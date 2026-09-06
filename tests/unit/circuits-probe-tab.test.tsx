@@ -192,14 +192,14 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
-  it('keeps resolved failures in History instead of accumulating stale attention', async () => {
+  it('keeps failures visible in Activity and retains them in History', async () => {
     mockBackend({ runs: [
       { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
       RUN_DONE, RUN_RUNNING,
     ] });
     openProbeDestination('circuits');
     await screen.findByTestId('run-card-12');
-    expect(screen.queryByTestId('run-card-9')).toBeNull();
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
     fireEvent.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-card-9')).toBeTruthy();
   });
@@ -622,8 +622,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_LONG] });
     openProbeDestination('circuits');
 
-    expect((await screen.findByTestId('run-toggle-20')).getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(screen.getByTestId('run-toggle-20'));
+    expect((await screen.findByTestId('run-toggle-20')).getAttribute('aria-expanded')).toBe('true');
     const timeline = await screen.findByTestId('run-steps-20');
     expect(timeline.tagName).toBe('OL');
 
@@ -743,13 +742,11 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
-    // Terminal runs collapse by default, but a failure is never hidden.
+    // Failed runs open by default, and a failure is never hidden.
     const collapsedError = await screen.findByTestId('run-error-25');
     expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
     expect(collapsedError.className).toContain('break-words');
     expect(collapsedError.className).not.toContain('truncate');
-
-    await user.click(screen.getByTestId('run-toggle-25'));
 
     // Trigger identity is unspaced, so it needs `break-all` — a
     // word-boundary break has nowhere to land and would overflow.
@@ -786,7 +783,6 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_RETRIED] });
     openProbeDestination('circuits');
 
-    fireEvent.click(await screen.findByTestId('run-toggle-26'));
     const row = await screen.findByTestId('run-step-26-review_classifier');
     expect(row.getAttribute('data-step-status')).toBe('completed');
     expect(row.textContent).toContain('Done');
@@ -797,16 +793,14 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-retries-26').textContent).toContain('retried');
   });
 
-  it('keeps diagnostics closed by default and preserves disclosure across views', async () => {
+  it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
     await waitFor(() => {
-      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
+      expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
     });
-    await user.click(screen.getByTestId('run-toggle-12'));
-    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
     await user.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByTestId('run-steps-11')).toBeNull();
@@ -833,6 +827,31 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     // Controls live outside the disclosure button — a button nested in a
     // button is invalid HTML and breaks keyboard semantics.
     expect(toggle.querySelector('button')).toBeNull();
+  });
+
+  it('uses tab semantics for the mutually exclusive views', async () => {
+    mockBackend();
+    openProbeDestination('circuits');
+
+    const tablist = screen.getByRole('tablist', { name: 'Circuit views' });
+    expect(tablist).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Activity/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('false');
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'History' }));
+    expect(screen.getByTestId('circuits-probe-body').getAttribute('aria-labelledby')).toBe('circuits-tab-history');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('supports roving keyboard navigation across circuit views', async () => {
+    mockBackend();
+    openProbeDestination('circuits');
+
+    const user = userEvent.setup();
+    const activityTab = screen.getByRole('tab', { name: /Activity/ });
+    activityTab.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'History' }));
   });
 
   it('advances a live run duration without waiting for a ledger event', async () => {
@@ -918,7 +937,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     expect(body.contains(screen.getByTestId('circuits-view-manage'))).toBe(false);
     fireEvent.click(screen.getByTestId('circuits-view-manage'));
-    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(true);
+    expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(false);
   });
 });
 

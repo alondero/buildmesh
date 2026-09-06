@@ -15,11 +15,13 @@
  * Shape
  * -----
  * A collapsed card answers "what is this run doing, and why?" in two
- * lines — run id, state, the active/queued step, its reason, duration and
- * progress. Expanding reveals the trigger identity and the full per-step
+ * lines — run id, state, trigger identity, the active/queued step, its
+ * reason, duration and progress. Expanding reveals the full per-step
  * timeline (status, outcome, attempt, duration, agent node, error text).
  *
- * Diagnostics default to collapsed; approvals and failures remain visible.
+ * Live and failed diagnostics default to expanded; terminal runs are
+ * collapsed until the user asks for their detail. Errors remain visible in
+ * the card headline even when a terminal card is collapsed.
  * `expanded` is lifted to the parent so a `circuit-run-updated`
  * refetch can't reset a card the user deliberately opened or closed.
  *
@@ -130,8 +132,12 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
-        <span className="block text-2xs text-text-secondary break-all line-clamp-2 mt-0.5" title={run.trigger_identity}>
-          {run.trigger_identity.startsWith('manual:') ? 'Manual run' : run.trigger_identity}
+        <span
+          className="block text-2xs text-text-secondary break-all mt-0.5"
+          data-testid={`run-trigger-${run.id}`}
+          title={run.trigger_identity}
+        >
+          {run.trigger_identity}
         </span>
         {/* Activity line — the fact the old one-liner buried. Wraps
             rather than clips: a long node id is the whole point. */}
@@ -148,7 +154,7 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
-        {activity.detail !== null && (expanded || activity.kind !== 'running') && (
+        {activity.detail !== null && (
           <span
             className="mt-0.5 block text-2xs text-text-muted break-words"
             data-testid={`run-reason-${run.id}`}
@@ -232,20 +238,6 @@ export function CircuitRunCard({
 
       {expanded && (
         <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
-          <dl className="text-2xs mb-1.5">
-            <dt className="text-text-muted">Triggered by</dt>
-            {/* `break-all`, not `break-words`: trigger identities are
-                unspaced (`issue:1468:buildmesh:run`) so a word-boundary
-                break has nowhere to land and would overflow instead. */}
-            <dd
-              className="font-mono text-text-secondary break-all"
-              data-testid={`run-trigger-${run.id}`}
-              title={run.trigger_identity}
-            >
-              {run.trigger_identity}
-            </dd>
-          </dl>
-
           {retried.length > 0 && (
             <p className="text-2xs text-status-warning mb-1.5" data-testid={`run-retries-${run.id}`}>
               {retried.length === 1
@@ -296,8 +288,6 @@ export function CircuitRunCard({
                         </span>
                       )}
                     </div>
-                    {(s.agent_node_id !== null || !!s.error_message) && <details className="mt-1">
-                      <summary className="cursor-pointer text-text-muted">Debug details</summary>
                     {s.agent_node_id !== null && (
                       <p className="text-text-muted mt-0.5">agent node #{s.agent_node_id}</p>
                     )}
@@ -309,7 +299,6 @@ export function CircuitRunCard({
                         {s.error_message}
                       </pre>
                     )}
-                    </details>}
                   </li>
                 );
               })}

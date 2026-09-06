@@ -15,7 +15,106 @@
  * component.
  */
 
+import { isTerminalRunState } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
+import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
+import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
+
+export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
+
+/** A run needs a user's attention before the circuit can make progress. */
+export function runNeedsAttention(detail: CircuitRunDetail): boolean {
+  return detail.run.state === 'failed' || detail.run.state === 'paused' ||
+    detail.steps.some((step) => step.status === 'blocked');
+}
+
+/**
+ * Activity includes work still in flight and failures that need explaining.
+ * Completed runs stay in History; pending runs normally arrive through the
+ * queue payload but remain eligible here if a backend snapshot includes one.
+ */
+export function runBelongsToActivity(detail: CircuitRunDetail): boolean {
+  return detail.run.state !== 'completed';
+}
+
+export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
+  return isTerminalRunState(detail.run.state);
+}
+
+function timestampValue(value: string): number {
+  const normalized = value.includes('T') || value.endsWith('Z')
+    ? value
+    : `${value.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function compareRunsNewestFirst(a: CircuitRunDetail | null, b: CircuitRunDetail | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return timestampValue(b.run.updated_at) - timestampValue(a.run.updated_at) ||
+    timestampValue(b.run.created_at) - timestampValue(a.run.created_at) ||
+    b.run.id - a.run.id;
+}
+
+export interface CircuitProbeRow extends CircuitWithRuns {
+  visibleRuns: CircuitRunDetail[];
+  hasAttention: boolean;
+  runningSteps: number;
+}
+
+/** Build the stable, view-specific row model used by the Probe. */
+export function buildCircuitProbeRows(
+  rows: CircuitWithRuns[],
+  view: CircuitProbeView
+): CircuitProbeRow[] {
+  return rows
+    .map((row) => {
+      const visibleRuns = view === 'history'
+        ? row.runs.filter(runBelongsToHistory)
+        : view === 'activity'
+          ? row.runs.filter(runBelongsToActivity)
+          : [];
+      visibleRuns.sort(compareRunsNewestFirst);
+      return {
+        ...row,
+        visibleRuns,
+        hasAttention: visibleRuns.some(runNeedsAttention),
+        runningSteps: countRunningSteps(row.runs),
+      };
+    })
+    .sort((a, b) => Number(b.hasAttention) - Number(a.hasAttention) ||
+      compareRunsNewestFirst(a.visibleRuns[0] ?? null, b.visibleRuns[0] ?? null) ||
+      a.circuit.name.localeCompare(b.circuit.name));
+}
+
+export interface CircuitActivityStats {
+  activityCount: number;
+  activeCount: number;
+  attentionCount: number;
+  queuedCount: number;
+}
+
+/** Summarize the monitoring header without rebuilding arrays in the component. */
+export function circuitActivityStats(
+  rows: CircuitWithRuns[],
+  queuedCount: number
+): CircuitActivityStats {
+  let activityCount = 0;
+  let activeCount = 0;
+  let attentionCount = 0;
+  for (const { runs } of rows) {
+    for (const detail of runs) {
+      if (runBelongsToActivity(detail)) {
+        activityCount += 1;
+        if (detail.run.state !== 'failed' && detail.run.state !== 'pending') activeCount += 1;
+        if (runNeedsAttention(detail)) attentionCount += 1;
+      }
+    }
+  }
+  return { activityCount, activeCount, attentionCount, queuedCount };
+}
 
 /**
  * Display label for a run state. The DB vocabulary is lower-case and

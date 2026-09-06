@@ -31,7 +31,7 @@
  * able to scroll the whole tab sideways.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { formatError } from '../../lib/errorUtils';
 import {
@@ -51,12 +51,138 @@ import {
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { isTerminalRunState } from '../Circuits/circuitGraphModel';
-import { countActiveRuns, countRunningSteps, pendingAdmissionDetail } from '../Circuits/runDiagnostics';
+import {
+  buildCircuitProbeRows,
+  circuitActivityStats,
+  countActiveRuns,
+  pendingAdmissionDetail,
+  type CircuitProbeView,
+} from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
+
+const CIRCUIT_PROBE_VIEWS = ['activity', 'history', 'queue', 'manage'] as const;
+
+interface CircuitCreateFormProps {
+  busy: boolean;
+  newName: string;
+  setNewName: (value: string) => void;
+  handleCreate: () => void;
+  blueprint: CircuitBlueprintKind;
+  setBlueprint: (value: CircuitBlueprintKind) => void;
+  effectiveTriggerKind: CircuitTriggerKind;
+  setTriggerKind: (value: CircuitTriggerKind) => void;
+  isReviewBlueprint: boolean;
+  needsLabel: boolean;
+  triggerLabel: string;
+  setTriggerLabel: (value: string) => void;
+  intervalSeconds: number;
+  setIntervalSeconds: (value: number) => void;
+}
+
+function CircuitCreateForm({
+  busy,
+  newName,
+  setNewName,
+  handleCreate,
+  blueprint,
+  setBlueprint,
+  effectiveTriggerKind,
+  setTriggerKind,
+  isReviewBlueprint,
+  needsLabel,
+  triggerLabel,
+  setTriggerLabel,
+  intervalSeconds,
+  setIntervalSeconds,
+}: CircuitCreateFormProps) {
+  return (
+    <div className="px-3 py-2 border-b border-border-subtle shrink-0" data-testid="circuit-create-form">
+      <h3 className="text-xs font-semibold text-text-primary mb-2">Create a circuit</h3>
+      <div className="flex items-center gap-1 mb-1">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="New circuit name"
+          aria-label="New circuit name"
+          data-testid="circuit-name-input"
+          className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={handleCreate}
+          disabled={busy || newName.trim() === '' || (needsLabel && triggerLabel.trim() === '')}
+          data-testid="circuit-create-button"
+          className="px-2 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 shrink-0"
+        >
+          New Circuit
+        </button>
+      </div>
+      <div className="flex flex-col items-stretch gap-2 min-w-0 [&_select]:w-full [&_select]:min-w-0">
+        <select
+          value={blueprint}
+          onChange={(e) => {
+            const next = e.target.value as CircuitBlueprintKind;
+            setBlueprint(next);
+            if (next === 'issue_driven_autopilot_review') setTriggerKind('github_issue_label');
+          }}
+          aria-label="Circuit blueprint"
+          data-testid="circuit-blueprint-select"
+          className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+        >
+          <option value="walking_skeleton">Walking skeleton</option>
+          <option value="issue_driven_autopilot_review">Issue-driven Autopilot + PR review</option>
+        </select>
+        <select
+          value={effectiveTriggerKind}
+          onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
+          aria-label="Circuit trigger"
+          data-testid="circuit-trigger-select"
+          disabled={isReviewBlueprint}
+          className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+        >
+          <option value="manual">Manual</option>
+          <option value="interval">Interval</option>
+          <option value="github_issue_label">Issue label</option>
+          <option value="github_pr_label">PR label</option>
+        </select>
+        {isReviewBlueprint && (
+          <span className="text-xs text-text-muted" title="This blueprint is triggered by labelled GitHub issues.">
+            GitHub issue trigger
+          </span>
+        )}
+        {needsLabel && (
+          <input
+            value={triggerLabel}
+            onChange={(e) => setTriggerLabel(e.target.value)}
+            placeholder="Label (e.g. buildmesh:run)"
+            aria-label="Trigger label"
+            data-testid="circuit-trigger-label-input"
+            className="flex-1 min-w-0 px-2 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+          />
+        )}
+        {effectiveTriggerKind === 'interval' && (
+          <label className="flex items-center gap-1 text-xs text-text-muted shrink-0">
+            every
+            <input
+              type="number"
+              min={60}
+              value={intervalSeconds}
+              onChange={(e) => setIntervalSeconds(Number(e.target.value) || 300)}
+              aria-label="Interval seconds"
+              data-testid="circuit-interval-input"
+              className="w-16 px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+            />
+            s
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
@@ -73,17 +199,27 @@ export function CircuitsProbeTab() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<'activity' | 'history' | 'queue' | 'manage'>('activity');
+  const [view, setView] = useState<CircuitProbeView>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
-  // Mesh-level run count, computed from every circuit's ledger — mirrors
-  // `db::count_active_circuit_runs` (#1467). Computed once per render and
-  // shared between the queue admission hint and every run card's
-  // `CircuitCapacity` (issue #1475 — the same number feeds both surfaces
-  // so the wording cannot disagree).
-  const meshActiveRuns = countActiveRuns(rows.flatMap(({ runs }) => runs));
+  // These snapshots only change when the backend payload or selected view
+  // changes. In particular, the duration clock must not rebuild the row model.
+  const allRuns = useMemo(() => rows.flatMap(({ runs }) => runs), [rows]);
+  const meshActiveRuns = useMemo(() => countActiveRuns(allRuns), [allRuns]);
+  const viewRows = useMemo(() => buildCircuitProbeRows(rows, view), [rows, view]);
+  const activityStats = useMemo(
+    () => circuitActivityStats(rows, queue.length),
+    [rows, queue.length]
+  );
+  const statusText = [
+    activityStats.attentionCount > 0 ? `${activityStats.attentionCount} need attention` : null,
+    activityStats.activeCount > 0 ? `${activityStats.activeCount} active` : null,
+    activityStats.queuedCount > 0 ? `${activityStats.queuedCount} queued` : null,
+  ].filter((part): part is string => part !== null).join(' · ') ||
+    (rows.length > 0 ? `${rows.length} circuits idle` : 'No circuits configured');
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
-   * "use the default" (all diagnostics closed) — storing
+   * "use the computed default" — live and failed diagnostics open while
+   * terminal runs stay collapsed. Storing
    * only deliberate toggles is what lets the `circuit-run-updated`
    * refetch land without snapping a card the user just opened shut.
    */
@@ -151,8 +287,9 @@ export function CircuitsProbeTab() {
   // Advance the duration clock while any visible run is still open. Gated
   // on `hasLiveRun` so a tab showing only finished runs — whose durations
   // are fixed by their own `updated_at` — re-renders never.
-  const hasLiveRun = rows.some(({ runs }) =>
-    runs.some(({ run }) => !isTerminalRunState(run.state))
+  const hasLiveRun = useMemo(
+    () => allRuns.some(({ run }) => !isTerminalRunState(run.state)),
+    [allRuns]
   );
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -175,9 +312,9 @@ export function CircuitsProbeTab() {
   };
 
   // Keep deliberate disclosures across live refreshes and view changes.
-  const toggleRunExpanded = (runId: number) => {
+  const toggleRunExpanded = (runId: number, defaultExpanded: boolean) => {
     setRunExpandOverrides((prev) => {
-      const current = prev[runId] ?? false;
+      const current = prev[runId] ?? defaultExpanded;
       return { ...prev, [runId]: !current };
     });
   };
@@ -203,31 +340,6 @@ export function CircuitsProbeTab() {
       openCircuitEditor(circuit.id);
     });
 
-  const needsAttention = (detail: CircuitWithRuns['runs'][number]) =>
-    detail.run.state === 'failed' || detail.run.state === 'paused' ||
-    detail.steps.some((step) => step.status === 'blocked');
-  // A later finished run supersedes an old failure; History retains
-  // every result. Only the latest finished run can flag circuit attention.
-  const latestFinishedIds = new Set(rows.map(({ runs }) =>
-    Math.max(-1, ...runs.filter(({ run }) => isTerminalRunState(run.state)).map(({ run }) => run.id))));
-  const isActivity = (detail: CircuitWithRuns['runs'][number]) =>
-    detail.run.state !== 'pending' &&
-    (!isTerminalRunState(detail.run.state) ||
-      (detail.run.state === 'failed' && latestFinishedIds.has(detail.run.id)));
-  const activityCount = rows.flatMap(({ runs }) => runs).filter(isActivity).length;
-  const attentionCount = rows.flatMap(({ runs }) => runs).filter(isActivity).filter(needsAttention).length;
-  const visibleRows = rows.map((row) => ({
-    ...row,
-    visibleRuns: row.runs.filter((detail) => view === 'history'
-      ? isTerminalRunState(detail.run.state)
-      : isActivity(detail)).sort((a, b) =>
-        (view === 'activity' ? Number(needsAttention(b)) - Number(needsAttention(a)) : 0) ||
-        b.run.id - a.run.id),
-  })).filter((row) => view === 'manage' || row.visibleRuns.length > 0)
-    .sort((a, b) => view === 'activity'
-      ? Number(b.visibleRuns.some(needsAttention)) - Number(a.visibleRuns.some(needsAttention))
-      : 0);
-
   if (activeMeshId === null) {
     return (
       <div className="p-4">
@@ -240,15 +352,41 @@ export function CircuitsProbeTab() {
     // Layout only — see the "Scroll ownership" note in the file header.
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
-        <p className="text-xs text-text-secondary mb-2" role="status">
-          {attentionCount > 0 ? `${attentionCount} need attention` : activityCount > 0 ? 'Circuits are working' : 'No active runs'}
+        <p className="text-xs text-text-secondary mb-2" role="status" data-testid="circuits-status">
+          {statusText}
         </p>
-        <div className="grid grid-cols-2 gap-1" aria-label="Circuit views">
-          {(['activity', 'history', 'queue', 'manage'] as const).map((item) => (
-            <button key={item} type="button" aria-pressed={view === item}
+        <div
+          className="grid grid-cols-2 gap-1"
+          role="tablist"
+          aria-label="Circuit views"
+          onKeyDown={(event) => {
+            const index = CIRCUIT_PROBE_VIEWS.indexOf(view);
+            const target = event.key === 'ArrowRight' || event.key === 'ArrowDown'
+              ? (index + 1) % CIRCUIT_PROBE_VIEWS.length
+              : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+                ? (index + CIRCUIT_PROBE_VIEWS.length - 1) % CIRCUIT_PROBE_VIEWS.length
+                : event.key === 'Home'
+                  ? 0
+                  : event.key === 'End'
+                    ? CIRCUIT_PROBE_VIEWS.length - 1
+                    : null;
+            if (target === null) return;
+            event.preventDefault();
+            const nextView = CIRCUIT_PROBE_VIEWS[target];
+            setView(nextView);
+            document.getElementById(`circuits-tab-${nextView}`)?.focus();
+          }}
+        >
+          {CIRCUIT_PROBE_VIEWS.map((item) => (
+            <button key={item} id={`circuits-tab-${item}`} type="button" role="tab"
+              aria-selected={view === item} aria-controls="circuits-view-panel" tabIndex={view === item ? 0 : -1}
               onClick={() => setView(item)} data-testid={`circuits-view-${item}`}
-              className={`rounded-md px-2 py-1 text-xs focus-visible:ring-1 focus-visible:ring-accent-cyan ${view === item ? 'bg-accent-cyan/15 text-accent-cyan' : 'text-text-muted hover:bg-bg-card-hover'}`}>
-              {item === 'activity' ? `Activity (${activityCount})` : item === 'queue' ? `Queue (${queue.length})` : item === 'history' ? 'History' : 'Manage'}
+              className={`min-w-0 rounded-md px-2 py-1 text-xs whitespace-normal break-words leading-tight focus-visible:ring-1 focus-visible:ring-accent-cyan ${
+                view === item ? 'bg-accent-cyan/15' : 'hover:bg-bg-card-hover'
+              }`}>
+              <span className={view === item ? 'text-accent-cyan' : 'text-text-muted'}>
+                {item === 'activity' ? `Activity (${activityStats.activityCount})` : item === 'queue' ? `Queue (${queue.length})` : item === 'history' ? 'History' : 'Manage'}
+              </span>
             </button>
           ))}
         </div>
@@ -258,96 +396,47 @@ export function CircuitsProbeTab() {
           {actionError ?? loadError}
         </div>
       )}
-      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" data-testid="circuits-probe-body">
-      {/* Configuration scrolls with Manage, keeping navigation reachable
-          even when the form is taller than a short dock. */}
-      {view === 'manage' && <div className="px-3 py-2 border-b border-border-subtle">
-        <h3 className="text-xs font-semibold text-text-primary mb-2">Create a circuit</h3>
-        <div className="flex items-center gap-1 mb-1">
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="New circuit name"
-            aria-label="New circuit name"
-            data-testid="circuit-name-input"
-            className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-text-primary focus:outline-none"
-          />
-          <button
-            type="button"
-            onClick={handleCreate}
-            disabled={
-              busy ||
-              newName.trim() === '' ||
-              (needsLabel && triggerLabel.trim() === '')
-            }
-            data-testid="circuit-create-button"
-            className="px-2 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 shrink-0"
-          >
-            New Circuit
-          </button>
-        </div>
-        <div className="flex flex-col items-stretch gap-2 min-w-0 [&_select]:w-full [&_select]:min-w-0">
-          <select
-            value={blueprint}
-            onChange={(e) => {
-              const next = e.target.value as CircuitBlueprintKind;
-              setBlueprint(next);
-              if (next === 'issue_driven_autopilot_review') {
-                setTriggerKind('github_issue_label');
-              }
-            }}
-            aria-label="Circuit blueprint"
-            data-testid="circuit-blueprint-select"
-            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-          >
-            <option value="walking_skeleton">Walking skeleton</option>
-            <option value="issue_driven_autopilot_review">Issue-driven Autopilot + PR review</option>
-          </select>
-          <select
-            value={effectiveTriggerKind}
-            onChange={(e) => setTriggerKind(e.target.value as CircuitTriggerKind)}
-            aria-label="Circuit trigger"
-            data-testid="circuit-trigger-select"
-            disabled={isReviewBlueprint}
-            className="px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-          >
-            <option value="manual">Manual</option>
-            <option value="interval">Interval</option>
-            <option value="github_issue_label">Issue label</option>
-            <option value="github_pr_label">PR label</option>
-          </select>
-          {isReviewBlueprint && (
-            <span className="text-xs text-text-muted" title="This blueprint is triggered by labelled GitHub issues.">
-              GitHub issue trigger
-            </span>
-          )}
-          {needsLabel && (
-            <input
-              value={triggerLabel}
-              onChange={(e) => setTriggerLabel(e.target.value)}
-              placeholder="Label (e.g. buildmesh:run)"
-              aria-label="Trigger label"
-              data-testid="circuit-trigger-label-input"
-              className="flex-1 min-w-0 px-2 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-            />
-          )}
-          {triggerKind === 'interval' && (
-            <label className="flex items-center gap-1 text-xs text-text-muted shrink-0">
-              every
-              <input
-                type="number"
-                min={60}
-                value={intervalSeconds}
-                onChange={(e) => setIntervalSeconds(Number(e.target.value) || 300)}
-                aria-label="Interval seconds"
-                data-testid="circuit-interval-input"
-                className="w-16 px-1.5 py-0.5 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
-              />
-              s
-            </label>
-          )}
-        </div>
-      </div>}
+      {view === 'manage' && <CircuitCreateForm
+        busy={busy}
+        newName={newName}
+        setNewName={setNewName}
+        handleCreate={handleCreate}
+        blueprint={blueprint}
+        setBlueprint={setBlueprint}
+        effectiveTriggerKind={effectiveTriggerKind}
+        setTriggerKind={setTriggerKind}
+        isReviewBlueprint={isReviewBlueprint}
+        needsLabel={needsLabel}
+        triggerLabel={triggerLabel}
+        setTriggerLabel={setTriggerLabel}
+        intervalSeconds={intervalSeconds}
+        setIntervalSeconds={setIntervalSeconds}
+      />}
+      <div
+        id="circuits-view-panel"
+        role="tabpanel"
+        aria-labelledby={`circuits-tab-${view}`}
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+        data-testid="circuits-probe-body"
+      >
+        {view === 'activity' && queue.length > 0 && (
+          <section className="mx-2 mt-2 rounded-md border border-status-warning/30 bg-status-warning/5 p-2" data-testid="circuit-activity-queue-summary">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold text-text-primary">Waiting in queue</h3>
+              <button type="button" onClick={() => setView('queue')} className="text-2xs text-accent-cyan hover:underline">
+                View queue
+              </button>
+            </div>
+            <p className="mt-0.5 text-2xs text-text-muted break-words">
+              {queue.length} {queue.length === 1 ? 'run is' : 'runs are'} waiting for circuit-run capacity.
+            </p>
+            <ul className="mt-1 text-2xs text-text-secondary">
+              {queue.slice(0, 3).map((entry) => (
+                <li key={entry.run.id} className="break-words">{entry.circuit_name} #{entry.run.id}</li>
+              ))}
+            </ul>
+          </section>
+        )}
         {view === 'queue' && queue.length === 0 && <EmptyState label="Queue is empty" hint="Runs waiting to start will appear here." />}
         {view === 'queue' && queue.length > 0 && (
           <section className="border-b border-border-subtle p-2" data-testid="circuit-queue">
@@ -432,17 +521,13 @@ export function CircuitsProbeTab() {
           </div>
         ) : (
           <ul className="flex flex-col gap-1 p-2">
-            {visibleRows.length === 0 && <li><EmptyState label={view === 'history' ? 'No finished runs yet' : 'All caught up'} hint={view === 'history' ? 'Completed, failed and cancelled runs appear here.' : 'Active runs and failures appear here. Start a circuit from Manage.'} /></li>}
             {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent history · up to 10 runs per circuit</li>}
-            {visibleRows.map(({ circuit, runs, visibleRuns }) => {
-              // One capacity snapshot per circuit, shared by its run cards
-              // — `countRunningSteps` walks every run, so computing it
-              // inside the run loop would be quadratic for nothing.
-              // `meshRunCapacity` / `meshActiveRuns` are mesh-level and
-              // pre-computed at component scope (#1475).
+            {viewRows.map(({ circuit, visibleRuns, runningSteps }) => {
+              // The row model computes this once when the backend payload
+              // changes; the duration clock does not repeat the scan.
               const capacity = {
                 concurrencyLimit: circuit.concurrency_limit,
-                runningSteps: countRunningSteps(runs),
+                runningSteps,
                 meshRunCapacity,
                 meshActiveRuns,
               };
@@ -453,8 +538,6 @@ export function CircuitsProbeTab() {
                     <span className="text-xs font-semibold text-text-primary">Agent review history</span>
                     <span className="text-2xs text-text-muted truncate" title={circuit.name}>{circuit.name}</span>
                   </div>
-                ) : view !== 'manage' ? (
-                  <h3 className="text-xs font-semibold text-text-primary break-words">{circuit.name}</h3>
                 ) : (
                   <div className="flex flex-col items-stretch gap-1">
                     <label className="flex items-center gap-1.5 min-w-0">
@@ -531,6 +614,12 @@ export function CircuitsProbeTab() {
                   </div>
                 )}
 
+                {view !== 'manage' && visibleRuns.length === 0 && (
+                  <p className="mt-1 text-2xs text-text-muted">
+                    {view === 'history' ? 'No finished runs yet.' : 'Idle · no active run.'}
+                  </p>
+                )}
+
                 {/* Run ledger — one expandable diagnostic card per run
                     (#1468), replacing the old truncated one-line chain. */}
                 {view !== 'manage' && visibleRuns.length > 0 && (
@@ -542,9 +631,12 @@ export function CircuitsProbeTab() {
                         capacity={capacity}
                         expanded={
                           runExpandOverrides[detail.run.id] ??
-                          false
+                          (detail.run.state === 'failed' || !isTerminalRunState(detail.run.state))
                         }
-                        onToggleExpanded={() => toggleRunExpanded(detail.run.id)}
+                        onToggleExpanded={() => toggleRunExpanded(
+                          detail.run.id,
+                          detail.run.state === 'failed' || !isTerminalRunState(detail.run.state)
+                        )}
                         now={now}
                         busy={busy}
                         onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
