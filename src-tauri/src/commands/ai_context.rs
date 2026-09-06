@@ -17,7 +17,7 @@
 use crate::db;
 use crate::env::to_host_path;
 use crate::process_util::git_command;
-use crate::services::github::{self, GitHubClient};
+use crate::services::github::{self, CreatePrRequest, GitHubClient};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -292,15 +292,22 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
         .ok_or_else(|| "No GitHub origin remote configured".to_string())?;
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    // Idempotent on retry (issue #771): if a previous attempt's POST timed
+    // out client-side but succeeded server-side, a retry would otherwise
+    // hit GitHub's "pull request already exists" 422 and surface as an
+    // opaque error to the user. The optimistic helper recovers via the
+    // existing PR's URL.
+    let req = CreatePrRequest {
+        owner: &owner,
+        repo: &repo_name,
+        title: "chore: make AI context portable across providers",
+        body: &pr_body(&added),
+        head: &branch_name,
+        base: &base,
+    };
     client
-        .create_pull_request(
-            &owner,
-            &repo_name,
-            "chore: make AI context portable across providers",
-            &pr_body(&added),
-            &branch_name,
-            &base,
-        )
+        .create_pull_request_idempotent(req)
+        .map(|pr| pr.html_url)
         .map_err(|e| e.to_string())
 }
 
