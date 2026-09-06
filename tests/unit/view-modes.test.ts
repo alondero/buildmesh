@@ -10,7 +10,8 @@ import {
   scopeNodesForMode,
   resolveSingleNode,
   resolveMeshScopeId,
-} from '../../src/lib/viewModes';import type { AgentNode } from '../../src/types/generated/AgentNode';
+} from '../../src/lib/viewModes';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {

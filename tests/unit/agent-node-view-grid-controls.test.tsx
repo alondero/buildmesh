@@ -166,6 +166,59 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([1, 2, 3, 4]);
   });
 
+  // Regression guards (#1609 review): the search text persists across mode
+  // switches by design, so any control-dependent early return between
+  // scoping and sorting would run on EVERY non-Filtered render and silently
+  // serve store-insertion order instead of the configured sort.
+  it('sorts the All view while a stale search query is active (#1609)', () => {
+    useUIStore.setState({ gridSearchQuery: 'runner', gridSortBy: 'name', gridSortDirection: 'asc' });
+
+    render(<AgentNodeView />);
+
+    // Full scope (the stale query narrows nothing), still name-sorted.
+    expect(renderedNodeIds()).toEqual([4, 1, 2, 3]);
+  });
+
+  it('sorts the Mesh view while a stale search query is active (#1609)', () => {
+    useAgentNodeStore.setState({
+      nodesById: Object.fromEntries(NODES.map(n => [n.id, { ...n, mesh_id: 1 }])),
+      nodeIds: NODES.map(n => n.id),
+    });
+    useMeshStore.setState({ selectedMeshId: 1 });
+    useUIStore.setState({
+      viewMode: 'mesh',
+      gridSearchQuery: 'runner',
+      gridSortBy: 'created',
+      gridSortDirection: 'desc',
+    });
+
+    render(<AgentNodeView />);
+
+    // Newest first: 2 (Jan 3), then 3 & 4 (Jan 2, position tie-break), 1 (Jan 1).
+    expect(renderedNodeIds()).toEqual([2, 3, 4, 1]);
+  });
+
+  it('sorts the Pinned view while a stale search query is active (#1609)', () => {
+    useAgentNodeStore.setState({
+      nodesById: Object.fromEntries(
+        NODES.map((n, i) => [n.id, { ...n, is_pinned: i % 2 === 0 }]),
+      ),
+      nodeIds: NODES.map(n => n.id),
+    });
+    useUIStore.setState({
+      viewMode: 'pinned',
+      lastNonSingleMode: 'pinned',
+      gridSearchQuery: 'runner',
+      gridSortBy: 'name',
+      gridSortDirection: 'asc',
+    });
+
+    render(<AgentNodeView />);
+
+    // Pinned set {1 'Alpha Runner', 3 'Gamma Guard'} — still name-sorted.
+    expect(renderedNodeIds()).toEqual([1, 3]);
+  });
+
   it('applies the selected mesh scope before the other grid controls', () => {
     useAgentNodeStore.setState({
       // Issue #1384 — normalised state; NODES slice is reshaped to map+ids.

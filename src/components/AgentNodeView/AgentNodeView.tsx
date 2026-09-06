@@ -5,7 +5,7 @@ import {
 } from '@dnd-kit/core';
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-import { useUIStore } from '../../stores/uiStore';
+import { useUIStore, type NonSingleViewMode } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
@@ -201,7 +201,7 @@ export function FilteredEmptyState() {
         </svg>
         <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No matching nodes</p>
         <p className="text-sm text-text-secondary mb-6 font-sans">
-          No node matches the current search and filters. Clear them to see every node again.
+          No node name matches the current search. Clear it to see every node again.
         </p>
         <button
           onClick={resetGridControls}
@@ -211,7 +211,10 @@ export function FilteredEmptyState() {
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
             <line x1="22" y1="3" x2="2" y2="3" />
           </svg>
-          Clear filters
+          {/* Labelled "Clear search": the provider/status filters this reset
+              also clears have no setter UI yet (#997 owns the popover), so
+              the label must not advertise controls the user never set. */}
+          Clear search
         </button>
       </div>
     </div>
@@ -223,6 +226,16 @@ export function FilteredEmptyState() {
 /// heading + body + accent-cyan CTA) but the call to action is "View All
 /// Nodes" — the natural next step when nothing is pinned yet. Pin afford-
 /// ances live in the node header and the sidebar node context menu (#985).
+/** Mode-aware grid empty state (ticket #986, #1609). A function over the
+ *  mode rather than inline ternaries in the render body — the mode→element
+ *  mapping reads as a table, and adding a mode means adding a row, not
+ *  re-nesting a conditional. */
+function gridEmptyState(mode: NonSingleViewMode) {
+  if (mode === 'pinned') return <PinnedEmptyState />;
+  if (mode === 'filtered') return <FilteredEmptyState />;
+  return <NoNodesSplash />;
+}
+
 export function PinnedEmptyState() {
   const setViewMode = useUIStore(state => state.setViewMode);
   return (
@@ -546,8 +559,8 @@ export function AgentNodeView() {
           ) : visibleNodes.length === 0 ? (
             // Empty states are mode-aware (ticket #986): Pinned explains
             // pinning and offers All Nodes, Filtered offers clearing the
-            // search/filters (#1609); mesh/all keep the splash.
-            viewMode === 'pinned' ? <PinnedEmptyState /> : viewMode === 'filtered' ? <FilteredEmptyState /> : <NoNodesSplash />
+            // search (#1609); mesh/all keep the splash.
+            gridEmptyState(viewMode)
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}

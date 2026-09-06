@@ -271,10 +271,16 @@ function App() {
         // `useUIStore.focusGridSearchRequest`). A request counter is the
         // React-idiomatic channel for "imperative command from outside
         // the component tree" — no ref forwarding, no module-level
-        // singleton, no leaky DOM registration. The component handles
-        // the "no input mounted" case as a no-op (the effect's
-        // `inputRef.current?.focus()` short-circuits), which is what the
-        // very first press hits if the Filtered mount hasn't painted yet.
+        // singleton, no leaky DOM registration. Ordering is guaranteed by
+        // React, not by defensive no-ops: `setViewMode('filtered')` and
+        // the counter bump happen in this same event handler, so React
+        // re-renders ONCE (18 batching) with both values — TitleBar mounts
+        // GridControls, the input ref attaches during commit, and
+        // GridControls' `useLayoutEffect` runs after the DOM mutation but
+        // before paint, reading the already-bumped counter. There is no
+        // intermediate committed frame in which the input is absent, so
+        // no press can be dropped; no "input not mounted yet" state
+        // exists to defend against.
         //
         // No cooldown: a held key must not burn a window — the user
         // re-pressing while already focused is a harmless re-focus, and

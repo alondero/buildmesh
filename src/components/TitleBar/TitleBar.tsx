@@ -427,13 +427,12 @@ export function TitleBar() {
           <ViewModeSwitcher />
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.
-              Outside Filtered the wrapper renders empty (no dead placeholder
-              eating width); entering Filtered mounts it with a 300ms slide
-              so the appearance reads as intentional. `ml-1` separates it
-              from the last segment. */}
-          <div className="ml-1 overflow-hidden transition-all duration-300 ease-out">
-            {viewMode === 'filtered' && <GridControls />}
-          </div>
+              An honest conditional mount: CSS can't interpolate `width: auto`,
+              so a transition-all wrapper would snap anyway while leaving a
+              4px `ml-1` behind when unmounted — `ml-1` lives on GridControls'
+              own root instead, so nothing occupies layout space outside
+              Filtered. */}
+          {viewMode === 'filtered' && <GridControls />}
         </div>
 
         {/* Centre cell — the #1375 command field. Non-draggable so clicks

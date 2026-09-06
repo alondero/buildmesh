@@ -34,13 +34,15 @@ function compareStableOrder(a: AgentNode, b: AgentNode): number {
  * Derive the ordered grid sequence from the active view scope and the
  * persisted Grid Controls state.
  *
- * Scope and filter are two different layers since #1609: the active View
- * Mode decides WHICH nodes are candidates (mesh / pinned / all — the pure
- * scopes in `src/lib/viewModes.ts`), and the Grid Controls narrow them only
- * inside the dedicated 'filtered' View Mode, which is where the Search
- * Nodes bar lives. An active search therefore never hides nodes behind the
- * user's back in Mesh / Pinned / All — the grid there is always the full
- * scope, sorted.
+ * This function has exactly one job: ORDERING. Which nodes are candidates —
+ * including the Grid Controls narrowing that applies only inside the
+ * 'filtered' View Mode — is owned entirely by `scopeNodesForMode`
+ * (src/lib/viewModes.ts), which receives the controls verbatim. There must
+ * be no filter logic and no control-dependent early return here: the search
+ * text persists in the store across mode switches (#1609), so any guard on
+ * it would run on every Mesh/Pinned/All render and, by skipping the sort
+ * below, silently serve store-insertion order. Sorting runs
+ * unconditionally on whatever the upstream scope returns.
  */
 export function deriveVisibleNodes(
   viewMode: ViewMode,
@@ -51,23 +53,7 @@ export function deriveVisibleNodes(
 ): AgentNode[] {
   if (viewMode === 'single') return [];
 
-  const scoped = scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls);
-  const search = controls.gridSearchQuery.trim().toLowerCase();
-
-  if (viewMode !== 'filtered' && (search || controls.gridProviderFilter !== null || controls.gridStatusFilter !== null)) {
-    // Belt-and-braces: a filter active outside 'filtered' must not narrow
-    // the grid — this branch can only be hit by direct store pokes in
-    // tests, never by the shipped UI, which shows the controls only in
-    // Filtered. Keeps the "other grids stay unfiltered" contract explicit.
-    return scoped;
-  }
-
-  const nodes = scoped.filter((node) => {
-    if (search && !node.name.toLowerCase().includes(search)) return false;
-    if (controls.gridProviderFilter !== null && node.provider !== controls.gridProviderFilter) return false;
-    if (controls.gridStatusFilter !== null && node.status !== controls.gridStatusFilter) return false;
-    return true;
-  });
+  const nodes = scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls);
 
   if (controls.gridSortBy === 'custom') return nodes;
 

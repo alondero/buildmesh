@@ -56,7 +56,7 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
   });
 
   it('enters Single on the active node from a grid mode', () => {
-    // Acceptance criterion #2: grid mode + active node â†’ Single solo view.
+    // Acceptance criterion #2: grid mode + active node → Single solo view.
     // Single renders the active node, so the mode switch alone solos it —
     // there is no per-node id to assert anymore.
     seedAgentNodes([NODE], NODE.id);
@@ -77,7 +77,7 @@ describe('toggleGridMaximize (#668 Alt+G / Cmd+G; View Modes wayfinder #982)', (
     expect(useUIStore.getState().viewMode).toBe('pinned');
   });
 
-  it('toggles back and forth: mesh â†’ single â†’ mesh â†’ single', () => {
+  it('toggles back and forth: mesh → single → mesh → single', () => {
     // Sequence covers all three acceptance criteria in one call chain.
     seedAgentNodes([NODE], NODE.id);
 
@@ -110,7 +110,7 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     seedAgentNodes([]);
   });
 
-  it('advances Mesh â†’ Pinned â†’ All â†’ Filtered â†’ Mesh in switcher order', () => {
+  it('advances Mesh → Pinned → All → Filtered → Mesh in switcher order', () => {
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('pinned');
     cycleGridMode();
@@ -146,11 +146,11 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
   it('records each grid mode it lands on as the Single restore target', () => {
     // Every non-single mode set updates lastNonSingleMode (uiStore.setViewMode),
     // so a later Alt+G solo/exit returns to wherever the cycle left the user.
-    cycleGridMode(); // mesh â†’ pinned
+    cycleGridMode(); // mesh → pinned
     expect(useUIStore.getState().lastNonSingleMode).toBe('pinned');
-    cycleGridMode(); // pinned â†’ all
+    cycleGridMode(); // pinned → all
     expect(useUIStore.getState().lastNonSingleMode).toBe('all');
-    cycleGridMode(); // all â†’ filtered (#1609)
+    cycleGridMode(); // all → filtered (#1609)
     expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
   });
 

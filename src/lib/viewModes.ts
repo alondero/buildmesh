@@ -35,7 +35,11 @@ export function resolveMeshScopeId(
 
 /** The Grid Controls fields the 'filtered' scope narrows by. The sort pair
  *  is deliberately excluded — 'filtered' reuses the existing grid sorters,
- *  it doesn't need to re-own them. */
+ *  it doesn't need to re-own them. `gridProviderFilter`/`gridStatusFilter`
+ *  are PRE-EXISTING store fields (#998 era, no setter UI ships yet — see
+ *  GridControls' header); #1609 carries them forward untouched rather than
+ *  deleting a persisted public field, so the predicate is written once and
+ *  lights up when #997 adds the popover. */
 export type FilterControls = Pick<GridControls, 'gridSearchQuery' | 'gridProviderFilter' | 'gridStatusFilter'>;
 
 // Neutral controls — the value `AgentNodeView` passes when it has no
@@ -70,8 +74,14 @@ export function matchesGridControls(node: AgentNode, controls: FilterControls): 
  *   - 'filtered' — every loaded node narrowed by the Grid Controls (#1609):
  *                  the free-text search plus the provider/status filters.
  *                  Cross-mesh like Pinned — the sidebar selection is
- *                  irrelevant to the scope (the mesh filter can be
- *                  reproduced by combining it with the search text).
+ *                  irrelevant to the scope. KNOWN CONSTRAINT (deliberate,
+ *                  not an oversight): the search matches `node.name` only,
+ *                  so "search inside one mesh" is NOT expressible — this
+ *                  mode cannot combine a mesh scope with a query. That
+ *                  would need a scope combinator or a mesh axis on the
+ *                  controls, which wayfinder #982 leaves "Not yet
+ *                  specified"; Ctrl+F from a mesh therefore lands in the
+ *                  global pool (App.tsx `focus-grid-search`).
  */
 export function scopeNodesForMode(
   mode: NonSingleViewMode,
