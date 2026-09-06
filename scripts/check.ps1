@@ -196,14 +196,43 @@ function Invoke-Rust {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'rust' }
 }
 
+function Invoke-ReadmeDrift {
+  # Issue #1545 — the README is the user-facing landing page; a stale
+  # provider count or a missing SmartScreen warning becomes a real
+  # support burden. scripts/check-readme-drift.mjs reads the source of
+  # truth (src/types/generated/Provider.ts + the canonical HARNESS_LABEL
+  # in src/components/Circuits/harnessCapabilities.ts) and asserts the
+  # README matches. Cheap (no build dependency, ~50ms).
+  Write-Host '== README drift (issue #1545) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  try {
+    & node scripts/check-readme-drift.mjs
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'readme-drift' }
+}
+
 Write-Host '== agent infrastructure and diff rules ==' -ForegroundColor Cyan
 Push-Location $repo
 try {
-  & node --test tests/agent-infra/check-agent-diff.test.mjs
+  # test:agent runs check-agent-diff. The README drift gate's own
+  # test suite (test:readme) lives below under the static-docs block
+  # because it shares that gate's lifecycle — neither runs under a
+  # bare Rust target.
+  & npm run test:agent
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-tests' }
   & node scripts/check-agent-diff.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
 } finally { Pop-Location }
+
+# Static-docs block: README drift gate + its test suite. Both are
+# docs concerns — a stale README has no bearing on a Rust build, so
+# the bare-rust target skips this block entirely. Grouped together
+# so a red build makes it clear which check failed.
+if ($Target -in @('unit', 'integration', 'all', 'all-ts')) {
+  & npm run test:readme
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'readme-tests' }
+  Invoke-ReadmeDrift
+}
 
 # Build before Rust so embedded mobile assets reflect the current source.
 if ($Target -in @('all', 'all-ts')) { Invoke-TsBuild }
