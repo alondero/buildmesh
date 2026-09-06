@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -192,6 +193,144 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
+  it('ignores an older snapshot when a refresh completes out of order', async () => {
+    mockBackend();
+    let resolveFirst!: (snapshot: unknown) => void;
+    let resolveSecond!: (snapshot: unknown) => void;
+    const firstSnapshot = new Promise<unknown>((resolve) => { resolveFirst = resolve; });
+    const secondSnapshot = new Promise<unknown>((resolve) => { resolveSecond = resolve; });
+    let probeCall = 0;
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'list_circuit_probe') {
+        return probeCall++ === 0 ? firstSnapshot : secondSnapshot;
+      }
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    await waitFor(() => expect(vi.mocked(listen)).toHaveBeenCalledWith(
+      'circuit-run-updated',
+      expect.any(Function),
+    ));
+
+    // A run-update starts a newer request before the initial request returns.
+    await emit('circuit-run-updated', {});
+    await act(async () => {
+      resolveSecond({
+        circuits: [{ circuit: { ...CIRCUIT, name: 'newer snapshot' }, runs: [] }],
+        queue: [],
+      });
+      await secondSnapshot;
+    });
+    expect(await screen.findByText('newer snapshot')).toBeTruthy();
+
+    await act(async () => {
+      resolveFirst({
+        circuits: [{ circuit: CIRCUIT, runs: [] }],
+        queue: [],
+      });
+      await firstSnapshot;
+    });
+    expect(screen.queryByText('nightly-sweep')).toBeNull();
+    expect(screen.getByText('newer snapshot')).toBeTruthy();
+  });
+
+  it('does not reload or set state when an action resolves after unmount', async () => {
+    mockBackend();
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'trigger_circuit_now') return triggerPromise;
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId('circuit-trigger-7'));
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
+
+    act(() => useUIStore.setState({ probeOpen: false }));
+    expect(screen.queryByTestId('circuits-probe-tab')).toBeNull();
+    await act(async () => {
+      resolveTrigger();
+      await triggerPromise;
+    });
+
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(1);
+  });
+
+  it('does not reload the previous mesh when an action resolves after a mesh switch', async () => {
+    mockBackend();
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'trigger_circuit_now') return triggerPromise;
+      return fallback?.(cmd, args) ?? Promise.resolve({ cmd });
+    });
+
+    openProbeDestination('circuits');
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId('circuit-trigger-7'));
+
+    const otherMesh = { ...MESH, id: 43, name: 'other mesh' };
+    act(() => useMeshStore.setState({
+      meshes: [MESH, otherMesh],
+      meshesById: new Map([[MESH.id, MESH], [otherMesh.id, otherMesh]]),
+      selectedMeshId: otherMesh.id,
+    }));
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(2);
+    });
+
+    await act(async () => {
+      resolveTrigger();
+      await triggerPromise;
+    });
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(2);
+  });
+
+  it('keeps failures visible in Activity and retains them in History', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
+      RUN_DONE, RUN_RUNNING,
+    ] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-12');
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+  });
+
+  it('prioritizes attention across circuits and separates history, queue, and configuration', async () => {
+    const failed = { ...RUN_DONE, run: { ...RUN_DONE.run, id: 13, circuit_id: 8, state: 'failed' } };
+    mockBackend({
+      circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }],
+      runs: [RUN_DONE, RUN_RUNNING, failed],
+      queue: QUEUE,
+    });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-13');
+    const cards = screen.getAllByTestId(/^run-card-/);
+    expect(cards.map((card) => card.getAttribute('data-run-state'))).toEqual(['failed', 'running']);
+    expect(screen.queryByTestId('run-card-11')).toBeNull();
+    expect(screen.queryByTestId('queue-run-21')).toBeNull();
+    expect(screen.queryByTestId('circuit-name-input')).toBeNull();
+    expect(screen.getByTestId('circuits-status').textContent).toContain('2 queued');
+    expect(screen.getByTestId('circuit-activity-queue-summary').textContent).toContain('Waiting in queue');
+    expect(screen.getByTestId('circuit-trigger-7')).toBeTruthy();
+    expect(screen.getByTestId('circuit-edit-flow-7')).toBeTruthy();
+    expect(screen.getByTestId('circuits-view-queue').textContent).toContain('(2)');
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(screen.getByTestId('run-card-11')).toBeTruthy();
+    expect(screen.queryByTestId('run-card-12')).toBeNull();
+    fireEvent.click(screen.getByTestId('circuits-view-manage'));
+    expect(screen.getByTestId('circuit-name-input')).toBeTruthy();
+    expect(screen.queryAllByTestId(/^run-card-/)).toHaveLength(0);
+  });
+
   it('lists circuits with their run ledger', async () => {
     mockBackend();
     openProbeDestination('circuits');
@@ -199,8 +338,11 @@ describe('CircuitsProbeTab', () => {
     expect(await screen.findByText('nightly-sweep')).toBeTruthy();
     // Run state renders in the humanised vocabulary (#1468); the raw DB
     // string stays available on `data-run-state` for machine assertions.
-    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('Completed');
     expect(screen.getByTestId('run-state-12').textContent).toBe('Running');
+    expect(screen.queryByTestId('run-state-11')).toBeNull();
+    expect(screen.queryByTestId('circuit-name-input')).toBeNull();
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    expect(await screen.findByTestId('run-state-11').then((el) => el.textContent)).toBe('Completed');
     expect(screen.getByTestId('run-card-11').getAttribute('data-run-state')).toBe('completed');
     // Steps are a vertical timeline, not a joined one-line string (#1468).
     expect(screen.queryByText(/trigger:completed/)).toBeNull();
@@ -239,6 +381,7 @@ describe('CircuitsProbeTab', () => {
 
     // Pin the wording verbatim — the same shape #1468 uses for the
     // queued-step copy so a reword silently fails review.
+    fireEvent.click(await screen.findByTestId('circuits-view-queue'));
     const reason21 = await screen.findByTestId('queue-pending-reason-21');
     expect(reason21.textContent).toContain("circuit-run slot");
     expect(reason21.textContent).toContain("this mesh's circuit-run slots");
@@ -272,6 +415,7 @@ describe('CircuitsProbeTab', () => {
     });
     openProbeDestination('circuits');
 
+    fireEvent.click(await screen.findByTestId('circuits-view-queue'));
     const reason = await screen.findByTestId('queue-pending-reason-21');
     expect(reason.textContent).toContain('allows 4 concurrent runs');
     // Belt-and-braces: the per-circuit number must not leak into the
@@ -284,6 +428,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'review-bot');
     await user.click(screen.getByTestId('circuit-create-button'));
 
@@ -310,6 +455,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'issue-runner');
     await user.selectOptions(screen.getByTestId('circuit-trigger-select'), 'github_issue_label');
     // The create button stays disabled until the label is filled in.
@@ -333,6 +479,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
     await user.selectOptions(
       screen.getByTestId('circuit-blueprint-select'),
@@ -361,6 +508,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     fireEvent.click(await screen.findByTestId('circuit-edit-flow-7'));
     expect(useUIStore.getState().activeCircuitEditorId).toBe(7);
   });
@@ -370,6 +518,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.click(await screen.findByTestId('circuit-trigger-7'));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('trigger_circuit_now', { circuitId: 7 });
@@ -381,6 +530,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     const trigger = (await screen.findByTestId('circuit-trigger-7')) as HTMLButtonElement;
     expect(trigger.disabled).toBe(false);
     await user.click(trigger);
@@ -394,6 +544,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     const toggle = (await screen.findByTestId('circuit-enabled-7')) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
     await user.click(toggle);
@@ -410,6 +561,7 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    await user.click(await screen.findByTestId('circuits-view-manage'));
     await user.click(await screen.findByTestId('circuit-delete-7'));
     expect(invoke).not.toHaveBeenCalledWith('delete_circuit', { circuitId: 7 });
     await user.click(screen.getByTestId('circuit-confirm-delete-7'));
@@ -423,6 +575,8 @@ describe('CircuitsProbeTab', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    expect(screen.queryByTestId('circuit-queue')).toBeNull();
+    await user.click(await screen.findByTestId('circuits-view-queue'));
     const queue = await screen.findByTestId('circuit-queue');
     expect(
       Array.from(queue.querySelectorAll('[data-testid^="queue-run-"]')).map((row) =>
@@ -572,7 +726,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_LONG] });
     openProbeDestination('circuits');
 
-    // A live run opens by default — the diagnostic you came for is visible.
+    expect((await screen.findByTestId('run-toggle-20')).getAttribute('aria-expanded')).toBe('true');
     const timeline = await screen.findByTestId('run-steps-20');
     expect(timeline.tagName).toBe('OL');
 
@@ -692,13 +846,11 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
-    // Terminal runs collapse by default, but a failure is never hidden.
+    // Failed runs open by default, and a failure is never hidden.
     const collapsedError = await screen.findByTestId('run-error-25');
     expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
     expect(collapsedError.className).toContain('break-words');
     expect(collapsedError.className).not.toContain('truncate');
-
-    await user.click(screen.getByTestId('run-toggle-25'));
 
     // Trigger identity is unspaced, so it needs `break-all` — a
     // word-boundary break has nowhere to land and would overflow.
@@ -745,15 +897,15 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-retries-26').textContent).toContain('retried');
   });
 
-  it('opens live runs, collapses terminal ones, and honours a manual toggle', async () => {
+  it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
-    // Run 12 is running → open. Run 11 completed → collapsed.
     await waitFor(() => {
       expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
     });
+    await user.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByTestId('run-steps-11')).toBeNull();
 
@@ -762,7 +914,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByTestId('run-steps-11')).toBeTruthy();
 
-    // …and one click closes the live run's, without needing two.
+    await user.click(screen.getByTestId('circuits-view-activity'));
+    expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('true');
     await user.click(screen.getByTestId('run-toggle-12'));
     expect(screen.getByTestId('run-toggle-12').getAttribute('aria-expanded')).toBe('false');
   });
@@ -771,12 +924,42 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     mockBackend({ runs: [RUN_DONE] });
     openProbeDestination('circuits');
 
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
     const toggle = await screen.findByTestId('run-toggle-11');
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('aria-controls')).toBe('run-detail-11');
     // Controls live outside the disclosure button — a button nested in a
     // button is invalid HTML and breaks keyboard semantics.
     expect(toggle.querySelector('button')).toBeNull();
+  });
+
+  it('uses tab semantics for the mutually exclusive views', async () => {
+    mockBackend();
+    openProbeDestination('circuits');
+
+    const tablist = screen.getByRole('tablist', { name: 'Circuit views' });
+    expect(tablist).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Activity/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('false');
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'History' }));
+    expect(screen.getByTestId('circuits-probe-body').getAttribute('aria-labelledby')).toBe('circuits-tab-history');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('supports roving keyboard navigation across circuit views', async () => {
+    mockBackend();
+    openProbeDestination('circuits');
+
+    const user = userEvent.setup();
+    const activityTab = screen.getByRole('tab', { name: /Activity/ });
+    activityTab.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'History' }));
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('tab', { name: 'Manage' }).getAttribute('aria-selected')).toBe('true');
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: /Activity/ }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('advances a live run duration without waiting for a ledger event', async () => {
@@ -831,6 +1014,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
+      fireEvent.click(screen.getByTestId('circuits-view-history'));
       expect(screen.getByTestId('run-card-11')).toBeTruthy();
       expect(vi.getTimerCount()).toBe(0);
     } finally {
@@ -859,8 +1043,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(nested.length).toBe(1);
     expect(nested[0]).toBe(body);
 
-    // The New Circuit toolbar stays outside the scroller, so it does not
-    // scroll away from the ledger.
+    expect(body.contains(screen.getByTestId('circuits-view-manage'))).toBe(false);
+    fireEvent.click(screen.getByTestId('circuits-view-manage'));
     expect(body.contains(screen.getByTestId('circuit-name-input'))).toBe(false);
   });
 });
