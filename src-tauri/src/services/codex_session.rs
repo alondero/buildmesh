@@ -70,15 +70,17 @@ fn find_fresh_id_for_directory_in(
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<String> {
-    find_candidates(
+    let candidates = find_candidates(
         sessions_dir,
         spawn_directory,
         created_not_before_ms,
         Some(created_not_before_ms),
+    );
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        created_not_before_ms,
+        true,
     )
-    .into_iter()
-    .max_by_key(|candidate| candidate.timestamp_ms)
-    .map(|candidate| candidate.id)
 }
 
 pub(crate) fn find_candidates(
@@ -220,11 +222,19 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
 /// `cli_session_id`. The PTY and hook paths may win first; the DB predicate
 /// keeps this delayed fallback from overwriting them.
 pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
-    let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
-        let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
-        for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
-            tokio::time::sleep(Duration::from_millis(*delay)).await;
+        let Ok((node, Some(generation))) = crate::blocking::run_blocking("codex_capture_generation", move || {
+            let generation = crate::db::session_started_at_ms(node_id).map_err(|e| e.to_string())?;
+            let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+            Ok((node, generation))
+        }).await else { return; };
+        let not_before = generation.saturating_sub(CAPTURE_SKEW_MS);
+        // Codex may publish its rollout only after the user submits the first
+        // prompt, minutes after the TUI appears. Circuit probes also recover
+        // identity later, so expiry here cannot permanently wedge a gate.
+        for (attempt, delay) in RETRY_DELAYS_MS.iter().copied()
+            .chain(std::iter::repeat_n(10_000, 30)).enumerate() {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
@@ -234,6 +244,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             };
             let path = sessions_dir.clone();
             let directory = spawn_directory.clone();
+            let expected_node = node.clone();
             // Keep the DB predicate, disk scan, and conditional write in one
             // blocking task. Splitting these into three dispatches on every
             // retry needlessly thrashes the blocking pool and widens the race
@@ -245,7 +256,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 let Some(id) = find_fresh_id_for_directory_in(&path, &directory, not_before) else {
                     return Ok(CaptureAttempt::NotFound);
                 };
-                match crate::db::set_cli_session_id_if_missing(node_id, &id) {
+                match crate::db::recover_live_cli_session_id(&expected_node, &id, generation) {
                     Ok(true) => Ok(CaptureAttempt::Stored(id)),
                     Ok(false) => Ok(CaptureAttempt::AlreadyStored),
                     Err(error) => Err(error.to_string()),
@@ -287,6 +298,18 @@ fn node_has_cli_session_id(node_id: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_capture_refuses_two_parent_sessions_in_the_same_launch_window() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for (name, id, time) in [
+            ("first.jsonl", "01a042fe-e7e2-79a2-96bd-a15140478a58", "2026-08-27T11:33:19.986Z"),
+            ("second.jsonl", "01a042fd-1111-7000-8000-000000000001", "2026-08-27T11:33:20.986Z"),
+        ] {
+            write_rollout(temp.path(), name, id, "F:/repo", time);
+        }
+        assert_eq!(find_fresh_id_for_directory_in(temp.path(), "F:/repo", 1_787_830_399_000), None);
+    }
 
     fn write_rollout(root: &Path, name: &str, id: &str, cwd: &str, timestamp: &str) {
         let day = root.join("2026").join("08").join("27");

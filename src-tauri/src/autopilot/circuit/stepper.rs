@@ -417,6 +417,8 @@ pub struct Capacity {
 /// "manual PTY interaction never breaks a run" guarantee.
 #[derive(Debug, Clone)]
 pub enum CircuitEvent {
+    ContinuationObserved { node_id: String, attempt: i32, stamp: String, revision: String, input_stamp: String },
+    ContinuationRetry { node_id: String, attempt: i32 },
     /// The run was triggered. Renamed from `ManualTriggered` in #1208:
     /// runs are minted pending by ANY trigger dispatch (Trigger Now,
     /// a GitHub poll ingest, an interval fire) and this event is
@@ -424,6 +426,16 @@ pub enum CircuitEvent {
     Triggered,
     /// Periodic fast tick carrying current capacity.
     Tick(Capacity),
+    /// A throttled observation of a waiting step. Progress is a transcript
+    /// revision, never a polling timestamp or terminal redraw counter.
+    WaitObserved {
+        node_id: String,
+        attempt: i32,
+        now_ms: i64,
+        progress: Option<String>,
+        reason: String,
+        timeout_ms: i64,
+    },
     /// The seam observed the injected prompt's target process is now live.
     AgentReady { node_id: String },
     /// The seam observed the step's piloted agent finished its turn/work
@@ -578,11 +590,30 @@ impl Transition {
 // The stepper.
 // ---------------------------------------------------------------------------
 
-/// Advance one run by one event. Mutates `run` in place (so callers can
-/// chain events without re-reading) and returns what to persist + execute.
+fn continuation_effect(node_id: &str) -> Effect {
+    Effect::InjectPty { node_id: node_id.into(), target_node_id: None,
+        prompt: "Continue the remaining work already assigned to you and run its relevant checks. Do not expand scope, approve permissions, or guess answers to questions requiring the user. If you are blocked on such a decision, report the blocker explicitly.".into() }
+}
+
+/// Advance one run by one event and return what to persist before effects.
 pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
     let mut t = Transition::default();
     match event {
+        CircuitEvent::ContinuationObserved { node_id, attempt, stamp, revision, input_stamp } => {
+            if run.state == RunState::Running && run.step(node_id).is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt) {
+                run.context.set(&format!("node.{node_id}.continuation.stamp"), stamp.clone());
+                run.context.set(&format!("node.{node_id}.continuation.revision"), revision.clone());
+                run.context.set(&format!("node.{node_id}.continuation.input"), input_stamp.clone());
+                t.context_changed = true;
+            }
+        }
+        CircuitEvent::ContinuationRetry { node_id, attempt } => {
+            if run.state == RunState::Running && run.step(node_id).is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.context.get(&format!("node.{node_id}.continuation.attempt")).and_then(|v| v.parse::<i32>().ok()) == Some(*attempt)
+                && run.context.get(&format!("node.{node_id}.continuation.delivery")) == Some("pending") {
+                t.effects.push(continuation_effect(node_id));
+            }
+        }
         CircuitEvent::Triggered => {
             if run.state == RunState::Pending {
                 run.state = RunState::Running;
@@ -615,6 +646,48 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
             if run.state == RunState::Running {
                 schedule_ready(run, &mut t, *capacity);
                 finish_run_if_done(run, &mut t);
+            }
+        }
+        CircuitEvent::WaitObserved { node_id, attempt, now_ms, progress, reason, timeout_ms } => {
+            if run.state != RunState::Running || !run.step(node_id).is_some_and(|s|
+                s.attempt == *attempt && matches!(s.status, StepStatus::Running | StepStatus::Blocked)) {
+                return t;
+            }
+            let prefix = format!("node.{node_id}.wait");
+            let same_attempt = run.context.get(&format!("{prefix}.attempt"))
+                .and_then(|s| s.parse::<i32>().ok()) == Some(*attempt);
+            let same_mode = run.context.get(&format!("{prefix}.timeout_ms"))
+                .and_then(|s| s.parse::<i64>().ok()) == Some(*timeout_ms);
+            let changed = progress.as_deref().is_some_and(|p|
+                run.context.get(&format!("{prefix}.progress")) != Some(p));
+            let since = run.context.get(&format!("{prefix}.since_ms"))
+                .and_then(|s| s.parse::<i64>().ok());
+            if !same_attempt || !same_mode || changed || since.is_none() {
+                run.context.set(&format!("{prefix}.attempt"), attempt.to_string());
+                run.context.set(&format!("{prefix}.timeout_ms"), timeout_ms.to_string());
+                run.context.set(&format!("{prefix}.since_ms"), now_ms.to_string());
+                if let Some(progress) = progress {
+                    run.context.set(&format!("{prefix}.progress"), progress.clone());
+                }
+                t.context_changed = true;
+            } else if since.is_some_and(|since| now_ms.saturating_sub(since) >= *timeout_ms) {
+                let detail = if reason.is_empty() { "Agent produced no new report" } else { reason };
+                fail_step(run, &mut t, node_id, format!("Timed out after {} minutes without progress: {detail}", timeout_ms / 60_000));
+                // A watchdog expiry ends the run even when the graph wires a
+                // retry loop: replaying the same stalled gate is not recovery.
+                run.state = RunState::Failed;
+                t.run_state_changed = true;
+                finish_run_if_done(run, &mut t);
+                return t;
+            }
+            if let Some(step) = run.step_mut(node_id) {
+                let error = (!reason.is_empty()).then(|| reason.clone());
+                if step.error != error {
+                    step.error = error.clone();
+                    let mut write = StepWrite::for_existing(node_id, step.status, *attempt);
+                    write.error = Some(error);
+                    t.step_writes.push(write);
+                }
             }
         }
         CircuitEvent::AgentReady { node_id } => {
@@ -709,6 +782,10 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
             if run.state == RunState::Paused {
                 run.state = RunState::Running;
                 t.run_state_changed = true;
+                for step in &run.steps {
+                    run.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
+                }
+                t.context_changed = true;
             }
         }
         CircuitEvent::CollaboratorApproved { node_id } => {
@@ -750,11 +827,19 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 let Some(attempt) = run.step(node_id).map(|step| step.attempt) else {
                     return t;
                 };
+                if *classification == Some(Classification::Continue)
+                    && run.context.get(&format!("node.{node_id}.evaluated_attempt")) == Some(attempt.to_string().as_str())
+                    && output.as_deref().is_some_and(|out| run.context.get(&format!("node.{node_id}.evaluated_output")) == Some(out))
+                    && run.context.get(&format!("node.{node_id}.classifier_version")) == Some("2") {
+                    return t;
+                }
+                run.context.set(&format!("node.{node_id}.classifier_version"), "2");
                 run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
                 run.context.set(&format!("node.{node_id}.classification"), match classification {
                     Some(Classification::Completed) => "completed",
                     Some(Classification::Blocked) => "blocked",
                     Some(Classification::Working) => "working",
+                    Some(Classification::Continue) => "continue",
                     None => "unavailable",
                 });
                 t.context_changed = true;
@@ -770,10 +855,11 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     }
                 }
                 if let Some(classification) = classification {
+                    run.context.set(&format!("node.{node_id}.classifier_failures.{attempt}"), "0");
                     let outcome = match classification {
                         Classification::Completed => StepOutcome::Completed,
                         Classification::Blocked => StepOutcome::Blocked,
-                        Classification::Working => StepOutcome::Working,
+                        Classification::Working | Classification::Continue => StepOutcome::Working,
                     };
                     // A classifier outcome only terminalizes the gate when the
                     // blueprint wires that outcome somewhere. An unwired
@@ -786,10 +872,26 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         cascade_after_completion(run, &mut t, 1);
                         finish_run_if_done(run, &mut t);
                     } else {
+                        let count_key = format!("node.{node_id}.continuations.{attempt}");
+                        let count = run.context.get(&count_key).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                        let owns_target = run.resolve_target_agent(node_id).is_some_and(|id|
+                            Some(id) != run.context.source_agent_id()
+                                && run.steps.iter().any(|s| s.agent_node_id == Some(id)));
+                        if *classification == Classification::Continue && owns_target && count < 2
+                            && run.context.get(&format!("node.{node_id}.continuation.stamp")).is_some()
+                            && matches!(run.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::LlmTurnClassifier { .. })) {
+                            run.context.set(&count_key, (count + 1).to_string());
+                            run.context.set(&format!("node.{node_id}.continuation.delivery"), "pending");
+                            run.context.set(&format!("node.{node_id}.continuation.attempt"), attempt.to_string());
+                            t.context_changed = true;
+                            t.effects.push(continuation_effect(node_id));
+                        }
                         let error = match classification {
                             Classification::Blocked => "Agent needs input. Continue the agent to produce a new report.",
                             Classification::Working => "Agent reported work remaining. Waiting for its next report; check the agent for a question or permission prompt.",
                             Classification::Completed => "Agent reported completion, but no completed route is wired; waiting for a new report.",
+                            Classification::Continue if owns_target && count < 2 => "Sent a bounded continuation for the remaining assigned work; waiting for a new report.",
+                            Classification::Continue => "Automatic continuation budget exhausted or source is borrowed; waiting for new progress before timeout.",
                         }.to_string();
                         if let Some(step) = run.step_mut(node_id) {
                             step.error = Some(error.clone());
@@ -801,6 +903,16 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         });
                     }
                 } else {
+                    let key = format!("node.{node_id}.classifier_failures.{attempt}");
+                    let failures = run.context.get(&key).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).saturating_add(1);
+                    run.context.set(&key, failures.to_string());
+                    if failures >= 5 {
+                        fail_step(run, &mut t, node_id, "Classifier unavailable after 5 attempts; ending this run so queued work can proceed.".into());
+                        run.state = RunState::Failed;
+                        t.run_state_changed = true;
+                        finish_run_if_done(run, &mut t);
+                        return t;
+                    }
                     // A classifier backend failure is not an agent verdict. Do
                     // not invent WORKING (or any other route) from None; keep
                     // the gate running with a visible, retryable explanation.
@@ -2758,6 +2870,122 @@ mod tests {
             context: ctx,
             steps: vec![],
         }
+    }
+
+    fn wait_observed(now_ms: i64, progress: Option<&str>) -> CircuitEvent {
+        CircuitEvent::WaitObserved { node_id: "classify".into(), attempt: 1, now_ms,
+            progress: progress.map(str::to_string), reason: "No readable report".into(), timeout_ms: 900_000 }
+    }
+
+    #[test]
+    fn circuit_wait_deadline_survives_restart_and_ignores_repeated_reports() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed(10_000, Some("report-1")));
+        run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+        let idle = advance(&mut run, &wait_observed(909_999, Some("report-1")));
+        assert!(idle.is_empty(), "polls and the same report must not renew the deadline or rewrite diagnostics");
+        let expired = advance(&mut run, &wait_observed(910_000, Some("report-1")));
+        assert!(expired.run_state_changed);
+        assert_eq!(run.state, RunState::Failed);
+        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("Timed out"));
+        assert!(run.steps.iter().all(|s| s.status.is_terminal()));
+    }
+
+    #[test]
+    fn circuit_wait_progress_and_explicit_resume_allow_more_time_but_stale_attempts_do_not() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed(0, Some("a")));
+        advance(&mut run, &wait_observed(899_999, Some("b")));
+        advance(&mut run, &wait_observed(900_000, Some("b")));
+        assert_eq!(run.state, RunState::Running);
+        advance(&mut run, &CircuitEvent::Paused);
+        assert!(advance(&mut run, &wait_observed(10_000_000, None)).is_empty());
+        advance(&mut run, &CircuitEvent::Resumed);
+        advance(&mut run, &wait_observed(10_000_000, None));
+        assert_eq!(run.state, RunState::Running);
+        run.step_mut("classify").unwrap().attempt = 2;
+        assert!(advance(&mut run, &wait_observed(20_000_000, None)).is_empty());
+        run.state = RunState::from_db_str("cancelled");
+        assert!(advance(&mut run, &wait_observed(30_000_000, None)).is_empty());
+    }
+
+    #[test]
+    fn circuit_approval_expires_without_approving_or_starting_downstream_work() {
+        let mut run = gate_run("classify", CircuitNodeKind::CollaboratorCheck { require_approval: true },
+            &[(StepOutcome::Completed, "done")]);
+        fire_to_gate(&mut run, "classify");
+        assert_eq!(status_of(&run, "classify"), StepStatus::Blocked);
+        advance(&mut run, &wait_observed(0, None));
+        let expired = advance(&mut run, &wait_observed(900_000, None));
+        assert_eq!(run.state, RunState::Failed);
+        assert!(expired.effects.is_empty());
+        assert!(run.step("done").is_none());
+        assert!(advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "classify".into() }).is_empty());
+    }
+
+    #[test]
+    fn circuit_yield_after_long_work_gets_its_own_recovery_window() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        let mut active = wait_observed(0, None);
+        if let CircuitEvent::WaitObserved { timeout_ms, .. } = &mut active { *timeout_ms = 7_200_000; }
+        advance(&mut run, &active);
+        advance(&mut run, &wait_observed(1_200_000, None));
+        assert_eq!(run.state, RunState::Running);
+        advance(&mut run, &wait_observed(2_099_999, None));
+        assert_eq!(run.state, RunState::Running);
+        advance(&mut run, &wait_observed(2_100_000, None));
+        assert_eq!(run.state, RunState::Failed);
+    }
+
+    #[test]
+    fn circuit_pending_continuation_replays_but_uncertain_delivery_does_not() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &CircuitEvent::ContinuationObserved { node_id: "classify".into(), attempt: 1, stamp: "100:yield".into(), revision: "r".into(), input_stamp: "1:0".into() });
+        advance(&mut run, &classified("classify", Some(Classification::Continue)));
+        run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+        let retry = CircuitEvent::ContinuationRetry { node_id: "classify".into(), attempt: 1 };
+        assert_eq!(advance(&mut run, &retry).effects.len(), 1);
+        run.context.set("node.classify.continuation.delivery", "claimed");
+        assert!(advance(&mut run, &retry).effects.is_empty());
+        run.context.set("node.classify.continuation.delivery", "pending");
+        run.step_mut("classify").unwrap().attempt = 2;
+        assert!(advance(&mut run, &retry).effects.is_empty());
+    }
+
+    #[test]
+    fn circuit_continuation_is_bounded_deduplicated_and_never_answers_a_blocker() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &CircuitEvent::ContinuationObserved { node_id: "classify".into(), attempt: 1, stamp: "100:yield".into(), revision: "report".into(), input_stamp: "1:0".into() });
+        for report in 0..3 {
+            let event = CircuitEvent::TurnClassified { node_id: "classify".into(), classification: Some(Classification::Continue), output: Some(format!("Next task {report}")) };
+            let t = advance(&mut run, &event);
+            assert_eq!(t.effects.iter().filter(|e| matches!(e, Effect::InjectPty { .. })).count(), usize::from(report < 2));
+            run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+            assert!(advance(&mut run, &event).is_empty());
+        }
+        assert!(advance(&mut run, &classified("classify", Some(Classification::Blocked))).effects.is_empty());
+        assert!(advance(&mut run, &classified("classify", Some(Classification::Working))).effects.is_empty());
+        run.context.set("source.agent_id", "900");
+        run.context.set("node.classify.continuations.1", "0");
+        let borrowed = advance(&mut run, &CircuitEvent::TurnClassified { node_id: "classify".into(), classification: Some(Classification::Continue), output: Some("Next borrowed task".into()) });
+        assert!(borrowed.effects.is_empty(), "the source is borrowed, not ours to continue");
+    }
+
+    #[test]
+    fn circuit_classifier_outage_has_a_durable_retry_budget() {
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        for attempt in 1..=5 {
+            advance(&mut run, &classified("classify", None));
+            run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+            assert_eq!(run.state, if attempt < 5 { RunState::Running } else { RunState::Failed });
+        }
+        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("5 attempts"));
     }
 
     /// Drive a gate_run from Pending up to the gate step existing. The

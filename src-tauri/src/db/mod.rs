@@ -3271,6 +3271,17 @@ pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
     set_cli_session_id_if_missing_inner(&db, id, cli_id)
 }
 
+/// Identity of the process and its last lifecycle transition. Continuations
+/// observed before user input/regeneration must not write into the new turn.
+pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
+    read_conn().query_row("SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
+        params![id], |row| {
+            let generation: Option<i64> = row.get(0)?;
+            let changed: Option<String> = row.get(1)?;
+            Ok(generation.map(|g| format!("{g}:{}", changed.unwrap_or_default())))
+        })
+}
+
 fn set_cli_session_id_if_missing_inner(
     conn: &Connection,
     id: i64,
@@ -3340,6 +3351,26 @@ pub(crate) fn recover_suspended_cli_session_id_inner(
         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
         params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
             generation])?;
+    Ok(changed > 0)
+}
+
+/// Live discovery uses the durable process generation, not the time of the
+/// recovery probe. A delayed disk scan must never claim a replacement session.
+pub(crate) fn recover_live_cli_session_id(node: &AgentNode, cli_id: &str, generation: i64) -> SqlResult<bool> {
+    recover_live_cli_session_id_inner(&write_conn(), node, cli_id, generation)
+}
+
+pub(crate) fn recover_live_cli_session_id_inner(
+    conn: &Connection, node: &AgentNode, cli_id: &str, generation: i64,
+) -> SqlResult<bool> {
+    let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
+        WHERE id = ?2 AND status IN ('running', 'ready', 'awaiting_input', 'completed', 'spawning')
+        AND provider = ?3 AND path = ?4 AND worktree_name IS ?5 AND worktree_path IS ?6
+        AND session_started_at = ?7 AND use_worktree = ?8 AND env = ?9
+        AND (cli_session_id IS NULL OR cli_session_id = '')
+        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
+        params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
+            generation, node.use_worktree, node.env.to_string()])?;
     Ok(changed > 0)
 }
 

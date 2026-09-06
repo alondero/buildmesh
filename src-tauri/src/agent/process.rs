@@ -39,6 +39,8 @@ pub struct AgentProcess {
     /// fallback every time. Private: callers enqueue through
     /// [`AgentProcessRegistry::write_bytes`].
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
+    input_version: std::sync::atomic::AtomicU64,
+    input_draft: AtomicBool,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -132,6 +134,8 @@ impl AgentProcess {
         Self {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
+            input_version: std::sync::atomic::AtomicU64::new(0),
+            input_draft: AtomicBool::new(false),
             writer_handle: Mutex::new(writer_handle),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
@@ -147,11 +151,27 @@ impl AgentProcess {
 
     /// Non-blocking enqueue onto the dedicated writer thread.
     fn enqueue_input(&self, data: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        self.enqueue_input_if_current(data, None).map(|_| ())
+    }
+
+    fn input_stamp(&self) -> Option<String> {
+        let _guard = self.writer_tx.lock().unwrap();
+        if self.input_draft.load(Ordering::Relaxed) { return None; }
+        Some(format!("{}:{}", self.generation, self.input_version.load(Ordering::Relaxed)))
+    }
+
+    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<&str>) -> Result<Option<String>, std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
+        let stamp = format!("{}:{}", self.generation, self.input_version.load(Ordering::Relaxed));
+        if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
+        let draft = !matches!(data.last(), Some(b'\r' | b'\n'));
         match guard.as_ref() {
-            Some(tx) => tx.try_send(data),
-            None => Err(std::sync::mpsc::TrySendError::Disconnected(data)),
+            Some(tx) => tx.try_send(data)?,
+            None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
+        let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
+        self.input_draft.store(draft, Ordering::Relaxed);
+        Ok(Some(format!("{}:{version}", self.generation)))
     }
 
     /// Stash the reader thread's `JoinHandle` on the registry entry.
@@ -280,6 +300,17 @@ impl AgentProcessRegistry {
             session_id,
         );
         Ok(())
+    }
+
+    pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
+        self.get(&session_id).and_then(|agent| agent.input_stamp())
+    }
+
+    /// Compare and enqueue under the same writer lock as ordinary keystrokes.
+    /// A partial draft invalidates a continuation even before Enter is pressed.
+    pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
+        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        agent.enqueue_input_if_current(data.to_vec(), Some(expected)).map_err(|e| e.to_string())
     }
 
     pub fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -693,6 +724,31 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    #[test]
+    fn circuit_continuation_cannot_append_to_or_submit_a_user_draft() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_001;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        let observed = registry.input_stamp(id).unwrap();
+        registry.write_bytes(id, b"unfinished draft").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"unfinished draft");
+        assert!(registry.input_stamp(id).is_none(), "a draft already present before classification is ineligible");
+        assert!(registry.write_bytes_if_current(id, b"continue", &observed).unwrap().is_none());
+        assert!(rx.try_recv().is_err());
+        registry.write_bytes(id, b"\r").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"\r");
+        let observed = registry.input_stamp(id).unwrap();
+        let staged = registry.write_bytes_if_current(id, b"staged prompt", &observed).unwrap().unwrap();
+        assert_eq!(rx.recv().unwrap(), b"staged prompt");
+        registry.write_bytes(id, b"more user input").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"more user input");
+        assert!(registry.write_bytes_if_current(id, b"\r", &staged).unwrap().is_none(), "Enter must not submit newer input");
+        assert!(rx.try_recv().is_err());
+        registry.kill_session(id);
+    }
 
     fn insert_trivial_agent(
         registry: &AgentProcessRegistry,

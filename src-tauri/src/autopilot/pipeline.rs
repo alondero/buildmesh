@@ -183,7 +183,7 @@ pub(crate) fn decide_implementing(classification: Option<Classification>) -> Tur
         Some(Classification::Blocked) => TurnAction::NotifyBlocked,
         // WORKING and "couldn't tell" (safe degradation, #483 AC) both mean
         // "leave the agent alone".
-        Some(Classification::Working) | None => TurnAction::Nothing,
+        Some(Classification::Working | Classification::Continue) | None => TurnAction::Nothing,
     }
 }
 
@@ -371,18 +371,28 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 /// retried remote requests, which an in-process turn reaction doesn't
 /// have. If `AgentDriver` grows multi-line paste support, converge on it.
 pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> Result<(), String> {
+    write_prompt_to_pty_guarded(node_id, text, app, None).map(|_| ())
+}
+
+pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHandle, expected_input: Option<&str>) -> Result<bool, String> {
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
         return Err(format!("node {} has no live agent process", node_id));
     }
-    crate::agent::process::PROCESS_REGISTRY
-        .write_bytes(node_id, injection_payload(text).as_bytes())?;
+    let registry = &crate::agent::process::PROCESS_REGISTRY;
+    let guard = if let Some(expected) = expected_input {
+        let Some(next) = registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)? else { return Ok(false); };
+        Some(next)
+    } else {
+        registry.write_bytes(node_id, injection_payload(text).as_bytes())?;
+        None
+    };
     let app = app.clone();
-    std::thread::spawn(move || submit_staged_prompt(node_id, &app));
-    Ok(())
+    std::thread::spawn(move || submit_staged_prompt(node_id, &app, guard));
+    Ok(true)
 }
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
-fn submit_staged_prompt(node_id: i64, app: &AppHandle) {
+fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
     // Phase 1: wait for the paste to echo back (the TUI redrawing its input
     // box with the staged text). Providers that render no echo fall through
     // at the deadline.
@@ -406,12 +416,13 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle) {
         }
     }
     // Phase 3: submit and verify.
-    match press_enter_until_output(node_id) {
-        Ok(attempt) => tracing::info!(
+    match press_enter_until_output_guarded(node_id, guard) {
+        Ok(Some(attempt)) => tracing::info!(
             "autopilot inject({}): staged prompt submitted (Enter attempt {})",
             node_id,
             attempt
         ),
+        Ok(None) => {}, // New input owns the draft; never submit it automatically.
         Err(e) => {
             // Loud degrade: a staged-but-unsubmitted prompt is exactly the
             // silent stall of #874 — surface the node instead.
@@ -431,8 +442,17 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle) {
 /// Shared with the launch watcher — a swallowed Enter stalls a prefilled
 /// launch the same way it stalls an injection.
 pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
+    press_enter_until_output_guarded(node_id, None)?.ok_or_else(|| "Input changed before submission".into())
+}
+
+fn press_enter_until_output_guarded(node_id: i64, mut guard: Option<String>) -> Result<Option<u32>, String> {
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
-        crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
+        if let Some(expected) = guard.as_deref() {
+            let Some(next) = crate::agent::process::PROCESS_REGISTRY.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
+            guard = Some(next);
+        } else {
+            crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
+        }
         let sent_at = Instant::now();
         while Instant::now() < sent_at + ENTER_ACK_WINDOW {
             std::thread::sleep(SUBMIT_POLL);
@@ -440,7 +460,7 @@ pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
                 evaluator::millis_since_last_output(node_id),
                 sent_at.elapsed().as_millis(),
             ) {
-                return Ok(attempt);
+                return Ok(Some(attempt));
             }
         }
         tracing::warn!(
