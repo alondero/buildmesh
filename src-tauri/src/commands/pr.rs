@@ -639,8 +639,7 @@ pub(crate) fn create_pr_blocking(
 
     let (owner, repo) = info.owner_repo()?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, base_branch)
-        .map_err(|e| e.to_string())
+    create_pr_with_precheck(&client, &owner, &repo, &title, &body, &info.branch, base_branch)
 }
 
 /// Create a PR directly from a mesh directory path (no node required).
@@ -675,7 +674,48 @@ pub(crate) fn create_pr_for_mesh_blocking(
 
     let (owner, repo) = info.owner_repo()?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, &base_branch)
+    create_pr_with_precheck(&client, &owner, &repo, &title, &body, &info.branch, &base_branch)
+}
+
+/// Issue #771: the create-side companion to `mergeability_from_summaries`.
+/// Pre-checks for an existing open PR on `head` before constructing the
+/// `CreatePr` payload; short-circuits to its URL when one exists.
+///
+/// **Why the guard exists.** The 180s write timeout from #762 lets a
+/// slow-but-progressing `POST /pulls` succeed server-side while the
+/// client times out. Without the guard a retry POSTs `/pulls` again and
+/// GitHub answers 422 ("a PR already exists for this branch") — the
+/// duplicate-PR bug. Pre-checking turns the retry into a no-op that
+/// returns the existing PR's URL with zero network calls beyond the
+/// one already paid.
+///
+/// **Fall-through semantics.** A transient pre-check failure (rate limit,
+/// 5xx) is NOT treated as "PR exists" — the function falls through to
+/// `create_pull_request`, which surfaces the real error. A 404 is
+/// `find_open_pr_for_branch`'s "no such repo OR no such branch" mapping
+/// to `Ok(None)` and is also a fall-through. Only `Ok(Some(pr))` is the
+/// short-circuit signal.
+///
+/// `pub(crate)` so the test seam drives the helper directly via
+/// `GitHubClient::for_test` + a `fake_server` script, rather than
+/// spinning up a full Tauri runtime. The two public create commands
+/// (`create_pr`, `create_pr_for_mesh`) wrap this helper after their own
+/// branch / worktree / mesh-bookkeeping.
+pub(crate) fn create_pr_with_precheck(
+    client: &GitHubClient,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+    head: &str,
+    base: &str,
+) -> Result<String, String> {
+    if let Ok(Some(existing)) = client.find_open_pr_for_branch(owner, repo, head) {
+        return Ok(existing.html_url);
+    }
+
+    client
+        .create_pull_request(owner, repo, title, body, head, base)
         .map_err(|e| e.to_string())
 }
 
@@ -1713,5 +1753,154 @@ mod tests {
             assert!(p.number > 0);
             assert!(p.html_url.starts_with("https://github.com/"));
         }
+    }
+
+    // ----- create_pr_with_precheck (issue #771) --------------------------
+    //
+    // The pre-check is the load-bearing piece that prevents the 180s
+    // write-timeout (#762) duplicate-PR failure mode: a slow POST that
+    // timed out client-side may have created the PR server-side, and an
+    // un-guarded retry would duplicate. The pre-check before constructing
+    // the CreatePr payload short-circuits the retry to the existing PR's
+    // URL.
+    //
+    // These tests pin the helper's three behaviours against a loopback
+    // `fake_server`:
+    //   - existing open PR → short-circuit, return its URL, NO POST /pulls
+    //   - no open PR       → fall through, POST /pulls, return new URL
+    //   - pre-check 5xx    → fall through, POST /pulls (resilience:
+    //                        a transient pre-check failure must NOT block
+    //                        PR creation)
+
+    /// Head_ref + html_url for the existing-PR fixture — matches the
+    /// `PullRequest` struct's `serde(default)` partial-response tolerance
+    /// (only `number` and `html_url` are required; the rest default).
+    fn existing_pr_json(number: i64, html_url: &str) -> serde_json::Value {
+        serde_json::json!([{
+            "number": number,
+            "html_url": html_url,
+            "title": format!("fix: dup-PR guard (#{})", number),
+            "state": "open",
+            "draft": false,
+        }])
+    }
+
+    /// Body for the created-PR fixture — what the POST /pulls response
+    /// carries. `create_pull_request_details` deserialises the full
+    /// `PullRequest`, so the fixture mirrors that shape.
+    fn created_pr_json(number: i64, html_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "html_url": html_url,
+            "title": "fix: dup-PR guard",
+            "body": "body",
+            "state": "open",
+            "draft": false,
+        })
+    }
+
+    /// Pin the issue's exact failure mode: an open PR already exists for
+    /// the branch, the user (re)tries Create, and the function MUST return
+    /// the existing URL without making a POST /pulls request. The count
+    /// assertion is the load-bearing one — if the pre-check regresses and
+    /// the function falls through, count goes to 2 AND the POST hits the
+    /// listener's closed socket, surfacing as an `Err`. The .expect()
+    /// covers the error signal; the count covers the "returned Ok but
+    /// still POSTed" subtler regression.
+    #[test]
+    fn create_pr_with_precheck_short_circuits_to_existing_pr() {
+        use crate::services::github::tests::{fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let existing = existing_pr_json(771, "https://github.com/acme/demo/pull/771");
+        let (base, count, handle) = fake_server(vec![Scripted::ListPulls(existing)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let url = create_pr_with_precheck(
+            &client, "acme", "demo", "title", "body", "feat/771", "main",
+        )
+        .expect("returns existing PR URL without erroring");
+
+        assert_eq!(
+            url, "https://github.com/acme/demo/pull/771",
+            "must return the existing PR's html_url verbatim, not a fresh-create URL"
+        );
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must short-circuit BEFORE POST /pulls — only the pre-check GET should fire"
+        );
+    }
+
+    /// Positive control: no existing PR → pre-check returns Ok(None) →
+    /// fall through to POST /pulls → return the created URL. The script
+    /// serves two responses; if the pre-check regresses into
+    /// "always return Some" we'd hit count==1 + an unexpected URL, not a
+    /// crash. The fake server handles this safely (it serves
+    /// script.len() then drops the listener; a short client gets
+    /// connection-refused, but here the count is the load-bearing signal).
+    #[test]
+    fn create_pr_with_precheck_falls_through_when_no_existing_pr() {
+        use crate::services::github::tests::{fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let empty: serde_json::Value = serde_json::json!([]);
+        let created = created_pr_json(772, "https://github.com/acme/demo/pull/772");
+        let (base, count, handle) =
+            fake_server(vec![Scripted::ListPulls(empty), Scripted::CreatePullRequest(created)]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let url = create_pr_with_precheck(
+            &client, "acme", "demo", "title", "body", "feat/771", "main",
+        )
+        .expect("creates new PR");
+
+        assert_eq!(
+            url, "https://github.com/acme/demo/pull/772",
+            "must return the CREATED PR's html_url when no pre-existing PR"
+        );
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "GET (pre-check) + POST (create) — the create path must still work"
+        );
+    }
+
+    /// Resilience: a transient pre-check failure (5xx, rate limit) MUST
+    /// NOT short-circuit to "PR exists." The whole point of the pre-check
+    /// is idempotency on the success path; on failure we fall through and
+    /// let the POST surface the real error. Without this, a 500 on the
+    /// GitHub list endpoint (e.g. partial outage) would silently turn
+    /// every Create PR click into a no-op URL — strictly worse than the
+    /// duplicate-PR bug we're guarding against.
+    #[test]
+    fn create_pr_with_precheck_falls_through_on_transient_precheck_error() {
+        use crate::services::github::tests::{fake_server, Scripted};
+        use std::sync::atomic::Ordering;
+
+        let created = created_pr_json(773, "https://github.com/acme/demo/pull/773");
+        let (base, count, handle) = fake_server(vec![
+            Scripted::ListPullsError,
+            Scripted::CreatePullRequest(created),
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let url = create_pr_with_precheck(
+            &client, "acme", "demo", "title", "body", "feat/771", "main",
+        )
+        .expect("transient pre-check failure must NOT block PR creation");
+
+        assert_eq!(
+            url, "https://github.com/acme/demo/pull/773",
+            "must return the CREATED PR's html_url; a pre-check 5xx is not 'PR exists'"
+        );
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "GET (failed pre-check) + POST (create) — fall-through preserves the create path"
+        );
     }
 }

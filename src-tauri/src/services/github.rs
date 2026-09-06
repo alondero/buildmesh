@@ -636,12 +636,13 @@ const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// the connect-timeout backstop at 10s, so a hard network failure aborts
 /// promptly and only legitimate progress extends the window.
 ///
-/// **Retry/idempotency caveat:** the caller is responsible for not
-/// re-invoking `create_pr` on a transient failure unless it can confirm
-/// the previous attempt didn't succeed (e.g. by checking `find_open_pr_for_branch`
-/// first). The current caller (`commands::pr::create_pr_for_mesh`) doesn't
-/// pre-check — a 180s timeout keeps the retry window manageable, and the
-/// user-visible "PR was created" success path is preserved.
+/// **Retry/idempotency caveat (closed by issue #771).** The
+/// `commands::pr::create_pr_with_precheck` helper now pre-checks
+/// `find_open_pr_for_branch` before constructing the `CreatePr` payload
+/// and short-circuits a retry to the existing PR's URL, so a
+/// slow-but-progressing POST that times out client-side no longer
+/// duplicates on retry. Transient pre-check failures (rate limit, 5xx)
+/// fall through to the POST and surface the real error.
 const HTTP_WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
@@ -3421,13 +3422,29 @@ This issue is related to #481 in a narrative sense.
     /// One scripted interaction for the fake server, in the exact order the
     /// client is expected to issue it. `Page` answers `POST /graphql` with
     /// one connection page; `Detail` answers `GET /repos/.../pulls/{n}`
-    /// with a clean/mergeable detail (the per-PR fallback path).
+    /// with a clean/mergeable detail (the per-PR fallback path);
+    /// `ListPulls` / `ListPullsError` / `CreatePullRequest` drive the
+    /// create-PR path tests (issue #771 pre-check) — same fake, no
+    /// second server.
     ///
     /// `pub(crate)` so `commands::pr` tests can script the same fake for
     /// the summaries-then-detail fallback without a second server.
     pub(crate) enum Scripted {
         Page(serde_json::Value, bool, Option<String>),
         Detail,
+        /// GET `/repos/{o}/{r}/pulls?head=...&state=open&per_page=1` — 200 OK
+        /// with the given JSON array body (empty array = no PR; populated
+        /// array = existing PR short-circuits the create path).
+        ListPulls(serde_json::Value),
+        /// GET `/repos/{o}/{r}/pulls?head=...&state=open&per_page=1` — 500
+        /// Internal Server Error with an empty body. Drives the
+        /// fall-through-on-error semantic in `create_pr_with_precheck`
+        /// (any non-success status other than 404 must NOT short-circuit
+        /// to "PR exists" — see issue #771).
+        ListPullsError,
+        /// POST `/repos/{o}/{r}/pulls` — 201 Created with the given PR JSON
+        /// body (mirrors GitHub's `create_pull_request` response shape).
+        CreatePullRequest(serde_json::Value),
     }
 
     /// Spin a fake GitHub server that counts requests and serves `script` in
@@ -3489,14 +3506,14 @@ This issue is related to #481 in a narrative sense.
                     let mut body = vec![0u8; content_length];
                     reader.read_exact(&mut body).expect("read body");
                 }
-                let resp_body = match step {
+                let (status_line, body_bytes): (String, Vec<u8>) = match step {
                     Scripted::Page(nodes, has_next, cursor) => {
                         assert!(
                             request_line.starts_with("POST "),
                             "scripted a GraphQL page but client sent: {}",
                             request_line.trim()
                         );
-                        serde_json::json!({
+                        let body = serde_json::json!({
                             "data": {
                                 "repository": {
                                     "pullRequests": {
@@ -3508,7 +3525,9 @@ This issue is related to #481 in a narrative sense.
                                     }
                                 }
                             }
-                        })
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
                     }
                     Scripted::Detail => {
                         assert!(
@@ -3516,18 +3535,65 @@ This issue is related to #481 in a narrative sense.
                             "scripted a REST detail but client sent: {}",
                             request_line.trim()
                         );
-                        serde_json::json!({
+                        let body = serde_json::json!({
                             "mergeable": true,
                             "mergeable_state": "clean"
-                        })
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::ListPulls(body) => {
+                        // Pre-check request: GET /repos/{o}/{r}/pulls?head=...&state=open
+                        // — accept any GET on /pulls to keep the path assertion loose
+                        // (the production client doesn't URL-encode `head=` parameters).
+                        assert!(
+                            request_line.starts_with("GET ")
+                                && request_line.contains("/pulls?"),
+                            "scripted a ListPulls but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::ListPullsError => {
+                        // Error response for the pre-check path — covers the
+                        // fall-through-on-error semantic in `create_pr_with_precheck`.
+                        assert!(
+                            request_line.starts_with("GET ")
+                                && request_line.contains("/pulls?"),
+                            "scripted a ListPullsError but client sent: {}",
+                            request_line.trim()
+                        );
+                        // Empty body — `find_open_pr_for_branch` calls `resp.text()`
+                        // on a non-success status and surfaces the empty body
+                        // verbatim, mapping to `GitHubError::Api`.
+                        ("HTTP/1.1 500 Internal Server Error\r\n".to_string(), Vec::new())
+                    }
+                    Scripted::CreatePullRequest(body) => {
+                        assert!(
+                            request_line.starts_with("POST ")
+                                && request_line.contains("/pulls"),
+                            "scripted a CreatePullRequest but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 201 Created\r\n".to_string(), bytes)
                     }
                 };
-                let resp_str = serde_json::to_string(&resp_body).expect("serialise");
-                let http = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_str.len(),
-                    resp_str
-                );
+                let http = if body_bytes.is_empty() {
+                    format!(
+                        "{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+                        status_line
+                    )
+                } else {
+                    let body_str = std::str::from_utf8(&body_bytes).expect("utf8 body");
+                    format!(
+                        "{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status_line,
+                        body_str.len(),
+                        body_str
+                    )
+                };
                 sock.write_all(http.as_bytes()).expect("write");
             }
         });
