@@ -510,7 +510,11 @@ pub trait AgentProvider: Send + Sync {
     /// effort / extra / sandbox onto `base_args` and never inspects or
     /// relocates trailing positionals — so a future adapter that adds a
     /// trailing flag cannot have that flag amputated by a blind `.pop()`.
-    fn spawn_recipe_for_resume(&self, _platform: Platform, _session_id: &str) -> Option<SpawnRecipe> {
+    fn spawn_recipe_for_resume(
+        &self,
+        _platform: Platform,
+        _session_id: &str,
+    ) -> Option<SpawnRecipe> {
         None
     }
 

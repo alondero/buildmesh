@@ -62,7 +62,8 @@ fn gitignore_update_for_portability(
                 Ok(None)
             } else {
                 let existing = blob.content();
-                let mut new_content = Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
+                let mut new_content =
+                    Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
                 new_content.extend_from_slice(existing);
                 append_separator(&mut new_content);
                 new_content.extend_from_slice(ai_context_gitignore::BLOCK.as_bytes());
@@ -267,12 +268,9 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
     push_builder
         .args(["push", "origin", &branch_name])
         .current_dir(&host_path);
-    let push_out = crate::process_util::run_command_with_timeout(
-        push_builder,
-        "git push",
-        PUSH_TIMEOUT,
-    )
-    .map_err(|e| format!("Failed to run git push: {}", e))?;
+    let push_out =
+        crate::process_util::run_command_with_timeout(push_builder, "git push", PUSH_TIMEOUT)
+            .map_err(|e| format!("Failed to run git push: {}", e))?;
     if !push_out.status.success() {
         return Err(format!(
             "git push failed: {}",
@@ -331,7 +329,10 @@ fn build_portability_commit(
     let mut files_added: Vec<String> = Vec::new();
 
     // AGENTS.md -> CLAUDE.md (same directory, so the target is just "CLAUDE.md").
-    let agents_md_present = root_builder.get("AGENTS.md").map_err(|e| e.to_string())?.is_some();
+    let agents_md_present = root_builder
+        .get("AGENTS.md")
+        .map_err(|e| e.to_string())?
+        .is_some();
     if root.join("CLAUDE.md").is_file() && !agents_md_present {
         let blob = repo.blob(b"CLAUDE.md").map_err(|e| e.to_string())?;
         root_builder
@@ -356,7 +357,10 @@ fn build_portability_commit(
         let mut agents_builder = repo
             .treebuilder(existing_agents_tree.as_ref())
             .map_err(|e| e.to_string())?;
-        let skills_present = agents_builder.get("skills").map_err(|e| e.to_string())?.is_some();
+        let skills_present = agents_builder
+            .get("skills")
+            .map_err(|e| e.to_string())?
+            .is_some();
         if !skills_present {
             let blob = repo.blob(b"../.claude/skills").map_err(|e| e.to_string())?;
             agents_builder
@@ -563,7 +567,10 @@ mod tests {
 
         let agents_md = tree.get_name("AGENTS.md").unwrap();
         assert_eq!(agents_md.filemode(), 0o120000);
-        assert_eq!(repo.find_blob(agents_md.id()).unwrap().content(), b"CLAUDE.md");
+        assert_eq!(
+            repo.find_blob(agents_md.id()).unwrap().content(),
+            b"CLAUDE.md"
+        );
 
         let agents_dir = tree.get_name(".agents").unwrap();
         let agents_tree = repo.find_tree(agents_dir.id()).unwrap();
@@ -575,7 +582,10 @@ mod tests {
         );
 
         // HEAD and working tree untouched.
-        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), head_before);
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_before
+        );
         assert!(!tr.path().join("AGENTS.md").exists());
         assert!(!tr.path().join(".agents").exists());
     }
@@ -646,10 +656,7 @@ mod tests {
 
     fn blob_content(repo: &git2::Repository, tree: &git2::Tree, name: &str) -> Vec<u8> {
         let entry = tree.get_name(name).expect("entry in tree");
-        repo.find_blob(entry.id())
-            .expect("blob")
-            .content()
-            .to_vec()
+        repo.find_blob(entry.id()).expect("blob").content().to_vec()
     }
 
     #[test]
@@ -692,10 +699,7 @@ mod tests {
     #[test]
     fn appends_agent_block_to_empty_gitignore_without_prepending_blank_lines() {
         let tr = TempRepo::new();
-        let repo = init_repo(
-            tr.path(),
-            &[("CLAUDE.md", "# context"), (".gitignore", "")],
-        );
+        let repo = init_repo(tr.path(), &[("CLAUDE.md", "# context"), (".gitignore", "")]);
 
         let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
         assert!(added.iter().any(|p| p == ".gitignore"));
@@ -735,11 +739,7 @@ mod tests {
         assert!(gi_str.contains("dist/\r\n"));
         // Separator is a single blank line, in CRLF — no Frankenstein
         // `\r\n\n` between the user's body and the block.
-        assert!(
-            !gi_str.contains("\r\n\n"),
-            "CRLF got mangled: {:?}",
-            gi_str
-        );
+        assert!(!gi_str.contains("\r\n\n"), "CRLF got mangled: {:?}", gi_str);
         // Block content landed.
         assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
@@ -822,8 +822,7 @@ mod tests {
                 (".gitignore", "node_modules/\n"),
             ],
         );
-        let status =
-            detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
+        let status = detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
         assert!(!status.gitignore_has_agent_patterns);
 
         // Repo with the canonical block — flag flips true.
@@ -835,15 +834,13 @@ mod tests {
                 (".gitignore", super::ai_context_gitignore::BLOCK),
             ],
         );
-        let status2 =
-            detect_ai_context_blocking(tr2.path().to_string_lossy().to_string()).unwrap();
+        let status2 = detect_ai_context_blocking(tr2.path().to_string_lossy().to_string()).unwrap();
         assert!(status2.gitignore_has_agent_patterns);
 
         // Repo with no .gitignore at all — flag is false.
         let tr3 = TempRepo::new();
         init_repo(tr3.path(), &[("CLAUDE.md", "# context")]);
-        let status3 =
-            detect_ai_context_blocking(tr3.path().to_string_lossy().to_string()).unwrap();
+        let status3 = detect_ai_context_blocking(tr3.path().to_string_lossy().to_string()).unwrap();
         assert!(!status3.gitignore_has_agent_patterns);
     }
 }

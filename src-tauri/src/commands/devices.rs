@@ -9,10 +9,10 @@
 //! `#[blocking_command]` (PR #1388 review point 3) wraps the body in
 //! `crate::commands::run_blocking`.
 
-use buildmesh_macros::blocking_command;
 use crate::db;
 use crate::http::revocation;
 use crate::models::DeviceSession;
+use buildmesh_macros::blocking_command;
 use tauri::command;
 
 /// List every paired device for the panel. The wire shape omits the token hash —

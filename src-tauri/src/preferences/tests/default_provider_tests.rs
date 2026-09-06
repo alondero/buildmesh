@@ -20,10 +20,7 @@ fn resolve_precedence_falls_through_to_per_mesh() {
 
 #[test]
 fn resolve_precedence_falls_through_to_app_wide() {
-    assert_eq!(
-        resolve_default_provider(None, None, Some("a".into())),
-        "a"
-    );
+    assert_eq!(resolve_default_provider(None, None, Some("a".into())), "a");
 }
 
 #[test]

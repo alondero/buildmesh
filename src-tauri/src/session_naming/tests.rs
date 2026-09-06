@@ -1,4 +1,9 @@
-use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
+use super::{
+    engine::*,
+    repository::*,
+    slug::*,
+    words::{ADJECTIVES, NOUNS},
+};
 use crate::models::AgentNode;
 
 /// Serialises tests that mutate process env (PATH, USERPROFILE,

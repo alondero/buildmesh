@@ -14,8 +14,8 @@
 //!   `403 Forbidden` (authenticated but wrong surface), distinct from the
 //!   `401 Unauthorized` returned when no valid credential is presented at all.
 
-use rusqlite::Connection;
 use crate::http::MaybeTls;
+use rusqlite::Connection;
 
 use crate::db;
 use crate::http::request;
@@ -231,20 +231,14 @@ mod tests {
     fn root_token_bearer_resolves_admin() {
         let conn = seeded_db();
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
-        assert_eq!(
-            resolve_role_inner(&conn, &bearer(&root)),
-            Some(Role::Admin)
-        );
+        assert_eq!(resolve_role_inner(&conn, &bearer(&root)), Some(Role::Admin));
     }
 
     #[test]
     fn root_token_cookie_resolves_admin() {
         let conn = seeded_db();
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
-        assert_eq!(
-            resolve_role_inner(&conn, &cookie(&root)),
-            Some(Role::Admin)
-        );
+        assert_eq!(resolve_role_inner(&conn, &cookie(&root)), Some(Role::Admin));
     }
 
     #[test]
@@ -252,14 +246,20 @@ mod tests {
         // A paired device's token is an Admin-surface credential (issue #502).
         let conn = seeded_db();
         let (_, token) = db::pair_device_session_inner(&conn, Some("iPhone"), None).unwrap();
-        assert_eq!(resolve_role_inner(&conn, &bearer(&token)), Some(Role::Admin));
+        assert_eq!(
+            resolve_role_inner(&conn, &bearer(&token)),
+            Some(Role::Admin)
+        );
     }
 
     #[test]
     fn device_token_cookie_resolves_admin() {
         let conn = seeded_db();
         let (_, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
-        assert_eq!(resolve_role_inner(&conn, &cookie(&token)), Some(Role::Admin));
+        assert_eq!(
+            resolve_role_inner(&conn, &cookie(&token)),
+            Some(Role::Admin)
+        );
     }
 
     #[test]
@@ -271,7 +271,10 @@ mod tests {
         db::revoke_device_session_inner(&conn, id).unwrap();
         assert_eq!(resolve_role_inner(&conn, &bearer(&token)), None);
         assert_eq!(
-            outcome(resolve_role_inner(&conn, &bearer(&token)), RequiredScope::Admin),
+            outcome(
+                resolve_role_inner(&conn, &bearer(&token)),
+                RequiredScope::Admin
+            ),
             AuthOutcome::Unauthorized
         );
     }
@@ -280,8 +283,14 @@ mod tests {
     fn resolve_device_session_recovers_the_id_for_a_device_but_not_the_root_token() {
         let conn = seeded_db();
         let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
-        assert_eq!(resolve_device_session_inner(&conn, &bearer(&token)), Some(id));
-        assert_eq!(resolve_device_session_inner(&conn, &cookie(&token)), Some(id));
+        assert_eq!(
+            resolve_device_session_inner(&conn, &bearer(&token)),
+            Some(id)
+        );
+        assert_eq!(
+            resolve_device_session_inner(&conn, &cookie(&token)),
+            Some(id)
+        );
         // The root token authenticates as Admin but owns no device row.
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
         assert_eq!(resolve_device_session_inner(&conn, &bearer(&root)), None);

@@ -14,7 +14,8 @@ use std::collections::HashSet;
 
 fn suspended_recovery_schema() -> rusqlite::Connection {
     let conn = pending_removal_schema();
-    conn.execute_batch("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER DEFAULT 1;
+    conn.execute_batch(
+        "ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER DEFAULT 1;
         ALTER TABLE agent_nodes ADD COLUMN is_pinned INTEGER DEFAULT 0;
         ALTER TABLE agent_nodes ADD COLUMN position INTEGER DEFAULT 0;
         ALTER TABLE agent_nodes ADD COLUMN source_pr INTEGER;
@@ -28,16 +29,25 @@ fn suspended_recovery_schema() -> rusqlite::Connection {
         INSERT INTO agent_nodes (id, mesh_id, name, path, status, cli_session_id)
         VALUES (43, 1, 'empty', '/repo', 'suspended', ''),
                (44, 1, 'known', '/repo', 'suspended', 'known'),
-               (45, 1, 'archived', '/repo', 'archived', NULL);").unwrap();
-    conn.execute("INSERT INTO app_settings VALUES ('codex_legacy_session_backfill_v1', '1')", []).unwrap();
+               (45, 1, 'archived', '/repo', 'archived', NULL);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO app_settings VALUES ('codex_legacy_session_backfill_v1', '1')",
+        [],
+    )
+    .unwrap();
     conn
 }
 
 #[test]
 fn startup_resume_lists_missing_and_empty_identities_after_legacy_migration() {
     let conn = suspended_recovery_schema();
-    let mut ids = super::list_suspended_nodes_inner(&conn).unwrap()
-        .into_iter().map(|node| node.id).collect::<Vec<_>>();
+    let mut ids = super::list_suspended_nodes_inner(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
     ids.sort();
     assert_eq!(ids, vec![42, 43, 44]);
 }
@@ -49,16 +59,50 @@ fn recovery_does_not_overwrite_or_share_an_identity_or_revive_a_changed_node() {
     let node = nodes.iter().find(|node| node.id == 42).unwrap();
     let sibling = nodes.iter().find(|node| node.id == 43).unwrap();
     assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "known", None).unwrap());
-    conn.execute("UPDATE agent_nodes SET status = 'running' WHERE id = 42", []).unwrap();
-    assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap());
-    conn.execute("UPDATE agent_nodes SET status = 'suspended', provider = 'agy' WHERE id = 42", []).unwrap();
-    assert!(!super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap());
-    assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "recovered", None).unwrap());
-    assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "replacement", None).unwrap());
-    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = 43", []).unwrap();
-    conn.execute("UPDATE agent_nodes SET session_started_at = 1234 WHERE id = 43", []).unwrap();
-    assert!(!super::recover_suspended_cli_session_id_inner(&conn, sibling, "old-generation", None).unwrap());
-    assert!(super::recover_suspended_cli_session_id_inner(&conn, sibling, "new-generation", Some(1234)).unwrap());
+    conn.execute(
+        "UPDATE agent_nodes SET status = 'running' WHERE id = 42",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap()
+    );
+    conn.execute(
+        "UPDATE agent_nodes SET status = 'suspended', provider = 'agy' WHERE id = 42",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !super::recover_suspended_cli_session_id_inner(&conn, node, "recovered", None).unwrap()
+    );
+    assert!(
+        super::recover_suspended_cli_session_id_inner(&conn, sibling, "recovered", None).unwrap()
+    );
+    assert!(
+        !super::recover_suspended_cli_session_id_inner(&conn, sibling, "replacement", None)
+            .unwrap()
+    );
+    conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = NULL WHERE id = 43",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE agent_nodes SET session_started_at = 1234 WHERE id = 43",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !super::recover_suspended_cli_session_id_inner(&conn, sibling, "old-generation", None)
+            .unwrap()
+    );
+    assert!(super::recover_suspended_cli_session_id_inner(
+        &conn,
+        sibling,
+        "new-generation",
+        Some(1234)
+    )
+    .unwrap());
 }
 
 #[test]
@@ -66,17 +110,36 @@ fn live_identity_recovery_rejects_regeneration_relocation_and_duplicate_claims()
     let conn = suspended_recovery_schema();
     let nodes = super::list_suspended_nodes_inner(&conn).unwrap();
     let node = nodes.iter().find(|node| node.id == 43).unwrap();
-    conn.execute("UPDATE agent_nodes SET status = 'awaiting_input', session_started_at = 100 WHERE id = 43", []).unwrap();
+    conn.execute(
+        "UPDATE agent_nodes SET status = 'awaiting_input', session_started_at = 100 WHERE id = 43",
+        [],
+    )
+    .unwrap();
     assert!(!super::recover_live_cli_session_id_inner(&conn, node, "known", 100).unwrap());
     assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 99).unwrap());
-    conn.execute("UPDATE agent_nodes SET use_worktree = 0 WHERE id = 43", []).unwrap();
+    conn.execute("UPDATE agent_nodes SET use_worktree = 0 WHERE id = 43", [])
+        .unwrap();
     assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
-    conn.execute("UPDATE agent_nodes SET use_worktree = 1, status = 'suspended' WHERE id = 43", []).unwrap();
+    conn.execute(
+        "UPDATE agent_nodes SET use_worktree = 1, status = 'suspended' WHERE id = 43",
+        [],
+    )
+    .unwrap();
     assert!(!super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
-    conn.execute("UPDATE agent_nodes SET status = 'completed' WHERE id = 43", []).unwrap();
+    conn.execute(
+        "UPDATE agent_nodes SET status = 'completed' WHERE id = 43",
+        [],
+    )
+    .unwrap();
     assert!(super::recover_live_cli_session_id_inner(&conn, node, "late", 100).unwrap());
     assert!(!super::recover_live_cli_session_id_inner(&conn, node, "replacement", 100).unwrap());
-    let stored: String = conn.query_row("SELECT cli_session_id FROM agent_nodes WHERE id = 43", [], |r| r.get(0)).unwrap();
+    let stored: String = conn
+        .query_row(
+            "SELECT cli_session_id FROM agent_nodes WHERE id = 43",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(stored, "late");
 }
 
@@ -205,17 +268,20 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
             worktree_name TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        "
-    ).unwrap();
+        ",
+    )
+    .unwrap();
 
     // Precondition: schema_version is already at 9 (bug state), so the
     // version-gated pass in `evolve_to` sees no work to do. The
     // always-pass column walk must still add the missing column.
-    let has_col_before: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let has_col_before: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert!(!has_col_before, "source_issue must be missing before fix");
 
     // Bug state: bump schema_version to current so the runner's
@@ -224,27 +290,27 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
     conn.execute(
         "UPDATE app_settings SET value = ?1 WHERE key = 'schema_version'",
         rusqlite::params![crate::db::migrations::SCHEMA_VERSION.to_string()],
-    ).unwrap();
+    )
+    .unwrap();
 
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    ).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
-    let has_col_after: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    assert!(has_col_after, "source_issue must exist after evolve_to's always-pass column walk");
+    let has_col_after: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        has_col_after,
+        "source_issue must exist after evolve_to's always-pass column walk"
+    );
 
     // Idempotent: running evolve_to again must be a no-op (every ALTER
     // is gated on the pragma_table_info skip, every backfill on its
     // app_settings flag, every AlwaysStep is naturally idempotent).
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    ).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 }
 
 /// Regression guard for the v18 sandbox column (issue #497): a pre-v18 `meshes`
@@ -276,21 +342,24 @@ fn test_evolve_to_adds_v18_sandbox_column_idempotently() {
         .unwrap()
     };
 
-    assert!(!present(&conn), "sandbox must be missing before evolve_to runs");
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    ).unwrap();
-    assert!(present(&conn), "sandbox must exist after evolve_to's always-pass column walk");
+    assert!(
+        !present(&conn),
+        "sandbox must be missing before evolve_to runs"
+    );
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    assert!(
+        present(&conn),
+        "sandbox must exist after evolve_to's always-pass column walk"
+    );
     // Idempotent: a second call must not error.
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    ).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     // Default must be 0 (off) — the feature is opt-in.
-    conn.execute("INSERT INTO meshes (name, path) VALUES ('m', '/tmp/m')", []).unwrap();
+    conn.execute("INSERT INTO meshes (name, path) VALUES ('m', '/tmp/m')", [])
+        .unwrap();
     let sandbox: i32 = conn
-        .query_row("SELECT sandbox FROM meshes WHERE name = 'm'", [], |row| row.get(0))
+        .query_row("SELECT sandbox FROM meshes WHERE name = 'm'", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(sandbox, 0, "sandbox must default to 0 (off)");
 }
@@ -355,13 +424,18 @@ fn close_deletes_row_and_enqueues_removal() {
     .unwrap();
 
     let node_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM agent_nodes WHERE id = 42", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM agent_nodes WHERE id = 42", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(node_count, 0, "node row must be gone immediately");
 
     let pending = crate::db::list_pending_worktree_removals_inner(&conn).unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].worktree_path, "/repo/.claude/worktrees/bold-keen-brook");
+    assert_eq!(
+        pending[0].worktree_path,
+        "/repo/.claude/worktrees/bold-keen-brook"
+    );
     assert_eq!(pending[0].node_name, "bold-keen-brook");
 }
 
@@ -372,7 +446,9 @@ fn close_without_worktree_enqueues_nothing() {
 
     crate::db::delete_agent_node_enqueueing_removal_inner(&conn, 42, None).unwrap();
 
-    assert!(crate::db::list_pending_worktree_removals_inner(&conn).unwrap().is_empty());
+    assert!(crate::db::list_pending_worktree_removals_inner(&conn)
+        .unwrap()
+        .is_empty());
 }
 
 /// Re-enqueuing the same path (e.g. a retry after a failed drain) is a no-op,
@@ -384,7 +460,12 @@ fn enqueue_is_idempotent_per_path() {
     crate::db::enqueue_worktree_removal_inner(&conn, "/repo/wt", "n").unwrap();
     crate::db::enqueue_worktree_removal_inner(&conn, "/repo/wt", "n").unwrap();
 
-    assert_eq!(crate::db::list_pending_worktree_removals_inner(&conn).unwrap().len(), 1);
+    assert_eq!(
+        crate::db::list_pending_worktree_removals_inner(&conn)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// A successful drain dequeues exactly the path it cleaned, leaving others.
@@ -489,7 +570,10 @@ fn adopting_manual_pool_slug_touches_only_the_named_row() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(name42, "claimed-slug", "the named row's name must be adopted");
+    assert_eq!(
+        name42, "claimed-slug",
+        "the named row's name must be adopted"
+    );
     assert_eq!(
         worktree_name42.as_deref(),
         Some("claimed-slug"),
@@ -578,11 +662,7 @@ fn evolve_to_handles_v6_to_current_upgrade() {
     );
 
     // Act: upgrade to current. First call does the work.
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
     // Assert: every mesh column the registry lists exists on the
     // table. (For agent_nodes the column set is the same; the
@@ -624,7 +704,9 @@ fn evolve_to_handles_v6_to_current_upgrade() {
         .unwrap();
     assert_eq!(legacy_name, "legacy");
     let node_name: String = conn
-        .query_row("SELECT name FROM agent_nodes WHERE id = 1", [], |row| row.get(0))
+        .query_row("SELECT name FROM agent_nodes WHERE id = 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(node_name, "a");
 
@@ -644,15 +726,14 @@ fn evolve_to_handles_v6_to_current_upgrade() {
     // inline default (1) applies. (The v24 backfill's worktree-
     // enabled filter `COALESCE(use_worktree, 1) = 1` also flips it
     // to 1 — both paths converge.)
-    assert_eq!(pool_size, 1, "v22 ALTER-time default 0 must flip to v24 default 1");
+    assert_eq!(
+        pool_size, 1,
+        "v22 ALTER-time default 0 must flip to v24 default 1"
+    );
 
     // Idempotent: a second call must be a no-op (no error, no
     // duplicate-column, no backfill re-flip).
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     let pool_size_after: i32 = conn
         .query_row(
             "SELECT pre_spawn_pool_size FROM meshes WHERE id = 1",
@@ -759,11 +840,7 @@ fn v19_first_class_migration_rewrites_minimax_only() {
     // version-gated column adds (none of which this v18-shape schema
     // is missing) and the always-pass `RewriteAgentNodeProviderId`
     // rewrite.
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
     let providers = v19_read_providers(&conn);
     // 7 rows: minimax, kimi, deepseek, claude, codex, terminal, claude:minimax
@@ -773,12 +850,12 @@ fn v19_first_class_migration_rewrites_minimax_only() {
         providers,
         vec![
             "claude:minimax", // minimax → claude:minimax
-            "kimi",            // kimi left bare — resolves to native Kimi Code (#918)
-            "deepseek",        // custom — NOT rewritten by the first-class block
-            "claude",          // native — left alone
-            "codex",           // native — left alone
-            "terminal",        // native — left alone
-            "claude:minimax",  // already composite — left alone
+            "kimi",           // kimi left bare — resolves to native Kimi Code (#918)
+            "deepseek",       // custom — NOT rewritten by the first-class block
+            "claude",         // native — left alone
+            "codex",          // native — left alone
+            "terminal",       // native — left alone
+            "claude:minimax", // already composite — left alone
         ]
     );
 }
@@ -826,7 +903,10 @@ fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
     let deepseek = providers.iter().find(|p| p.contains("deepseek")).unwrap();
     assert_eq!(deepseek, "claude:deepseek");
     let disabled = providers.iter().find(|p| p.contains("disabled")).unwrap();
-    assert_eq!(disabled, "disabled-bot", "disabled custom account must stay bare");
+    assert_eq!(
+        disabled, "disabled-bot",
+        "disabled custom account must stay bare"
+    );
 }
 
 /// Idempotency: re-running the custom-account block on a v19+ DB
@@ -907,14 +987,11 @@ fn read_mesh_default_providers(conn: &rusqlite::Connection) -> Vec<(String, Opti
         .prepare("SELECT name, default_provider FROM meshes ORDER BY id ASC")
         .unwrap();
     stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect()
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })
+    .unwrap()
+    .map(|r| r.unwrap())
+    .collect()
 }
 
 /// Safety net: bare `minimax` / `kimi` mesh defaults are rewritten to
@@ -931,10 +1008,10 @@ fn ensure_mesh_default_provider_normalized_rewrites_bare_to_composite() {
         got,
         vec![
             ("m1".into(), Some("claude:minimax".into())), // bare minimax rewritten
-            ("m2".into(), Some("kimi".into())),            // bare kimi left alone (#918)
-            ("m3".into(), Some("claude".into())),          // native — left alone
-            ("m4".into(), Some("claude:minimax".into())),  // composite — left alone
-            ("m5".into(), None),                           // NULL — left alone
+            ("m2".into(), Some("kimi".into())),           // bare kimi left alone (#918)
+            ("m3".into(), Some("claude".into())),         // native — left alone
+            ("m4".into(), Some("claude:minimax".into())), // composite — left alone
+            ("m5".into(), None),                          // NULL — left alone
         ],
         "ensure_mesh_default_provider_normalized must rewrite bare minimax only; \
          bare kimi left bare so it resolves to the native Kimi Code harness (#918)"
@@ -1173,7 +1250,12 @@ fn reader_pool_recycles_after_panic_unwind() {
     }));
     assert!(result.is_err());
     let reader = readers.checkout().unwrap();
-    assert_eq!(reader.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -1235,5 +1317,10 @@ fn reader_pool_shares_named_memory_uri() {
         .unwrap();
     let readers = super::ReaderPool::open(&uri).unwrap();
     let reader = readers.checkout().unwrap();
-    assert_eq!(reader.query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }

@@ -14,8 +14,8 @@
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
 use crate::http::request;
-use tokio::io::BufStream;
 use crate::http::MaybeTls;
+use tokio::io::BufStream;
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
@@ -109,11 +109,7 @@ fn validate_drive_request<'a>(
 ///   `Retry-After: 1` (issue #750, item 1 — atomic claim-before-send)
 /// - written → `200 {"verdict":..,"idempotency_key":..,"replayed":..}`
 /// - duplicate key → `200` replaying the original verdict, no second write
-pub async fn prompt(
-    lines: &mut BufStream<MaybeTls>,
-    node_id: i64,
-    content_length: usize,
-) {
+pub async fn prompt(lines: &mut BufStream<MaybeTls>, node_id: i64, content_length: usize) {
     let Some(body_bytes) =
         request::read_body_or_send_error(lines, content_length, 256 * 1024).await
     else {
@@ -145,12 +141,8 @@ pub async fn prompt(
     // `_async` runs that fully-sync path on the blocking pool (issue #1234): the
     // `InProgress` wait loop sleeps for up to 5s, which would otherwise pin a
     // tokio worker and stall every other route sharing the pool.
-    match drive::drive_node_with_key_async(
-        node_id,
-        idempotency_key.to_string(),
-        req.prompt.clone(),
-    )
-    .await
+    match drive::drive_node_with_key_async(node_id, idempotency_key.to_string(), req.prompt.clone())
+        .await
     {
         Ok(outcome) => {
             let body = serde_json::json!({
@@ -207,7 +199,8 @@ pub async fn prompt(
             // Body uniformity with the other 4xx shapes — `{"error":"..."}`.
             // The status line + `Retry-After` header is the load-bearing
             // signal; the body is purely informational.
-            let body = r#"{"error":"in_progress: another caller is currently driving this key"}"#.to_string();
+            let body = r#"{"error":"in_progress: another caller is currently driving this key"}"#
+                .to_string();
             let _ = request::write_json_with_retry_after(lines, "409 Conflict", &body, 1).await;
         }
     }
@@ -267,4 +260,3 @@ mod tests {
         assert_eq!(validate_drive_request("hi", &max).unwrap(), max);
     }
 }
-

@@ -10,12 +10,12 @@
 //! to exercise the real Rust backend without needing Tauri APIs in the browser.
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
-use tauri::AppHandle;
 use std::net::SocketAddr;
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::AppHandle;
+use tauri::Emitter;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use ts_rs::TS;
 
 /// Payload of the `node-activated` Tauri event. Emitted only by the
@@ -51,11 +51,21 @@ struct JsonRpcResponse {
 impl JsonRpcResponse {
     fn success<T: Serialize>(data: &T) -> String {
         let data = serde_json::to_value(data).unwrap();
-        serde_json::to_string(&JsonRpcResponse { ok: true, data: Some(data), error: None }).unwrap()
+        serde_json::to_string(&JsonRpcResponse {
+            ok: true,
+            data: Some(data),
+            error: None,
+        })
+        .unwrap()
     }
 
     fn error(msg: &str) -> String {
-        serde_json::to_string(&JsonRpcResponse { ok: false, data: None, error: Some(msg.to_string()) }).unwrap()
+        serde_json::to_string(&JsonRpcResponse {
+            ok: false,
+            data: None,
+            error: Some(msg.to_string()),
+        })
+        .unwrap()
     }
 }
 
@@ -92,12 +102,18 @@ pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
         };
 
         TEST_SERVER_RUNNING.store(true, Ordering::SeqCst);
-        tracing::info!("[test_server] HTTP test server listening on http://127.0.0.1:{} (IPv4)", port);
+        tracing::info!(
+            "[test_server] HTTP test server listening on http://127.0.0.1:{} (IPv4)",
+            port
+        );
 
         // Optional: also listen on IPv6 for localhost over IPv6
         let app_ipv6 = app_handle.clone();
         let _ = TcpListener::bind(addr_ipv6).await.map(|listener_ipv6| {
-            tracing::info!("[test_server] HTTP test server also listening on http://[::1]:{} (IPv6)", port);
+            tracing::info!(
+                "[test_server] HTTP test server also listening on http://[::1]:{} (IPv6)",
+                port
+            );
             tauri::async_runtime::spawn(async move {
                 loop {
                     match listener_ipv6.accept().await {
@@ -128,7 +144,11 @@ pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
     });
 }
 
-async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: SocketAddr, app: &AppHandle) {
+async fn handle_connection(
+    stream: &mut tokio::net::TcpStream,
+    client_addr: SocketAddr,
+    app: &AppHandle,
+) {
     let mut buf = vec![0u8; 16384];
     let n = match stream.read(&mut buf).await {
         Ok(n) if n > 0 => n,
@@ -150,7 +170,11 @@ async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: Sock
     );
 
     if let Err(e) = stream.write_all(resp.as_bytes()).await {
-        tracing::warn!("[test_server] Failed to send response to {}: {}", client_addr, e);
+        tracing::warn!(
+            "[test_server] Failed to send response to {}: {}",
+            client_addr,
+            e
+        );
     }
 }
 
@@ -211,7 +235,8 @@ fn process_request(request: &str, app: &AppHandle) -> String {
 }
 
 fn handle_create_test_mesh(args: &serde_json::Value) -> String {
-    let name = args.get("name")
+    let name = args
+        .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("Test Mesh");
 
@@ -225,7 +250,10 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
     let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Node");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("/tmp");
-    let branch = args.get("branch").and_then(|v| v.as_str()).unwrap_or("main");
+    let branch = args
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
 
     use crate::models::EnvType;
 
@@ -272,9 +300,7 @@ fn handle_list_agent_nodes() -> String {
 }
 
 fn handle_get_agent_node(args: &serde_json::Value) -> String {
-    let node_id = args.get("nodeId")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
     match crate::db::get_agent_node_by_id(node_id) {
         Ok(node) => JsonRpcResponse::success(&node),
@@ -284,15 +310,25 @@ fn handle_get_agent_node(args: &serde_json::Value) -> String {
 
 fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
     let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
-    let provider = args.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").to_string();
-    let resume = args.get("resume").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let provider = args
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anthropic")
+        .to_string();
+    let resume = args
+        .get("resume")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let intent = if resume.is_some() {
         crate::commands::agent::SpawnAgentIntent::Resume
     } else {
         crate::commands::agent::SpawnAgentIntent::Fresh
     };
 
-    tracing::info!("[test_server] spawn_agent: spawning thread for node_id={}", node_id);
+    tracing::info!(
+        "[test_server] spawn_agent: spawning thread for node_id={}",
+        node_id
+    );
 
     // Spawn a dedicated thread to avoid panics corrupting the async runtime
     let app_clone = app.clone();
@@ -307,7 +343,8 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
                 cols: None,
             },
         ))
-    }).join();
+    })
+    .join();
 
     tracing::info!("[test_server] spawn_agent result: {:?}", result);
 
@@ -329,20 +366,30 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
 
 fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> String {
     let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
-    let prefill = args.get("prefill").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let provider = args.get("provider").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+    let prefill = args
+        .get("prefill")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let provider = args
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
-    tracing::info!("[test_server] spawn_handover_agent: mesh_id={}, prefill_len={}", mesh_id, prefill.len());
+    tracing::info!(
+        "[test_server] spawn_handover_agent: mesh_id={}, prefill_len={}",
+        mesh_id,
+        prefill.len()
+    );
 
     let app_clone = app.clone();
     let result = std::thread::spawn(move || {
         tauri::async_runtime::block_on(crate::commands::agent::spawn_handover_agent(
-            app_clone,
-            mesh_id,
-            prefill,
-            provider,
+            app_clone, mesh_id, prefill, provider,
         ))
-    }).join();
+    })
+    .join();
 
     match result {
         Ok(Ok(node)) => {
@@ -378,11 +425,22 @@ fn handle_kill_agent(args: &serde_json::Value) -> String {
 /// This bypasses the PTY and directly emits 'agent-output' events.
 fn handle_inject_test_output(args: &serde_json::Value, app: AppHandle) -> String {
     let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
-    let lines = args.get("lines").and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect::<Vec<_>>())
+    let lines = args
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_else(|| vec!["Hello from test output!\n".to_string()]);
 
-    tracing::info!("[test_server] inject_test_output: node_id={} lines={}", node_id, lines.len());
+    tracing::info!(
+        "[test_server] inject_test_output: node_id={} lines={}",
+        node_id,
+        lines.len()
+    );
 
     for line in &lines {
         // Use the same wire key as the production `agent-output` emit
@@ -417,7 +475,10 @@ fn handle_delete_mesh(args: &serde_json::Value) -> String {
 
 fn handle_delete_agent_node(args: &serde_json::Value) -> String {
     let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
-    let remove_worktree = args.get("removeWorktree").and_then(|v| v.as_bool()).unwrap_or(false);
+    let remove_worktree = args
+        .get("removeWorktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     match crate::services::agent_node::delete(node_id, remove_worktree) {
         Ok(_) => {
@@ -455,10 +516,7 @@ fn handle_set_active_node(args: &serde_json::Value, app: AppHandle) -> String {
     tracing::info!("[test_server] set_active_node: node_id={}", node_id);
 
     // Emit a frontend event that the agent-node store listens to
-    let _ = app.emit(
-        "node-activated",
-        NodeActivatedPayload { node_id },
-    );
+    let _ = app.emit("node-activated", NodeActivatedPayload { node_id });
 
     JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id }))
 }
@@ -477,7 +535,11 @@ fn handle_update_mesh_column(args: &serde_json::Value) -> String {
     let column = args.get("column").and_then(|v| v.as_str()).unwrap_or("");
     let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-    match crate::commands::mesh_properties::update_mesh_column(mesh_id, column.to_string(), value.to_string()) {
+    match crate::commands::mesh_properties::update_mesh_column(
+        mesh_id,
+        column.to_string(),
+        value.to_string(),
+    ) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e),
     }
@@ -485,7 +547,11 @@ fn handle_update_mesh_column(args: &serde_json::Value) -> String {
 
 fn handle_update_worktree_base_ref(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let base_ref = args.get("base_ref").and_then(|v| v.as_str()).unwrap_or("fresh").to_string();
+    let base_ref = args
+        .get("base_ref")
+        .and_then(|v| v.as_str())
+        .unwrap_or("fresh")
+        .to_string();
 
     match crate::commands::mesh_properties::update_worktree_base_ref(mesh_id, base_ref) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
@@ -504,10 +570,15 @@ fn handle_remove_worktree_base_ref(args: &serde_json::Value) -> String {
 
 fn handle_update_mesh_use_worktree(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let use_worktree = args.get("use_worktree").and_then(|v| v.as_bool()).unwrap_or(true);
+    let use_worktree = args
+        .get("use_worktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     match crate::commands::mesh_properties::update_mesh_use_worktree(mesh_id, use_worktree) {
-        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id, "use_worktree": use_worktree })),
+        Ok(_) => JsonRpcResponse::success(
+            &serde_json::json!({ "mesh_id": mesh_id, "use_worktree": use_worktree }),
+        ),
         Err(e) => JsonRpcResponse::error(&e),
     }
 }
@@ -537,8 +608,16 @@ mod tests {
     #[test]
     fn test_server_binds_loopback_only() {
         let (v4, v6) = listen_addrs(1991);
-        assert!(v4.ip().is_loopback(), "IPv4 test-server bind must be loopback, got {}", v4.ip());
-        assert!(v6.ip().is_loopback(), "IPv6 test-server bind must be loopback, got {}", v6.ip());
+        assert!(
+            v4.ip().is_loopback(),
+            "IPv4 test-server bind must be loopback, got {}",
+            v4.ip()
+        );
+        assert!(
+            v6.ip().is_loopback(),
+            "IPv6 test-server bind must be loopback, got {}",
+            v6.ip()
+        );
         assert_eq!(v4.port(), 1991);
         assert_eq!(v6.port(), 1991);
     }

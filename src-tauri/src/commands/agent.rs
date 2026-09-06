@@ -21,8 +21,8 @@
 //! single direct call site; no re-export lives here.
 
 use crate::agent::spawn::{
-    spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome,
-    SpawnRequest, TerminalSize,
+    spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome, SpawnRequest,
+    TerminalSize,
 };
 use crate::db;
 use serde::{Deserialize, Serialize};
@@ -197,8 +197,7 @@ async fn spawn_new_agent_impl(
         crate::preferences::default_provider(),
     );
 
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone())
-        .await;
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone()).await;
 
     let node = crate::services::agent_node::create(
         mesh.id,
@@ -268,9 +267,14 @@ pub async fn spawn_issue_agent(
         provider,
         Some(issue_number),
         Some(initial_name),
-    ).await?;
+    )
+    .await?;
 
-    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
+    tracing::info!(
+        "spawn_issue_agent: spawned node {} for issue #{}",
+        node.id,
+        issue_number
+    );
     Ok(node)
 }
 
@@ -500,12 +504,10 @@ pub(crate) fn validate_pr_spawn_inputs(
     }
 
     if head_ref.is_empty() {
-        return Err(
-            "PR's head_ref is required (got an empty value). \
+        return Err("PR's head_ref is required (got an empty value). \
              Reload the PR list so the panel can re-fetch the head branch, \
              then retry the spawn."
-                .to_string(),
-        );
+            .to_string());
     }
 
     Ok((head_ref, head_repo_owner, head_repo_clone_url))
@@ -572,10 +574,7 @@ pub fn create_pr_node(
         head_repo_owner,
         head_repo_clone_url,
     )?;
-    let _ = app.emit(
-        "node-created",
-        NodeCreatedPayload { id: draft.node.id },
-    );
+    let _ = app.emit("node-created", NodeCreatedPayload { id: draft.node.id });
 
     let app_for_spawn = app.clone();
     let node_id = draft.node.id;
@@ -627,11 +626,8 @@ pub(crate) fn create_pr_node_impl(
     // an upstream payload quirk) is normalised before it reaches the
     // service layer as `node.branch` — without the trim, stage-2's
     // `git fetch origin <ref>` would fail on the persisted branch.
-    let (head_ref, head_repo_owner, head_repo_clone_url) = validate_pr_spawn_inputs(
-        &head_ref,
-        head_repo_owner,
-        head_repo_clone_url,
-    )?;
+    let (head_ref, head_repo_owner, head_repo_clone_url) =
+        validate_pr_spawn_inputs(&head_ref, head_repo_owner, head_repo_clone_url)?;
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
@@ -673,18 +669,22 @@ pub(crate) fn create_pr_node_impl(
     // force-pushed / rebased between click-time and spawn-time. An empty
     // `head_sha` (partial GitHub response, fork payload) skips the drift
     // check — same fail-open semantics as `pr_head_unfetchable`.
-    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() { None } else { Some(&head_sha) };
+    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() {
+        None
+    } else {
+        Some(&head_sha)
+    };
 
     let node = crate::services::agent_node::create_pending_with_source_pr_fork(
         mesh.id,
         &mesh.path,
         &head_ref,
         Some(&effective_provider),
-        None,                 // source_issue
-        Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
-        pinned_sha_opt,       // source_pr_pinned_sha — exact-pinning handle (issue #444)
+        None,            // source_issue
+        Some(pr_number), // source_pr — the key field for stage-2 worktree adoption
+        pinned_sha_opt,  // source_pr_pinned_sha — exact-pinning handle (issue #444)
         Some(&initial_name),
-        head_repo_owner.as_deref(),  // fork meta (issue #443) — None for same-repo PRs
+        head_repo_owner.as_deref(), // fork meta (issue #443) — None for same-repo PRs
         head_repo_clone_url.as_deref(),
     )
     .map_err(|e| e.to_string())?;
@@ -724,9 +724,13 @@ pub async fn spawn_handover_agent(
         provider,
         None,
         None,
-    ).await?;
+    )
+    .await?;
 
-    tracing::info!("spawn_handover_agent: spawned node {} via handover", node.id);
+    tracing::info!(
+        "spawn_handover_agent: spawned node {} via handover",
+        node.id
+    );
     Ok(node)
 }
 
@@ -750,19 +754,30 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     // Recovery is filesystem/SQLite work and each provider scans a different
     // store. Run those independent scans together so one slow Codex rollout
     // directory cannot hold every other node on the startup critical path.
-    let recovery_tasks = nodes.iter().cloned().map(|node| {
-        tauri::async_runtime::spawn(async move {
-            let node_id = node.id;
-            (node_id, crate::services::session_recovery::recover_suspended_node(node).await)
+    let recovery_tasks = nodes
+        .iter()
+        .cloned()
+        .map(|node| {
+            tauri::async_runtime::spawn(async move {
+                let node_id = node.id;
+                (
+                    node_id,
+                    crate::services::session_recovery::recover_suspended_node(node).await,
+                )
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     for task in recovery_tasks {
         match task.await {
             Ok((node_id, Err(error))) => {
-                tracing::warn!("auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}");
+                tracing::warn!(
+                    "auto_resume_agent_nodes: identity recovery failed for {node_id}: {error}"
+                );
             }
             Ok(_) => {}
-            Err(error) => tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}"),
+            Err(error) => {
+                tracing::warn!("auto_resume_agent_nodes: identity recovery task failed: {error}")
+            }
         }
     }
 
@@ -815,7 +830,6 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 // (the inverted calls #1052 closes) now points at
 // `agent::process::kill_agent` directly.
 // ---------------------------------------------------------------------------
-
 
 #[cfg(test)]
 #[cfg(test)]
@@ -893,10 +907,8 @@ mod tests {
         use std::sync::OnceLock;
         static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
         PATH.get_or_init(|| {
-            let p = std::env::temp_dir().join(format!(
-                "buildmesh_pr_node_test_{}.db",
-                std::process::id()
-            ));
+            let p = std::env::temp_dir()
+                .join(format!("buildmesh_pr_node_test_{}.db", std::process::id()));
             let _ = std::fs::remove_file(&p);
             p
         })
@@ -940,8 +952,7 @@ mod tests {
         let repo = git2::Repository::init(&path).expect("git init");
         repo.remote_set_url("origin", origin_url)
             .expect("remote_set_url");
-        let mesh = crate::db::create_mesh(name, path.to_str().unwrap())
-            .expect("create_mesh");
+        let mesh = crate::db::create_mesh(name, path.to_str().unwrap()).expect("create_mesh");
         (tmp, mesh.id)
     }
 
@@ -960,7 +971,7 @@ mod tests {
         ensure_pr_db();
 
         let err = create_pr_node_impl(
-            1,           // mesh_id — irrelevant; gate short-circuits before DB read
+            1, // mesh_id — irrelevant; gate short-circuits before DB read
             420,
             "any title".to_string(),
             "".to_string(),
@@ -1002,8 +1013,8 @@ mod tests {
             "feat/443-fork".to_string(),
             "".to_string(),
             None,
-            Some("alice".to_string()),     // owner present
-            None,                          // clone_url MISSING — XOR violation
+            Some("alice".to_string()), // owner present
+            None,                      // clone_url MISSING — XOR violation
         )
         .expect_err("owner without clone_url must be rejected");
 
@@ -1063,10 +1074,8 @@ mod tests {
         let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         ensure_pr_db();
 
-        let (_tmp, mesh_id) = create_test_mesh(
-            "pr-seam-test",
-            "https://github.com/alondero/buildmesh.git",
-        );
+        let (_tmp, mesh_id) =
+            create_test_mesh("pr-seam-test", "https://github.com/alondero/buildmesh.git");
 
         let pr_number: i64 = 445;
         let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
@@ -1166,8 +1175,7 @@ mod tests {
         // (no app-level setter for it; the column is set on insert via
         // `meshes.default_provider` and only the React UI mutates it
         // through `commands::mesh_properties`, not a `db::` helper).
-        let (_tmp2, mesh_id2) =
-            create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
+        let (_tmp2, mesh_id2) = create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
         let db = crate::db::write_conn();
         db.execute(
             "UPDATE meshes SET default_provider = ?1 WHERE id = ?2",
@@ -1210,8 +1218,7 @@ mod tests {
         ensure_pr_db();
 
         // Case A: non-empty head_sha persists verbatim.
-        let (_tmp_a, mesh_id_a) =
-            create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
+        let (_tmp_a, mesh_id_a) = create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
         let sha = "abcdef0123456789abcdef0123456789abcdef01";
         let draft_a = create_pr_node_impl(
             mesh_id_a,
@@ -1232,8 +1239,7 @@ mod tests {
         );
 
         // Case B: empty head_sha persists as None.
-        let (_tmp_b, mesh_id_b) =
-            create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
+        let (_tmp_b, mesh_id_b) = create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
         let draft_b = create_pr_node_impl(
             mesh_id_b,
             2,
@@ -1315,4 +1321,3 @@ mod tests {
         assert!(resume.get("initial_prompt").is_none());
     }
 }
-

@@ -26,9 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::autopilot::circuit::context::CircuitContext;
 use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
+use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
 use crate::models::AutopilotCircuit;
 use crate::services::github::GitHubClient;
@@ -95,12 +95,11 @@ pub(crate) fn parse_sqlite_datetime(s: &str) -> Option<SystemTime> {
     let hour: u32 = time_parts.next()?.parse().ok()?;
     let minute: u32 = time_parts.next()?.parse().ok()?;
     let second: u32 = time_parts.next()?.parse().ok()?;
-    let naive = chrono::NaiveDate::from_ymd_opt(year, month, day)?
-        .and_hms_opt(hour, minute, second)?;
-    Some(SystemTime::from(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-        naive,
-        chrono::Utc,
-    )))
+    let naive =
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+    Some(SystemTime::from(
+        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc),
+    ))
 }
 
 /// The interval trigger's cooldown decision (pure): fire when the
@@ -148,7 +147,10 @@ pub(crate) fn unseen_identities<'a>(
     fetched: &'a [(String, i64)],
     known: &HashSet<String>,
 ) -> Vec<&'a (String, i64)> {
-    fetched.iter().filter(|(id, _)| !known.contains(id)).collect()
+    fetched
+        .iter()
+        .filter(|(id, _)| !known.contains(id))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +163,10 @@ fn run_github_poll_pass() {
     let circuits = match db::list_enabled_circuits() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("circuits: github poll could not list enabled circuits: {}", e);
+            tracing::warn!(
+                "circuits: github poll could not list enabled circuits: {}",
+                e
+            );
             return;
         }
     };
@@ -169,7 +174,11 @@ fn run_github_poll_pass() {
         let graph = match CircuitGraph::from_json(&circuit.graph_json) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!("circuits: circuit {} has unreadable graph_json: {}", circuit.id, e);
+                tracing::warn!(
+                    "circuits: circuit {} has unreadable graph_json: {}",
+                    circuit.id,
+                    e
+                );
                 continue;
             }
         };
@@ -293,25 +302,22 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
         .map(|i| (issue_identity(i.number, label), i.number))
         .collect();
     mint_unseen_runs(circuit, &fetched, |number| {
-        issues
-            .iter()
-            .find(|i| i.number == number)
-            .map(|i| {
-                let mut ctx = base_context(circuit);
-                ctx.with_issue(
-                    i.number,
-                    &i.title,
-                    &i.body,
-                    &i.author,
-                    &i.html_url,
-                    &i.labels,
-                );
-                if let Some(decision) = gate_decisions.get(&i.number) {
-                    ctx.with_collaborator_gate(matches!(decision, GateDecision::AutoRun));
-                }
-                ctx.with_autopilot_finish_prompt(Some(i.number), Some(action.as_str()));
-                ctx
-            })
+        issues.iter().find(|i| i.number == number).map(|i| {
+            let mut ctx = base_context(circuit);
+            ctx.with_issue(
+                i.number,
+                &i.title,
+                &i.body,
+                &i.author,
+                &i.html_url,
+                &i.labels,
+            );
+            if let Some(decision) = gate_decisions.get(&i.number) {
+                ctx.with_collaborator_gate(matches!(decision, GateDecision::AutoRun));
+            }
+            ctx.with_autopilot_finish_prompt(Some(i.number), Some(action.as_str()));
+            ctx
+        })
     });
 }
 
@@ -344,8 +350,10 @@ fn ingest_pull_requests(circuit: &AutopilotCircuit, label: &str) {
             return;
         }
     };
-    let fetched: Vec<(String, i64)> =
-        prs.iter().map(|p| (pr_identity(p.number, label), p.number)).collect();
+    let fetched: Vec<(String, i64)> = prs
+        .iter()
+        .map(|p| (pr_identity(p.number, label), p.number))
+        .collect();
     mint_unseen_runs(circuit, &fetched, |number| {
         prs.iter().find(|p| p.number == number).map(|p| {
             let mut ctx = base_context(circuit);
@@ -414,7 +422,11 @@ fn mint_unseen_runs(
     let known: HashSet<String> = match db::list_circuit_trigger_identities(circuit.id) {
         Ok(k) => k.into_iter().collect(),
         Err(e) => {
-            tracing::warn!("circuits: identity listing failed for {}: {}", circuit.id, e);
+            tracing::warn!(
+                "circuits: identity listing failed for {}: {}",
+                circuit.id,
+                e
+            );
             return;
         }
     };
@@ -455,7 +467,10 @@ pub fn run_interval_pass() {
     let circuits = match db::list_enabled_circuits() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("circuits: interval pass could not list enabled circuits: {}", e);
+            tracing::warn!(
+                "circuits: interval pass could not list enabled circuits: {}",
+                e
+            );
             return;
         }
     };
@@ -564,7 +579,10 @@ mod tests {
 
     #[test]
     fn identities_match_the_models_doc_vocabulary() {
-        assert_eq!(issue_identity(42, "buildmesh:run"), "issue:42:buildmesh:run");
+        assert_eq!(
+            issue_identity(42, "buildmesh:run"),
+            "issue:42:buildmesh:run"
+        );
         assert_eq!(pr_identity(7, "review-me"), "pr:7:review-me");
     }
 

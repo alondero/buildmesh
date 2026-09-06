@@ -376,7 +376,9 @@ fn is_bounded_gate(kind: &CircuitNodeKind) -> bool {
     matches!(
         kind,
         CircuitNodeKind::RetryLimit { .. }
-            | CircuitNodeKind::CollaboratorCheck { require_approval: true }
+            | CircuitNodeKind::CollaboratorCheck {
+                require_approval: true
+            }
     )
 }
 
@@ -413,7 +415,9 @@ impl CircuitGraph {
             CircuitNodeKind::InjectPty { target_node_id, .. }
             | CircuitNodeKind::AwaitAgentTurn { target_node_id }
             | CircuitNodeKind::LlmTurnClassifier { target_node_id }
-            | CircuitNodeKind::ReviewVerdict { target_node_id } => target_node_id.as_deref() == Some("$source"),
+            | CircuitNodeKind::ReviewVerdict { target_node_id } => {
+                target_node_id.as_deref() == Some("$source")
+            }
             _ => false,
         })
     }
@@ -449,7 +453,10 @@ impl CircuitGraph {
             }
         }
         if self.requires_source_agent()
-            && self.roots().iter().any(|root| !matches!(root.kind, CircuitNodeKind::Manual))
+            && self
+                .roots()
+                .iter()
+                .any(|root| !matches!(root.kind, CircuitNodeKind::Manual))
         {
             return Err("Circuits using $source must have only Manual root triggers".into());
         }
@@ -560,7 +567,10 @@ impl CircuitGraph {
 
         let mut parents: HashMap<&str, Vec<&str>> = HashMap::new();
         for edge in &self.edges {
-            parents.entry(edge.to.as_str()).or_default().push(edge.from.as_str());
+            parents
+                .entry(edge.to.as_str())
+                .or_default()
+                .push(edge.from.as_str());
         }
         let mut queue = VecDeque::from([node_id]);
         let mut seen = HashSet::from([node_id]);
@@ -792,7 +802,10 @@ impl CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
             blueprint: Some(CircuitBlueprintKind::WalkingSkeleton),
             nodes: vec![
-                CircuitNode { id: "trigger".to_string(), kind: trigger },
+                CircuitNode {
+                    id: "trigger".to_string(),
+                    kind: trigger,
+                },
                 CircuitNode {
                     id: "spawn".to_string(),
                     kind: CircuitNodeKind::SpawnAgentNode {
@@ -819,9 +832,21 @@ impl CircuitGraph {
                 },
             ],
             edges: vec![
-                CircuitEdge { from: "trigger".to_string(), to: "spawn".to_string(), condition: EdgeCondition::Always },
-                CircuitEdge { from: "spawn".to_string(), to: "inject".to_string(), condition: EdgeCondition::Always },
-                CircuitEdge { from: "inject".to_string(), to: "notify".to_string(), condition: EdgeCondition::Always },
+                CircuitEdge {
+                    from: "trigger".to_string(),
+                    to: "spawn".to_string(),
+                    condition: EdgeCondition::Always,
+                },
+                CircuitEdge {
+                    from: "spawn".to_string(),
+                    to: "inject".to_string(),
+                    condition: EdgeCondition::Always,
+                },
+                CircuitEdge {
+                    from: "inject".to_string(),
+                    to: "notify".to_string(),
+                    condition: EdgeCondition::Always,
+                },
             ],
         }
     }
@@ -852,10 +877,17 @@ impl CircuitGraph {
         use StepOutcome::Completed;
 
         fn node(id: &str, kind: CircuitNodeKind) -> CircuitNode {
-            CircuitNode { id: id.to_string(), kind }
+            CircuitNode {
+                id: id.to_string(),
+                kind,
+            }
         }
         fn edge(from: &str, to: &str) -> CircuitEdge {
-            CircuitEdge { from: from.to_string(), to: to.to_string(), condition: Always }
+            CircuitEdge {
+                from: from.to_string(),
+                to: to.to_string(),
+                condition: Always,
+            }
         }
         fn outcome(from: &str, to: &str, value: StepOutcome) -> CircuitEdge {
             CircuitEdge {
@@ -1040,10 +1072,7 @@ pub fn validate_circuit_request(
     // GitHub triggers require a non-empty label (after trim). The IPC
     // layer never has to remember this — the model is the single
     // source of truth.
-    let needs_label = matches!(
-        selected_trigger,
-        T::GithubIssueLabel | T::GithubPrLabel
-    );
+    let needs_label = matches!(selected_trigger, T::GithubIssueLabel | T::GithubPrLabel);
     let trigger_label = trigger_label
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -1153,25 +1182,51 @@ mod tests {
     fn every_node_kind_serialises_with_its_snake_case_discriminator() {
         let kinds = vec![
             CircuitNodeKind::Manual,
-            CircuitNodeKind::Interval { interval_seconds: 300 },
-            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
-            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
+            CircuitNodeKind::Interval {
+                interval_seconds: 300,
+            },
+            CircuitNodeKind::GithubIssueLabel {
+                label: "buildmesh:run".into(),
+            },
+            CircuitNodeKind::GithubPullRequestLabel {
+                label: "review-me".into(),
+            },
             spawn_kind("p", Some("fix-it")),
             inject_kind("wrap up"),
-            CircuitNodeKind::GithubAction { action: GithubActionKind::AddLabel, open_pr_policy: None, label: Some("done".into()), comment: None },
+            CircuitNodeKind::GithubAction {
+                action: GithubActionKind::AddLabel,
+                open_pr_policy: None,
+                label: Some("done".into()),
+                comment: None,
+            },
             set_status_kind(SessionStatusKind::Completed),
-            CircuitNodeKind::Notify { message: "hi".into() },
-            CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
-            CircuitNodeKind::DeterministicVerification { command: "cargo test".into() },
-            CircuitNodeKind::CollaboratorCheck { require_approval: true },
+            CircuitNodeKind::Notify {
+                message: "hi".into(),
+            },
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            CircuitNodeKind::DeterministicVerification {
+                command: "cargo test".into(),
+            },
+            CircuitNodeKind::CollaboratorCheck {
+                require_approval: true,
+            },
             CircuitNodeKind::RetryLimit { max_retries: 3 },
             CircuitNodeKind::AllCompleted,
             CircuitNodeKind::AnyCompleted,
         ];
         for kind in kinds {
-            let node = CircuitNode { id: "n1".into(), kind };
+            let node = CircuitNode {
+                id: "n1".into(),
+                kind,
+            };
             let json = serde_json::to_string(&node).unwrap();
-            assert!(json.contains("\"type\""), "every variant must tag its type: {}", json);
+            assert!(
+                json.contains("\"type\""),
+                "every variant must tag its type: {}",
+                json
+            );
             let back: CircuitNode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, node);
         }
@@ -1185,13 +1240,21 @@ mod tests {
             condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
         };
         let json = serde_json::to_string(&edge).unwrap();
-        assert_eq!(CircuitGraph::from_json(&format!("{{\"version\":2,\"nodes\":[],\"edges\":[{}]}}", json)).unwrap().edges[0].condition, EdgeCondition::OnOutcome(StepOutcome::Failed));
+        assert_eq!(
+            CircuitGraph::from_json(&format!(
+                "{{\"version\":2,\"nodes\":[],\"edges\":[{}]}}",
+                json
+            ))
+            .unwrap()
+            .edges[0]
+                .condition,
+            EdgeCondition::OnOutcome(StepOutcome::Failed)
+        );
     }
 
     #[test]
     fn missing_condition_field_defaults_to_always() {
-        let parsed: CircuitEdge =
-            serde_json::from_str(r#"{"from":"a","to":"b"}"#).unwrap();
+        let parsed: CircuitEdge = serde_json::from_str(r#"{"from":"a","to":"b"}"#).unwrap();
         assert_eq!(parsed.condition, EdgeCondition::Always);
     }
 
@@ -1211,16 +1274,46 @@ mod tests {
             version: 1,
             blueprint: None,
             nodes: vec![
-                CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
-                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Notify { message: "x".into() } },
-                CircuitNode { id: "b".into(), kind: CircuitNodeKind::AllCompleted },
-                CircuitNode { id: "c".into(), kind: CircuitNodeKind::AnyCompleted },
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "a".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "x".into(),
+                    },
+                },
+                CircuitNode {
+                    id: "b".into(),
+                    kind: CircuitNodeKind::AllCompleted,
+                },
+                CircuitNode {
+                    id: "c".into(),
+                    kind: CircuitNodeKind::AnyCompleted,
+                },
             ],
             edges: vec![
-                CircuitEdge { from: "t".into(), to: "a".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "a".into(), to: "c".into(), condition: EdgeCondition::default() },
-                CircuitEdge { from: "t".into(), to: "c".into(), condition: EdgeCondition::default() },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "a".into(),
+                    condition: EdgeCondition::default(),
+                },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    condition: EdgeCondition::default(),
+                },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "c".into(),
+                    condition: EdgeCondition::default(),
+                },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "c".into(),
+                    condition: EdgeCondition::default(),
+                },
             ],
         }
     }
@@ -1247,12 +1340,28 @@ mod tests {
             version: 1,
             blueprint: None,
             nodes: vec![
-                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Manual },
-                CircuitNode { id: "b".into(), kind: CircuitNodeKind::Notify { message: "m".into() } },
+                CircuitNode {
+                    id: "a".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "b".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "m".into(),
+                    },
+                },
             ],
             edges: vec![
-                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::OnOutcome(StepOutcome::Completed) },
-                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::OnOutcome(StepOutcome::Failed) },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+                },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+                },
             ],
         };
         assert_eq!(g.children("a"), vec!["b".to_string()]);
@@ -1265,7 +1374,9 @@ mod tests {
     fn only_spawn_consumes_an_agent_slot() {
         assert!(consumes_agent_slot(&spawn_kind("p", None)));
         assert!(!consumes_agent_slot(&inject_kind("p")));
-        assert!(!consumes_agent_slot(&CircuitNodeKind::Notify { message: "n".into() }));
+        assert!(!consumes_agent_slot(&CircuitNodeKind::Notify {
+            message: "n".into()
+        }));
         assert!(!consumes_agent_slot(&CircuitNodeKind::AllCompleted));
     }
 
@@ -1274,12 +1385,22 @@ mod tests {
         assert!(is_executable(&CircuitNodeKind::Manual));
         assert!(is_executable(&spawn_kind("p", None)));
         assert!(is_executable(&inject_kind("p")));
-        assert!(is_executable(&CircuitNodeKind::Notify { message: "n".into() }));
+        assert!(is_executable(&CircuitNodeKind::Notify {
+            message: "n".into()
+        }));
         // Milestone 2 (#1207): gates execute.
-        assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier { target_node_id: None }));
-        assert!(is_executable(&CircuitNodeKind::DeterministicVerification { command: "cargo test".into() }));
-        assert!(is_executable(&CircuitNodeKind::CollaboratorCheck { require_approval: true }));
-        assert!(is_executable(&CircuitNodeKind::RetryLimit { max_retries: 3 }));
+        assert!(is_executable(&CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None
+        }));
+        assert!(is_executable(&CircuitNodeKind::DeterministicVerification {
+            command: "cargo test".into()
+        }));
+        assert!(is_executable(&CircuitNodeKind::CollaboratorCheck {
+            require_approval: true
+        }));
+        assert!(is_executable(&CircuitNodeKind::RetryLimit {
+            max_retries: 3
+        }));
         // Milestone 3 (issue #1208): all five GitHub actions execute.
         for action in [
             GithubActionKind::AddLabel,
@@ -1289,7 +1410,12 @@ mod tests {
             GithubActionKind::CloseIssue,
         ] {
             assert!(
-                is_executable(&CircuitNodeKind::GithubAction { action, open_pr_policy: None, label: None, comment: None }),
+                is_executable(&CircuitNodeKind::GithubAction {
+                    action,
+                    open_pr_policy: None,
+                    label: None,
+                    comment: None
+                }),
                 "{action:?} must be executable"
             );
         }
@@ -1323,7 +1449,10 @@ mod tests {
     // -- semantic validation (canvas editor save boundary) ------------------
 
     fn node(id: &str, kind: CircuitNodeKind) -> CircuitNode {
-        CircuitNode { id: id.into(), kind }
+        CircuitNode {
+            id: id.into(),
+            kind,
+        }
     }
 
     #[test]
@@ -1336,7 +1465,10 @@ mod tests {
         let g = CircuitGraph {
             version: 1,
             blueprint: None,
-            nodes: vec![node("t", CircuitNodeKind::Manual), node("t", CircuitNodeKind::Manual)],
+            nodes: vec![
+                node("t", CircuitNodeKind::Manual),
+                node("t", CircuitNodeKind::Manual),
+            ],
             edges: vec![],
         };
         assert!(g.validate().unwrap_err().contains("duplicate node id"));
@@ -1378,8 +1510,18 @@ mod tests {
             version: CIRCUIT_GRAPH_VERSION,
             blueprint: None,
             nodes: vec![
-                node("trigger", CircuitNodeKind::Interval { interval_seconds: 60 }),
-                node("gate", CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) }),
+                node(
+                    "trigger",
+                    CircuitNodeKind::Interval {
+                        interval_seconds: 60,
+                    },
+                ),
+                node(
+                    "gate",
+                    CircuitNodeKind::AwaitAgentTurn {
+                        target_node_id: Some("$source".into()),
+                    },
+                ),
             ],
             edges: vec![always("trigger", "gate")],
         };
@@ -1393,8 +1535,18 @@ mod tests {
             blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
-                node("b", CircuitNodeKind::Notify { message: String::new() }),
-                node("c", CircuitNodeKind::Notify { message: String::new() }),
+                node(
+                    "b",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
+                node(
+                    "c",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
             ],
             edges: vec![always("a", "b"), always("b", "c")],
         };
@@ -1409,8 +1561,18 @@ mod tests {
             blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
-                node("b", CircuitNodeKind::Notify { message: String::new() }),
-                node("c", CircuitNodeKind::Notify { message: String::new() }),
+                node(
+                    "b",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
+                node(
+                    "c",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
                 node("d", CircuitNodeKind::AllCompleted),
             ],
             edges: vec![
@@ -1450,7 +1612,12 @@ mod tests {
             blueprint: None,
             nodes: vec![
                 node("work", spawn_kind("p", None)),
-                node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: true }),
+                node(
+                    "gate",
+                    CircuitNodeKind::CollaboratorCheck {
+                        require_approval: true,
+                    },
+                ),
             ],
             edges: vec![always("work", "gate"), always("gate", "work")],
         };
@@ -1464,8 +1631,18 @@ mod tests {
             blueprint: None,
             nodes: vec![
                 node("a", CircuitNodeKind::Manual),
-                node("b", CircuitNodeKind::Notify { message: String::new() }),
-                node("c", CircuitNodeKind::Notify { message: String::new() }),
+                node(
+                    "b",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
+                node(
+                    "c",
+                    CircuitNodeKind::Notify {
+                        message: String::new(),
+                    },
+                ),
             ],
             edges: vec![always("a", "b"), always("b", "c"), always("c", "a")],
         };
@@ -1486,7 +1663,12 @@ mod tests {
             blueprint: None,
             nodes: vec![
                 node("work", spawn_kind("p", None)),
-                node("gate", CircuitNodeKind::CollaboratorCheck { require_approval: false }),
+                node(
+                    "gate",
+                    CircuitNodeKind::CollaboratorCheck {
+                        require_approval: false,
+                    },
+                ),
             ],
             edges: vec![always("work", "gate"), always("gate", "work")],
         };
@@ -1503,8 +1685,18 @@ mod tests {
             nodes: vec![
                 node("a", spawn_kind("p", None)),
                 node("retry", CircuitNodeKind::RetryLimit { max_retries: 2 }),
-                node("c", CircuitNodeKind::Notify { message: "x".into() }),
-                node("d", CircuitNodeKind::Notify { message: "y".into() }),
+                node(
+                    "c",
+                    CircuitNodeKind::Notify {
+                        message: "x".into(),
+                    },
+                ),
+                node(
+                    "d",
+                    CircuitNodeKind::Notify {
+                        message: "y".into(),
+                    },
+                ),
             ],
             edges: vec![
                 always("a", "retry"),
@@ -1526,7 +1718,10 @@ mod tests {
         let g = CircuitGraph {
             version: CIRCUIT_GRAPH_VERSION,
             blueprint: None,
-            nodes: vec![node("retry", CircuitNodeKind::RetryLimit { max_retries: 3 })],
+            nodes: vec![node(
+                "retry",
+                CircuitNodeKind::RetryLimit { max_retries: 3 },
+            )],
             edges: vec![always("retry", "retry")],
         };
         assert!(g.validate().unwrap_err().contains("connects to itself"));
@@ -1565,14 +1760,20 @@ mod tests {
             other => panic!("expected spawn, got {other:?}"),
         }
         match &parsed.node("i").unwrap().kind {
-            CircuitNodeKind::InjectPty { prompt, target_node_id } => {
+            CircuitNodeKind::InjectPty {
+                prompt,
+                target_node_id,
+            } => {
                 assert_eq!(prompt, "hi");
                 assert_eq!(target_node_id, &None);
             }
             other => panic!("expected inject, got {other:?}"),
         }
         match &parsed.node("st").unwrap().kind {
-            CircuitNodeKind::SetNodeStatus { status, target_node_id } => {
+            CircuitNodeKind::SetNodeStatus {
+                status,
+                target_node_id,
+            } => {
                 assert_eq!(*status, SessionStatusKind::Completed);
                 assert_eq!(target_node_id, &None);
             }
@@ -1628,8 +1829,15 @@ mod tests {
         let ids: Vec<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["trigger", "spawn", "inject", "notify"]);
         assert_eq!(
-            g.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect::<Vec<_>>(),
-            vec![("trigger", "spawn"), ("spawn", "inject"), ("inject", "notify")]
+            g.edges
+                .iter()
+                .map(|e| (e.from.as_str(), e.to.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("trigger", "spawn"),
+                ("spawn", "inject"),
+                ("inject", "notify")
+            ]
         );
         match &g.node("spawn").unwrap().kind {
             CircuitNodeKind::SpawnAgentNode {
@@ -1640,7 +1848,10 @@ mod tests {
                 effort,
                 extra_args,
             } => {
-                assert_eq!(prompt, "", "spawn starts fresh — the prompt rides InjectPty");
+                assert_eq!(
+                    prompt, "",
+                    "spawn starts fresh — the prompt rides InjectPty"
+                );
                 assert_eq!(*name, None);
                 assert_eq!(provider, &None);
                 assert_eq!(model, &None);
@@ -1650,7 +1861,10 @@ mod tests {
             other => panic!("expected spawn node, got {:?}", other),
         }
         match &g.node("inject").unwrap().kind {
-            CircuitNodeKind::InjectPty { prompt, target_node_id } => {
+            CircuitNodeKind::InjectPty {
+                prompt,
+                target_node_id,
+            } => {
                 assert_eq!(prompt, "do the thing");
                 assert_eq!(target_node_id, &None);
             }
@@ -1664,9 +1878,15 @@ mod tests {
         // of the chain identical to the manual skeleton — the trigger is
         // the only thing the create form varies.
         for trigger in [
-            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
-            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
-            CircuitNodeKind::Interval { interval_seconds: 300 },
+            CircuitNodeKind::GithubIssueLabel {
+                label: "buildmesh:run".into(),
+            },
+            CircuitNodeKind::GithubPullRequestLabel {
+                label: "review-me".into(),
+            },
+            CircuitNodeKind::Interval {
+                interval_seconds: 300,
+            },
         ] {
             let g = CircuitGraph::triggered_skeleton("fix it", trigger);
             assert_eq!(g.nodes.len(), 4);
@@ -1689,7 +1909,8 @@ mod tests {
     #[test]
     fn issue_driven_autopilot_review_is_a_valid_two_agent_blueprint() {
         let g = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        g.validate().expect("review blueprint must pass graph validation");
+        g.validate()
+            .expect("review blueprint must pass graph validation");
         assert!(g.is_issue_driven_autopilot_review());
         assert_eq!(
             g.blueprint,
@@ -1725,7 +1946,9 @@ mod tests {
         ));
         assert!(matches!(
             g.node("collaborator_gate").map(|n| &n.kind),
-            Some(CircuitNodeKind::CollaboratorCheck { require_approval: true })
+            Some(CircuitNodeKind::CollaboratorCheck {
+                require_approval: true
+            })
         ));
         assert!(
             g.node("review_prompt").is_none(),
@@ -1795,8 +2018,8 @@ mod tests {
             .find(|node| node.id == "reviewer")
             .unwrap();
         if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut reviewer.kind {
-            *prompt = "The pull request URL is {{pr.url}}. Use it as additional review context."
-                .into();
+            *prompt =
+                "The pull request URL is {{pr.url}}. Use it as additional review context.".into();
         }
         graph.nodes.push(CircuitNode {
             id: "review_prompt".into(),

@@ -123,8 +123,12 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::Skipped(node));
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    if matches!(intent, SpawnIntent::Resume { cause: ResumeCause::Startup })
-        && node.status != crate::models::SessionStatus::Suspended
+    if matches!(
+        intent,
+        SpawnIntent::Resume {
+            cause: ResumeCause::Startup
+        }
+    ) && node.status != crate::models::SessionStatus::Suspended
     {
         return Ok(SpawnOutcome::Skipped(node));
     }

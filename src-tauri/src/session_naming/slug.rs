@@ -1,5 +1,5 @@
-use rand::seq::IndexedRandom;
 use super::words::{ADJECTIVES, NOUNS};
+use rand::seq::IndexedRandom;
 
 // ---------------------------------------------------------------------------
 // Random name generation (word lists + combinatorics)

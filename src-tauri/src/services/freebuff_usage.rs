@@ -29,7 +29,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::usage::{logged_out, unavailable, BillingBalance, ProviderUsage, UsageError, UsageWindow};
+use super::usage::{
+    logged_out, unavailable, BillingBalance, ProviderUsage, UsageError, UsageWindow,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -111,8 +113,7 @@ fn freebuff_credential_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Some(username) = env::var("USERNAME").ok().filter(|s| !s.is_empty()) {
-            let linux_path =
-                format!("/home/{}/.config/manicode/credentials.json", username);
+            let linux_path = format!("/home/{}/.config/manicode/credentials.json", username);
             let host_path = crate::env::to_host_path(&linux_path);
             if host_path != linux_path {
                 paths.push(PathBuf::from(host_path));
@@ -165,7 +166,11 @@ fn read_freebuff_credentials(candidates: &[PathBuf]) -> Result<FreebuffAuth, Usa
         let fingerprint = trimmed_non_blank(creds.fingerprint_id.as_deref());
         let email = trimmed_non_blank(creds.email.as_deref());
         if let (Some(token), Some(fingerprint), Some(email)) = (token, fingerprint, email) {
-            return Ok(FreebuffAuth { token, fingerprint, email });
+            return Ok(FreebuffAuth {
+                token,
+                fingerprint,
+                email,
+            });
         }
     }
     Err(UsageError::NoCredential(
@@ -319,10 +324,7 @@ pub fn freebuff_usage() -> ProviderUsage {
 /// loopback URL (so the live HTTP fetch can run against a `tiny_http`
 /// listener without touching the network). Mirrors
 /// `cursor_usage_with_sources` / `commandcode_usage_with_path`.
-pub(crate) fn freebuff_usage_with(
-    candidates: &[PathBuf],
-    live_url: &str,
-) -> ProviderUsage {
+pub(crate) fn freebuff_usage_with(candidates: &[PathBuf], live_url: &str) -> ProviderUsage {
     let auth = match read_freebuff_credentials(candidates) {
         Ok(auth) => auth,
         Err(error) => return logged_out("freebuff", error.to_string()),
@@ -411,8 +413,7 @@ struct StatusEnvelope<'a> {
 /// borrows the `status` slice from `body`.
 fn is_no_active_session(body: &str) -> bool {
     body.is_empty()
-        || serde_json::from_str::<StatusEnvelope>(body)
-            .is_ok_and(|e| e.status == Some("none"))
+        || serde_json::from_str::<StatusEnvelope>(body).is_ok_and(|e| e.status == Some("none"))
 }
 
 /// Classify 401 (Unauthorized). An unparseable body falls through to
@@ -424,9 +425,7 @@ fn classify_401_error(body: &str) -> StatusOutcome {
             return StatusOutcome::Logout("Freebuff account suspended".to_string());
         }
     }
-    StatusOutcome::Logout(
-        "Freebuff session expired -- run 'freebuff login' to log in".to_string(),
-    )
+    StatusOutcome::Logout("Freebuff session expired -- run 'freebuff login' to log in".to_string())
 }
 
 /// Classify 403 (Forbidden). An unparseable body (WAF/CDN HTML page,
@@ -452,9 +451,9 @@ fn classify_403_error(body: &str) -> StatusOutcome {
     };
     match env.status {
         Some("banned") => StatusOutcome::Logout("Freebuff account suspended".to_string()),
-        Some("country_blocked") => StatusOutcome::Unavailable(
-            "Freebuff is not available in this region".to_string(),
-        ),
+        Some("country_blocked") => {
+            StatusOutcome::Unavailable("Freebuff is not available in this region".to_string())
+        }
         // Any other `status` value (recognised or absent) indicates the
         // upstream actively rejected the request -- surface as
         // Unavailable so the user can investigate without their login
@@ -505,8 +504,8 @@ fn classify_status(status: u16, body: &str) -> StatusOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::services::usage::spawn_loopback;
+    use std::path::Path;
 
     /// Helper: write a `credentials.json` with the standard three fields
     /// into a tempdir. Mirrors the cursor / commandcode test fixtures.
@@ -598,7 +597,10 @@ mod tests {
         // the NaN / Infinity branches below.
         let body = r#"{ "earnedSessions": -5.0 }"#;
         let (_, balance) = parse_freebuff_response(body).expect("parse");
-        assert!(balance.is_none(), "negative earnedSessions must be filtered out");
+        assert!(
+            balance.is_none(),
+            "negative earnedSessions must be filtered out"
+        );
     }
 
     #[test]
@@ -630,7 +632,10 @@ mod tests {
         // `<UsagePanel>` card doesn't break its layout.
         let body = "<html>\n  <body><h1>502 Bad Gateway</h1></body>\n</html>";
         let result = clamp_error_body(body);
-        assert!(!result.contains('\n'), "must collapse newlines, got {result:?}");
+        assert!(
+            !result.contains('\n'),
+            "must collapse newlines, got {result:?}"
+        );
         assert!(result.starts_with("<html>"));
         assert!(result.contains("502 Bad Gateway"));
     }
@@ -643,7 +648,10 @@ mod tests {
         let long_body = "a".repeat(ERROR_BODY_MAX_CHARS * 10);
         let result = clamp_error_body(&long_body);
         let char_count = result.chars().count();
-        assert!(char_count <= ERROR_BODY_MAX_CHARS + 1, "got {char_count} chars");
+        assert!(
+            char_count <= ERROR_BODY_MAX_CHARS + 1,
+            "got {char_count} chars"
+        );
         assert!(result.ends_with('…'), "expected `…` suffix, got {result:?}");
     }
 
@@ -744,10 +752,7 @@ mod tests {
         // bearer — the upstream quota endpoint would 401 with
         // incomplete metadata.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_freebuff_credentials(
-            dir.path(),
-            r#"{ "authToken": "fb_test_token_2" }"#,
-        );
+        let path = write_freebuff_credentials(dir.path(), r#"{ "authToken": "fb_test_token_2" }"#);
         let candidates = vec![path];
         let err = read_freebuff_credentials(&candidates).expect_err("missing fields");
         assert!(
@@ -882,7 +887,10 @@ mod tests {
         assert_eq!(usage.provider, "freebuff");
         assert!(!usage.logged_in);
         assert!(
-            usage.error.as_deref().is_some_and(|e| e.contains("No credential")),
+            usage
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("No credential")),
             "expected No credential error, got {:?}",
             usage.error
         );
@@ -948,11 +956,11 @@ mod tests {
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
         );
-        assert!(usage.logged_in, "403 with unparseable body must NOT log the user out");
-        assert_eq!(
-            usage.error.as_deref(),
-            Some("Access forbidden (HTTP 403)")
+        assert!(
+            usage.logged_in,
+            "403 with unparseable body must NOT log the user out"
         );
+        assert_eq!(usage.error.as_deref(), Some("Access forbidden (HTTP 403)"));
     }
 
     #[test]
@@ -1005,8 +1013,7 @@ mod tests {
         );
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(
-                tiny_http::Response::from_string(r#"{"status":"banned"}"#)
-                    .with_status_code(403),
+                tiny_http::Response::from_string(r#"{"status":"banned"}"#).with_status_code(403),
             );
         });
         let usage = freebuff_usage_with(
@@ -1044,10 +1051,7 @@ mod tests {
         assert!(usage_empty.logged_in, "404 must not log the user out");
         assert!(usage_empty.error.is_none());
         assert!(usage_empty.windows.is_empty());
-        assert_eq!(
-            usage_empty.detail.as_deref(),
-            Some("no active session")
-        );
+        assert_eq!(usage_empty.detail.as_deref(), Some("no active session"));
 
         // {"status":"none"} body.
         let port_status = spawn_loopback(1, |req| {
@@ -1061,10 +1065,7 @@ mod tests {
         );
         assert!(usage_status.logged_in);
         assert!(usage_status.windows.is_empty());
-        assert_eq!(
-            usage_status.detail.as_deref(),
-            Some("no active session")
-        );
+        assert_eq!(usage_status.detail.as_deref(), Some("no active session"));
     }
 
     #[test]
@@ -1159,9 +1160,8 @@ mod tests {
             // `long_body` is moved into the `Fn` closure via `move`; `Fn`
             // closures can be called multiple times so `tiny_http::Response::from_string`
             // consuming it would require `Clone` (one clone per request).
-            let _ = req.respond(
-                tiny_http::Response::from_string(long_body.clone()).with_status_code(500),
-            );
+            let _ = req
+                .respond(tiny_http::Response::from_string(long_body.clone()).with_status_code(500));
         });
         let usage = freebuff_usage_with(
             &one_candidate(&path),
@@ -1259,7 +1259,10 @@ mod tests {
             let prefix = format!("{}:", name);
             headers
                 .iter()
-                .find(|h| h.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()))
+                .find(|h| {
+                    h.to_ascii_lowercase()
+                        .starts_with(&prefix.to_ascii_lowercase())
+                })
                 .and_then(|h| h.split_once(": ").map(|(_, v)| v.to_string()))
         };
         let auth = header_lookup("Authorization").expect("Authorization header");

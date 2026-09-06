@@ -66,12 +66,33 @@ fn insert_run(conn: &Connection, identity: &str, state: &str, days_ago: i64, bod
 #[test]
 fn circuit_retention_preserves_unfinished_cleanup_intent() {
     let conn = prune_db();
-    let manual = insert_run(&conn, "manual:old", "failed", 40, r#"{"cleanup.pending":"1"}"#);
-    let issue = insert_run(&conn, "issue:cleanup", "failed", 40, r#"{"cleanup.pending":"1"}"#);
+    let manual = insert_run(
+        &conn,
+        "manual:old",
+        "failed",
+        40,
+        r#"{"cleanup.pending":"1"}"#,
+    );
+    let issue = insert_run(
+        &conn,
+        "issue:cleanup",
+        "failed",
+        40,
+        r#"{"cleanup.pending":"1"}"#,
+    );
     insert_run(&conn, "manual:new", "completed", 0, "{}");
-    assert_eq!(prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap(), (0, 0));
+    assert_eq!(
+        prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap(),
+        (0, 0)
+    );
     for id in [manual, issue] {
-        let body: String = conn.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        let body: String = conn
+            .query_row(
+                "SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(body.contains("cleanup.pending"));
     }
 }
@@ -147,7 +168,10 @@ fn prune_drops_old_terminal_interval_runs_and_their_steps() {
 
     let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
 
-    assert_eq!(deleted, 2, "both non-newest terminal interval rows are swept");
+    assert_eq!(
+        deleted, 2,
+        "both non-newest terminal interval rows are swept"
+    );
     assert_eq!(count(&conn, "autopilot_circuit_runs"), 1);
     assert_eq!(
         count(&conn, "autopilot_circuit_run_steps"),

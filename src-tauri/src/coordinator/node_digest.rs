@@ -137,11 +137,7 @@ pub fn enrichment(tail: Option<&TranscriptTail>) -> Enrichment {
 /// Build the spine of a Node Digest from a node row plus the two fields that
 /// aren't carried on `AgentNode`: its Mesh name and the timestamp of its last
 /// status change. Pure — no I/O — so it is exhaustively unit-testable.
-pub fn spine(
-    node: &AgentNode,
-    mesh_name: &str,
-    status_changed_at: DateTime<Utc>,
-) -> NodeDigest {
+pub fn spine(node: &AgentNode, mesh_name: &str, status_changed_at: DateTime<Utc>) -> NodeDigest {
     let needs_feedback = node.status == SessionStatus::AwaitingInput;
     NodeDigest {
         id: node.id,
@@ -201,14 +197,21 @@ mod tests {
     #[test]
     fn awaiting_input_node_needs_feedback_with_waiting_since() {
         let changed = Utc::now();
-        let digest = spine(&node(SessionStatus::AwaitingInput, Provider::Anthropic), "core", changed);
+        let digest = spine(
+            &node(SessionStatus::AwaitingInput, Provider::Anthropic),
+            "core",
+            changed,
+        );
 
         assert_eq!(digest.id, 7);
         assert_eq!(digest.name, "fix-login");
         assert_eq!(digest.mesh, "core");
         assert_eq!(digest.provider, "anthropic");
         assert_eq!(digest.status, "awaiting_input");
-        assert!(digest.needs_feedback, "awaiting_input must set needs_feedback");
+        assert!(
+            digest.needs_feedback,
+            "awaiting_input must set needs_feedback"
+        );
         assert_eq!(
             digest.waiting_since,
             Some(changed),
@@ -220,18 +223,29 @@ mod tests {
     #[test]
     fn running_node_is_not_waiting() {
         let changed = Utc::now();
-        let digest = spine(&node(SessionStatus::Running, Provider::Codex), "core", changed);
+        let digest = spine(
+            &node(SessionStatus::Running, Provider::Codex),
+            "core",
+            changed,
+        );
 
         assert_eq!(digest.status, "running");
         assert_eq!(digest.provider, "codex");
         assert!(!digest.needs_feedback);
-        assert_eq!(digest.waiting_since, None, "a running node has no waiting_since");
+        assert_eq!(
+            digest.waiting_since, None,
+            "a running node has no waiting_since"
+        );
         assert_eq!(digest.last_activity, changed);
     }
 
     #[test]
     fn idle_node_reports_spine_without_feedback() {
-        let digest = spine(&node(SessionStatus::Idle, Provider::Anthropic), "core", Utc::now());
+        let digest = spine(
+            &node(SessionStatus::Idle, Provider::Anthropic),
+            "core",
+            Utc::now(),
+        );
         assert_eq!(digest.status, "idle");
         assert!(!digest.needs_feedback);
         assert!(digest.waiting_since.is_none());
@@ -240,18 +254,32 @@ mod tests {
     #[test]
     fn digest_serializes_to_expected_json_shape() {
         let changed = "2026-06-14T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let digest = spine(&node(SessionStatus::AwaitingInput, Provider::Anthropic), "core", changed);
+        let digest = spine(
+            &node(SessionStatus::AwaitingInput, Provider::Anthropic),
+            "core",
+            changed,
+        );
         let json: serde_json::Value = serde_json::to_value(&digest).unwrap();
 
         // Lock the wire contract a later MCP wrap depends on.
         for key in [
-            "id", "name", "mesh", "provider", "status", "needs_feedback",
-            "waiting_since", "last_activity", "enrichment",
+            "id",
+            "name",
+            "mesh",
+            "provider",
+            "status",
+            "needs_feedback",
+            "waiting_since",
+            "last_activity",
+            "enrichment",
         ] {
             assert!(json.get(key).is_some(), "digest JSON must carry `{key}`");
         }
         assert_eq!(json["needs_feedback"], serde_json::json!(true));
-        assert_eq!(json["waiting_since"], serde_json::json!("2026-06-14T10:00:00Z"));
+        assert_eq!(
+            json["waiting_since"],
+            serde_json::json!("2026-06-14T10:00:00Z")
+        );
     }
 
     // --- Enrichment layering (issue #317): the four degrade-and-flag paths ---

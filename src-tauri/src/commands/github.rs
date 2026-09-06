@@ -32,7 +32,9 @@ pub async fn check_gh_auth() -> bool {
     match tauri::async_runtime::spawn_blocking(check_gh_auth_blocking).await {
         Ok(authed) => authed,
         Err(e) => {
-            tracing::warn!("check_gh_auth: auth-check task failed ({e}); reporting not-authenticated");
+            tracing::warn!(
+                "check_gh_auth: auth-check task failed ({e}); reporting not-authenticated"
+            );
             false
         }
     }

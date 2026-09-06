@@ -81,9 +81,15 @@ pub(crate) enum OAuthError {
 impl std::fmt::Display for OAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OAuthError::CodeExpired => write!(f, "OpenCode OAuth: device code expired before activation"),
-            OAuthError::AccessDenied => write!(f, "OpenCode OAuth: user denied the device-flow consent"),
-            OAuthError::NoCredential(target) => write!(f, "OpenCode OAuth: no credential at {target}"),
+            OAuthError::CodeExpired => {
+                write!(f, "OpenCode OAuth: device code expired before activation")
+            }
+            OAuthError::AccessDenied => {
+                write!(f, "OpenCode OAuth: user denied the device-flow consent")
+            }
+            OAuthError::NoCredential(target) => {
+                write!(f, "OpenCode OAuth: no credential at {target}")
+            }
             OAuthError::Transport(msg) => write!(f, "OpenCode OAuth transport: {msg}"),
             OAuthError::Shape(msg) => write!(f, "OpenCode OAuth shape: {msg}"),
         }
@@ -237,9 +243,7 @@ pub(crate) fn parse_token_response(body: &str) -> Result<TokenResponse, OAuthErr
 /// loopback `tiny_http` server so the full HTTP round-trip
 /// (auth header propagation, status routing, body parse, merge)
 /// gets exercised without live OpenCode Console traffic.
-pub(crate) fn fetch_workspaces(
-    access_token: &str,
-) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
+pub(crate) fn fetch_workspaces(access_token: &str) -> Result<Vec<OpenCodeWorkspace>, OAuthError> {
     fetch_workspaces_against(OPENCODE_CONSOLE_HOST, access_token)
 }
 
@@ -394,12 +398,10 @@ pub(crate) fn try_refresh_against(
                     // (#971) so this wrapper is currently unused.
 pub(crate) fn try_refresh() -> Result<TokenResponse, OAuthError> {
     use crate::services::windows_cred;
-    let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET).map_err(|e| {
-        OAuthError::Shape(format!("refresh read failed: {e}"))
-    })?;
-    let cred = parse_opencode_console_full_credential(&blob).map_err(|e| {
-        OAuthError::Shape(format!("refresh parse failed: {e}"))
-    })?;
+    let blob = windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET)
+        .map_err(|e| OAuthError::Shape(format!("refresh read failed: {e}")))?;
+    let cred = parse_opencode_console_full_credential(&blob)
+        .map_err(|e| OAuthError::Shape(format!("refresh parse failed: {e}")))?;
     let refresh_token = cred.refresh_token.ok_or_else(|| {
         OAuthError::Shape("refresh requires refresh_token in stored credential".to_string())
     })?;
@@ -767,8 +769,7 @@ pub(crate) fn start_device_flow() -> Result<(DeviceCode, Client), OAuthError> {
 /// `saturating_sub` clamps negative elapsed to zero (clock-skew defense)
 /// so a future `started_at_ms` doesn't spuriously fire the gate.
 fn device_code_is_expired(started_at_ms: i64, original_expires_in_secs: u32, now_ms: i64) -> bool {
-    now_ms.saturating_sub(started_at_ms)
-        >= (original_expires_in_secs as i64).saturating_mul(1000)
+    now_ms.saturating_sub(started_at_ms) >= (original_expires_in_secs as i64).saturating_mul(1000)
 }
 
 /// Polls `POST /auth/device/token` honoring RFC 8628 §3.5 backoff rules.
@@ -827,13 +828,8 @@ pub(crate) fn poll_for_token(
         }
         // Surface all non-success statuses into the body-error namespace.
         if status.as_u16() == 400 {
-            if let Ok(err_json) =
-                serde_json::from_str::<serde_json::Value>(&body).map_err(|_| ())
-            {
-                let err_code = err_json
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body).map_err(|_| ()) {
+                let err_code = err_json.get("error").and_then(|v| v.as_str()).unwrap_or("");
                 match err_code {
                     "authorization_pending" => {
                         sleep_fn(interval);
@@ -959,10 +955,7 @@ pub(crate) fn poll_for_token_once_against(
     // We don't fail on 400 alone — we route on the `error` field.
     if status.as_u16() == 400 {
         if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body) {
-            let err_code = err_json
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let err_code = err_json.get("error").and_then(|v| v.as_str()).unwrap_or("");
             return Ok(match err_code {
                 "authorization_pending" => OpenCodeDeviceCodeStatus::Pending,
                 "slow_down" => OpenCodeDeviceCodeStatus::SlowDown {
@@ -1075,8 +1068,7 @@ pub(crate) fn parse_opencode_console_full_credential(
 /// `UsageError::NoCredential`); that path stays in `services::usage` where
 /// the live fetcher needs the load-bearing subset only.
 #[cfg(windows)]
-pub(crate) fn read_opencode_console_full_credential()
-    -> Result<Option<OpenCodeConsoleCred>, String>
+pub(crate) fn read_opencode_console_full_credential() -> Result<Option<OpenCodeConsoleCred>, String>
 {
     use crate::services::windows_cred;
     match windows_cred::read(OPENCODE_CONSOLE_CRED_TARGET) {
@@ -1089,8 +1081,7 @@ pub(crate) fn read_opencode_console_full_credential()
 }
 
 #[cfg(not(windows))]
-pub(crate) fn read_opencode_console_full_credential()
-    -> Result<Option<OpenCodeConsoleCred>, String>
+pub(crate) fn read_opencode_console_full_credential() -> Result<Option<OpenCodeConsoleCred>, String>
 {
     // Per the locked #956 design, non-Windows mirrors the agy precedent at
     // `services::usage::read_agy_token` — the dance's credential sink
@@ -1161,8 +1152,7 @@ pub(crate) fn cred_is_expired(cred: &OpenCodeConsoleCred, now_unix: i64) -> bool
 /// branch.
 #[cfg(windows)]
 pub(crate) fn revoke() -> Result<(), String> {
-    crate::services::windows_cred::delete(OPENCODE_CONSOLE_CRED_TARGET)
-        .map_err(|e| e.to_string())
+    crate::services::windows_cred::delete(OPENCODE_CONSOLE_CRED_TARGET).map_err(|e| e.to_string())
 }
 
 #[cfg(not(windows))]
@@ -1322,10 +1312,10 @@ mod tests {
         // SQLite path (#953) takes over with whatever partial state the
         // user has on disk instead of returning a 401 round-trip later.
         let blobs: Vec<&[u8]> = vec![
-            br#"{"workspace_id": "wrk_xyz"}"#,                       // missing token
-            br#"{"access_token": "tok"}"#,                            // missing workspace
-            br#"{"access_token": "", "workspace_id": "wrk_xyz"}"#,    // empty token
-            br#"{"access_token": "tok", "workspace_id": ""}"#,        // empty workspace
+            br#"{"workspace_id": "wrk_xyz"}"#, // missing token
+            br#"{"access_token": "tok"}"#,     // missing workspace
+            br#"{"access_token": "", "workspace_id": "wrk_xyz"}"#, // empty token
+            br#"{"access_token": "tok", "workspace_id": ""}"#, // empty workspace
         ];
         for blob in blobs {
             let err = parse_opencode_console_credential(blob).unwrap_err();
@@ -1792,8 +1782,7 @@ mod tests {
                 }
                 "/api/orgs" => {
                     let _ = orgs_tx.send(auth);
-                    let _ = req
-                        .respond(tiny_http::Response::from_string(r#"[]"#));
+                    let _ = req.respond(tiny_http::Response::from_string(r#"[]"#));
                 }
                 _ => {
                     let _ = req.respond(
@@ -1829,13 +1818,11 @@ mod tests {
                 );
             }
             "/api/orgs" => {
-                let _ = req
-                    .respond(tiny_http::Response::from_string(r#"[]"#));
+                let _ = req.respond(tiny_http::Response::from_string(r#"[]"#));
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let base = format!("http://127.0.0.1:{port}");
@@ -1869,9 +1856,8 @@ mod tests {
                 );
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let base = format!("http://127.0.0.1:{port}");
@@ -1904,11 +1890,15 @@ mod tests {
                 serde_json::json!({ "kind": "pending" }),
             ),
             (
-                OpenCodeDeviceCodeStatus::SlowDown { new_interval_secs: 10 },
+                OpenCodeDeviceCodeStatus::SlowDown {
+                    new_interval_secs: 10,
+                },
                 serde_json::json!({ "kind": "slow_down", "new_interval_secs": 10 }),
             ),
             (
-                OpenCodeDeviceCodeStatus::Success { token: token.clone() },
+                OpenCodeDeviceCodeStatus::Success {
+                    token: token.clone(),
+                },
                 serde_json::json!({
                     "kind": "success",
                     "token": {
@@ -1935,8 +1925,7 @@ mod tests {
         ];
 
         for (variant, expected_json) in cases {
-            let serialized =
-                serde_json::to_value(&variant).expect("serialize must not fail");
+            let serialized = serde_json::to_value(&variant).expect("serialize must not fail");
             assert_eq!(
                 serialized, expected_json,
                 "wire shape drifted for {variant:?}"
@@ -1946,8 +1935,7 @@ mod tests {
             // Rust representation and the wire JSON surfaces here rather
             // than at the React reducer.
             let rehydrated: OpenCodeDeviceCodeStatus =
-                serde_json::from_value(expected_json.clone())
-                    .expect("deserialize must not fail");
+                serde_json::from_value(expected_json.clone()).expect("deserialize must not fail");
             let reserialized =
                 serde_json::to_value(&rehydrated).expect("re-serialize must not fail");
             assert_eq!(
@@ -1981,10 +1969,7 @@ mod tests {
             return;
         }
 
-        let target = format!(
-            "buildmesh-test-opencode-ws-{}",
-            Uuid::new_v4().simple()
-        );
+        let target = format!("buildmesh-test-opencode-ws-{}", Uuid::new_v4().simple());
         let _cleanup = CleanupTarget(target.clone());
         let token = TokenResponse {
             access_token: "oc_sk_ws".to_string(),
@@ -2016,10 +2001,7 @@ mod tests {
             return;
         }
 
-        let target = format!(
-            "buildmesh-test-opencode-srv-{}",
-            Uuid::new_v4().simple()
-        );
+        let target = format!("buildmesh-test-opencode-srv-{}", Uuid::new_v4().simple());
         let _cleanup = CleanupTarget(target.clone());
         let token = TokenResponse {
             access_token: "oc_sk_srv".to_string(),
@@ -2052,23 +2034,15 @@ mod tests {
             return;
         }
 
-        let target = format!(
-            "buildmesh-test-opencode-set-ws-{}",
-            Uuid::new_v4().simple()
-        );
+        let target = format!("buildmesh-test-opencode-set-ws-{}", Uuid::new_v4().simple());
         let _cleanup = CleanupTarget(target.clone());
         let token = TokenResponse {
             access_token: "oc_sk_switch".to_string(),
             refresh_token: "rt_switch".to_string(),
             expires_in: Duration::from_secs(3_600),
         };
-        persist_token_response_to(
-            &target,
-            &token,
-            Some("wrk_initial"),
-            Some("srv_locked"),
-        )
-        .expect("initial persist should succeed");
+        persist_token_response_to(&target, &token, Some("wrk_initial"), Some("srv_locked"))
+            .expect("initial persist should succeed");
 
         // Capture the expires_at before the switch so we can assert it
         // didn't drift (the producer reads `Utc::now()` at persist
@@ -2076,8 +2050,7 @@ mod tests {
         let blob_before = windows_cred::read(&target).unwrap();
         let cred_before = parse_opencode_console_full_credential(&blob_before).unwrap();
 
-        set_active_workspace_for_target(&target, "wrk_org_new")
-            .expect("switch should succeed");
+        set_active_workspace_for_target(&target, "wrk_org_new").expect("switch should succeed");
 
         let blob_after = windows_cred::read(&target).unwrap();
         let cred_after = parse_opencode_console_full_credential(&blob_after).unwrap();
@@ -2113,18 +2086,14 @@ mod tests {
             return;
         }
 
-        let target = format!(
-            "buildmesh-test-opencode-status-{}",
-            Uuid::new_v4().simple()
-        );
+        let target = format!("buildmesh-test-opencode-status-{}", Uuid::new_v4().simple());
         let _cleanup = CleanupTarget(target.clone());
         let token = TokenResponse {
             access_token: "oc_sk_no_ws".to_string(),
             refresh_token: "rt_no_ws".to_string(),
             expires_in: Duration::from_secs(3_600),
         };
-        persist_token_response_to(&target, &token, None, None)
-            .expect("persist should succeed");
+        persist_token_response_to(&target, &token, None, None).expect("persist should succeed");
 
         // Read back via the same parser the status IPC uses —
         // confirms the parser routers correctly when a partial blob
@@ -2133,7 +2102,10 @@ mod tests {
         // round-trip in the component tests instead.
         let blob = crate::services::windows_cred::read(&target).unwrap();
         let cred = parse_opencode_console_full_credential(&blob).unwrap();
-        assert!(cred.workspace_id.is_none(), "test precondition: no workspace_id");
+        assert!(
+            cred.workspace_id.is_none(),
+            "test precondition: no workspace_id"
+        );
         assert!(
             cred.access_token.is_some(),
             "test precondition: access_token is set so the no-workspace_id downgrade is the relevant branch"
@@ -2163,19 +2135,10 @@ mod tests {
         let started_at_ms = now_ms - 1_000; // 1s ago — not expired
         let port = spawn_loopback(1, |req| {
             let body = r#"{"_tag":"DeviceTokenError","error":"invalid_grant","error_description":"The device code is invalid"}"#;
-            let _ = req.respond(
-                tiny_http::Response::from_string(body).with_status_code(400),
-            );
+            let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(400));
         });
         let base = format!("http://127.0.0.1:{port}");
-        let status = poll_for_token_once_against(
-            &base,
-            "dc_xyz",
-            5,
-            600,
-            started_at_ms,
-        )
-        .unwrap();
+        let status = poll_for_token_once_against(&base, "dc_xyz", 5, 600, started_at_ms).unwrap();
         match status {
             OpenCodeDeviceCodeStatus::CodeExpired => {}
             other => panic!("expected CodeExpired, got {other:?}"),

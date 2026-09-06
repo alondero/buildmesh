@@ -66,7 +66,9 @@ pub fn wrap(
     session_id: i64,
     sandbox: bool,
 ) -> CommandBuilder {
-    recipe.base_args.extend(std::mem::take(&mut recipe.trailing_args));
+    recipe
+        .base_args
+        .extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
     let mut cmd = if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
@@ -113,7 +115,10 @@ pub fn wrap(
                 }
             }
         } else {
-            tracing::info!("spawn_environment: building macOS command for {}", executable);
+            tracing::info!(
+                "spawn_environment: building macOS command for {}",
+                executable
+            );
             let mut c = CommandBuilder::new(executable);
             c.args(recipe.base_args);
             c
@@ -154,7 +159,10 @@ pub fn wrap(
                 c
             }
             WindowsShell::Direct => {
-                tracing::info!("spawn_environment: building direct Windows spawn for {}", executable);
+                tracing::info!(
+                    "spawn_environment: building direct Windows spawn for {}",
+                    executable
+                );
                 let mut c = CommandBuilder::new(executable);
                 c.args(recipe.base_args);
                 c
@@ -164,7 +172,10 @@ pub fn wrap(
 
     cmd.cwd(spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
-    cmd.env("BUILDMESH_PORT", crate::http_server::current_http_port().to_string());
+    cmd.env(
+        "BUILDMESH_PORT",
+        crate::http_server::current_http_port().to_string(),
+    );
     // Issue #1366 round-2 fix: the runtime hook token is minted
     // lazily by the Grok adapter's `provision_attention_hooks`
     // BEFORE `wrap()` runs (the orchestrator orders: provision →
@@ -284,10 +295,7 @@ mod tests {
         append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
         assert_eq!(wslenv, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
         append_to_wslenv(&mut wslenv, "BUILDMESH_PORT", "/u");
-        assert_eq!(
-            wslenv,
-            "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u"
-        );
+        assert_eq!(wslenv, "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u");
     }
 
     fn decode_ps(encoded: &str) -> String {
@@ -312,7 +320,11 @@ mod tests {
             .expect("valid base64");
 
         // First two bytes must be the UTF-16LE encoding of 'e' (0x65 0x00), not a BOM.
-        assert_eq!(&bytes[..2], &[0x65, 0x00], "leading bytes should be 'e' as UTF-16LE, not a BOM");
+        assert_eq!(
+            &bytes[..2],
+            &[0x65, 0x00],
+            "leading bytes should be 'e' as UTF-16LE, not a BOM"
+        );
 
         let decoded = decode_ps(&encoded);
         assert_eq!(decoded, "echo hi");
@@ -337,18 +349,30 @@ mod tests {
                     1. `default_provider` (per-mesh override)\n\
                     2. Buildmesh-wide default\n\
                     3. Anthropic (hardcoded fallback)";
-        let args = vec!["--anthropic".to_string(), "--prefill".to_string(), body.to_string()];
+        let args = vec![
+            "--anthropic".to_string(),
+            "--prefill".to_string(),
+            body.to_string(),
+        ];
         let cmd_str = format_powershell_command("claude", &args);
 
         // Must start with the call operator so PowerShell treats it as command invocation.
-        assert!(cmd_str.starts_with("& "), "command must use PowerShell call operator: {}", cmd_str);
+        assert!(
+            cmd_str.starts_with("& "),
+            "command must use PowerShell call operator: {}",
+            cmd_str
+        );
 
         // The binary and every arg must be wrapped in single quotes. After the
         // leading `& 'claude' `, there must be no bare newline outside of a quoted
         // string — i.e. every newline in the prefill stays inside the single-quoted
         // arg, not at the top level of the script.
         let after_call = cmd_str.strip_prefix("& ").unwrap();
-        assert!(after_call.starts_with("'claude'"), "binary must be single-quoted: {}", cmd_str);
+        assert!(
+            after_call.starts_with("'claude'"),
+            "binary must be single-quoted: {}",
+            cmd_str
+        );
 
         // The prefill body's newlines must appear inside a single-quoted region —
         // i.e. between an odd-numbered ' and the next '. We verify by checking
@@ -369,6 +393,10 @@ mod tests {
     fn format_powershell_command_escapes_embedded_single_quotes() {
         let args = vec!["--prefill".to_string(), "it's a test".to_string()];
         let cmd_str = format_powershell_command("claude", &args);
-        assert!(cmd_str.contains("'it''s a test'"), "expected doubled-quote escaping, got: {}", cmd_str);
+        assert!(
+            cmd_str.contains("'it''s a test'"),
+            "expected doubled-quote escaping, got: {}",
+            cmd_str
+        );
     }
 }

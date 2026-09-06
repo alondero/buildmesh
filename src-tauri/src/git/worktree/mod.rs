@@ -208,10 +208,17 @@ pub fn create_git_worktree(
 
     // Ensure parent directory exists
     if let Some(parent) = host_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
     }
 
-    tracing::info!("Creating git worktree: {} at {} (mode: {}, base_ref: {})", branch_name, worktree_host_path, worktree_mode, base_ref);
+    tracing::info!(
+        "Creating git worktree: {} at {} (mode: {}, base_ref: {})",
+        branch_name,
+        worktree_host_path,
+        worktree_mode,
+        base_ref
+    );
 
     let repo = git2::Repository::open(project_root)
         .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
@@ -316,7 +323,9 @@ fn generate_husk_stash_path(host_path: &std::path::Path) -> std::path::PathBuf {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "worktree".to_string());
-    let parent = host_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = host_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     parent.join(format!("{stem}.husk-{millis}-{}", std::process::id()))
 }
 
@@ -431,7 +440,12 @@ pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::
 
             if src.is_file() {
                 if let Err(e) = std::fs::copy(&src, &dest) {
-                    tracing::warn!("Failed to copy included file {} -> {}: {}", src.display(), dest.display(), e);
+                    tracing::warn!(
+                        "Failed to copy included file {} -> {}: {}",
+                        src.display(),
+                        dest.display(),
+                        e
+                    );
                 } else {
                     tracing::info!("Copied included file: {}", trimmed);
                 }
@@ -585,11 +599,7 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
     let host = to_host_path(worktree_path);
 
     let mut cmd = crate::process_util::git_command();
-    cmd.arg("-C")
-        .arg(&host)
-        .arg("reset")
-        .arg("--hard")
-        .arg(sha);
+    cmd.arg("-C").arg(&host).arg("reset").arg("--hard").arg(sha);
 
     let output = cmd
         .output()
@@ -912,7 +922,11 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
 /// there.
 fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
     let Ok(repo) = Repository::open(commondir) else {
-        tracing::warn!("could not reopen repo at {:?} to delete branch {}", commondir, branch);
+        tracing::warn!(
+            "could not reopen repo at {:?} to delete branch {}",
+            commondir,
+            branch
+        );
         return;
     };
     // No such branch (detached, or already gone) — nothing to tidy.
@@ -920,7 +934,11 @@ fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
         return;
     };
     if let Err(e) = branch_ref.delete() {
-        tracing::warn!("could not delete branch {} after closing its worktree: {}", branch, e);
+        tracing::warn!(
+            "could not delete branch {} after closing its worktree: {}",
+            branch,
+            e
+        );
     }
 }
 
@@ -1102,7 +1120,11 @@ mod tests {
             let t = Instant::now();
             create_git_worktree(&repo_root, &wt_path_str, wt_name, "branched", "HEAD")
                 .expect("create_git_worktree must succeed");
-            eprintln!("[e2e] run {} create_git_worktree (git CLI): {:?}", i, t.elapsed());
+            eprintln!(
+                "[e2e] run {} create_git_worktree (git CLI): {:?}",
+                i,
+                t.elapsed()
+            );
 
             // Cleanup between runs.
             let _ = remove_worktree_dir_with_retry(&wt_path_str);
@@ -1130,7 +1152,10 @@ mod tests {
         // Make the working tree dirty: modify a tracked file + add an untracked one.
         fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
         fs::write(parent.join("scratch.txt"), "untracked local note").unwrap();
-        assert!(repo_is_dirty(parent), "precondition: parent repo must be dirty");
+        assert!(
+            repo_is_dirty(parent),
+            "precondition: parent repo must be dirty"
+        );
 
         let wt_path = parent.join(".claude").join("worktrees").join("wt-1");
         create_git_worktree(
@@ -1151,7 +1176,10 @@ mod tests {
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(!wt_path.join("scratch.txt").exists());
-        assert!(repo_is_dirty(parent), "creating a worktree must not modify the parent");
+        assert!(
+            repo_is_dirty(parent),
+            "creating a worktree must not modify the parent"
+        );
     }
 
     #[test]
@@ -1160,7 +1188,10 @@ mod tests {
         let parent = td.path();
         init_repo_with_commit(parent, &[("README.md", "# project\n")]);
         fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
-        assert!(repo_is_dirty(parent), "precondition: parent repo must be dirty");
+        assert!(
+            repo_is_dirty(parent),
+            "precondition: parent repo must be dirty"
+        );
 
         let wt_path = parent.join(".claude").join("worktrees").join("wt-det");
         create_git_worktree(
@@ -1174,7 +1205,10 @@ mod tests {
 
         assert!(wt_path.exists());
         let wt_repo = git2::Repository::open(&wt_path).expect("worktree should be a valid repo");
-        assert!(wt_repo.head_detached().unwrap_or(false), "HEAD should be detached");
+        assert!(
+            wt_repo.head_detached().unwrap_or(false),
+            "HEAD should be detached"
+        );
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(repo_is_dirty(parent));
@@ -1211,14 +1245,17 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .count();
-        assert_eq!(husk_only, 1, "precondition: only the husk exists in the container");
+        assert_eq!(
+            husk_only, 1,
+            "precondition: only the husk exists in the container"
+        );
 
         create_git_worktree(&root, wt.to_str().unwrap(), "wt-empty", "branched", "HEAD")
             .expect("empty husk must be renamed aside, not block create");
 
         // The path is now a real, openable, registered worktree.
-        let wt_repo = git2::Repository::open(&wt)
-            .expect("after recovery the path must open as a Repository");
+        let wt_repo =
+            git2::Repository::open(&wt).expect("after recovery the path must open as a Repository");
         assert_eq!(
             wt_repo.head().unwrap().shorthand().unwrap_or(""),
             "wt-empty",
@@ -1262,7 +1299,11 @@ mod tests {
         let td = TestDir::new("wt_user_dir");
         init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
         let root = td.path().to_string_lossy().to_string();
-        let wt = td.path().join(".claude").join("worktrees").join("wt-userdata");
+        let wt = td
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("wt-userdata");
         fs::create_dir_all(&wt).unwrap();
         let sentinel = wt.join("user-notes.md");
         let sentinel_bytes = b"important user data - must survive a refused create\n";
@@ -1295,17 +1336,17 @@ mod tests {
         );
 
         // User data is untouched — the refused-create contract.
-        assert!(sentinel.exists(), "user file at top level must not be removed");
+        assert!(
+            sentinel.exists(),
+            "user file at top level must not be removed"
+        );
         assert_eq!(
             fs::read(&sentinel).unwrap(),
             sentinel_bytes,
             "top-level user file content must be byte-for-byte identical"
         );
         assert!(nested_dir.exists(), "nested user dir must not be removed");
-        assert!(
-            nested_file.exists(),
-            "nested user file must not be removed"
-        );
+        assert!(nested_file.exists(), "nested user file must not be removed");
         assert_eq!(
             fs::read_to_string(&nested_file).unwrap(),
             "deeper user data\n",
@@ -1354,7 +1395,10 @@ mod tests {
         )
         .expect("git worktree move must succeed");
 
-        assert!(!src.exists(), "source directory must be gone after the move");
+        assert!(
+            !src.exists(),
+            "source directory must be gone after the move"
+        );
         assert!(dst.exists(), "target directory must exist after the move");
 
         // Git's internal references must have followed the directory: the moved
@@ -1402,7 +1446,10 @@ mod tests {
             "error must name the occupied-target guard, got: {}",
             err
         );
-        assert!(src.exists(), "source must be untouched after a refused move");
+        assert!(
+            src.exists(),
+            "source must be untouched after a refused move"
+        );
         // The target must NOT have gained a nested worktree.
         assert!(
             !dst.join("warm-amber-fox").exists(),
@@ -1454,8 +1501,7 @@ mod tests {
         sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
             .expect("sanitize must succeed");
 
-        git2::Repository::open(&wt)
-            .expect("libgit2 must open the worktree after sanitize");
+        git2::Repository::open(&wt).expect("libgit2 must open the worktree after sanitize");
         let backpointer = fs::read_to_string(admin_dir.join("gitdir")).unwrap();
         assert!(
             !backpointer.trim_start().starts_with('/'),
@@ -1489,8 +1535,14 @@ mod tests {
             "/mnt/f/src/repo"
         );
         // Real WSL paths must NOT be re-mangled.
-        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
-        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        assert_eq!(
+            convert_link_path_for_env("/mnt/f/src", EnvType::Wsl),
+            "/mnt/f/src"
+        );
+        assert_eq!(
+            convert_link_path_for_env("/home/u/repo", EnvType::Wsl),
+            "/home/u/repo"
+        );
         // → Windows (host conversion is a Windows-host behaviour).
         #[cfg(windows)]
         {
@@ -1526,7 +1578,10 @@ mod tests {
             .expect("sanitize must succeed");
 
         assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitlink_before);
-        assert_eq!(fs::read_to_string(&admin_gitdir).unwrap(), backpointer_before);
+        assert_eq!(
+            fs::read_to_string(&admin_gitdir).unwrap(),
+            backpointer_before
+        );
         git2::Repository::open(&wt).expect("worktree must still open");
     }
 
@@ -1534,7 +1589,13 @@ mod tests {
     fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
         let td = TestDir::new("resolve_sha");
         let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
-        let head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+        let head = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
 
         // A resolvable ref returns its concrete SHA.
         assert_eq!(
@@ -1578,7 +1639,9 @@ mod tests {
         let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
         let head = repo.head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(
-            resolve_base_commit(&repo, "origin/does-not-exist").unwrap().id(),
+            resolve_base_commit(&repo, "origin/does-not-exist")
+                .unwrap()
+                .id(),
             head,
             "an unresolvable ref must fall back to HEAD rather than error"
         );
@@ -1603,7 +1666,10 @@ mod tests {
         let content = fs::read_to_string(wt_path.join("f.txt")).unwrap();
         assert_eq!(content, "from-origin-main\n");
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
-        assert_eq!(wt_repo.head().unwrap().peel_to_commit().unwrap().id(), origin_oid);
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid
+        );
     }
 
     #[test]
@@ -1624,8 +1690,14 @@ mod tests {
 
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
         assert!(wt_repo.head_detached().unwrap_or(false));
-        assert_eq!(wt_repo.head().unwrap().peel_to_commit().unwrap().id(), origin_oid);
-        assert_eq!(fs::read_to_string(wt_path.join("f.txt")).unwrap(), "from-origin-main\n");
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid
+        );
+        assert_eq!(
+            fs::read_to_string(wt_path.join("f.txt")).unwrap(),
+            "from-origin-main\n"
+        );
     }
 
     #[test]
@@ -1649,7 +1721,10 @@ mod tests {
         let wt_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(wt_oid, head_oid);
         assert_ne!(wt_oid, origin_oid);
-        assert_eq!(fs::read_to_string(wt_path.join("f.txt")).unwrap(), "local-drift\n");
+        assert_eq!(
+            fs::read_to_string(wt_path.join("f.txt")).unwrap(),
+            "local-drift\n"
+        );
     }
 
     #[test]
@@ -1705,7 +1780,11 @@ mod tests {
         fs::create_dir_all(project_root.join("config/nested")).unwrap();
         fs::write(project_root.join("config/nested/.keep"), "keep\n").unwrap();
         fs::write(project_root.join("README-top"), "top\n").unwrap();
-        fs::write(project_root.join(".worktreeinclude"), "README-top\nconfig\n").unwrap();
+        fs::write(
+            project_root.join(".worktreeinclude"),
+            "README-top\nconfig\n",
+        )
+        .unwrap();
 
         fs::create_dir_all(&wt).unwrap();
         apply_worktree_include(project_root.to_str().unwrap(), &wt);
@@ -1854,11 +1933,8 @@ mod tests {
         let mut cfg = repo.config().unwrap();
         cfg.set_str("remote.origin.url", "https://example.invalid/repo.git")
             .unwrap();
-        cfg.set_str(
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/remotes/origin/*",
-        )
-        .unwrap();
+        cfg.set_str("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
         cfg.set_str(&format!("branch.{}.remote", branch), "origin")
             .unwrap();
         cfg.set_str(

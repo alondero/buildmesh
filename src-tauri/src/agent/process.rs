@@ -182,7 +182,9 @@ fn input_buffer_state_after(
                     // An incomplete escape sequence is ambiguous too. Keep
                     // the paste mode that was already established, but fail
                     // closed for continuation eligibility.
-                    if !sequence_complete { len = UNKNOWN_INPUT_BUFFER_LEN; }
+                    if !sequence_complete {
+                        len = UNKNOWN_INPUT_BUFFER_LEN;
+                    }
                 } else if !bracketed_paste {
                     len = UNKNOWN_INPUT_BUFFER_LEN;
                 }
@@ -274,13 +276,25 @@ impl AgentProcess {
         {
             return None;
         }
-        Some(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
+        Some(InputStamp {
+            generation: self.generation,
+            version: self.input_version.load(Ordering::Relaxed),
+        })
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<Option<InputStamp>, std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input_if_current(
+        &self,
+        data: Vec<u8>,
+        expected: Option<InputStamp>,
+    ) -> Result<Option<InputStamp>, std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
-        let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
-        if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
+        let stamp = InputStamp {
+            generation: self.generation,
+            version: self.input_version.load(Ordering::Relaxed),
+        };
+        if expected.is_some_and(|expected| expected != stamp) {
+            return Ok(None);
+        }
         let current_len = self.input_buffer_len.load(Ordering::Relaxed);
         let current_bracketed_paste = self.input_bracketed_paste.load(Ordering::Relaxed);
         let (next_len, next_bracketed_paste) =
@@ -291,8 +305,12 @@ impl AgentProcess {
         }
         let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
         self.input_buffer_len.store(next_len, Ordering::Relaxed);
-        self.input_bracketed_paste.store(next_bracketed_paste, Ordering::Relaxed);
-        Ok(Some(InputStamp { generation: self.generation, version }))
+        self.input_bracketed_paste
+            .store(next_bracketed_paste, Ordering::Relaxed);
+        Ok(Some(InputStamp {
+            generation: self.generation,
+            version,
+        }))
     }
 
     /// Stash the reader thread's `JoinHandle` on the registry entry.
@@ -424,15 +442,27 @@ impl AgentProcessRegistry {
     }
 
     pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
-        self.get(&session_id).and_then(|agent| agent.input_stamp()).map(InputStamp::encode)
+        self.get(&session_id)
+            .and_then(|agent| agent.input_stamp())
+            .map(InputStamp::encode)
     }
 
     /// Compare and enqueue under the same writer lock as ordinary keystrokes.
     /// A partial draft invalidates a continuation even before Enter is pressed.
-    pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
-        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
-        let expected = InputStamp::decode(expected).ok_or_else(|| "Invalid input ownership stamp".to_string())?;
-        agent.enqueue_input_if_current(data.to_vec(), Some(expected)).map_err(|e| e.to_string())
+    pub(crate) fn write_bytes_if_current(
+        &self,
+        session_id: i64,
+        data: &[u8],
+        expected: &str,
+    ) -> Result<Option<String>, String> {
+        let agent = self
+            .get(&session_id)
+            .ok_or_else(|| "Agent not running".to_string())?;
+        let expected = InputStamp::decode(expected)
+            .ok_or_else(|| "Invalid input ownership stamp".to_string())?;
+        agent
+            .enqueue_input_if_current(data.to_vec(), Some(expected))
+            .map_err(|e| e.to_string())
             .map(|stamp| stamp.map(InputStamp::encode))
     }
 
@@ -858,37 +888,70 @@ mod tests {
         let observed = registry.input_stamp(id).unwrap();
         registry.write_bytes(id, b"unfinished draft").unwrap();
         assert_eq!(rx.recv().unwrap(), b"unfinished draft");
-        assert!(registry.input_stamp(id).is_none(), "a draft already present before classification is ineligible");
-        assert!(registry.write_bytes_if_current(id, b"continue", &observed).unwrap().is_none());
+        assert!(
+            registry.input_stamp(id).is_none(),
+            "a draft already present before classification is ineligible"
+        );
+        assert!(registry
+            .write_bytes_if_current(id, b"continue", &observed)
+            .unwrap()
+            .is_none());
         assert!(rx.try_recv().is_err());
         registry.write_bytes(id, b"\r").unwrap();
         assert_eq!(rx.recv().unwrap(), b"\r");
         let observed = registry.input_stamp(id).unwrap();
-        let staged = registry.write_bytes_if_current(id, b"staged prompt", &observed).unwrap().unwrap();
+        let staged = registry
+            .write_bytes_if_current(id, b"staged prompt", &observed)
+            .unwrap()
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), b"staged prompt");
         registry.write_bytes(id, b"more user input").unwrap();
         assert_eq!(rx.recv().unwrap(), b"more user input");
-        assert!(registry.write_bytes_if_current(id, b"\r", &staged).unwrap().is_none(), "Enter must not submit newer input");
+        assert!(
+            registry
+                .write_bytes_if_current(id, b"\r", &staged)
+                .unwrap()
+                .is_none(),
+            "Enter must not submit newer input"
+        );
         assert!(rx.try_recv().is_err());
         registry.kill_session(id);
     }
 
     #[test]
     fn input_stamp_ignores_navigation_and_tracks_backspace_to_empty() {
-        assert_eq!(input_buffer_len_after(0, b"\x1b[A\x1b[I"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(0, b"\x1b[A\x1b[I"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(0, b"draft"), 5);
-        assert_eq!(input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(5, b"\x7f\x7f\x7f\x7f\x7f"), 0);
         assert_eq!(input_buffer_len_after(5, b"\x03"), 0);
-        assert_eq!(input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"), 8);
-        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x1b[D\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
-        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x15"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"),
+            8
+        );
+        assert_eq!(
+            input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x1b[D\x7f"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
+        assert_eq!(
+            input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x15"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(0, b"\x10"), UNKNOWN_INPUT_BUFFER_LEN);
     }
 
     #[test]
     fn input_buffer_state_preserves_bracketed_paste_across_packets() {
-        assert_eq!(input_buffer_state_after(0, false, b"\x1b[200~draft"), (5, true));
+        assert_eq!(
+            input_buffer_state_after(0, false, b"\x1b[200~draft"),
+            (5, true)
+        );
         assert_eq!(input_buffer_state_after(5, true, b"\n"), (5, true));
         assert_eq!(input_buffer_state_after(5, true, b"\x1b[201~"), (5, false));
     }

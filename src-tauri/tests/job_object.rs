@@ -72,7 +72,8 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
 
 #[test]
 fn job_terminate_kills_orphaned_detached_descendant() {
-    let pid_file = std::env::temp_dir().join(format!("buildmesh_job_test_{}.pid", std::process::id()));
+    let pid_file =
+        std::env::temp_dir().join(format!("buildmesh_job_test_{}.pid", std::process::id()));
     let _ = std::fs::remove_file(&pid_file);
 
     // The parent sleeps briefly so we win the race to assign it to the job before

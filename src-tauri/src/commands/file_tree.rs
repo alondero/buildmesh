@@ -1,12 +1,12 @@
 //! File tree listing with host/guest path mapping
 
-use std::fs;
-use std::path::Path;
-use serde::{Deserialize, Serialize};
-use tauri::command;
-use ts_rs::TS;
 use crate::env;
 use crate::process_util::command_no_window;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+use tauri::command;
+use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "FileNode.ts")]
@@ -19,8 +19,15 @@ pub struct FileNode {
     pub children: Vec<FileNode>,
 }
 
-fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usize, max_depth: usize) -> FileNode {
-    let name = path.file_name()
+fn read_dir_recursive(
+    path: &Path,
+    base_path: &str,
+    host_base: &str,
+    depth: usize,
+    max_depth: usize,
+) -> FileNode {
+    let name = path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
@@ -54,7 +61,13 @@ fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usiz
                 if name.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                children.push(read_dir_recursive(&entry.path(), base_path, host_base, depth + 1, max_depth));
+                children.push(read_dir_recursive(
+                    &entry.path(),
+                    base_path,
+                    host_base,
+                    depth + 1,
+                    max_depth,
+                ));
             }
         }
     }
@@ -78,7 +91,10 @@ pub async fn list_directory(path: String, max_depth: Option<usize>) -> Result<Fi
         let path_obj = Path::new(&host_path);
 
         if !path_obj.exists() {
-            return Err(format!("Path does not exist: {} (mapped from {})", host_path, path));
+            return Err(format!(
+                "Path does not exist: {} (mapped from {})",
+                host_path, path
+            ));
         }
         if !path_obj.is_dir() {
             return Err(format!("Path is not a directory: {}", host_path));
@@ -220,7 +236,10 @@ mod tests {
     fn test_to_host_path_converts_linux_path() {
         let result = to_host_path("/home/user/file.txt".to_string());
         assert!(result.contains("\\wsl$"), "Should convert to UNC path"); // allow-wsl-path
-        assert!(result.contains("\\home\\user\\file.txt"), "Should use backslashes");
+        assert!(
+            result.contains("\\home\\user\\file.txt"),
+            "Should use backslashes"
+        );
     }
 
     #[cfg(target_os = "windows")]

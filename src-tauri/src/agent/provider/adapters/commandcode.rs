@@ -169,7 +169,10 @@ impl AgentProvider for CommandCodeAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::commandcode_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -185,16 +188,19 @@ impl AgentProvider for CommandCodeAdapter {
         let spawn_path = spawn_path.to_string();
         let app = app.clone();
         Box::pin(async move {
-            if let Err(error) = crate::services::commandcode_watcher::start_for_resumed_session_async(
-                node_id,
-                &session_id,
-                &spawn_path,
-                env_type,
-                app,
-            )
-            .await
+            if let Err(error) =
+                crate::services::commandcode_watcher::start_for_resumed_session_async(
+                    node_id,
+                    &session_id,
+                    &spawn_path,
+                    env_type,
+                    app,
+                )
+                .await
             {
-                tracing::warn!("commandcode watcher: could not resume watch for node {node_id}: {error}");
+                tracing::warn!(
+                    "commandcode watcher: could not resume watch for node {node_id}: {error}"
+                );
             }
         })
     }
@@ -320,10 +326,7 @@ mod tests {
         let args = COMMANDCODE.resume_args("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9");
         assert_eq!(
             args,
-            vec![
-                "--resume",
-                "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"
-            ]
+            vec!["--resume", "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"]
         );
     }
 
@@ -359,7 +362,10 @@ mod tests {
         assert_eq!(
             COMMANDCODE.effort_control(),
             EffortControlKind::Closed {
-                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: COMMANDCODE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
         assert!(COMMANDCODE.supports_extra_args());
@@ -384,7 +390,10 @@ mod tests {
         assert_eq!(
             caps.effort_control,
             crate::agent::capabilities::EffortControlKind::Closed {
-                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: COMMANDCODE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
     }

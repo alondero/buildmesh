@@ -415,10 +415,7 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
 /// (including WSL translation). `spawn_path` is the CLI cwd form; raw WSL UNC
 /// paths are normalized first so `\\wsl$\<distro>\home\user\repo` resolves to
 /// the same slug the in-WSL CLI wrote (`home-user-repo`).
-pub(crate) fn commandcode_sessions_dir(
-    env_type: EnvType,
-    spawn_path: &str,
-) -> Option<PathBuf> {
+pub(crate) fn commandcode_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     let normalized = env::normalize_unc_to_wsl(spawn_path);
     let projects = env::commandcode_projects_dir(env_type, &normalized)?;
     let slug = commandcode_project_slug(&normalized);
@@ -442,10 +439,7 @@ fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<Path
 
 /// Pure Command Code locator used by the contract test and kept separate from
 /// process-global home/environment discovery.
-pub(crate) fn commandcode_transcript_path_in(
-    sessions_root: &Path,
-    session_id: &str,
-) -> PathBuf {
+pub(crate) fn commandcode_transcript_path_in(sessions_root: &Path, session_id: &str) -> PathBuf {
     sessions_root.join(format!("{session_id}.jsonl"))
 }
 /// Build the expected on-disk path of a Claude Code session transcript:
@@ -596,8 +590,12 @@ fn read_opencode_messages(
     session_id: &str,
     row_budget: usize,
 ) -> Option<Vec<serde_json::Value>> {
-    Some(read_opencode_message_rows(db_path, session_id, row_budget)?
-        .into_iter().map(|(_, message)| message).collect())
+    Some(
+        read_opencode_message_rows(db_path, session_id, row_budget)?
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect(),
+    )
 }
 
 fn read_opencode_message_rows(
@@ -674,9 +672,7 @@ pub(crate) fn read_opencode_tail_from_messages(
 /// last_assistant_message: None }` for an actively-working node and the
 /// Coordinator renders the spine fields (status, needs_feedback)
 /// regardless of the digest content.
-pub(crate) fn read_opencode_digest_from_messages(
-    messages: &[serde_json::Value],
-) -> TranscriptTail {
+pub(crate) fn read_opencode_digest_from_messages(messages: &[serde_json::Value]) -> TranscriptTail {
     let parsed = parse_opencode_messages(messages, 1);
     // Only degrade when the parser saw no turns at all — i.e., empty
     // window (brand-new session before the user's first prompt) or
@@ -720,16 +716,12 @@ pub(crate) fn read_opencode_tail(
 /// the result through [`read_opencode_digest_from_messages`]. Mirrors
 /// the AGY split: test the semantics with explicit messages, drive the
 /// dispatch through this.
-pub(crate) fn read_opencode_digest(
-    session_id: Option<&str>,
-    node_path: &str,
-) -> TranscriptTail {
+pub(crate) fn read_opencode_digest(session_id: Option<&str>, node_path: &str) -> TranscriptTail {
     let (db_path, session_id) = match opencode_resolve(session_id, node_path) {
         Ok(pair) => pair,
         Err(reason) => return TranscriptTail::unavailable(reason),
     };
-    let Some(messages) =
-        read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
+    let Some(messages) = read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
     else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };
@@ -779,10 +771,7 @@ fn opencode_resolve<'a>(
 ///
 /// A user turn with no `text` parts, or an assistant turn with neither
 /// text nor tool calls, is dropped — same as Claude's thinking-only line.
-pub(crate) fn parse_opencode_messages(
-    messages: &[serde_json::Value],
-    keep: usize,
-) -> Parsed {
+pub(crate) fn parse_opencode_messages(messages: &[serde_json::Value], keep: usize) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -871,10 +860,7 @@ pub(crate) fn parse_opencode_messages(
 /// `dead_code` analysis doesn't see `#[cfg(test)]` use-sites in some
 /// versions, hence the `#[allow(dead_code)]`.
 #[allow(dead_code)]
-pub(crate) fn parse_opencode_export(
-    export: &serde_json::Value,
-    keep: usize,
-) -> Parsed {
+pub(crate) fn parse_opencode_export(export: &serde_json::Value, keep: usize) -> Parsed {
     match export.get("messages").and_then(|m| m.as_array()) {
         Some(messages) => parse_opencode_messages(messages, keep),
         None => Parsed {
@@ -919,7 +905,10 @@ fn extract_opencode_tool_calls(parts: &[serde_json::Value]) -> Vec<ToolCall> {
                 .or_else(|| p.get("name").and_then(|n| n.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let input = state.get("input").cloned().unwrap_or(serde_json::Value::Null);
+            let input = state
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             Some(ToolCall {
                 name,
                 input: truncate_json_strings(input, MAX_TOOL_STRING),
@@ -1081,7 +1070,9 @@ pub(crate) fn read_assistant_report(
 fn opencode_assistant_report(path: &Path, session_id: &str) -> Option<AssistantReport> {
     use sha2::{Digest, Sha256};
     read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)?
-        .into_iter().rev().find_map(|(id, message)| {
+        .into_iter()
+        .rev()
+        .find_map(|(id, message)| {
             let text = parse_opencode_messages(&[message], 1).last_assistant_message?;
             Some(AssistantReport {
                 revision: format!("{id}:{:x}", Sha256::digest(text.as_bytes())),
@@ -1108,10 +1099,14 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
     loop {
         line.clear();
         let bytes = reader.read_line(&mut line).ok()?;
-        if bytes == 0 { break; }
+        if bytes == 0 {
+            break;
+        }
         offset += bytes as u64;
         // Ignore a record the writer has not finished publishing yet.
-        if !line.ends_with('\n') { break; }
+        if !line.ends_with('\n') {
+            break;
+        }
         if line_has_assistant_text(format, &line) {
             assistant_line_offset = Some(offset);
         }
@@ -1146,34 +1141,34 @@ fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
                     .and_then(|message| message.get("role"))
                     .and_then(|role| role.as_str())
                     == Some("assistant")
-                && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
-                    .trim()
-                    .is_empty()
+                && !concat_text_blocks(
+                    value
+                        .get("message")
+                        .and_then(|message| message.get("content")),
+                )
+                .trim()
+                .is_empty()
         }
         TranscriptFormat::Codex => {
             matches!(
                 value.get("type").and_then(|kind| kind.as_str()),
                 Some("response_item") | Some("event_msg")
-            ) && value
-                .get("payload")
-                .is_some_and(|payload| {
-                    payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
-                        && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !payload
-                            .get("content")
-                            .map(codex_concat_text)
-                            .unwrap_or_default()
-                            .trim()
-                            .is_empty()
-                })
+            ) && value.get("payload").is_some_and(|payload| {
+                payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
+                    && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                    && !payload
+                        .get("content")
+                        .map(codex_concat_text)
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+            })
         }
         TranscriptFormat::CommandCode => {
             value.get("type").and_then(|kind| kind.as_str()) == Some("message")
                 && value.get("message").is_some_and(|message| {
                     message.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !concat_text_blocks(message.get("content"))
-                            .trim()
-                            .is_empty()
+                        && !concat_text_blocks(message.get("content")).trim().is_empty()
                 })
         }
         TranscriptFormat::Agy => {
@@ -1189,7 +1184,9 @@ fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
                     serde_json::Value::String(text) => !text.trim().is_empty(),
                     serde_json::Value::Array(blocks) => blocks
                         .iter()
-                        .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+                        .filter(|block| {
+                            block.get("type").and_then(|kind| kind.as_str()) == Some("text")
+                        })
                         .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
                         .any(|text| !text.trim().is_empty()),
                     _ => false,
@@ -1265,7 +1262,11 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
     // newline so the parser only sees complete JSONL lines.
     let mut discard = Vec::new();
     let _ = buf_reader.read_until(b'\n', &mut discard);
-    Some(parse_transcript(format, buf_reader.lines().map_while(Result::ok), 1))
+    Some(parse_transcript(
+        format,
+        buf_reader.lines().map_while(Result::ok),
+        1,
+    ))
 }
 /// Effective tail length: `0` …"™ default, otherwise clamp to the ceiling.
 fn effective_tail(tail: usize) -> usize {
@@ -1710,7 +1711,9 @@ pub(crate) fn commandcode_message_activity(
         "user" if is_synthetic_message(&text) || text.trim().is_empty() => None,
         "user" => Some(CommandCodeMessageActivity::UserTurn),
         "assistant" if !tool_calls.is_empty() => Some(CommandCodeMessageActivity::ToolUse),
-        "assistant" if !text.trim().is_empty() => Some(CommandCodeMessageActivity::AssistantResponse),
+        "assistant" if !text.trim().is_empty() => {
+            Some(CommandCodeMessageActivity::AssistantResponse)
+        }
         _ => None,
     }
 }
@@ -1904,10 +1907,7 @@ fn parse_agy_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
                 // typically `PLANNER_RESPONSE`; we don't gate on it — a
                 // renamed type would still be a recognized assistant turn,
                 // only the role-by-source gate flags the shape break).
-                let text = val
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                let text = val.get("content").and_then(|c| c.as_str()).unwrap_or("");
                 let mut tool_calls = extract_agy_tool_calls(val.get("tool_calls"));
                 if text.trim().is_empty() && tool_calls.is_empty() {
                     // thinking-only turn — nothing the Coordinator can use.
@@ -1975,7 +1975,6 @@ fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
         })
         .collect()
 }
-
 
 // --- Grok Code parser (issue #1281) ---
 //
@@ -2260,8 +2259,18 @@ mod tests {
         let directory = "F:/repo/.claude/worktrees/source";
         let anchor = 1_788_701_729_172;
         let id = "01a076ee-6c95-7c82-9e5f-928e9f43ad7a";
-        let recover = || crate::services::codex_session::find_historic_id_for_directory_in(root.path(), directory, anchor, true);
-        assert!(recover().is_none(), "initial startup capture sees no rollout yet");
+        let recover = || {
+            crate::services::codex_session::find_historic_id_for_directory_in(
+                root.path(),
+                directory,
+                anchor,
+                true,
+            )
+        };
+        assert!(
+            recover().is_none(),
+            "initial startup capture sees no rollout yet"
+        );
         assert!(read_assistant_report(TranscriptFormat::Codex, None, directory).is_none());
         let day = root.path().join("2026/09/06");
         fs::create_dir_all(&day).unwrap();
@@ -2277,7 +2286,10 @@ mod tests {
         fs::write(day.join("child.jsonl"), format!("{child}\n")).unwrap();
         assert_eq!(recover().as_deref(), Some(id));
         let actual = assistant_report_from_file(&path, TranscriptFormat::Codex).unwrap();
-        assert_eq!(actual.text, "Implementation and verification finished; changes are uncommitted.");
+        assert_eq!(
+            actual.text,
+            "Implementation and verification finished; changes are uncommitted."
+        );
         assert!(!actual.revision.is_empty());
     }
     fn write_fixture(name: &str, body: &str) -> PathBuf {
@@ -2301,20 +2313,32 @@ mod tests {
         let assistant = r#"{"type":"assistant","message":{"id":"a","role":"assistant","content":[{"type":"text","text":"Done."}]}}"#;
         writeln!(file, "{assistant}").unwrap();
         let first = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
-        let user = r#"{"type":"user","message":{"role":"user","content":"Now finish and open the PR"}}"#;
+        let user =
+            r#"{"type":"user","message":{"role":"user","content":"Now finish and open the PR"}}"#;
         writeln!(file, "{user}").unwrap();
-        let waiting = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
+        let waiting =
+            assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
         assert_eq!(waiting.revision, first.revision);
         let tool = r#"{"type":"assistant","message":{"id":"tool","role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"git status"}}]}}"#;
         writeln!(file, "{tool}").unwrap();
-        assert_eq!(assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap().revision, first.revision);
+        assert_eq!(
+            assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode)
+                .unwrap()
+                .revision,
+            first.revision
+        );
         // Even byte-identical responses have distinct positions in the log.
         writeln!(file, "{assistant}").unwrap();
         let second = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
         assert_eq!(second.text, first.text);
         assert_ne!(second.revision, first.revision);
         file.write_all(br#"{"type":"assistant""#).unwrap();
-        assert_eq!(assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap().revision, second.revision);
+        assert_eq!(
+            assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode)
+                .unwrap()
+                .revision,
+            second.revision
+        );
     }
     // --- Shared primitive tests ---
     #[test]
@@ -2364,7 +2388,12 @@ mod tests {
             TranscriptTail::unavailable(UnavailableReason::NoSession)
         );
         assert_eq!(
-            read_tail(TranscriptFormat::ClaudeCode, Some(""), "X:\\src\\buildmesh", 10),
+            read_tail(
+                TranscriptFormat::ClaudeCode,
+                Some(""),
+                "X:\\src\\buildmesh",
+                10
+            ),
             TranscriptTail::unavailable(UnavailableReason::NoSession)
         );
     }
@@ -2385,7 +2414,11 @@ mod tests {
     }
     #[test]
     fn unreadable_file_path_is_unreadable() {
-        let result = read_tail_from_file(Path::new("X:\\nope\\missing.jsonl"), 10, TranscriptFormat::ClaudeCode);
+        let result = read_tail_from_file(
+            Path::new("X:\\nope\\missing.jsonl"),
+            10,
+            TranscriptFormat::ClaudeCode,
+        );
         assert_eq!(
             result,
             TranscriptTail::unavailable(UnavailableReason::Unreadable)
@@ -2417,8 +2450,9 @@ mod tests {
         // produces a race that surfaces as a ShapeChanged from the *other*
         // test's larger fixture).
         let suffix = std::process::id();
-        let path = std::env::temp_dir()
-            .join(format!("buildmesh_test_long_transcript_{suffix}_{rounds}.jsonl"));
+        let path = std::env::temp_dir().join(format!(
+            "buildmesh_test_long_transcript_{suffix}_{rounds}.jsonl"
+        ));
         std::fs::write(&path, &body).unwrap();
         path
     }
@@ -2429,18 +2463,27 @@ mod tests {
         let cheap = read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode);
         std::fs::remove_file(&path).ok();
         let full_last = match full {
-            TranscriptTail::Available { last_assistant_message, .. } => last_assistant_message,
+            TranscriptTail::Available {
+                last_assistant_message,
+                ..
+            } => last_assistant_message,
             other => panic!("full read should be available, got {other:?}"),
         };
         let cheap_last = match cheap {
-            TranscriptTail::Available { last_assistant_message, turns } => {
+            TranscriptTail::Available {
+                last_assistant_message,
+                turns,
+            } => {
                 assert!(turns.is_empty(), "cheap reader must not return turns");
                 last_assistant_message
             }
             other => panic!("cheap read should be available, got {other:?}"),
         };
         assert_eq!(cheap_last, full_last);
-        assert_eq!(cheap_last.as_deref(), Some("The blocking question: shall I proceed?"));
+        assert_eq!(
+            cheap_last.as_deref(),
+            Some("The blocking question: shall I proceed?")
+        );
     }
     #[test]
     fn read_last_assistant_message_falls_back_when_window_lacks_assistant_text() {
@@ -2454,7 +2497,10 @@ mod tests {
         let cheap = read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode);
         std::fs::remove_file(&path).ok();
         let cheap_last = match cheap {
-            TranscriptTail::Available { last_assistant_message, .. } => last_assistant_message,
+            TranscriptTail::Available {
+                last_assistant_message,
+                ..
+            } => last_assistant_message,
             other => panic!("cheap read should be available, got {other:?}"),
         };
         assert_eq!(
@@ -2466,7 +2512,11 @@ mod tests {
     // --- Contract test over a checked-in real-shape fixture ---
     #[test]
     fn contract_parses_tail_and_last_assistant_message() {
-        let tail = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 10, TranscriptFormat::ClaudeCode);
+        let tail = read_tail_from_file(
+            &fixture("claude_code_transcript.jsonl"),
+            10,
+            TranscriptFormat::ClaudeCode,
+        );
         let TranscriptTail::Available {
             turns,
             last_assistant_message,
@@ -2492,7 +2542,10 @@ mod tests {
         assert_eq!(turns[1].tool_calls[0].name, "Read");
         assert_eq!(turns[1].tool_calls[0].input["file_path"], "src/login.ts");
         // The blocking question is the most recent assistant text.
-        assert_eq!(turns[4].text, "Found it — the redirect drops the query string. Shall I apply the fix?");
+        assert_eq!(
+            turns[4].text,
+            "Found it — the redirect drops the query string. Shall I apply the fix?"
+        );
         assert_eq!(
             last_assistant_message.as_deref(),
             Some("Found it — the redirect drops the query string. Shall I apply the fix?")
@@ -2500,7 +2553,11 @@ mod tests {
     }
     #[test]
     fn tail_length_limits_returned_turns() {
-        let two = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 2, TranscriptFormat::ClaudeCode);
+        let two = read_tail_from_file(
+            &fixture("claude_code_transcript.jsonl"),
+            2,
+            TranscriptFormat::ClaudeCode,
+        );
         let TranscriptTail::Available { turns, .. } = two else {
             panic!("expected available");
         };
@@ -2524,7 +2581,10 @@ mod tests {
         assert_eq!(parsed.turns.len(), 1);
         assert_eq!(parsed.turns[0].role, "user");
         // … but the last assistant message is still recovered from the full stream.
-        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Shall I apply the fix?"));
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("Shall I apply the fix?")
+        );
     }
 
     #[test]
@@ -2556,7 +2616,11 @@ mod tests {
     // --- Brittleness defence: renamed/missing fields …"™ Unavailable, no panic ---
     #[test]
     fn shape_changed_fixture_degrades_not_panics() {
-        let tail = read_tail_from_file(&fixture("claude_code_transcript_shape_changed.jsonl"), 10, TranscriptFormat::ClaudeCode);
+        let tail = read_tail_from_file(
+            &fixture("claude_code_transcript_shape_changed.jsonl"),
+            10,
+            TranscriptFormat::ClaudeCode,
+        );
         assert_eq!(
             tail,
             TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
@@ -2571,7 +2635,11 @@ mod tests {
         // tool-result echo, a thinking-only assistant) plus non-message lines
         // (summary/mode/system) is a genuinely-quiet session — `Empty`, the
         // quiet degrade, not the loud `ShapeChanged`.
-        let tail = read_tail_from_file(&fixture("claude_code_transcript_empty.jsonl"), 10, TranscriptFormat::ClaudeCode);
+        let tail = read_tail_from_file(
+            &fixture("claude_code_transcript_empty.jsonl"),
+            10,
+            TranscriptFormat::ClaudeCode,
+        );
         assert_eq!(
             tail,
             TranscriptTail::unavailable(UnavailableReason::Empty),
@@ -2582,8 +2650,10 @@ mod tests {
     #[test]
     fn empty_session_is_empty_through_the_digest_reader_too() {
         // The cheap digest path must make the same empty-vs-shape distinction.
-        let tail =
-            read_last_assistant_message_from_file(&fixture("claude_code_transcript_empty.jsonl"), TranscriptFormat::ClaudeCode);
+        let tail = read_last_assistant_message_from_file(
+            &fixture("claude_code_transcript_empty.jsonl"),
+            TranscriptFormat::ClaudeCode,
+        );
         assert_eq!(tail, TranscriptTail::unavailable(UnavailableReason::Empty));
     }
 
@@ -2598,7 +2668,10 @@ mod tests {
         ];
         let parsed = parse_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty());
-        assert!(parsed.saw_malformed, "a renamed role/content line is malformed");
+        assert!(
+            parsed.saw_malformed,
+            "a renamed role/content line is malformed"
+        );
         assert_eq!(
             empty_or_shape_changed(parsed.saw_malformed),
             UnavailableReason::ShapeChanged
@@ -2617,8 +2690,9 @@ mod tests {
                 r#"{{"type":"tool_use","id":"t{i}","name":"Read","input":{{"file_path":"/a/{i}"}}}}"#
             ));
         }
-        let line =
-            format!(r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#);
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#
+        );
         let parsed = parse_turns(std::iter::once(line), 10);
         assert_eq!(parsed.turns.len(), 1);
         assert_eq!(
@@ -2643,10 +2717,16 @@ mod tests {
                     start + i
                 ));
             }
-            format!(r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#)
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#
+            )
         };
         let parsed = parse_turns(vec![mk(0), mk(1000)].into_iter(), 10);
-        assert_eq!(parsed.turns.len(), 1, "same message.id coalesces to one turn");
+        assert_eq!(
+            parsed.turns.len(),
+            1,
+            "same message.id coalesces to one turn"
+        );
         assert_eq!(parsed.turns[0].tool_calls.len(), MAX_TURN_TOOL_CALLS);
     }
 
@@ -2715,7 +2795,10 @@ mod tests {
             ]
             .into_iter(),
         );
-        assert!(pending.is_empty(), "terminal notifications end the wait, got {pending:?}");
+        assert!(
+            pending.is_empty(),
+            "terminal notifications end the wait, got {pending:?}"
+        );
     }
 
     #[test]
@@ -2750,8 +2833,8 @@ mod tests {
     #[test]
     fn count_pending_reads_real_fixture_shape() {
         let suffix = std::process::id();
-        let path = std::env::temp_dir()
-            .join(format!("buildmesh_test_pending_tasks_{suffix}.jsonl"));
+        let path =
+            std::env::temp_dir().join(format!("buildmesh_test_pending_tasks_{suffix}.jsonl"));
         let body = [
             launch_line("early"),
             notification_line("early", "completed"),
@@ -2826,7 +2909,9 @@ mod tests {
         assert_eq!(turns[1].tool_calls.len(), 1);
         assert_eq!(turns[1].tool_calls[0].name, "shell");
         assert_eq!(turns[1].tool_calls[0].input["command"], "dir /s /b *.ts");
-        assert!(turns[1].text.starts_with("I found the following TypeScript files"));
+        assert!(turns[1]
+            .text
+            .starts_with("I found the following TypeScript files"));
         // call_02's arguments are a string-encoded JSON blob — decoded to
         // structure, not delivered as an escaped string.
         assert_eq!(turns[3].tool_calls[0].name, "read_file");
@@ -2929,7 +3014,8 @@ mod tests {
         ));
         let day = temp.join("2026").join("07").join("18");
         std::fs::create_dir_all(&day).unwrap();
-        let file = day.join("rollout-2026-07-18T10-00-00-c1234567-89ab-cdef-0123-456789abcdef.jsonl");
+        let file =
+            day.join("rollout-2026-07-18T10-00-00-c1234567-89ab-cdef-0123-456789abcdef.jsonl");
         std::fs::write(&file, "{}").unwrap();
 
         let found = find_codex_rollout_in(&temp, "c1234567-89ab-cdef-0123-456789abcdef");
@@ -2954,17 +3040,32 @@ mod tests {
     /// future routing regression.
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
-        assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        assert_eq!(
+            TranscriptFormat::for_harness("codex"),
+            TranscriptFormat::Codex
+        );
         assert_eq!(
             TranscriptFormat::for_harness("commandcode"),
             TranscriptFormat::CommandCode
         );
-        assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
+        assert_eq!(
+            TranscriptFormat::for_harness("cursor"),
+            TranscriptFormat::Cursor
+        );
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
-        assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
-        assert_eq!(TranscriptFormat::for_harness("opencode"), TranscriptFormat::OpenCode);
+        assert_eq!(
+            TranscriptFormat::for_harness("grok"),
+            TranscriptFormat::Grok
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("opencode"),
+            TranscriptFormat::OpenCode
+        );
         for id in ["anthropic", "claude", "terminal", ""] {
-            assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
+            assert_eq!(
+                TranscriptFormat::for_harness(id),
+                TranscriptFormat::ClaudeCode
+            );
         }
     }
 
@@ -2972,9 +3073,7 @@ mod tests {
     fn commandcode_slug_matches_v143_layout() {
         // Observed on-disk layout in Command Code v1.43.0 (issue #1500).
         assert_eq!(
-            commandcode_project_slug(
-                r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove"
-            ),
+            commandcode_project_slug(r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove"),
             "f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
         );
         assert_eq!(
@@ -3007,9 +3106,7 @@ mod tests {
         .expect("windows sessions dir should resolve");
         let dir_str = dir.to_string_lossy().replace('\\', "/");
         assert!(
-            dir_str.ends_with(
-                "projects/f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"
-            ),
+            dir_str.ends_with("projects/f-src-buildmesh-claude-worktrees-saucy-thunderous-cove"),
             "sessions dir should be projects/<slug>, got {dir_str}"
         );
         assert!(
@@ -3233,7 +3330,9 @@ mod tests {
             "c-Users-adam-src-buildmesh"
         );
         assert_eq!(
-            cursor_workspace_slug("C:\\Users\\adam\\src\\buildmesh\\.claude\\worktrees\\fancy-name"),
+            cursor_workspace_slug(
+                "C:\\Users\\adam\\src\\buildmesh\\.claude\\worktrees\\fancy-name"
+            ),
             "c-Users-adam-src-buildmesh--claude-worktrees-fancy-name"
         );
     }
@@ -3293,11 +3392,7 @@ mod tests {
     /// for.
     #[test]
     fn agy_contract_parses_tail_and_last_assistant_message() {
-        let tail = read_tail_from_file(
-            &fixture("agy_transcript.jsonl"),
-            10,
-            TranscriptFormat::Agy,
-        );
+        let tail = read_tail_from_file(&fixture("agy_transcript.jsonl"), 10, TranscriptFormat::Agy);
         let TranscriptTail::Available {
             turns,
             last_assistant_message,
@@ -3323,8 +3418,7 @@ mod tests {
         assert_eq!(turns[1].tool_calls.len(), 1);
         assert_eq!(turns[1].tool_calls[0].name, "read_file");
         assert_eq!(
-            turns[1].tool_calls[0].input["file_path"],
-            "src/login.ts",
+            turns[1].tool_calls[0].input["file_path"], "src/login.ts",
             "AGY's `args` field is mapped onto the shared `input` wire shape"
         );
         // The second MODEL turn has text + a different tool call shape.
@@ -3333,10 +3427,7 @@ mod tests {
             "Found it — the redirect drops the query string. Shall I apply the fix?"
         );
         assert_eq!(turns[2].tool_calls[0].name, "search_replace");
-        assert_eq!(
-            turns[2].tool_calls[0].input["file_path"],
-            "src/login.ts"
-        );
+        assert_eq!(turns[2].tool_calls[0].input["file_path"], "src/login.ts");
         // The SYSTEM TASK_NOTIFICATION is silently dropped before the
         // user prompt that follows it.
         assert_eq!(turns[3].text, "Yes, apply the fix.");
@@ -3476,9 +3567,7 @@ mod tests {
     #[test]
     fn agy_locator_prefers_short_transcript_then_falls_back_to_full() {
         let suffix = std::process::id();
-        let temp = std::env::temp_dir().join(format!(
-            "buildmesh_test_agy_locator_{suffix}"
-        ));
+        let temp = std::env::temp_dir().join(format!("buildmesh_test_agy_locator_{suffix}"));
         let conv = temp.join("conv-123").join(".system_generated").join("logs");
         std::fs::create_dir_all(&conv).unwrap();
 
@@ -3592,7 +3681,10 @@ mod tests {
         ];
         let parsed = parse_grok_turns(lines.into_iter(), 10);
         assert_eq!(parsed.turns.len(), 2);
-        assert!(!parsed.saw_malformed, "unknown event types must not flag malformed");
+        assert!(
+            !parsed.saw_malformed,
+            "unknown event types must not flag malformed"
+        );
         assert_eq!(parsed.last_assistant_message.as_deref(), Some("real reply"));
     }
 
@@ -3612,7 +3704,10 @@ mod tests {
         ];
         let parsed = parse_grok_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty());
-        assert!(parsed.saw_malformed, "recognized role with wrong content type is malformed");
+        assert!(
+            parsed.saw_malformed,
+            "recognized role with wrong content type is malformed"
+        );
         assert_eq!(
             empty_or_shape_changed(parsed.saw_malformed),
             UnavailableReason::ShapeChanged
@@ -3630,7 +3725,10 @@ mod tests {
             r#"{"latency_ms":42,"transport":"stream"}"#.to_string(),
         ];
         let parsed = parse_grok_turns(lines.into_iter(), 10);
-        assert!(parsed.turns.is_empty(), "no recognized-role lines yields no turns");
+        assert!(
+            parsed.turns.is_empty(),
+            "no recognized-role lines yields no turns"
+        );
         assert!(
             !parsed.saw_malformed,
             "unknown event types must NOT flag malformed"
@@ -3701,9 +3799,8 @@ mod tests {
     #[test]
     fn grok_locator_prefers_chat_history_over_updates() {
         let suffix = std::process::id();
-        let temp = std::env::temp_dir().join(format!(
-            "buildmesh_test_grok_locator_prefer_{suffix}"
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("buildmesh_test_grok_locator_prefer_{suffix}"));
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("chat_history.jsonl"), "{}").unwrap();
@@ -3722,9 +3819,8 @@ mod tests {
     #[test]
     fn grok_locator_falls_back_to_updates_when_chat_history_missing() {
         let suffix = std::process::id();
-        let temp = std::env::temp_dir().join(format!(
-            "buildmesh_test_grok_locator_fallback_{suffix}"
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("buildmesh_test_grok_locator_fallback_{suffix}"));
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
@@ -3742,8 +3838,7 @@ mod tests {
     #[test]
     fn grok_locator_returns_none_when_both_files_missing() {
         let suffix = std::process::id();
-        let temp = std::env::temp_dir()
-            .join(format!("buildmesh_test_grok_locator_none_{suffix}"));
+        let temp = std::env::temp_dir().join(format!("buildmesh_test_grok_locator_none_{suffix}"));
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
         assert!(grok_locator_in(&temp, "session-abc", "").is_none());
@@ -3839,8 +3934,7 @@ mod tests {
         assert_eq!(turns[1].tool_calls.len(), 1);
         assert_eq!(turns[1].tool_calls[0].name, "read_file");
         assert_eq!(
-            turns[1].tool_calls[0].input["file_path"],
-            "src/login.ts",
+            turns[1].tool_calls[0].input["file_path"], "src/login.ts",
             "OpenCode `state.input` is mapped onto the shared `input` wire shape"
         );
         // Second assistant turn: reasoning (skipped), text, tool call — the
@@ -3855,10 +3949,7 @@ mod tests {
             turns[3].text
         );
         assert_eq!(turns[3].tool_calls[0].name, "search_replace");
-        assert_eq!(
-            turns[3].tool_calls[0].input["file_path"],
-            "src/login.ts"
-        );
+        assert_eq!(turns[3].tool_calls[0].input["file_path"], "src/login.ts");
         // Final assistant turn: text only, with a trailing step-finish part
         // that must be silently dropped.
         assert_eq!(
@@ -3953,7 +4044,10 @@ mod tests {
                  got {tail:?}"
             );
         };
-        assert!(turns.is_empty(), "digest path must return turns: Vec::new()");
+        assert!(
+            turns.is_empty(),
+            "digest path must return turns: Vec::new()"
+        );
         assert!(
             last_assistant_message.is_none(),
             "no assistant message in the window —> last_assistant_message: None"
@@ -4321,8 +4415,16 @@ mod tests {
     #[test]
     fn opencode_locator_reads_messages_from_file_backed_db() {
         let tmp = tempfile_opencode_db(&[
-            (100, "user", &opencode_text_message("user", "Inspect src/login.ts.")),
-            (200, "assistant", &opencode_text_message("assistant", "Looking now.")),
+            (
+                100,
+                "user",
+                &opencode_text_message("user", "Inspect src/login.ts."),
+            ),
+            (
+                200,
+                "assistant",
+                &opencode_text_message("assistant", "Looking now."),
+            ),
             // Row for a *different* session id — must not leak in. We
             // re-open and write to that session id below.
         ]);
@@ -4335,9 +4437,8 @@ mod tests {
         .expect("insert foreign row");
         drop(conn);
 
-        let messages =
-            read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 10)
-                .expect("locator should return a value");
+        let messages = read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 10)
+            .expect("locator should return a value");
         let parsed = parse_opencode_messages(&messages, 10);
         assert_eq!(parsed.turns.len(), 2);
         assert_eq!(parsed.turns[0].role, "user");
@@ -4360,7 +4461,11 @@ mod tests {
     fn circuit_opencode_report_identity_survives_restart_and_identical_replies() {
         let session = "ses_fixedsid000000000000000000001";
         let tmp = tempfile_opencode_db(&[
-            (100, "assistant", &opencode_text_message("assistant", "Done.")),
+            (
+                100,
+                "assistant",
+                &opencode_text_message("assistant", "Done."),
+            ),
             (200, "user", &opencode_text_message("user", "Finish now")),
         ]);
         let first = opencode_assistant_report(tmp.path(), session).unwrap();
@@ -4372,7 +4477,12 @@ mod tests {
         let second = opencode_assistant_report(tmp.path(), session).unwrap();
         assert_eq!(second.text, first.text);
         assert_ne!(second.revision, first.revision);
-        assert_eq!(opencode_assistant_report(tmp.path(), session).unwrap().revision, second.revision);
+        assert_eq!(
+            opencode_assistant_report(tmp.path(), session)
+                .unwrap()
+                .revision,
+            second.revision
+        );
     }
 
     /// A session id that doesn't match any row is not an error — the
@@ -4381,13 +4491,10 @@ mod tests {
     /// file on drop.
     #[test]
     fn opencode_locator_returns_empty_for_unknown_session() {
-        let tmp = tempfile_opencode_db(&[(
-            100,
-            "user",
-            &opencode_text_message("user", "hi"),
-        )]);
-        let messages = read_opencode_messages(tmp.path(), "ses_unknown0000000000000000000000001", 10)
-            .expect("locator must not error when the session has no rows");
+        let tmp = tempfile_opencode_db(&[(100, "user", &opencode_text_message("user", "hi"))]);
+        let messages =
+            read_opencode_messages(tmp.path(), "ses_unknown0000000000000000000000001", 10)
+                .expect("locator must not error when the session has no rows");
         let parsed = parse_opencode_messages(&messages, 10);
         assert_eq!(
             parsed,
@@ -4425,14 +4532,25 @@ mod tests {
     fn opencode_locator_returns_rows_in_ascending_order() {
         let tmp = tempfile_opencode_db(&[
             (0, "user", &opencode_text_message("user", "first ever row")),
-            (50_000, "assistant", &opencode_text_message("assistant", "early assistant")),
-            (100_000, "user", &opencode_text_message("user", "near latest 2")),
-            (150_000, "assistant", &opencode_text_message("assistant", "latest 1")),
+            (
+                50_000,
+                "assistant",
+                &opencode_text_message("assistant", "early assistant"),
+            ),
+            (
+                100_000,
+                "user",
+                &opencode_text_message("user", "near latest 2"),
+            ),
+            (
+                150_000,
+                "assistant",
+                &opencode_text_message("assistant", "latest 1"),
+            ),
             (200_000, "user", &opencode_text_message("user", "latest 2")),
         ]);
-        let messages =
-            read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 3)
-                .expect("locator must accept the bounded row_budget");
+        let messages = read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 3)
+            .expect("locator must accept the bounded row_budget");
         assert_eq!(
             messages.len(),
             3,
@@ -4481,5 +4599,3 @@ mod tests {
         );
     }
 }
-
-

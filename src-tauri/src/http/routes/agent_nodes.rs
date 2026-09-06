@@ -17,10 +17,7 @@ use crate::http::MaybeTls;
 use crate::db;
 use crate::http::request;
 
-pub async fn discover(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-) {
+pub async fn discover(lines: &mut tokio::io::BufStream<MaybeTls>, mesh_id: i64) {
     // Issue #1389 — `services::agent_node_discovery::discover` walks every
     // session directory under `~/.claude/projects/`, `~/.cursor/projects/`,
     // and `~/.gemini/antigravity-cli/brain/` and reads each JSONL line by
@@ -81,8 +78,7 @@ pub async fn import_and_resume(
     mesh_id: i64,
     content_length: usize,
 ) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
+    let Some(body_bytes) = request::read_body_or_send_error(lines, content_length, 64 * 1024).await
     else {
         return;
     };
@@ -156,8 +152,11 @@ pub async fn import_and_resume(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|n| crate::env::resolve_worktree_node_raw(&effective_dir, n));
-            let resolved =
-                crate::env::resolve_agent_path_in_dir(&mesh.path, &effective_dir, worktree_owned.as_deref());
+            let resolved = crate::env::resolve_agent_path_in_dir(
+                &mesh.path,
+                &effective_dir,
+                worktree_owned.as_deref(),
+            );
             let use_worktree = worktree_owned.is_some();
             let mut node = match db::create_agent_node(
                 mesh_id,

@@ -197,7 +197,11 @@ fn path_exts() -> Vec<String> {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty()),
             ),
-            _ => exts.extend([".EXE", ".CMD", ".BAT", ".COM"].iter().map(|s| s.to_string())),
+            _ => exts.extend(
+                [".EXE", ".CMD", ".BAT", ".COM"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            ),
         }
     }
     exts
@@ -329,7 +333,10 @@ mod tests {
         let path_dirs = dirs(&["C:/tools"]);
         let exists = fake_fs(&["C:/tools/claude.exe"]);
         let profiles = detect_profiles(&path_dirs, &["", ".EXE"], None, &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["claude"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["claude"]
+        );
     }
 
     #[test]
@@ -339,7 +346,10 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.claude"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["claude"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["claude"]
+        );
     }
 
     /// Kimi Code (#918) ships `~/.kimi/` for config alongside the `kimi` binary.
@@ -352,7 +362,10 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.kimi"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["kimi"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["kimi"]
+        );
     }
 
     /// MiniMax Code CLI (`mcode`) ships `~/.mcode/` or `~/.minimax-code/` for config alongside the `mcode` binary.
@@ -362,11 +375,20 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.mcode"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["mcode"]
+        );
 
         let exists_alt = fake_fs(&["/home/me/.minimax-code"]);
         let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
-        assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["mcode"]);
+        assert_eq!(
+            profiles_alt
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mcode"]
+        );
     }
 
     /// DeepSeek Harness (`dsh`) ships `~/.dsh/` or `~/.deepseek-harness/` for config alongside the `dsh` binary.
@@ -376,11 +398,20 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.dsh"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["dsh"]
+        );
 
         let exists_alt = fake_fs(&["/home/me/.deepseek-harness"]);
         let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
-        assert_eq!(profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["dsh"]);
+        assert_eq!(
+            profiles_alt
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dsh"]
+        );
     }
 
     /// Command Code ships `~/.commandcode/` for config and auth credentials alongside the `cmdc`/`cmd` binary.
@@ -390,7 +421,10 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.commandcode"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["commandcode"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["commandcode"]
+        );
     }
 
     /// On Windows, `cmd.exe` in System32 must NOT false-positive Command Code.
@@ -472,7 +506,10 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.gemini/antigravity-cli"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["agy"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["agy"]
+        );
 
         // The IDE-fork home and the symlink-layer home must count too —
         // mirrors the dual-`.kimi` / dual-`.mcode` pattern used for
@@ -480,14 +517,20 @@ mod tests {
         let exists_alt = fake_fs(&["/home/me/.antigravity"]);
         let profiles_alt = detect_profiles(&path_dirs, &[""], Some(&home), &exists_alt);
         assert_eq!(
-            profiles_alt.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            profiles_alt
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["agy"]
         );
 
         let exists_sym = fake_fs(&["/home/me/.antigravitycli"]);
         let profiles_sym = detect_profiles(&path_dirs, &[""], Some(&home), &exists_sym);
         assert_eq!(
-            profiles_sym.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            profiles_sym
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["agy"]
         );
     }
@@ -523,7 +566,10 @@ mod tests {
         let home = PathBuf::from("/home/me");
         let exists = fake_fs(&["/home/me/.config/manicode"]);
         let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["freebuff"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["freebuff"]
+        );
     }
 
     /// Freebuff installed globally via npm in `%APPDATA%\npm` or `~/.npm-global/bin`
@@ -533,7 +579,10 @@ mod tests {
         let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
         let exists = fake_fs(&["C:/Users/me/AppData/Roaming/npm/freebuff.cmd"]);
         let profiles = detect_profiles(&path_dirs, &["", ".CMD", ".EXE"], None, &exists);
-        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["freebuff"]);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["freebuff"]
+        );
     }
 
     #[test]

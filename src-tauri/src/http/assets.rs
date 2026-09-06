@@ -6,7 +6,7 @@
 //! the SPA shell directly so the existing QR code at `http://lan-ip:1992/`
 //! keeps working unchanged.
 
-use crate::http::{MaybeTls, request};
+use crate::http::{request, MaybeTls};
 
 #[derive(rust_embed::Embed)]
 #[folder = "../dist/mobile"]
@@ -83,7 +83,10 @@ fn inject_debug_shim(html: &str, shim: &str) -> (String, InsertionStrategy) {
             InsertionStrategy::AfterDoctype,
         );
     }
-    (format!("{marked_shim}{html}"), InsertionStrategy::PrependedFallback)
+    (
+        format!("{marked_shim}{html}"),
+        InsertionStrategy::PrependedFallback,
+    )
 }
 
 /// Return the byte index of the first occurrence of `needle` in `haystack`,
@@ -99,7 +102,8 @@ fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     let n = needle.as_bytes();
     let first = n[0];
     for i in 0..=h.len() - n.len() {
-        if h[i].eq_ignore_ascii_case(&first) && h[i + 1..i + n.len()].eq_ignore_ascii_case(&n[1..]) {
+        if h[i].eq_ignore_ascii_case(&first) && h[i + 1..i + n.len()].eq_ignore_ascii_case(&n[1..])
+        {
             return Some(i);
         }
     }
@@ -423,11 +427,17 @@ mod tests {
     fn parse_bytes_range_closed() {
         assert_eq!(
             parse_bytes_range("bytes=0-1023"),
-            Some(BytesRange::Closed { start: 0, end: 1023 })
+            Some(BytesRange::Closed {
+                start: 0,
+                end: 1023
+            })
         );
         assert_eq!(
             parse_bytes_range("bytes=100-200"),
-            Some(BytesRange::Closed { start: 100, end: 200 })
+            Some(BytesRange::Closed {
+                start: 100,
+                end: 200
+            })
         );
     }
 
@@ -499,7 +509,8 @@ mod tests {
         // HTML5 lets the author omit `</head>` when it's immediately followed
         // by `<body>`. Aggressive minifiers exploit this — the shim must
         // still inject, just before `<body>`.
-        let html = "<!doctype html><html><head><title>x</title><body><div id=\"r\"></div></body></html>";
+        let html =
+            "<!doctype html><html><head><title>x</title><body><div id=\"r\"></div></body></html>";
         let (out, strategy) = inject_debug_shim(html, SHIM_SCRIPT_TAG);
         assert_eq!(strategy, InsertionStrategy::BeforeBody);
         assert!(out.contains(DEBUG_SHIM_MARKER), "marker missing: {out:?}");
@@ -563,7 +574,13 @@ mod tests {
     #[test]
     fn resolve_range_closed_truncates_overshoot() {
         assert_eq!(
-            resolve_range(BytesRange::Closed { start: 0, end: 9999 }, 100),
+            resolve_range(
+                BytesRange::Closed {
+                    start: 0,
+                    end: 9999
+                },
+                100
+            ),
             Some((0, 99))
         );
     }
@@ -596,10 +613,7 @@ mod tests {
             None
         );
         // Suffix longer than the body
-        assert_eq!(
-            resolve_range(BytesRange::Suffix { last_n: 200 }, 100),
-            None
-        );
+        assert_eq!(resolve_range(BytesRange::Suffix { last_n: 200 }, 100), None);
         // Empty body
         assert_eq!(
             resolve_range(BytesRange::Closed { start: 0, end: 0 }, 0),

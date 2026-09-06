@@ -168,11 +168,17 @@ impl AppContainerProfile {
                 let hr2 = ffi::DeriveAppContainerSidFromAppContainerName(wname.as_ptr(), &mut sid);
                 if hr2 != ffi::S_OK {
                     free_capability_sids(&capability_sids);
-                    return Err(format!("DeriveAppContainerSidFromAppContainerName failed: HRESULT 0x{:08X}", hr2));
+                    return Err(format!(
+                        "DeriveAppContainerSidFromAppContainerName failed: HRESULT 0x{:08X}",
+                        hr2
+                    ));
                 }
             } else if hr != ffi::S_OK {
                 free_capability_sids(&capability_sids);
-                return Err(format!("CreateAppContainerProfile failed: HRESULT 0x{:08X}", hr));
+                return Err(format!(
+                    "CreateAppContainerProfile failed: HRESULT 0x{:08X}",
+                    hr
+                ));
             }
             sid
         };
@@ -214,7 +220,10 @@ impl AppContainerProfile {
         unsafe {
             let mut out: *mut u16 = std::ptr::null_mut();
             if ffi::ConvertSidToStringSidW(self.sid, &mut out) == 0 || out.is_null() {
-                return Err(format!("ConvertSidToStringSidW failed: {}", std::io::Error::last_os_error()));
+                return Err(format!(
+                    "ConvertSidToStringSidW failed: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
             // Read the NUL-terminated wide string.
             let mut len = 0usize;
@@ -237,7 +246,10 @@ impl AppContainerProfile {
         if hr == ffi::S_OK {
             Ok(())
         } else {
-            Err(format!("DeleteAppContainerProfile failed: HRESULT 0x{:08X}", hr))
+            Err(format!(
+                "DeleteAppContainerProfile failed: HRESULT 0x{:08X}",
+                hr
+            ))
         }
     }
 }
@@ -289,13 +301,19 @@ mod tests {
     #[test]
     fn create_yields_sid_then_deletes() {
         let name = "com.alond.buildmesh.test-appcontainer";
-        let profile = AppContainerProfile::create_or_derive(name, true)
-            .expect("create AppContainer profile");
-        assert!(!profile.app_container_sid().is_null(), "SID must be non-null");
+        let profile =
+            AppContainerProfile::create_or_derive(name, true).expect("create AppContainer profile");
+        assert!(
+            !profile.app_container_sid().is_null(),
+            "SID must be non-null"
+        );
 
         // Capabilities requested → the SECURITY_CAPABILITIES reflects them.
         let caps = profile.security_capabilities();
-        assert_eq!(caps.capability_count, 1, "internetClient capability present");
+        assert_eq!(
+            caps.capability_count, 1,
+            "internetClient capability present"
+        );
         assert!(!caps.app_container_sid.is_null());
 
         profile.delete().expect("delete AppContainer profile");
@@ -306,8 +324,7 @@ mod tests {
     #[test]
     fn create_or_derive_is_idempotent() {
         let name = "com.alond.buildmesh.test-appcontainer-idem";
-        let first = AppContainerProfile::create_or_derive(name, false)
-            .expect("first create");
+        let first = AppContainerProfile::create_or_derive(name, false).expect("first create");
         let second = AppContainerProfile::create_or_derive(name, false)
             .expect("second create-or-derive must succeed via the derive fallback");
         assert!(!first.app_container_sid().is_null());

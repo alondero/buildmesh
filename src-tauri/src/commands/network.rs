@@ -264,8 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
 
-        let b64 = get_root_cert_mobileconfig_inner(dir.path())
-            .expect("get_root_cert_mobileconfig");
+        let b64 = get_root_cert_mobileconfig_inner(dir.path()).expect("get_root_cert_mobileconfig");
         let signed = base64::engine::general_purpose::STANDARD
             .decode(&b64)
             .expect("base64");
@@ -280,9 +279,12 @@ mod tests {
             .args([
                 "cms",
                 "-verify",
-                "-inform", "DER",
-                "-in", signed_path.to_str().unwrap(),
-                "-CAfile", root_pem_path.to_str().unwrap(),
+                "-inform",
+                "DER",
+                "-in",
+                signed_path.to_str().unwrap(),
+                "-CAfile",
+                root_pem_path.to_str().unwrap(),
                 "-noverify",
             ])
             .output()

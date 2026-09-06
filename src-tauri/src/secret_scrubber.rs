@@ -118,8 +118,9 @@ static QUOTED_VALUE_RE: Lazy<Regex> = Lazy::new(|| {
 /// *substring* match (so `accessToken`/`apiKey` camelCase keys are caught):
 /// over-masking a benign `tokens_used` is the safe direction for a secret
 /// scrubber; missing a real credential key is not.
-static SECRET_KEY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(&format!("(?i)(?:{SECRET_WORDS})")).expect("secret-key regex is valid"));
+static SECRET_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!("(?i)(?:{SECRET_WORDS})")).expect("secret-key regex is valid")
+});
 
 /// An HTTP auth-scheme credential — `Bearer`/`Basic`/`token`/`OAuth` followed by
 /// the credential. Masks the credential while keeping the scheme word (in its
@@ -295,7 +296,8 @@ mod tests {
     #[test]
     fn masks_github_token_mid_sentence_context_free() {
         // No key=value context here — the distinctive ghp_ shape is enough.
-        let scrubbed = SecretScrubber::scrub("I ran it with ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 set.");
+        let scrubbed =
+            SecretScrubber::scrub("I ran it with ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 set.");
         assert_eq!(scrubbed, "I ran it with [REDACTED] set.");
     }
 

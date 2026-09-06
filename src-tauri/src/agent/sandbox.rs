@@ -123,7 +123,10 @@ pub fn seatbelt_profile(
     // The one read-write region: the node's Git worktree. Everything the agent
     // edits, builds, and commits lives here.
     p.push_str(";; Read-write ONLY inside the node's Git worktree.\n");
-    p.push_str(&format!("(allow file* (subpath {}))\n\n", sbpl_quote(worktree_path)));
+    p.push_str(&format!(
+        "(allow file* (subpath {}))\n\n",
+        sbpl_quote(worktree_path)
+    ));
 
     // Transient scratch space. macOS hands every process a per-user temp dir
     // under /private/var/folders; many tools (git, compilers) write there.
@@ -140,8 +143,14 @@ pub fn seatbelt_profile(
         let home = home.trim_end_matches('/');
         p.push_str(";; Git user-level config (read-only). $HOME is otherwise denied.\n");
         p.push_str("(allow file-read*\n");
-        p.push_str(&format!("    (literal {})\n", sbpl_quote(&format!("{home}/.gitconfig"))));
-        p.push_str(&format!("    (subpath {}))\n\n", sbpl_quote(&format!("{home}/.config/git"))));
+        p.push_str(&format!(
+            "    (literal {})\n",
+            sbpl_quote(&format!("{home}/.gitconfig"))
+        ));
+        p.push_str(&format!(
+            "    (subpath {}))\n\n",
+            sbpl_quote(&format!("{home}/.config/git"))
+        ));
     }
 
     // SSH agent socket forwarding. Granting the socket lets git authenticate
@@ -155,7 +164,10 @@ pub fn seatbelt_profile(
         // socket placed elsewhere (e.g. a forwarded path) still resolves.
         if let Some(parent) = PathBuf::from(sock).parent().and_then(|p| p.to_str()) {
             if !parent.is_empty() {
-                p.push_str(&format!("(allow file-read* (literal {}))\n", sbpl_quote(parent)));
+                p.push_str(&format!(
+                    "(allow file-read* (literal {}))\n",
+                    sbpl_quote(parent)
+                ));
             }
         }
         p.push('\n');
@@ -214,8 +226,14 @@ mod tests {
     #[test]
     fn profile_opens_with_version_and_denies_default() {
         let p = seatbelt_profile(WORKTREE, None, None);
-        assert!(p.starts_with("(version 1)"), "profile must start with the SBPL version header:\n{p}");
-        assert!(p.contains("(deny default)"), "profile must deny by default:\n{p}");
+        assert!(
+            p.starts_with("(version 1)"),
+            "profile must start with the SBPL version header:\n{p}"
+        );
+        assert!(
+            p.contains("(deny default)"),
+            "profile must deny by default:\n{p}"
+        );
     }
 
     #[test]
@@ -230,7 +248,10 @@ mod tests {
     #[test]
     fn profile_allows_network_for_git() {
         let p = seatbelt_profile(WORKTREE, None, None);
-        assert!(p.contains("(allow network*)"), "profile must allow network egress for git:\n{p}");
+        assert!(
+            p.contains("(allow network*)"),
+            "profile must allow network egress for git:\n{p}"
+        );
     }
 
     #[test]
@@ -254,7 +275,10 @@ mod tests {
         // produce an `(allow file* (literal ""))` that grants nothing or, worse,
         // matches unexpectedly.
         let p_empty = seatbelt_profile(WORKTREE, None, Some(""));
-        assert!(!p_empty.contains("(literal \"\")"), "empty sock must not emit a literal rule:\n{p_empty}");
+        assert!(
+            !p_empty.contains("(literal \"\")"),
+            "empty sock must not emit a literal rule:\n{p_empty}"
+        );
     }
 
     /// The whole point of the sandbox: the home folder's credential stores are
@@ -269,7 +293,8 @@ mod tests {
         assert!(!p.contains(".aws"), "profile must never grant ~/.aws:\n{p}");
         // We DO allow git's user config — that's read-only and not a secret.
         assert!(
-            p.contains(&format!("(literal \"{home}/.gitconfig\"))")) || p.contains(&format!("{home}/.gitconfig")),
+            p.contains(&format!("(literal \"{home}/.gitconfig\"))"))
+                || p.contains(&format!("{home}/.gitconfig")),
             "profile should allow read of ~/.gitconfig when HOME is known:\n{p}"
         );
     }
@@ -285,23 +310,38 @@ mod tests {
     }
 
     fn argv(cmd: &CommandBuilder) -> Vec<String> {
-        cmd.get_argv().iter().map(|s| s.to_string_lossy().into_owned()).collect()
+        cmd.get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
     fn seatbelt_command_wraps_binary_with_sandbox_exec() {
         let session_id = -97_001; // negative => unlikely to collide with a real session temp file
-        let args = vec!["--dangerously-skip-permissions".to_string(), "--session-id".to_string(), "abc".to_string()];
+        let args = vec![
+            "--dangerously-skip-permissions".to_string(),
+            "--session-id".to_string(),
+            "abc".to_string(),
+        ];
         let cmd = seatbelt_command("claude", &args, WORKTREE, session_id).expect("write profile");
 
         let got = argv(&cmd);
         assert_eq!(got[0], SANDBOX_EXEC, "must invoke sandbox-exec: {got:?}");
         assert_eq!(got[1], "-f", "must pass a profile file: {got:?}");
         let profile_file = got[2].clone();
-        assert!(profile_file.ends_with(".sb"), "profile path must be a .sb file: {got:?}");
+        assert!(
+            profile_file.ends_with(".sb"),
+            "profile path must be a .sb file: {got:?}"
+        );
         assert_eq!(
             &got[3..],
-            &["claude", "--dangerously-skip-permissions", "--session-id", "abc"],
+            &[
+                "claude",
+                "--dangerously-skip-permissions",
+                "--session-id",
+                "abc"
+            ],
             "inner binary + args must follow the profile, unchanged: {got:?}"
         );
 

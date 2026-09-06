@@ -19,19 +19,15 @@ mod confirm_quit_tests;
 mod default_provider_tests;
 mod harness_tests;
 mod migrations_tests;
-mod pairings_tests;
 mod pairing_compat_tests;
+mod pairings_tests;
 mod storage_tests;
 
-static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(crate) fn test_dir() -> PathBuf {
     let id = TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "buildmesh-prefs-test-{}-{id}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("buildmesh-prefs-test-{}-{id}", std::process::id()))
 }
 
 pub(crate) fn with_temp_dir<F: FnOnce(&PathBuf)>(f: F) -> PathBuf {

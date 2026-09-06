@@ -26,7 +26,10 @@ fn default_provider_accounts_cover_the_builtin_providers() {
     let accounts = default_provider_accounts();
     let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
     for required in ["anthropic", "codex", "agy", "grok", "opencode"] {
-        assert!(ids.contains(&required), "missing default account: {required}");
+        assert!(
+            ids.contains(&required),
+            "missing default account: {required}"
+        );
     }
 }
 
@@ -43,9 +46,7 @@ fn builtin_minimax_pairing_reproduces_claude_code_model_routing() {
     assert_eq!(tiers.sonnet.as_deref(), Some("MiniMax-M3[1m]"));
     assert_eq!(tiers.haiku.as_deref(), Some("MiniMax-M2.7"));
     assert_eq!(tiers.small_fast.as_deref(), Some("MiniMax-M2.7"));
-    assert_eq!(
-        anthropic.base_url, "https://api.minimax.io/anthropic"
-    );
+    assert_eq!(anthropic.base_url, "https://api.minimax.io/anthropic");
 }
 
 #[test]
@@ -55,15 +56,28 @@ fn builtin_deepseek_pairing_reproduces_claude_code_model_routing() {
         .iter()
         .find(|s| s.surface == ApiSurface::Anthropic)
         .expect("anthropic surface for deepseek");
-    assert_eq!(anthropic.model_tiers.opus.as_deref(), Some("deepseek-reasoner"));
-    assert_eq!(anthropic.model_tiers.fable.as_deref(), Some("deepseek-reasoner"));
-    assert_eq!(anthropic.model_tiers.haiku.as_deref(), Some("deepseek-chat"));
+    assert_eq!(
+        anthropic.model_tiers.opus.as_deref(),
+        Some("deepseek-reasoner")
+    );
+    assert_eq!(
+        anthropic.model_tiers.fable.as_deref(),
+        Some("deepseek-reasoner")
+    );
+    assert_eq!(
+        anthropic.model_tiers.haiku.as_deref(),
+        Some("deepseek-chat")
+    );
 }
 
 #[test]
 fn builtin_provider_accounts_have_no_via_substring_in_id() {
     for b in BUILTIN_PROVIDER_ACCOUNTS {
-        assert!(!b.id.contains("via"), "legacy id slipped into catalog: {}", b.id);
+        assert!(
+            !b.id.contains("via"),
+            "legacy id slipped into catalog: {}",
+            b.id
+        );
     }
 }
 

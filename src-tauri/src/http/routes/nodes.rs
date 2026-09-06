@@ -1,9 +1,9 @@
 //! `GET /api/nodes` and `POST /api/nodes/create`, plus `POST /api/nodes/{id}/input`
 //! (issue #1377) for the triage deck's one-tap Approve/Reject chips.
 
-use tauri::Emitter;
-use crate::http::MaybeTls;
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
+use crate::http::MaybeTls;
+use tauri::Emitter;
 
 use crate::db;
 use crate::http::request;
@@ -19,12 +19,8 @@ pub async fn list_json() -> String {
     }
 }
 
-pub async fn create(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
+pub async fn create(lines: &mut tokio::io::BufStream<MaybeTls>, content_length: usize) {
+    let Some(body_bytes) = request::read_body_or_send_error(lines, content_length, 64 * 1024).await
     else {
         return;
     };
@@ -203,7 +199,9 @@ pub async fn post_input(
     // and the user would have to guess whether the agent died or the request
     // was malformed. Pin the failure shape.
     let node_exists = crate::commands::run_blocking("http_input_node_lookup", move || {
-        db::get_agent_node_by_id(node_id).map(|_| ()).map_err(|e| e.to_string())
+        db::get_agent_node_by_id(node_id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     })
     .await
     .is_ok();
@@ -223,14 +221,12 @@ pub async fn post_input(
     // a single `Result<(), String>` whose `Err` carries either the PTY-write
     // failure or (rarely) the offload-task failure — both surface as 5xx.
     let seq = req.seq.clone();
-    let write_result = crate::commands::run_blocking(
-        "http_input_write_bytes",
-        move || -> Result<(), String> {
+    let write_result =
+        crate::commands::run_blocking("http_input_write_bytes", move || -> Result<(), String> {
             let registry: &dyn ProcessRegistryApi = &**PROCESS_REGISTRY;
             crate::http::ws::write_mobile_input(registry, node_id, &seq)
-        },
-    )
-    .await;
+        })
+        .await;
 
     match write_result {
         Ok(()) => {

@@ -42,21 +42,46 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
             VALUES (1,1,1,'a','failed','{\"cleanup.pending\":\"1\"}',2), (2,1,1,'b','running','{}',NULL), (3,1,1,'c','failed','{}',NULL);
         INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status) VALUES
             (1,'owned',1,'failed'),(1,'borrowed',2,'failed'),(1,'shared',3,'failed'),(2,'active',3,'running'),(3,'historic',4,'failed');").unwrap();
-    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
+    assert_eq!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
+        vec![1]
+    );
     // A failed deletion leaves the association for the next pass/restart.
-    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
-    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1 WHERE id = 2", []).unwrap();
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty(), "another run borrows this agent");
-    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2", []).unwrap();
-    conn.execute("DELETE FROM agent_nodes WHERE id = 1", []).unwrap();
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
+    assert_eq!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
+        vec![1]
+    );
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET source_agent_node_id = 1 WHERE id = 2",
+        [],
+    )
+    .unwrap();
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty(),
+        "another run borrows this agent"
+    );
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM agent_nodes WHERE id = 1", [])
+        .unwrap();
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     let _path = init_temp_db("failure-cleanup");
     let mesh = create_mesh("failure-cleanup", "/tmp/failure-cleanup").unwrap();
-    let circuit = create_autopilot_circuit(mesh.id, "cleanup", "", 2, &sample_graph_json()).unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "cleanup", "", 2, &sample_graph_json()).unwrap();
     let run = create_circuit_run(circuit.id, mesh.id, "manual:cleanup", "{}").unwrap();
     set_circuit_run_state(run, "running").unwrap();
     assert!(reserve_circuit_agent_slots(run, 2).unwrap());
@@ -74,32 +99,75 @@ fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
 fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     init_temp_db("node-review");
     let mesh = create_mesh("node-review-mesh", "/tmp/node-review").unwrap();
-    let source = create_agent_node(mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node(
+        mesh.id,
+        "Fix parser",
+        &mesh.path,
+        "pr-head",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
     let run_id = create_node_circuit_run(source.id, None, 3).unwrap();
     assert_eq!(create_node_circuit_run(source.id, None, 3).unwrap(), run_id);
-    assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
-    let preset_count: i64 = write_conn().query_row(
-        "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
-        rusqlite::params![mesh.id], |row| row.get(0),
-    ).unwrap();
+    assert!(
+        list_autopilot_circuits(mesh.id).unwrap().is_empty(),
+        "preset is hidden from user blueprints"
+    );
+    let preset_count: i64 = write_conn()
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
+            rusqlite::params![mesh.id],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(preset_count, 1);
     let run = get_circuit_run(run_id).unwrap().unwrap();
     assert_eq!(run.source_agent_node_id, Some(source.id));
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
+    let ctx =
+        crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
-    assert!(list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
-    commit_circuit_advance(run_id, Some("running"), None, &[CircuitStepOp {
-        node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
-        agent_node_id: Some(123456), attempt: 1, fresh_attempt: false,
-    }]).unwrap();
+    assert!(list_circuit_agent_ownerships()
+        .unwrap()
+        .iter()
+        .any(|row| row.0 == source.id && row.1 == run_id));
+    commit_circuit_advance(
+        run_id,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "reviewer".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: Some(123456),
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
     assert_eq!(cancel_circuit_run(run_id).unwrap(), vec![123456]);
     assert!(get_agent_node_by_id(source.id).is_ok());
-    assert!(!list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id));
+    assert!(!list_circuit_agent_ownerships()
+        .unwrap()
+        .iter()
+        .any(|row| row.0 == source.id));
     let history = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
-    assert_eq!(history.len(), 1, "the preset is history-visible after completion");
+    assert_eq!(
+        history.len(),
+        1,
+        "the preset is history-visible after completion"
+    );
     assert!(history[0].0.is_preset);
     assert_eq!(history[0].1[0].run.state, "cancelled");
 }
@@ -109,19 +177,46 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     init_temp_db("node-circuit-validation");
     let mesh = create_mesh("node-workflow-mesh", "/tmp/node-workflow").unwrap();
     let other = create_mesh("node-other-mesh", "/tmp/node-other").unwrap();
-    let source = create_agent_node(mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
-        "claude", None, None, None, None, false, None, None, None).unwrap();
+    let source = create_agent_node(
+        mesh.id,
+        "Source",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
-    let foreign = create_autopilot_circuit(other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
-    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3).unwrap_err().contains("manual Circuit"));
-    let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
-    let timed = create_autopilot_circuit(mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
+    let foreign =
+        create_autopilot_circuit(other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
+    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3)
+        .unwrap_err()
+        .contains("manual Circuit"));
+    let interval = CircuitGraph::triggered_skeleton(
+        "task",
+        crate::autopilot::circuit::model::CircuitNodeKind::Interval {
+            interval_seconds: 60,
+        },
+    );
+    let timed =
+        create_autopilot_circuit(mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
     assert!(create_node_circuit_run(source.id, Some(timed.id), 3).is_err());
     let manual = create_autopilot_circuit(mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
     let run = create_node_circuit_run(source.id, Some(manual.id), 3).unwrap();
     assert_eq!(get_circuit_run(run).unwrap().unwrap().circuit_id, manual.id);
     cancel_circuit_run(run).unwrap();
-    assert_ne!(create_node_circuit_run(source.id, Some(manual.id), 3).unwrap(), run);
+    assert_ne!(
+        create_node_circuit_run(source.id, Some(manual.id), 3).unwrap(),
+        run
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -134,12 +229,16 @@ fn circuit_crud_round_trips_all_fields() {
     let mesh = create_mesh("circuit-crud-mesh", "/tmp/circuit-crud").unwrap();
 
     let created =
-        create_autopilot_circuit(mesh.id, "nightly-sweep", "desc", 3, &sample_graph_json()).unwrap();
+        create_autopilot_circuit(mesh.id, "nightly-sweep", "desc", 3, &sample_graph_json())
+            .unwrap();
     assert_eq!(created.mesh_id, mesh.id);
     assert_eq!(created.name, "nightly-sweep");
     assert_eq!(created.description, "desc");
     assert_eq!(created.concurrency_limit, 3);
-    assert!(!created.enabled, "circuits default to disabled (draft-first, issue #1356)");
+    assert!(
+        !created.enabled,
+        "circuits default to disabled (draft-first, issue #1356)"
+    );
     // graph_json round-trips back into the parsed AST.
     let parsed = CircuitGraph::from_json(&created.graph_json).unwrap();
     assert_eq!(parsed.nodes.len(), 4);
@@ -220,9 +319,10 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
             },
             crate::autopilot::circuit::model::CircuitNode {
                 id: "verify".into(),
-                kind: crate::autopilot::circuit::model::CircuitNodeKind::DeterministicVerification {
-                    command: "cargo test".into(),
-                },
+                kind:
+                    crate::autopilot::circuit::model::CircuitNodeKind::DeterministicVerification {
+                        command: "cargo test".into(),
+                    },
             },
         ],
         edges: vec![crate::autopilot::circuit::model::CircuitEdge {
@@ -238,7 +338,10 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     let reloaded = get_autopilot_circuit(created.id).unwrap().unwrap();
     assert_eq!(reloaded.name, "editable");
     assert_eq!(reloaded.concurrency_limit, 2);
-    assert!(!reloaded.enabled, "graph save must not flip the draft-first enabled flag");
+    assert!(
+        !reloaded.enabled,
+        "graph save must not flip the draft-first enabled flag"
+    );
     let parsed = CircuitGraph::from_json(&reloaded.graph_json).unwrap();
     assert_eq!(parsed, new_graph);
 
@@ -270,7 +373,10 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
 
     let after = get_autopilot_circuit(created.id).unwrap().unwrap();
     assert_eq!(after.name, "survivor");
-    assert!(after.enabled, "an explicitly enabled circuit must survive evolve_to");
+    assert!(
+        after.enabled,
+        "an explicitly enabled circuit must survive evolve_to"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -287,9 +393,13 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     let circuit =
         create_autopilot_circuit(mesh.id, "ledgered", "", 2, &sample_graph_json()).unwrap();
 
-    let run_id =
-        create_circuit_run(circuit.id, mesh.id, "manual:1234", r#"{"circuit.name":"ledgered"}"#)
-            .unwrap();
+    let run_id = create_circuit_run(
+        circuit.id,
+        mesh.id,
+        "manual:1234",
+        r#"{"circuit.name":"ledgered"}"#,
+    )
+    .unwrap();
     let runs = list_circuit_runs(circuit.id, 10).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, "pending");
@@ -298,7 +408,7 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     // `circuit.*` before the worker ever sees the row).
     assert_eq!(runs[0].context_json, r#"{"circuit.name":"ledgered"}"#);
 
-// One atomic advance: trigger completes, spawn starts.
+    // One atomic advance: trigger completes, spawn starts.
     commit_circuit_advance(
         run_id,
         Some("running"),
@@ -332,7 +442,10 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     assert_eq!(spawn_step.status, "running");
     assert!(spawn_step.outcome.is_none());
     assert!(spawn_step.started_at.is_some(), "insert stamps started_at");
-    assert!(spawn_step.completed_at.is_none(), "non-terminal step has no completed_at");
+    assert!(
+        spawn_step.completed_at.is_none(),
+        "non-terminal step has no completed_at"
+    );
     assert_eq!(spawn_step.attempt, 1);
 
     // A stale worker association is a harmless no-op, not a rusqlite
@@ -350,8 +463,8 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -375,8 +488,7 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
 fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
     let path = init_temp_db("queue_order");
     let mesh = create_mesh("circuit-queue-mesh", "/tmp/circuit-queue").unwrap();
-    let circuit =
-        create_autopilot_circuit(mesh.id, "queue", "", 2, &sample_graph_json()).unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "queue", "", 2, &sample_graph_json()).unwrap();
 
     let first = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
     let second = create_circuit_run(circuit.id, mesh.id, "manual:2", "{}").unwrap();
@@ -420,13 +532,8 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
     set_circuit_run_state(older_active, "running").unwrap();
     let mut terminal_ids = Vec::new();
     for index in 0..11 {
-        let run_id = create_circuit_run(
-            circuit.id,
-            mesh.id,
-            &format!("terminal:{}", index),
-            "{}",
-        )
-        .unwrap();
+        let run_id =
+            create_circuit_run(circuit.id, mesh.id, &format!("terminal:{}", index), "{}").unwrap();
         commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
         terminal_ids.push(run_id);
     }
@@ -439,7 +546,10 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
         .collect::<Vec<_>>();
     assert_eq!(visible_ids.len(), 11, "one active plus ten terminal rows");
     assert!(visible_ids.contains(&older_active));
-    assert!(!visible_ids.contains(&terminal_ids[0]), "oldest terminal row is bounded out");
+    assert!(
+        !visible_ids.contains(&terminal_ids[0]),
+        "oldest terminal row is bounded out"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -449,8 +559,7 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
 fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     let path = init_temp_db("cancel_run");
     let mesh = create_mesh("circuit-cancel-mesh", "/tmp/circuit-cancel").unwrap();
-    let circuit =
-        create_autopilot_circuit(mesh.id, "cancel", "", 2, &sample_graph_json()).unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "cancel", "", 2, &sample_graph_json()).unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
     set_circuit_run_state(run_id, "running").unwrap();
     commit_circuit_advance(
@@ -535,8 +644,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
     let path = init_temp_db("agent_ownership");
     let mesh = create_mesh("circuit-owner-mesh", "/tmp/circuit-owner").unwrap();
     let circuit =
-        create_autopilot_circuit(mesh.id, "issue autopilot", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit(mesh.id, "issue autopilot", "", 2, &sample_graph_json()).unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "issue:42:run", "{}").unwrap();
     commit_circuit_advance(
         run_id,
@@ -578,7 +686,14 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
 
     assert_eq!(
         list_circuit_agent_ownerships().unwrap(),
-        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string(), None)]
+        vec![(
+            agent.id,
+            run_id,
+            circuit.id,
+            "issue autopilot".to_string(),
+            "completed".to_string(),
+            None
+        )]
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();
@@ -602,7 +717,7 @@ fn step_upsert_never_duplicates_a_node_row() {
     let circuit = create_autopilot_circuit(mesh.id, "dup", "", 1, "{}").unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
 
-for _ in 0..3 {
+    for _ in 0..3 {
         commit_circuit_advance(
             run_id,
             None,
@@ -648,8 +763,8 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -689,8 +804,7 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
     // delete_mesh must not leave circuit-ledger orphans behind.
     let path = init_temp_db("mesh-cascade");
     let mesh = create_mesh("circuit-mesh-cascade", "/tmp/circuit-mesh-cascade").unwrap();
-    let circuit =
-        create_autopilot_circuit(mesh.id, "doomed-with-mesh", "", 1, "{}").unwrap();
+    let circuit = create_autopilot_circuit(mesh.id, "doomed-with-mesh", "", 1, "{}").unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "", "{}").unwrap();
     commit_circuit_advance(
         run_id,
@@ -702,8 +816,8 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -754,7 +868,7 @@ fn concurrency_counters_count_only_running_work() {
                 error: None,
                 agent_node_id: None,
                 attempt: 1,
-            fresh_attempt: false,
+                fresh_attempt: false,
             },
             CircuitStepOp {
                 node_id: "spawn".into(),
@@ -772,14 +886,14 @@ fn concurrency_counters_count_only_running_work() {
                 error: None,
                 agent_node_id: None,
                 attempt: 1,
-            fresh_attempt: false,
+                fresh_attempt: false,
             },
         ],
     )
     .unwrap();
 
     // Circuit two (same mesh): running step piloting agent 102.
-let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
+    let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     commit_circuit_advance(
         r2,
         Some("running"),
@@ -876,8 +990,11 @@ fn count_active_circuit_runs_includes_running_paused_only() {
 #[test]
 fn count_active_circuit_runs_excludes_terminal_states() {
     let path = init_temp_db("run-count-terminal");
-    let mesh = create_mesh("circuit-run-count-terminal", "/tmp/circuit-run-count-terminal")
-        .unwrap();
+    let mesh = create_mesh(
+        "circuit-run-count-terminal",
+        "/tmp/circuit-run-count-terminal",
+    )
+    .unwrap();
     let c1 = create_autopilot_circuit(mesh.id, "c1", "", 4, "{}").unwrap();
     let c2 = create_autopilot_circuit(mesh.id, "c2", "", 4, "{}").unwrap();
     let c3 = create_autopilot_circuit(mesh.id, "c3", "", 4, "{}").unwrap();
@@ -904,7 +1021,10 @@ fn count_active_circuit_runs_excludes_terminal_states() {
     // r_done and r_dead are terminal in DB.
     assert_eq!(get_circuit_run(r_done).unwrap().unwrap().state, "completed");
     assert_eq!(get_circuit_run(r_dead).unwrap().unwrap().state, "failed");
-    assert_eq!(get_circuit_run(r_pending).unwrap().unwrap().state, "pending");
+    assert_eq!(
+        get_circuit_run(r_pending).unwrap().unwrap().state,
+        "pending"
+    );
 }
 
 /// Single-release idempotency lives inside `commit_circuit_advance`'s
@@ -996,7 +1116,10 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     assert_eq!(active[0].circuit_concurrency_limit, 3);
     assert!(active[0].circuit_enabled);
     assert_eq!(
-        CircuitGraph::from_json(&active[0].circuit_graph_json).unwrap().nodes.len(),
+        CircuitGraph::from_json(&active[0].circuit_graph_json)
+            .unwrap()
+            .nodes
+            .len(),
         4
     );
 
@@ -1015,11 +1138,12 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
     let c2 = create_autopilot_circuit(mesh.id, "two", "", 1, "{}").unwrap();
 
     let first = create_circuit_run(c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
-    let replay =
-        create_circuit_run(c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
-    assert_eq!(first, replay, "same circuit + identity must dedupe to one run");
-    let independent =
-        create_circuit_run(c2.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    let replay = create_circuit_run(c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    assert_eq!(
+        first, replay,
+        "same circuit + identity must dedupe to one run"
+    );
+    let independent = create_circuit_run(c2.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
     assert_ne!(
         first, independent,
         "a second circuit may process the same source independently"
@@ -1054,7 +1178,10 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
         .filter(|id| [on_a.id, on_b.id, off.id].contains(id))
         .collect();
     assert_eq!(listed.len(), 2, "disabled circuits must not appear");
-    assert!(listed.contains(&on_a.id) && listed.contains(&on_b.id), "listing spans meshes");
+    assert!(
+        listed.contains(&on_a.id) && listed.contains(&on_b.id),
+        "listing spans meshes"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -1079,7 +1206,12 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     // MAX(created_at) must be the SECOND run's timestamp — the sleep
     // guarantees SQLite's datetime strings differ and sort correctly.
     let runs = list_circuit_runs(circuit.id, 10).unwrap();
-    let newest = runs.iter().map(|r| r.created_at.as_str()).max().unwrap().to_string();
+    let newest = runs
+        .iter()
+        .map(|r| r.created_at.as_str())
+        .max()
+        .unwrap()
+        .to_string();
     assert_eq!(latest, newest);
 
     // The identity set the GitHub poll pass pre-filters against.
@@ -1168,7 +1300,10 @@ fn evolve_to_v34_creates_circuit_tables_and_queue_index_from_a_v33_db() {
             |row| row.get::<_, i64>(0).map(|c| c > 0),
         )
         .unwrap();
-    assert!(queue_index, "queue ordering must have a composite mesh/state/position index");
+    assert!(
+        queue_index,
+        "queue ordering must have a composite mesh/state/position index"
+    );
 
     // Idempotent: re-running the migration must not error or duplicate.
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
@@ -1257,7 +1392,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(circuit_id, 1, "run history moves to the canonical preset row");
+    assert_eq!(
+        circuit_id, 1,
+        "run history moves to the canonical preset row"
+    );
     assert_eq!(source_id, Some(7));
     let missing_source: Option<i64> = conn
         .query_row(
@@ -1266,7 +1404,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(missing_source, None, "deleted historical sources remain nullable during migration");
+    assert_eq!(
+        missing_source, None,
+        "deleted historical sources remain nullable during migration"
+    );
     let unique_preset_index: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'uq_autopilot_circuits_preset_mesh'",
@@ -1274,7 +1415,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| row.get::<_, i64>(0).map(|count| count > 0),
         )
         .unwrap();
-    assert!(unique_preset_index, "each mesh can have only one review preset row");
+    assert!(
+        unique_preset_index,
+        "each mesh can have only one review preset row"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,15 +1455,25 @@ fn paused_runs_stay_active_and_counters_count_them() {
     // scope the assertion to this circuit rather than the whole table.)
     set_circuit_run_state(r1, "paused").unwrap();
     let active = list_active_circuit_runs().unwrap();
-    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
-    assert_eq!(mine.len(), 1, "a paused run stays active (it resumes later)");
+    let mine: Vec<_> = active
+        .iter()
+        .filter(|a| a.run.circuit_id == circuit.id)
+        .collect();
+    assert_eq!(
+        mine.len(),
+        1,
+        "a paused run stays active (it resumes later)"
+    );
     assert_eq!(mine[0].run.state, "paused");
     assert_eq!(count_running_circuit_steps(circuit.id).unwrap(), 1);
 
     // Resume flips the state back through the same setter.
     set_circuit_run_state(r1, "running").unwrap();
     let active = list_active_circuit_runs().unwrap();
-    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
+    let mine: Vec<_> = active
+        .iter()
+        .filter(|a| a.run.circuit_id == circuit.id)
+        .collect();
     assert_eq!(mine[0].run.state, "running");
 
     let _ = get();
@@ -1372,9 +1526,15 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     assert_eq!(work.status, "pending_slot");
     assert_eq!(work.attempt, 2, "the retry's execution count persists");
     assert_eq!(work.outcome, None, "fresh attempt clears the stale outcome");
-    assert_eq!(work.error_message, None, "fresh attempt clears the stale error");
+    assert_eq!(
+        work.error_message, None,
+        "fresh attempt clears the stale error"
+    );
     assert!(work.started_at.is_some());
-    assert!(work.completed_at.is_none(), "a reset step is back in flight");
+    assert!(
+        work.completed_at.is_none(),
+        "a reset step is back in flight"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -1387,15 +1547,24 @@ fn explicit_error_clear_works_for_running_and_completed_steps() {
     let circuit = create_autopilot_circuit(mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
     let run_id = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
     let mut op = CircuitStepOp {
-        node_id: "classifier".into(), status: "running".into(), outcome: None,
-        error: Some(Some("Classifier unavailable; retrying".into())), agent_node_id: None,
-        attempt: 2, fresh_attempt: false,
+        node_id: "classifier".into(),
+        status: "running".into(),
+        outcome: None,
+        error: Some(Some("Classifier unavailable; retrying".into())),
+        agent_node_id: None,
+        attempt: 2,
+        fresh_attempt: false,
     };
     commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
-    assert!(list_circuit_run_steps(run_id).unwrap()[0].error_message.is_some());
+    assert!(list_circuit_run_steps(run_id).unwrap()[0]
+        .error_message
+        .is_some());
     op.error = Some(None);
     commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
-    assert_eq!(list_circuit_run_steps(run_id).unwrap()[0].error_message, None);
+    assert_eq!(
+        list_circuit_run_steps(run_id).unwrap()[0].error_message,
+        None
+    );
     op.error = Some(Some("stale again".into()));
     commit_circuit_advance(run_id, None, None, &[op.clone()]).unwrap();
     op.status = "completed".into();
@@ -1454,7 +1623,10 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
 
     let steps = list_circuit_run_steps(run_id).unwrap();
     for outcome in ["blocked", "working", "green", "red"] {
-        let step = steps.iter().find(|s| s.node_id == format!("gate-{outcome}")).unwrap();
+        let step = steps
+            .iter()
+            .find(|s| s.node_id == format!("gate-{outcome}"))
+            .unwrap();
         assert_eq!(step.outcome.as_deref(), Some(outcome));
         assert!(
             step.completed_at.is_some(),

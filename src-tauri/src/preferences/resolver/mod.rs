@@ -19,8 +19,8 @@ pub mod accounts;
 pub mod catalog;
 pub mod default_provider;
 pub mod harness;
-pub mod pairings;
 pub mod pairing_compat;
+pub mod pairings;
 
 // ----- Re-exports: harness -----------------------------------------------
 
@@ -33,41 +33,41 @@ pub use harness::{
 // ----- Re-exports: catalog -----------------------------------------------
 
 #[allow(unused_imports)]
-pub use catalog::{
-    default_provider_accounts, first_class_surfaces, harness_surface,
-    is_claude_compatible_id, keyed_first_class_catalog, provider_surfaces, surface_for_executor,
+pub(crate) use catalog::{
+    claude_harness_id, claude_harness_id_from, deepseek_default_tiers, keyed_first_class_template,
+    kimi_default_tiers, minimax_default_tiers, BUILTIN_PROVIDER_ACCOUNTS,
 };
 #[allow(unused_imports)]
-pub(crate) use catalog::{
-    BUILTIN_PROVIDER_ACCOUNTS, claude_harness_id, claude_harness_id_from, deepseek_default_tiers,
-    kimi_default_tiers, keyed_first_class_template, minimax_default_tiers,
+pub use catalog::{
+    default_provider_accounts, first_class_surfaces, harness_surface, is_claude_compatible_id,
+    keyed_first_class_catalog, provider_surfaces, surface_for_executor,
 };
 
 // ----- Re-exports: accounts ----------------------------------------------
 
 #[allow(unused_imports)]
 pub use accounts::{
-    minimax_api_key_resolved, provider_accounts, remove_provider_account, set_account_key_if_absent,
-    upsert_provider_account,
+    minimax_api_key_resolved, provider_accounts, remove_provider_account,
+    set_account_key_if_absent, upsert_provider_account,
 };
 
 // ----- Re-exports: pairings ----------------------------------------------
 
 #[allow(unused_imports)]
+pub(crate) use pairings::effective_pairings;
+#[allow(unused_imports)]
 pub use pairings::{
     compatible_providers_for_harness, effective_provider_pairings, pairing_for, provider_pairings,
-    proxied_order_for, proxied_provider_order, remove_provider_pairing, resolve_stored_pairing_and_account,
-    set_proxied_provider_order, upsert_provider_pairing,
+    proxied_order_for, proxied_provider_order, remove_provider_pairing,
+    resolve_stored_pairing_and_account, set_proxied_provider_order, upsert_provider_pairing,
 };
-#[allow(unused_imports)]
-pub(crate) use pairings::effective_pairings;
 
 // ----- Re-exports: pairing_compat ---------------------------------------
 
 #[allow(unused_imports)]
-pub use pairing_compat::{pairing_compatibility, endpoint_model_descriptor};
-#[allow(unused_imports)]
 pub(crate) use pairing_compat::pairing_can_potentially_match;
+#[allow(unused_imports)]
+pub use pairing_compat::{endpoint_model_descriptor, pairing_compatibility};
 
 // ----- Re-exports: default_provider --------------------------------------
 

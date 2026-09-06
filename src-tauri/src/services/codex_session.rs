@@ -77,7 +77,9 @@ fn find_fresh_id_for_directory_in(
         Some(created_not_before_ms),
     );
     crate::services::session_recovery::select_recovery_identity(
-        candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.id, candidate.timestamp_ms)),
         created_not_before_ms,
         true,
     )
@@ -99,7 +101,8 @@ pub(crate) fn find_candidates(
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
-            if written_not_before_ms.is_some_and(|not_before| !was_written_since(&path, not_before)) {
+            if written_not_before_ms.is_some_and(|not_before| !was_written_since(&path, not_before))
+            {
                 continue;
             }
             if let Some(candidate) = read_session_meta(&path, spawn_directory) {
@@ -122,12 +125,7 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let sessions_dir = crate::env::codex_sessions_dir(env_type, spawn_directory)?;
-    find_historic_id_for_directory_in(
-        &sessions_dir,
-        spawn_directory,
-        anchor_ms,
-        recorded_start,
-    )
+    find_historic_id_for_directory_in(&sessions_dir, spawn_directory, anchor_ms, recorded_start)
 }
 
 pub(crate) fn find_historic_id_for_directory_in(
@@ -139,7 +137,9 @@ pub(crate) fn find_historic_id_for_directory_in(
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
     let candidates = find_candidates(&sessions_dir, spawn_directory, cutoff, None);
     crate::services::session_recovery::select_recovery_identity(
-        candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.id, candidate.timestamp_ms)),
         anchor_ms,
         recorded_start,
     )
@@ -159,15 +159,31 @@ fn rollout_days_newest_first(sessions_dir: &Path, created_not_before_ms: i64) ->
         .unwrap_or(NaiveDate::MIN);
     let mut days = Vec::new();
     for year in subdirs_sorted_desc(sessions_dir) {
-        let Some(year_number) = directory_number(&year) else { continue; };
-        if year_number < cutoff.year() { break; }
+        let Some(year_number) = directory_number(&year) else {
+            continue;
+        };
+        if year_number < cutoff.year() {
+            break;
+        }
         for month in subdirs_sorted_desc(&year) {
-            let Some(month_number) = directory_number(&month) else { continue; };
-            if year_number == cutoff.year() && month_number < cutoff.month() as i32 { break; }
+            let Some(month_number) = directory_number(&month) else {
+                continue;
+            };
+            if year_number == cutoff.year() && month_number < cutoff.month() as i32 {
+                break;
+            }
             for day in subdirs_sorted_desc(&month) {
-                let Some(day_number) = directory_number(&day) else { continue; };
-                let Some(date) = NaiveDate::from_ymd_opt(year_number, month_number as u32, day_number as u32) else { continue; };
-                if date < cutoff { break; }
+                let Some(day_number) = directory_number(&day) else {
+                    continue;
+                };
+                let Some(date) =
+                    NaiveDate::from_ymd_opt(year_number, month_number as u32, day_number as u32)
+                else {
+                    continue;
+                };
+                if date < cutoff {
+                    break;
+                }
                 days.push(day);
             }
         }
@@ -176,8 +192,14 @@ fn rollout_days_newest_first(sessions_dir: &Path, created_not_before_ms: i64) ->
 }
 
 fn subdirs_sorted_desc(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new(); };
-    let mut dirs = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect::<Vec<_>>();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
     dirs.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
     dirs
 }
@@ -202,12 +224,23 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
     {
         return None;
     }
-    if record.payload.source.as_ref().is_some_and(|source| source.get("subagent").is_some()) {
+    if record
+        .payload
+        .source
+        .as_ref()
+        .is_some_and(|source| source.get("subagent").is_some())
+    {
         return None;
     }
-    let id = uuid::Uuid::parse_str(record.payload.session_id.as_deref().or(record.payload.id.as_deref())?)
-        .ok()?
-        .to_string();
+    let id = uuid::Uuid::parse_str(
+        record
+            .payload
+            .session_id
+            .as_deref()
+            .or(record.payload.id.as_deref())?,
+    )
+    .ok()?
+    .to_string();
     let cwd = record.payload.cwd?;
     if !crate::env::directories_match(&cwd, spawn_directory) {
         return None;
@@ -223,22 +256,33 @@ fn read_session_meta(path: &Path, spawn_directory: &str) -> Option<Candidate> {
 /// keeps this delayed fallback from overwriting them.
 pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: EnvType) {
     tauri::async_runtime::spawn(async move {
-        let Ok((node, Some(generation))) = crate::blocking::run_blocking("codex_capture_generation", move || {
-            let generation = crate::db::session_started_at_ms(node_id).map_err(|e| e.to_string())?;
-            let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-            Ok((node, generation))
-        }).await else { return; };
+        let Ok((node, Some(generation))) =
+            crate::blocking::run_blocking("codex_capture_generation", move || {
+                let generation =
+                    crate::db::session_started_at_ms(node_id).map_err(|e| e.to_string())?;
+                let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+                Ok((node, generation))
+            })
+            .await
+        else {
+            return;
+        };
         let not_before = generation.saturating_sub(CAPTURE_SKEW_MS);
         // Codex may publish its rollout only after the user submits the first
         // prompt, minutes after the TUI appears. Circuit probes also recover
         // identity later, so expiry here cannot permanently wedge a gate.
-        for (attempt, delay) in RETRY_DELAYS_MS.iter().copied()
-            .chain(std::iter::repeat_n(10_000, 30)).enumerate() {
+        for (attempt, delay) in RETRY_DELAYS_MS
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(10_000, 30))
+            .enumerate()
+        {
             tokio::time::sleep(Duration::from_millis(delay)).await;
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
-            let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &spawn_directory) else {
+            let Some(sessions_dir) = crate::env::codex_sessions_dir(env_type, &spawn_directory)
+            else {
                 tracing::warn!("codex session capture: no sessions directory for env {env_type:?}");
                 return;
             };
@@ -266,7 +310,9 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             let capture = match captured {
                 Ok(attempt) => attempt,
                 Err(error) => {
-                    tracing::warn!("codex session capture: blocking task failed for node {node_id}: {error}");
+                    tracing::warn!(
+                        "codex session capture: blocking task failed for node {node_id}: {error}"
+                    );
                     return;
                 }
             };
@@ -296,12 +342,23 @@ mod tests {
     fn fresh_capture_refuses_two_parent_sessions_in_the_same_launch_window() {
         let temp = tempfile::TempDir::new().unwrap();
         for (name, id, time) in [
-            ("first.jsonl", "01a042fe-e7e2-79a2-96bd-a15140478a58", "2026-08-27T11:33:19.986Z"),
-            ("second.jsonl", "01a042fd-1111-7000-8000-000000000001", "2026-08-27T11:33:20.986Z"),
+            (
+                "first.jsonl",
+                "01a042fe-e7e2-79a2-96bd-a15140478a58",
+                "2026-08-27T11:33:19.986Z",
+            ),
+            (
+                "second.jsonl",
+                "01a042fd-1111-7000-8000-000000000001",
+                "2026-08-27T11:33:20.986Z",
+            ),
         ] {
             write_rollout(temp.path(), name, id, "F:/repo", time);
         }
-        assert_eq!(find_fresh_id_for_directory_in(temp.path(), "F:/repo", 1_787_830_399_000), None);
+        assert_eq!(
+            find_fresh_id_for_directory_in(temp.path(), "F:/repo", 1_787_830_399_000),
+            None
+        );
     }
 
     fn write_rollout(root: &Path, name: &str, id: &str, cwd: &str, timestamp: &str) {
@@ -367,7 +424,11 @@ mod tests {
     #[test]
     fn traversal_is_descending_and_prunes_old_rollout_days() {
         let temp = tempfile::TempDir::new().unwrap();
-        for date in [("2024", "01", "01"), ("2026", "08", "26"), ("2026", "08", "27")] {
+        for date in [
+            ("2024", "01", "01"),
+            ("2026", "08", "26"),
+            ("2026", "08", "27"),
+        ] {
             fs::create_dir_all(temp.path().join(date.0).join(date.1).join(date.2)).unwrap();
         }
         let names = rollout_days_newest_first(temp.path(), 1_787_830_399_000)

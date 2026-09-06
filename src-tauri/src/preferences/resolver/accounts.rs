@@ -14,7 +14,10 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
     let mut prefs = match load() {
         Ok(prefs) => prefs,
         Err(e) => {
-            tracing::warn!("preferences::provider_accounts load failed, using defaults: {}", e);
+            tracing::warn!(
+                "preferences::provider_accounts load failed, using defaults: {}",
+                e
+            );
             return default_provider_accounts();
         }
     };
@@ -23,7 +26,8 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
         .as_deref()
         .filter(|key| !key.is_empty())
         .map(str::to_string);
-    let merged = merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone());
+    let merged =
+        merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone());
     let (mut migrated, changed) = migrate_kimi_companion(merged);
     // One-shot persistence: if a PR #1044 `kimi-via-claude` row was carried
     // over to the first-class `kimi` row, write the cleaned list back so the
@@ -32,7 +36,10 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
     if changed {
         prefs.provider_accounts = migrated.clone();
         if let Err(e) = save(prefs) {
-            tracing::warn!("preferences::provider_accounts migration save failed: {}", e);
+            tracing::warn!(
+                "preferences::provider_accounts migration save failed: {}",
+                e
+            );
         }
     }
     // Fold the deprecated MiniMax field into the effective in-memory account
@@ -54,9 +61,7 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
 /// legacy endpoint → pairing before this runs). Returns the migrated list
 /// plus a `changed` flag so the caller can persist the result when the
 /// migration actually moved state. Pure — no disk side effects.
-fn migrate_kimi_companion(
-    mut accounts: Vec<ProviderAccount>,
-) -> (Vec<ProviderAccount>, bool) {
+fn migrate_kimi_companion(mut accounts: Vec<ProviderAccount>) -> (Vec<ProviderAccount>, bool) {
     let Some(companion_idx) = accounts.iter().position(|a| a.id == "kimi-via-claude") else {
         return (accounts, false);
     };
@@ -109,10 +114,11 @@ pub fn minimax_api_key_resolved() -> Option<String> {
         Ok(prefs) => prefs,
         Err(_) => return None,
     };
-    let from_account = merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone())
-        .into_iter()
-        .find(|a| a.id == "minimax")
-        .and_then(|a| a.api_key);
+    let from_account =
+        merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone())
+            .into_iter()
+            .find(|a| a.id == "minimax")
+            .and_then(|a| a.api_key);
     non_empty(from_account).or_else(|| non_empty(prefs.minimax_api_key))
 }
 
@@ -125,7 +131,11 @@ pub fn minimax_api_key_resolved() -> Option<String> {
 /// custom endpoint alike — appears automatically, and clearing its key or
 /// disabling it removes it with no second list to keep in sync (issue #568).
 pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAccount) {
-    if let Some(existing) = prefs.provider_accounts.iter_mut().find(|a| a.id == account.id) {
+    if let Some(existing) = prefs
+        .provider_accounts
+        .iter_mut()
+        .find(|a| a.id == account.id)
+    {
         *existing = account;
     } else {
         prefs.provider_accounts.push(account);

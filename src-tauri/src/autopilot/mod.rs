@@ -132,7 +132,10 @@ impl GateDecision {
 /// is never auto-run: an unknown identity can't be a verified collaborator, so
 /// it gates regardless of the fetched permission (which for an empty username
 /// would already be `None`, but the explicit guard makes the intent loud).
-pub fn evaluate(trigger: &AutopilotTrigger, author_permission: CollaboratorPermission) -> GateDecision {
+pub fn evaluate(
+    trigger: &AutopilotTrigger,
+    author_permission: CollaboratorPermission,
+) -> GateDecision {
     if trigger.author.trim().is_empty() {
         return GateDecision::RequireApproval;
     }
@@ -181,8 +184,14 @@ mod tests {
     #[test]
     fn collaborator_with_push_access_auto_runs() {
         let t = trigger("maintainer");
-        assert_eq!(evaluate(&t, CollaboratorPermission::Admin), GateDecision::AutoRun);
-        assert_eq!(evaluate(&t, CollaboratorPermission::Write), GateDecision::AutoRun);
+        assert_eq!(
+            evaluate(&t, CollaboratorPermission::Admin),
+            GateDecision::AutoRun
+        );
+        assert_eq!(
+            evaluate(&t, CollaboratorPermission::Write),
+            GateDecision::AutoRun
+        );
     }
 
     #[test]

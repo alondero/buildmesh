@@ -60,9 +60,7 @@ pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFold
 pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     crate::commands::run_blocking("add_mesh", move || {
         tracing::debug!("add_mesh called");
-        let folder_path = app.dialog()
-            .file()
-            .blocking_pick_folder();
+        let folder_path = app.dialog().file().blocking_pick_folder();
         tracing::debug!("folder picker returned: {:?}", folder_path);
         let folder_path = folder_path.ok_or("No folder selected")?;
 
@@ -178,8 +176,7 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 /// restructuring the FILL_LOCK to block user-initiated deletes, which is
 /// out of scope.
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
-    let pool_paths =
-        db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
+    let pool_paths = db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
@@ -267,11 +264,9 @@ pub async fn get_local_ip() -> Result<String, String> {
                 return Err(format!("interface enumeration task panicked: {}", e));
             }
             Err(_elapsed) => {
-                return Err(
-                    "timeout enumerating interfaces (5s exceeded); \
+                return Err("timeout enumerating interfaces (5s exceeded); \
                      a stuck adapter driver may be blocking GetAdaptersAddresses"
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
     };

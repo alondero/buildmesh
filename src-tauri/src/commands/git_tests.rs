@@ -9,8 +9,8 @@
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -276,7 +276,10 @@ mod tests {
 
         // Expected: deleted.txt(wt_del), modified.txt(wt_mod), untracked.txt(wt_new) = 3
         // staged.txt: content matches disk, so git2 doesn't report it as changed.
-        assert_eq!(total, 3, "expected 3 (untracked + modified + deleted — staged.txt content matches disk)");
+        assert_eq!(
+            total, 3,
+            "expected 3 (untracked + modified + deleted — staged.txt content matches disk)"
+        );
         assert_eq!(added, 1, "expected 1 added (untracked.txt)");
         assert_eq!(modified, 1, "expected 1 modified");
         assert_eq!(deleted, 1, "expected 1 deleted");
@@ -328,7 +331,10 @@ mod tests {
         let seed = TempGitRepo::new();
         let seed_repo = init_git_repo(seed.path());
         run_git(seed.path(), &["branch", "-M", "main"]);
-        run_git(seed.path(), &["remote", "add", "main", remote.path().to_str().unwrap()]);
+        run_git(
+            seed.path(),
+            &["remote", "add", "main", remote.path().to_str().unwrap()],
+        );
         run_git(seed.path(), &["push", "-u", "main", "main"]);
 
         let local = TempGitRepo::new();
@@ -342,7 +348,12 @@ mod tests {
             local.path().to_str().unwrap(),
         ]);
 
-        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        stage_file(
+            &seed_repo,
+            seed.path(),
+            "remote-change.txt",
+            "remote change",
+        );
         commit_staged(&seed_repo, "add remote change");
         run_git(seed.path(), &["push", "main", "main"]);
 
@@ -350,8 +361,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.fetched, "expected fetch to succeed: {}", result.message);
-        assert!(result.pulled, "expected fast-forward pull: {}", result.message);
+        assert!(
+            result.fetched,
+            "expected fetch to succeed: {}",
+            result.message
+        );
+        assert!(
+            result.pulled,
+            "expected fast-forward pull: {}",
+            result.message
+        );
         assert_eq!(result.new_commits, 1);
         assert!(local.path().join("remote-change.txt").exists());
     }
@@ -375,7 +394,10 @@ mod tests {
         let seed = TempGitRepo::new();
         let seed_repo = init_git_repo(seed.path());
         run_git(seed.path(), &["branch", "-M", "main"]);
-        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(
+            seed.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         run_git(seed.path(), &["push", "-u", "origin", "main"]);
 
         let local = TempGitRepo::new();
@@ -390,10 +412,18 @@ mod tests {
         // the standard refspec; drop it, and drop the now-unmappable
         // tracking ref state back to the clone-time SHA (it's already
         // there — the remote hasn't moved yet).
-        run_git(local.path(), &["config", "--unset-all", "remote.origin.fetch"]);
+        run_git(
+            local.path(),
+            &["config", "--unset-all", "remote.origin.fetch"],
+        );
 
         // Remote gains a commit AFTER the clone.
-        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        stage_file(
+            &seed_repo,
+            seed.path(),
+            "remote-change.txt",
+            "remote change",
+        );
         commit_staged(&seed_repo, "add remote change");
         run_git(seed.path(), &["push", "origin", "main"]);
 
@@ -401,7 +431,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.fetched, "expected fetch to succeed: {}", result.message);
+        assert!(
+            result.fetched,
+            "expected fetch to succeed: {}",
+            result.message
+        );
         assert!(
             result.pulled,
             "expected fast-forward pull despite the missing fetch refspec \
@@ -461,7 +495,10 @@ mod tests {
         let seed = TempGitRepo::new();
         init_git_repo(seed.path());
         run_git(seed.path(), &["branch", "-M", "main"]);
-        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(
+            seed.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         run_git(seed.path(), &["push", "-u", "origin", "main"]);
 
         let local = TempGitRepo::new();
@@ -533,7 +570,12 @@ mod tests {
         // Create worktree OUTSIDE the main repo (avoids showing as untracked in main)
         let wt_dir = TempGitRepo::new();
         let wt_path = wt_dir.path().to_path_buf();
-        repo.branch("wt-branch", &repo.head().unwrap().peel_to_commit().unwrap(), false).unwrap();
+        repo.branch(
+            "wt-branch",
+            &repo.head().unwrap().peel_to_commit().unwrap(),
+            false,
+        )
+        .unwrap();
         repo.worktree("worktree1", &wt_path, None).unwrap();
 
         // Make a change ONLY in the worktree
@@ -571,9 +613,10 @@ mod tests {
         // Brand-new, unstaged file with three lines.
         fs::write(_repo.path().join("new.txt"), "x\ny\nz\n").unwrap();
 
-        let statuses =
-            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
-                .unwrap();
+        let statuses = crate::commands::git::get_git_status_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
 
         let entry = find_status(&statuses, "new.txt");
         assert_eq!(entry.status, "added");
@@ -591,9 +634,10 @@ mod tests {
         commit_staged(&repo, "add edit.txt");
         fs::write(_repo.path().join("edit.txt"), "a\nB\nc\nd\n").unwrap();
 
-        let statuses =
-            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
-                .unwrap();
+        let statuses = crate::commands::git::get_git_status_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
 
         let entry = find_status(&statuses, "edit.txt");
         assert_eq!(entry.status, "modified");
@@ -611,9 +655,10 @@ mod tests {
         commit_staged(&repo, "add gone.txt");
         fs::remove_file(_repo.path().join("gone.txt")).unwrap();
 
-        let statuses =
-            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
-                .unwrap();
+        let statuses = crate::commands::git::get_git_status_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
 
         let entry = find_status(&statuses, "gone.txt");
         assert_eq!(entry.status, "deleted");
@@ -626,11 +671,15 @@ mod tests {
         let _repo = TempGitRepo::new();
         let _ = init_git_repo(_repo.path());
 
-        let statuses =
-            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
-                .unwrap();
+        let statuses = crate::commands::git::get_git_status_blocking(
+            _repo.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
 
-        assert!(statuses.is_empty(), "clean repo has no changed files: {statuses:?}");
+        assert!(
+            statuses.is_empty(),
+            "clean repo has no changed files: {statuses:?}"
+        );
     }
 
     // ─── get_git_branch_status ──────────────────────────────────────────────
@@ -640,9 +689,10 @@ mod tests {
         let dir = TempGitRepo::new();
         fs::create_dir_all(dir.path()).unwrap();
 
-        let result =
-            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
-                .unwrap();
+        let result = crate::commands::git::get_git_branch_status_blocking(
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
         assert!(result.is_none(), "non-git dir should return None");
     }
 
@@ -652,16 +702,24 @@ mod tests {
         init_git_repo(repo_dir.path());
         run_git(repo_dir.path(), &["branch", "-M", "main"]);
 
-        let status =
-            crate::commands::git::get_git_branch_status_blocking(repo_dir.path().to_string_lossy().into_owned())
-                .unwrap()
-                .expect("repo with a commit should report a branch");
+        let status = crate::commands::git::get_git_branch_status_blocking(
+            repo_dir.path().to_string_lossy().into_owned(),
+        )
+        .unwrap()
+        .expect("repo with a commit should report a branch");
 
         assert_eq!(status.name, "main");
         assert_eq!(status.ahead, 0, "no upstream → ahead is 0");
         assert_eq!(status.behind, 0, "no upstream → behind is 0");
-        assert!(!status.short_sha.is_empty(), "repo with a commit should report a short SHA");
-        assert_eq!(status.short_sha.len(), 7, "git2 short_id() defaults to 7 chars");
+        assert!(
+            !status.short_sha.is_empty(),
+            "repo with a commit should report a short SHA"
+        );
+        assert_eq!(
+            status.short_sha.len(),
+            7,
+            "git2 short_id() defaults to 7 chars"
+        );
     }
 
     #[test]
@@ -672,9 +730,10 @@ mod tests {
 
         // get_git_branch_status returns Ok(None) for an unborn HEAD (the existing
         // path in get_git_branch_status short-circuits on `repo.head()` Err).
-        let result =
-            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
-                .unwrap();
+        let result = crate::commands::git::get_git_branch_status_blocking(
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
         assert!(result.is_none(), "unborn HEAD should return None");
     }
 
@@ -687,7 +746,10 @@ mod tests {
         let seed = TempGitRepo::new();
         let seed_repo = init_git_repo(seed.path());
         run_git(seed.path(), &["branch", "-M", "main"]);
-        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(
+            seed.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         run_git(seed.path(), &["push", "-u", "origin", "main"]);
 
         let local = TempGitRepo::new();
@@ -701,15 +763,21 @@ mod tests {
 
         // Advance the remote by one commit, then fetch into the local clone
         // (fetch updates the tracking ref without moving local HEAD).
-        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        stage_file(
+            &seed_repo,
+            seed.path(),
+            "remote-change.txt",
+            "remote change",
+        );
         commit_staged(&seed_repo, "add remote change");
         run_git(seed.path(), &["push", "origin", "main"]);
         run_git(local.path(), &["fetch", "origin"]);
 
-        let status =
-            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
-                .unwrap()
-                .expect("clone should report a branch");
+        let status = crate::commands::git::get_git_branch_status_blocking(
+            local.path().to_string_lossy().into_owned(),
+        )
+        .unwrap()
+        .expect("clone should report a branch");
 
         assert_eq!(status.name, "main");
         assert_eq!(status.ahead, 0);
@@ -725,17 +793,26 @@ mod tests {
         let local = TempGitRepo::new();
         let local_repo = init_git_repo(local.path());
         run_git(local.path(), &["branch", "-M", "main"]);
-        run_git(local.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(
+            local.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         run_git(local.path(), &["push", "-u", "origin", "main"]);
 
         // Commit locally without pushing.
-        stage_file(&local_repo, local.path(), "local-change.txt", "local change");
+        stage_file(
+            &local_repo,
+            local.path(),
+            "local-change.txt",
+            "local change",
+        );
         commit_staged(&local_repo, "add local change");
 
-        let status =
-            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
-                .unwrap()
-                .expect("repo should report a branch");
+        let status = crate::commands::git::get_git_branch_status_blocking(
+            local.path().to_string_lossy().into_owned(),
+        )
+        .unwrap()
+        .expect("repo should report a branch");
 
         assert_eq!(status.name, "main");
         assert_eq!(status.ahead, 1, "one unpushed local commit");
@@ -755,14 +832,19 @@ mod tests {
         // Detach HEAD at the current commit.
         repo.set_head_detached(head_oid).unwrap();
 
-        let status =
-            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
-                .unwrap()
-                .expect("detached HEAD on a commit should still report a status");
+        let status = crate::commands::git::get_git_branch_status_blocking(
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .unwrap()
+        .expect("detached HEAD on a commit should still report a status");
 
-        assert_eq!(status.name, "HEAD", "shorthand() of a detached HEAD is \"HEAD\"");
         assert_eq!(
-            status.short_sha, head_oid.to_string().get(..7).unwrap(),
+            status.name, "HEAD",
+            "shorthand() of a detached HEAD is \"HEAD\""
+        );
+        assert_eq!(
+            status.short_sha,
+            head_oid.to_string().get(..7).unwrap(),
             "short_sha should be the 7-char prefix of the HEAD OID"
         );
         assert_eq!(status.short_sha.len(), 7);
@@ -825,8 +907,11 @@ mod tests {
         for i in 1..=5 {
             let c = cache.clone();
             handles.push(std::thread::spawn(move || {
-                crate::commands::git::get_mesh_git_static_blocking(&c, format!("/tmp/fake-mesh-{i}"))
-                    .expect("concurrent call should succeed")
+                crate::commands::git::get_mesh_git_static_blocking(
+                    &c,
+                    format!("/tmp/fake-mesh-{i}"),
+                )
+                .expect("concurrent call should succeed")
             }));
         }
         let mut results = Vec::new();
@@ -859,13 +944,8 @@ mod tests {
         )
         .unwrap();
         let branch_ref = format!("refs/remotes/origin/{branch}");
-        repo.reference_symbolic(
-            "refs/remotes/origin/HEAD",
-            &branch_ref,
-            true,
-            "test setup",
-        )
-        .unwrap();
+        repo.reference_symbolic("refs/remotes/origin/HEAD", &branch_ref, true, "test setup")
+            .unwrap();
         repo
     }
 
@@ -950,7 +1030,12 @@ mod tests {
         // Create worktree OUTSIDE the main repo
         let wt_dir = TempGitRepo::new();
         let wt_path = wt_dir.path().to_path_buf();
-        repo.branch("wt-branch2", &repo.head().unwrap().peel_to_commit().unwrap(), false).unwrap();
+        repo.branch(
+            "wt-branch2",
+            &repo.head().unwrap().peel_to_commit().unwrap(),
+            false,
+        )
+        .unwrap();
         repo.worktree("worktree2", &wt_path, None).unwrap();
 
         // Make changes in the main working tree
@@ -1046,11 +1131,20 @@ mod tests {
         commit_staged(&repo, "add new.txt");
         fs::write(_repo.path().join("new.txt"), "edited").unwrap();
         let wt_pre = flags_for_path(&repo, "new.txt");
-        assert!(wt_pre.is_wt_modified(), "precondition: worktree edit is unstaged");
+        assert!(
+            wt_pre.is_wt_modified(),
+            "precondition: worktree edit is unstaged"
+        );
         stage_file_blocking(path, "new.txt").unwrap();
         let wt_post = flags_for_path(&repo, "new.txt");
-        assert!(!wt_post.is_wt_modified(), "re-stage clears the worktree delta");
-        assert!(wt_post.is_index_modified(), "re-stage still differs from HEAD");
+        assert!(
+            !wt_post.is_wt_modified(),
+            "re-stage clears the worktree delta"
+        );
+        assert!(
+            wt_post.is_index_modified(),
+            "re-stage still differs from HEAD"
+        );
     }
 
     #[test]
@@ -1065,7 +1159,10 @@ mod tests {
 
         // Precondition: worktree deletion is unstaged (WT_DELETED).
         let wt_pre = flags_for_path(&repo, "gone.txt");
-        assert!(wt_pre.is_wt_deleted(), "precondition: file missing from worktree");
+        assert!(
+            wt_pre.is_wt_deleted(),
+            "precondition: file missing from worktree"
+        );
 
         stage_file_blocking(path, "gone.txt").unwrap();
 
@@ -1074,8 +1171,14 @@ mod tests {
         // vacuously clean). count_status' "deleted" bucket would still be
         // 1 because it counts INDEX_DELETED; assert the precise flags.
         let wt_post = flags_for_path(&repo, "gone.txt");
-        assert!(!wt_post.is_wt_deleted(), "staged deletion must not read as wt_deleted");
-        assert!(wt_post.is_index_deleted(), "the entry must be index_deleted (staged deletion)");
+        assert!(
+            !wt_post.is_wt_deleted(),
+            "staged deletion must not read as wt_deleted"
+        );
+        assert!(
+            wt_post.is_index_deleted(),
+            "the entry must be index_deleted (staged deletion)"
+        );
     }
 
     #[test]
@@ -1105,7 +1208,11 @@ mod tests {
         revert_file_blocking(path, "keep.txt").unwrap();
 
         let (total, _, modified, _) = count_status(&repo);
-        assert_eq!((total, modified), (0, 0), "revert restores HEAD state exactly");
+        assert_eq!(
+            (total, modified),
+            (0, 0),
+            "revert restores HEAD state exactly"
+        );
         assert_eq!(
             fs::read_to_string(_repo.path().join("keep.txt")).unwrap(),
             "original",
@@ -1127,8 +1234,14 @@ mod tests {
         revert_file_blocking(path, "added.txt").unwrap();
         revert_file_blocking(path, "staged-new.txt").unwrap();
 
-        assert!(! _repo.path().join("added.txt").exists(), "untracked file removed");
-        assert!(! _repo.path().join("staged-new.txt").exists(), "staged-new file removed");
+        assert!(
+            !_repo.path().join("added.txt").exists(),
+            "untracked file removed"
+        );
+        assert!(
+            !_repo.path().join("staged-new.txt").exists(),
+            "staged-new file removed"
+        );
         let (total, _, _, _) = count_status(&repo);
         assert_eq!(total, 0, "index entries dropped too");
     }
