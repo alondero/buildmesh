@@ -23,10 +23,10 @@
 //!   free slot in its run's durable agent lease; otherwise the step parks in
 //!   `Queued` (`pending_slot` in the ledger) and promotes FIFO on a later
 //!   `Tick`. The worker reserves the blueprint's declared spawn slots before
-//!   admitting a run, so retained agents never bypass the host safety cap and
-//!   peer runs cannot steal capacity needed by a downstream reviewer. Non-
-//!   agent steps never wait on agent slots (they still respect the per-
-//!   circuit limit). Known milestone-1 scope note:
+//!   admitting a run, so peer runs cannot steal capacity needed by a
+//!   downstream reviewer; an optional app-wide pool remains the explicit
+//!   host-safety backstop. Non-agent steps never wait on agent slots (they
+//!   still respect the per-circuit limit). Known milestone-1 scope note:
 //!   FIFO ordering is per-run — cross-run ordering on one circuit is
 //!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
@@ -405,8 +405,8 @@ pub struct Capacity {
     /// Free per-circuit step slots (`concurrency_limit - running steps`).
     pub circuit_free_slots: i64,
     /// Free slots in this run's durable agent lease, additionally bounded by
-    /// the mesh/global process safety counters.
-    pub mesh_agent_free_slots: i64,
+    /// the optional app-wide process pool.
+    pub agent_free_slots: i64,
 }
 
 /// One observed fact from outside the pure core. Kept minimal: every
@@ -1240,7 +1240,7 @@ fn e_satisfied_completed(edge: &super::model::CircuitEdge, run: &RunView) -> boo
 /// occupy their slot until the piloted node finishes.
 fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
     let mut circuit_free = capacity.circuit_free_slots;
-    let mut mesh_agent_free = capacity.mesh_agent_free_slots;
+    let mut agent_free = capacity.agent_free_slots;
 
     loop {
         // Fail-fast: stop scheduling the moment anything failed.
@@ -1262,14 +1262,14 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
                 Some(n) => n.kind.clone(),
                 None => continue,
             };
-            let started = try_start(run, t, &node_id, &kind, &mut circuit_free, &mut mesh_agent_free);
+            let started = try_start(run, t, &node_id, &kind, &mut circuit_free, &mut agent_free);
             progressed |= started;
             if started && step_completed_instantly(run, &node_id) {
                 // Freed its slot again — but its successors are picked
                 // up on the next fixpoint pass.
                 circuit_free += 1;
                 if consumes_agent_slot(&kind) {
-                    mesh_agent_free += 1;
+                    agent_free += 1;
                 }
             }
         }
@@ -1279,7 +1279,7 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
                 break;
             }
             let needs_agent_slot = consumes_agent_slot(&kind);
-            let agent_fits = !needs_agent_slot || mesh_agent_free > 0;
+            let agent_fits = !needs_agent_slot || agent_free > 0;
             if circuit_free <= 0 || !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
                 continue;
@@ -1292,7 +1292,7 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             } else {
                 circuit_free -= 1;
                 if needs_agent_slot {
-                    mesh_agent_free -= 1;
+                    agent_free -= 1;
                 }
             }
         }
@@ -1345,17 +1345,17 @@ fn try_start(
     node_id: &str,
     kind: &CircuitNodeKind,
     circuit_free: &mut i64,
-    mesh_agent_free: &mut i64,
+    agent_free: &mut i64,
 ) -> bool {
     let needs_agent_slot = consumes_agent_slot(kind);
-    let agent_fits = !needs_agent_slot || *mesh_agent_free > 0;
+    let agent_fits = !needs_agent_slot || *agent_free > 0;
     if *circuit_free <= 0 || !agent_fits {
         return false;
     }
     start_step(run, t, node_id, kind);
     *circuit_free -= 1;
     if needs_agent_slot {
-        *mesh_agent_free -= 1;
+        *agent_free -= 1;
     }
     true
 }
@@ -1690,8 +1690,8 @@ fn reset_step_for_retry(
 /// terminal step frees exactly its own circuit slot, so capping the
 /// cascade at that count preserves the per-circuit concurrency limit
 /// between Ticks (the Tick's authoritative capacity snapshot re-checks).
-/// Agent spawns always wait for the next Tick (which also recounts mesh
-/// slots freed by the autopilot lifecycle), so they never cascade here.
+/// Agent spawns always wait for the next Tick (which also recounts slots
+/// freed by the agent lifecycle), so they never cascade here.
 fn cascade_after_completion(run: &mut RunView, t: &mut Transition, budget: usize) {
     if run.state != RunState::Running || budget == 0 {
         return; // fail-fast: nothing new may start once the run failed
@@ -1827,8 +1827,8 @@ mod tests {
         }
     }
 
-    fn capacity(circuit_free: i64, mesh_agent_free: i64) -> Capacity {
-        Capacity { circuit_free_slots: circuit_free, mesh_agent_free_slots: mesh_agent_free }
+    fn capacity(circuit_free: i64, agent_free: i64) -> Capacity {
+        Capacity { circuit_free_slots: circuit_free, agent_free_slots: agent_free }
     }
 
     fn tick(c: i64, m: i64) -> CircuitEvent {

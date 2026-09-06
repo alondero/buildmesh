@@ -290,9 +290,9 @@ describe('run diagnostics', () => {
       ).toContain("all 2 of this circuit's step slots are busy");
     });
 
-    it('blames the mesh agent budget when circuit slots are free', () => {
+    it('blames the circuit agent lease when circuit slots are free', () => {
       // `schedule_ready` only has two reasons to park a step, so with
-      // circuit capacity to spare the agent-slot budget is the binding
+      // circuit capacity to spare the circuit-agent lease is the binding
       // one by elimination. (#1467 makes this a fact, not an inference.)
       expect(
         queuedReason({
@@ -301,12 +301,12 @@ describe('run diagnostics', () => {
           meshRunCapacity: 2,
           meshActiveRuns: 1,
         })
-      ).toContain('mesh agent slot');
+      ).toContain('circuit agent slot');
     });
 
     it('does not claim a zero limit is "busy"', () => {
       // A 0 limit would divide the copy by a nonsense number; fall back
-      // to the mesh explanation rather than "All 0 slots are busy".
+      // to the circuit-agent explanation rather than "All 0 slots are busy".
       expect(
         queuedReason({
           concurrencyLimit: 0,
@@ -314,7 +314,7 @@ describe('run diagnostics', () => {
           meshRunCapacity: 2,
           meshActiveRuns: 1,
         })
-      ).toContain('agent slot');
+      ).toContain('circuit agent slot');
     });
 
     it('never claims one budget is THE reason', () => {
@@ -338,9 +338,10 @@ describe('run diagnostics', () => {
         expect(copy.startsWith('Waiting for a slot')).toBe(true);
       }
       expect(circuitFull).toContain("this circuit's step slots are busy");
-      // The mesh branch says WHY it concluded that, so the reader can judge.
+      // The circuit-agent branch says WHY it concluded that, so the reader can judge.
       expect(circuitFree).toContain('spare step slots');
-      expect(circuitFree).toContain('mesh agent slot');
+      expect(circuitFree).toContain('circuit agent slot');
+      expect(circuitFree).not.toContain('Autopilot');
     });
   });
 
@@ -467,7 +468,7 @@ describe('run diagnostics', () => {
       // Per #1467's own AC: the three capacity concepts must read
       // unambiguously as different budgets. The pending copy says
       // "circuit-run slot(s)", the queued copy says "step slots" or
-      // "agent slot" — no overlap.
+      // "circuit agent slot" — no overlap.
       const pendingCopy = pendingAdmissionDetail({
         concurrencyLimit: 2,
         runningSteps: 0,

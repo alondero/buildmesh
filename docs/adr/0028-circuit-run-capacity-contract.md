@@ -2,6 +2,27 @@
 
 Status: accepted
 
+## Amendment (September 2026)
+
+The original decision below established a separate circuit-run admission
+capacity while retaining the legacy mesh agent setting as a circuit backstop.
+Issue #1467 exposed that coupling as a deadlock for multi-agent circuits: a
+retained implementation agent could consume the legacy slot that a downstream
+reviewer needed, so the reviewer could never start.
+
+This amendment supersedes that part of the original decision. The legacy
+`meshes.autopilot_concurrency_limit` remains unchanged for the legacy
+Autopilot poller, but is no longer a circuit input. Circuit runs are bounded
+by `meshes.circuit_run_capacity`, and admission reserves each blueprint's
+declared `SpawnAgentNode` footprint in a durable per-run lease. The optional
+app-wide `autopilot_pool_size` remains the only process-level backstop for
+circuits; when it is unset, there is intentionally no additional per-mesh
+agent-process cap. Admission counts durable worst-case lease reservations,
+while a running Tick counts live circuit agents against that same optional
+host-wide pool. The arithmetic is shared, but the occupancy snapshots are
+intentionally different so already-running work is not starved by peers that
+have not materialized their full blueprint footprint.
+
 The Autopilot Circuits scheduler (issue #1467, walking skeletons #1205/#1206)
 previously enforced per-mesh capacity through a single column,
 `meshes.autopilot_concurrency_limit`, which counted **distinct piloted

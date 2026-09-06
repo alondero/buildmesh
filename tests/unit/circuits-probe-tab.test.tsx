@@ -624,7 +624,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     );
   });
 
-  it('attributes a queued step to the mesh agent budget when circuit slots are free', async () => {
+  it('attributes a queued step to the circuit agent lease when circuit slots are free', async () => {
     const RUN_QUEUED: CircuitRunDetail = {
       run: { ...RUN_DONE.run, id: 23, state: 'running' },
       steps: [step({ node_id: 'implementer', status: 'pending_slot' })],
@@ -633,7 +633,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     openProbeDestination('circuits');
 
     expect((await screen.findByTestId('run-reason-23')).textContent).toContain(
-      'waiting on a mesh agent slot'
+      'waiting on a circuit agent slot'
     );
   });
 

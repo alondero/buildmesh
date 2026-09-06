@@ -533,15 +533,8 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
     .unwrap();
     set_circuit_step_agent_node(run_id, "spawn", agent.id).unwrap();
 
-    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 1);
     assert_eq!(count_active_circuit_agent_nodes_total().unwrap(), 1);
     commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
-    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 0);
-    assert_eq!(
-        count_retained_circuit_agent_nodes(mesh.id).unwrap(),
-        1,
-        "terminal runs still account for retained agent processes"
-    );
     assert_eq!(count_retained_circuit_agent_nodes_total().unwrap(), 1);
 
     assert_eq!(
@@ -557,7 +550,7 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
             .all(|(owned_agent_id, ..)| *owned_agent_id != agent.id),
         "clearing this step removes this agent's ownership without assuming other parallel tests are idle"
     );
-    assert_eq!(count_retained_circuit_agent_nodes(mesh.id).unwrap(), 0);
+    assert_eq!(count_retained_circuit_agent_nodes_total().unwrap(), 0);
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -764,7 +757,7 @@ let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     )
     .unwrap();
 
-    // Mesh B: its own piloted agent must not leak into mesh A's count.
+    // Mesh B contributes to the app-wide active circuit-agent count.
     let rb = create_circuit_run(cb.id, mesh_b.id, "", "{}").unwrap();
     commit_circuit_advance(
         rb,
@@ -785,11 +778,10 @@ let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     assert_eq!(count_running_circuit_steps(c1.id).unwrap(), 1);
     assert_eq!(count_running_circuit_steps(c2.id).unwrap(), 1);
     assert_eq!(
-        count_active_circuit_agent_nodes(mesh_a.id).unwrap(),
-        2,
-        "distinct piloted agents across circuits on mesh A"
+        count_active_circuit_agent_nodes_total().unwrap(),
+        3,
+        "distinct piloted agents across all active circuit runs"
     );
-    assert_eq!(count_active_circuit_agent_nodes(mesh_b.id).unwrap(), 1);
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -1284,7 +1276,6 @@ fn paused_runs_stay_active_and_counters_count_them() {
     assert_eq!(mine.len(), 1, "a paused run stays active (it resumes later)");
     assert_eq!(mine[0].run.state, "paused");
     assert_eq!(count_running_circuit_steps(circuit.id).unwrap(), 1);
-    assert_eq!(count_active_circuit_agent_nodes(mesh.id).unwrap(), 1);
 
     // Resume flips the state back through the same setter.
     set_circuit_run_state(r1, "running").unwrap();

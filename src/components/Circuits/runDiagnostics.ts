@@ -76,13 +76,14 @@ export function stepStatusLabel(status: string): string {
  *   2. **Per-circuit step slots** — `autopilot_circuits.concurrency_limit`,
  *      steps the circuit may run at once. A `pending_slot` step is
  *      parked here.
- *   3. **Mesh agent slots** — `meshes.autopilot_concurrency_limit`,
- *      agent processes this mesh will spawn at once. A step needing a
- *      fresh agent with no slot to spare gets parked on this too.
+ *   3. **Circuit agent slots** — the run's durable blueprint lease,
+ *      optionally bounded by the app-wide Autopilot process pool. A step
+ *      needing a fresh agent with no circuit slot to spare gets parked on
+ *      this too. The legacy mesh node setting is not a circuit budget.
  *
  * The Probe's three copy strings spell out which budget binds: "circuit-
- * run slots", "step slots", "agent slot". A user reading "waiting for a
- * slot" should be able to tell which.
+ * run slots", "step slots", "circuit agent slot". A user reading
+ * "waiting for a slot" should be able to tell which.
  *
  * `runningSteps` and `meshActiveRuns` are both CLIENT-SIDE OBSERVATIONS
  * through a paginated window (`listCircuitsWithRuns(meshId, 10)`,
@@ -268,7 +269,7 @@ function failedWithoutMessageDetail(
  *
  * Like `queuedReason`, the copy names *a* binding constraint rather than
  * claiming an exclusive cause. The two are deliberately visually
- * distinct (`queuedReason` says "step slots" or "agent slot"; this says
+ * distinct (`queuedReason` says "step slots" or "circuit agent slot"; this says
  * "circuit-run slots") so a user reading "waiting for a slot" can tell
  * which budget binds.
  *
@@ -299,7 +300,7 @@ export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
  * for why this is observation rather than the scheduler's own answer.
  *
  * The wording names *a* binding constraint, never "the" reason: when the
- * circuit's step budget AND the mesh agent budget are both exhausted, both are
+ * circuit's step budget AND its agent lease are both exhausted, both are
  * binding, and claiming one exclusively would be false. #1467 replaces this
  * with a capacity contract the ledger can state outright.
  */
@@ -310,7 +311,7 @@ export function queuedReason(capacity: CircuitCapacity): string {
       ? "Waiting for a slot — this circuit runs one step at a time, and that slot is busy."
       : `Waiting for a slot — all ${concurrencyLimit} of this circuit's step slots are busy.`;
   }
-  return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a mesh agent slot (Autopilot's concurrency limit).";
+  return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
 }
 
 /** Terminal-vs-live progress through the ledger, for the card's counter. */

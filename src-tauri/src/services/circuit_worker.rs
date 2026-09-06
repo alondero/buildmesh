@@ -472,32 +472,78 @@ fn required_agent_slots(active: &db::ActiveCircuitRun) -> i64 {
         .unwrap_or(0)
 }
 
-fn agent_reservation_fits(
-    mesh: &crate::models::Mesh,
+/// Free slots in the optional app-wide Autopilot pool after accounting for
+/// agents outside a circuit lease and circuit-owned slots. Admission passes
+/// durable worst-case lease reservations here; a running Tick passes the
+/// live circuit-agent count. The snapshots intentionally differ even though
+/// they protect the same host-wide resource.
+fn global_agent_free_slots(
+    global_pool: Option<u32>,
+    unleased_slots: i64,
+    circuit_occupied_slots: i64,
+) -> i64 {
+    global_pool
+        .map(|pool| {
+            i64::from(pool)
+                .saturating_sub(unleased_slots)
+                .saturating_sub(circuit_occupied_slots)
+        })
+        .unwrap_or(i64::MAX)
+}
+
+fn global_agent_reservation_fits(
     required: i64,
-    mesh_reserved: i64,
-    global_reserved: i64,
-    nonleased_mesh_active: i64,
-    nonleased_total: i64,
+    reserved_circuit_slots: i64,
+    unleased_slots: i64,
     global_pool: Option<u32>,
 ) -> bool {
     if required <= 0 {
         return true;
     }
-    let mesh_free = i64::from(mesh.autopilot_concurrency_limit)
-        .saturating_sub(nonleased_mesh_active)
-        .saturating_sub(mesh_reserved);
-    if mesh_free < required {
-        return false;
-    }
-    global_pool
-        .map(|pool| {
-            i64::from(pool)
-                .saturating_sub(nonleased_total)
-                .saturating_sub(global_reserved)
-                >= required
-        })
-        .unwrap_or(true)
+    global_agent_free_slots(global_pool, unleased_slots, reserved_circuit_slots) >= required
+}
+
+/// Observe the capacity available to one running circuit. The worker injects
+/// the app-wide pool setting so this seam can exercise the real DB counters
+/// without a Tauri runtime. A circuit's durable lease is the agent budget;
+/// the legacy per-mesh Autopilot cap is deliberately not read here.
+fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> CircuitEvent {
+    let circuit_running =
+        db::count_running_circuit_steps(active.run.circuit_id).unwrap_or_else(|e| {
+            tracing::warn!("circuits: running-step count failed, failing closed: {}", e);
+            i64::MAX
+        });
+    let global_free_slots = match global_pool {
+        None => i64::MAX,
+        Some(pool) => {
+            let legacy_total = db::count_active_autopilot_nodes_total();
+            let circuit_total = db::count_active_circuit_agent_nodes_total();
+            let retained_total = db::count_retained_circuit_agent_nodes_total();
+            match (legacy_total, circuit_total, retained_total) {
+                (Ok(legacy), Ok(circuits), Ok(retained)) => {
+                    global_agent_free_slots(
+                        Some(pool),
+                        legacy.saturating_add(retained),
+                        circuits,
+                    )
+                }
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                    tracing::warn!(
+                        "circuits: global Autopilot pool count failed, failing closed: {}",
+                        e
+                    );
+                    0
+                }
+            }
+        }
+    };
+    let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
+    let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
+    let lease_free = reserved_for_run.saturating_sub(owned_by_run);
+    CircuitEvent::Tick(Capacity {
+        circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
+        agent_free_slots: global_free_slots.min(lease_free),
+    })
 }
 
 /// One full pass over every active circuit run. Per-run failures are
@@ -526,7 +572,6 @@ fn run_pass(app: &AppHandle) {
     // admission sweep clears it.
     use std::collections::HashMap;
     let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
-    let mut reserved_by_mesh: HashMap<i64, i64> = HashMap::new();
     // Repair leases for active runs created before the reservation table was
     // introduced. This is idempotent and keeps restarts from losing a claim.
     for active in &runs {
@@ -540,14 +585,18 @@ fn run_pass(app: &AppHandle) {
     let global_pool = crate::preferences::autopilot_pool_size();
     // Active circuit runs are represented by their lease. Terminal runs do
     // not hold a lease, but retained implementation PTYs still consume host
-    // capacity until their agent rows are archived/deleted; include those
-    // non-leased agents in the admission baseline.
+    // optional app-wide pool until their agent rows are archived/deleted;
+    // include those non-leased agents in the global baseline.
     let retained_total = db::count_retained_circuit_agent_nodes_total().unwrap_or(i64::MAX);
-    let legacy_total = db::count_active_autopilot_nodes_total()
+    let unleased_slots = db::count_active_autopilot_nodes_total()
         .unwrap_or(i64::MAX)
         .saturating_add(retained_total);
-    let mut global_reserved = db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
+    let mut reserved_circuit_slots =
+        db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
+        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
+            continue;
+        }
         // Pending runs that the gate deferred re-appear next pass;
         // running/paused runs always proceed (they already hold a slot).
         if active.run.state == "pending" {
@@ -565,50 +614,33 @@ fn run_pass(app: &AppHandle) {
                     );
                     continue;
                 }
-                Some(_) => {} // admitted by may_admit_run — fall through to drive
+                Some(_) => {} // admitted by may_admit_run — reserve its lease below
             }
-        }
-        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
-            continue;
-        }
-        if active.run.state == "pending" {
-            if let Some(mesh) = mesh_cache.get(&active.run.mesh_id).and_then(|m| m.as_ref()) {
-                let required = required_agent_slots(&active);
-                if required > 0 {
-                    let existing = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
-                    let additional = required.saturating_sub(existing);
-                    let mesh_reserved = *reserved_by_mesh
-                        .entry(active.run.mesh_id)
-                        .or_insert_with(|| db::count_reserved_circuit_agent_slots(active.run.mesh_id).unwrap_or(i64::MAX));
-                    let retained_mesh_active = db::count_retained_circuit_agent_nodes(active.run.mesh_id).unwrap_or(i64::MAX);
-                    let legacy_mesh_active = db::count_active_autopilot_nodes(active.run.mesh_id)
-                        .unwrap_or(i64::MAX)
-                        .saturating_add(retained_mesh_active);
-                    if additional > 0
-                        && !agent_reservation_fits(
-                            mesh,
-                            additional,
-                            mesh_reserved,
-                            global_reserved,
-                            legacy_mesh_active,
-                            legacy_total,
-                            global_pool,
-                        )
-                    {
-                        tracing::info!(
-                            "circuits: mesh {} held — run {} needs {} reserved agent slot(s)",
-                            active.run.mesh_id, active.run.id, required
-                        );
-                        continue;
-                    }
-                    if additional > 0 {
-                        match db::reserve_circuit_agent_slots(active.run.id, required) {
-                            Ok(true) => {
-                                *reserved_by_mesh.get_mut(&active.run.mesh_id).unwrap() += additional;
-                                global_reserved = global_reserved.saturating_add(additional);
-                            }
-                            Ok(false) | Err(_) => continue,
+            let required = required_agent_slots(&active);
+            if required > 0 {
+                let existing = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
+                let additional = required.saturating_sub(existing);
+                if additional > 0
+                    && !global_agent_reservation_fits(
+                        additional,
+                        reserved_circuit_slots,
+                        unleased_slots,
+                        global_pool,
+                    )
+                {
+                    tracing::info!(
+                        "circuits: global Autopilot pool held — run {} needs {} reserved agent slot(s)",
+                        active.run.id, required
+                    );
+                    continue;
+                }
+                if additional > 0 {
+                    match db::reserve_circuit_agent_slots(active.run.id, required) {
+                        Ok(true) => {
+                            reserved_circuit_slots =
+                                reserved_circuit_slots.saturating_add(additional);
                         }
+                        Ok(false) | Err(_) => continue,
                     }
                 }
             }
@@ -1051,78 +1083,12 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     // Capacity snapshot for scheduling. Every failure here fails CLOSED
     // (zero capacity — the run parks in pending_slot until the next
     // pass), but loudly: a silent permanent queue would look exactly
-    // like a busy mesh.
-    let mesh_limit = match db::get_mesh_by_id(active.run.mesh_id) {
-        Ok(m) => i64::from(m.autopilot_concurrency_limit),
-        Err(e) => {
-            tracing::warn!(
-                "circuits: could not read mesh {} for capacity snapshot, failing closed: {}",
-                active.run.mesh_id,
-                e
-            );
-            0
-        }
-    };
-    let circuit_running =
-        db::count_running_circuit_steps(active.run.circuit_id).unwrap_or_else(|e| {
-            tracing::warn!("circuits: running-step count failed, failing closed: {}", e);
-            i64::MAX
-        });
-    let legacy_mesh_active = db::count_active_autopilot_nodes(active.run.mesh_id)
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                "circuits: legacy active-agent count failed, failing closed: {}",
-                e
-            );
-            i64::MAX
-        });
-    let circuit_mesh_active =
-        db::count_active_circuit_agent_nodes(active.run.mesh_id).unwrap_or_else(|e| {
-            tracing::warn!("circuits: active-agent count failed, failing closed: {}", e);
-            i64::MAX
-        });
-    let retained_mesh_active =
-        db::count_retained_circuit_agent_nodes(active.run.mesh_id).unwrap_or_else(|e| {
-            tracing::warn!(
-                "circuits: retained-agent count failed, failing closed: {}",
-                e
-            );
-            i64::MAX
-        });
-    let mesh_active = legacy_mesh_active
-        .saturating_add(circuit_mesh_active)
-        .saturating_add(retained_mesh_active);
-    let global_free_slots = match crate::preferences::autopilot_pool_size() {
-        None => i64::MAX,
-        Some(pool) => {
-            let legacy_total = db::count_active_autopilot_nodes_total();
-            let circuit_total = db::count_active_circuit_agent_nodes_total();
-            let retained_total = db::count_retained_circuit_agent_nodes_total();
-            match (legacy_total, circuit_total, retained_total) {
-                (Ok(legacy), Ok(circuits), Ok(retained)) => {
-                    i64::from(pool).saturating_sub(
-                        legacy.saturating_add(circuits).saturating_add(retained),
-                    )
-                }
-                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                    tracing::warn!(
-                        "circuits: global Autopilot pool count failed, failing closed: {}",
-                        e
-                    );
-                    0
-                }
-            }
-        }
-    };
-    let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
-    let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
-    let lease_free = reserved_for_run.saturating_sub(owned_by_run);
-    events.push(CircuitEvent::Tick(Capacity {
-        circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
-        mesh_agent_free_slots: (mesh_limit - mesh_active)
-            .min(global_free_slots)
-            .min(lease_free),
-    }));
+    // like a busy mesh. Circuit-owned agents use their durable run lease;
+    // the optional app-wide pool is the only external agent backstop.
+    events.push(observe_capacity(
+        active,
+        crate::preferences::autopilot_pool_size(),
+    ));
 
     events
 }
@@ -2994,7 +2960,7 @@ mod tests {
     // shapes — empty mesh / under-cap mesh / full mesh — using the
     // process-global DB with the same `--test-threads=1` discipline as
     // the rest of `db::circuit_tests`. The DB-layer contracts
-    // (`count_active_circuit_runs` / `release_circuit_run`) are pinned
+    // (`count_active_circuit_runs` / terminal commit) are pinned
     // separately in `db/circuit_tests.rs`; here we verify the gate
     // composes correctly with state transitions on real rows.
     // ------------------------------------------------------------------
@@ -3119,23 +3085,60 @@ mod tests {
     }
 
     #[test]
-    fn agent_reservation_keeps_the_host_cap_hard_for_downstream_spawns() {
-        let mesh = crate::models::Mesh {
-            autopilot_concurrency_limit: 2,
-            ..zero_test_mesh()
-        };
+    fn global_agent_reservation_counts_occupied_pool_slots() {
+        assert!(
+            global_agent_reservation_fits(2, 0, 0, Some(2)),
+            "an empty optional global pool should fit the requested lease"
+        );
+        // A peer run's reservation consumes the optional global pool before
+        // its second process has been created.
+        assert!(!global_agent_reservation_fits(2, 1, 0, Some(2)));
+        assert!(!global_agent_reservation_fits(1, 0, 1, Some(1)));
+        // Legacy (non-circuit) agents remain part of global accounting.
+        assert!(!global_agent_reservation_fits(1, 0, 2, Some(2)));
+    }
 
-        // A two-agent blueprint can claim both mesh slots when no other
-        // process or run lease is using them.
-        assert!(agent_reservation_fits(&mesh, 2, 0, 0, 0, 0, Some(2)));
-        // A peer run's reservation consumes capacity even before its second
-        // process has been created, so retained agents cannot fan out past
-        // the configured host limit.
-        assert!(!agent_reservation_fits(&mesh, 2, 1, 0, 0, 0, Some(2)));
-        assert!(!agent_reservation_fits(&mesh, 1, 0, 1, 0, 0, Some(1)));
-        // Legacy (non-circuit) agents remain part of both host and global
-        // accounting while leases cover circuit agents.
-        assert!(!agent_reservation_fits(&mesh, 1, 0, 0, 2, 0, Some(2)));
+    #[test]
+    fn observed_capacity_ignores_legacy_mesh_node_cap() {
+        let path = init_temp_db_at("observe_capacity_legacy_mesh_cap");
+        let mesh = crate::db::create_mesh("observe-capacity", "/tmp/observe-capacity").unwrap();
+        crate::db::set_mesh_autopilot(mesh.id, false, None, 1, None, None).unwrap();
+        let circuit = crate::db::create_autopilot_circuit(
+            mesh.id,
+            "observe-capacity-circuit",
+            "",
+            2,
+            "{}",
+        )
+        .unwrap();
+        let run_id = crate::db::create_circuit_run(
+            circuit.id,
+            mesh.id,
+            "manual:observe-capacity",
+            "{}",
+        )
+        .unwrap();
+        crate::db::set_circuit_run_state(run_id, "running").unwrap();
+        assert!(crate::db::reserve_circuit_agent_slots(run_id, 2).unwrap());
+
+        let active = crate::db::list_active_circuit_runs()
+            .unwrap()
+            .into_iter()
+            .find(|active| active.run.id == run_id)
+            .expect("running test circuit should be observable");
+        // This is the production capacity-observation seam used by
+        // `observe`, exercised without a Tauri runtime or PTY. A two-slot
+        // lease remains available even though the legacy mesh cap is one.
+        let event = observe_capacity(&active, None);
+        match event {
+            CircuitEvent::Tick(capacity) => {
+                assert_eq!(capacity.circuit_free_slots, 2);
+                assert_eq!(capacity.agent_free_slots, 2);
+            }
+            other => panic!("expected a capacity tick, got {other:?}"),
+        }
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,
