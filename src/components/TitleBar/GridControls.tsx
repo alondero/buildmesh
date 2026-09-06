@@ -128,7 +128,10 @@ export function GridControls() {
 
   return (
     <div
-      className="flex items-center gap-1"
+      // `ml-1` lives here (not on a wrapper in TitleBar) so the gap to the
+      // switcher's last segment exists only while the bar is mounted — an
+      // unmounted mode must not leave an empty margin behind (#1609 review).
+      className="ml-1 flex items-center gap-1"
       data-testid="grid-controls"
     >
       <input

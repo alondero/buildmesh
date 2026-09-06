@@ -4,13 +4,15 @@ import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeContextPin } from '../lib/probeContext';
 
-// The four canvas View Modes (wayfinder #982 — tickets #983 state model,
+// The five canvas View Modes (wayfinder #982 — tickets #983 state model,
 // #986 rendering). 'single' solos the active node (it subsumes the old
 // `maximizedNodeId`), 'mesh' scopes to the sidebar-selected mesh, 'pinned'
-// is a cross-mesh filter over `AgentNode.is_pinned`, and 'all' shows every
-// node. Kept as a string-literal union (not a generated wire enum) because
-// it's a pure UI concern — no backend serialises it.
-export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all';
+// is a cross-mesh filter over `AgentNode.is_pinned`, 'all' shows every
+// node, and 'filtered' (the Search Nodes view, #1609) shows the cross-mesh
+// node set narrowed by the Grid Controls (search text + provider + status
+// filters). Kept as a string-literal union (not a generated wire enum)
+// because it's a pure UI concern — no backend serialises it.
+export type ViewMode = 'single' | 'mesh' | 'pinned' | 'all' | 'filtered';
 
 // The Universal Command Omnibar's preselected palette mode (issue #1409 —
 // map #1371 Decision #2): 'files' is the default search (⌘/Ctrl+K),
@@ -25,7 +27,7 @@ export type OmnibarMode = 'files' | 'commands';
 export type NonSingleViewMode = Exclude<ViewMode, 'single'>;
 
 const VIEW_MODE_STORAGE_KEY = 'buildmesh.view-mode';
-const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all'];
+const VIEW_MODES: readonly ViewMode[] = ['single', 'mesh', 'pinned', 'all', 'filtered'];
 
 // Boot value for `viewMode`: the persisted mode if it's present and valid,
 // else derived from the current mesh selection exactly as the pre-view-modes

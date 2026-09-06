@@ -596,6 +596,15 @@ fn read_opencode_messages(
     session_id: &str,
     row_budget: usize,
 ) -> Option<Vec<serde_json::Value>> {
+    Some(read_opencode_message_rows(db_path, session_id, row_budget)?
+        .into_iter().map(|(_, message)| message).collect())
+}
+
+fn read_opencode_message_rows(
+    db_path: &Path,
+    session_id: &str,
+    row_budget: usize,
+) -> Option<Vec<(String, serde_json::Value)>> {
     use rusqlite::{Connection, OpenFlags};
     use std::time::Duration;
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
@@ -610,24 +619,25 @@ fn read_opencode_messages(
     }
     let mut stmt = conn
         .prepare(
-            "SELECT data FROM message \
+            "SELECT id, data FROM message \
              WHERE session_id = ?1 \
              ORDER BY time_created DESC \
              LIMIT ?2",
         )
         .ok()?;
-    let mut latest: Vec<serde_json::Value> = Vec::new();
+    let mut latest = Vec::new();
     let mut rows = stmt
         .query(rusqlite::params![session_id, row_budget as i64])
         .ok()?;
     while let Some(row) = rows.next().ok()? {
-        let data: String = row.get(0).ok()?;
+        let id: String = row.get(0).ok()?;
+        let data: String = row.get(1).ok()?;
         // Each row's `data` is one message record. We accept any JSON shape
         // here — structural validation lives in the parser so an unknown
         // shape degrades as `ShapeChanged`, not a panic. Rows that aren't
         // valid JSON are silently dropped (graceful failure on bad rows).
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-            latest.push(value);
+            latest.push((id, value));
         }
     }
     // The query returned DESC; the parser consumes ASC (matches the
@@ -1046,6 +1056,149 @@ pub fn read_last_assistant_message(
     }
     read_last_assistant_message_from_file(&path, format)
 }
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantReport {
+    pub text: String,
+    pub revision: String,
+}
+
+/// A circuit needs the identity of the assistant response, not the file's
+/// mtime: a new user prompt or tool event also changes the transcript file.
+/// Unsupported/non-JSONL stores fall back to live per-turn PTY observation.
+pub(crate) fn read_assistant_report(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+) -> Option<AssistantReport> {
+    if format == TranscriptFormat::OpenCode {
+        let (path, session_id) = opencode_resolve(session_id, node_path).ok()?;
+        return opencode_assistant_report(&path, session_id);
+    }
+    let path = locate_transcript(format, session_id?, node_path)?;
+    assistant_report_from_file(&path, format)
+}
+
+fn opencode_assistant_report(path: &Path, session_id: &str) -> Option<AssistantReport> {
+    use sha2::{Digest, Sha256};
+    read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)?
+        .into_iter().rev().find_map(|(id, message)| {
+            let text = parse_opencode_messages(&[message], 1).last_assistant_message?;
+            Some(AssistantReport {
+                revision: format!("{id}:{:x}", Sha256::digest(text.as_bytes())),
+                text,
+            })
+        })
+}
+
+fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<AssistantReport> {
+    use sha2::{Digest, Sha256};
+    let mut file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let start = size.saturating_sub(256 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut reader = BufReader::new(file.take(size - start));
+    let mut offset = start;
+    let mut line = String::new();
+    if start > 0 {
+        // The window may begin in the middle of a UTF-8 character.
+        offset += reader.read_until(b'\n', &mut Vec::new()).ok()? as u64;
+    }
+    let mut lines = Vec::new();
+    let mut assistant_line_offset = None;
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).ok()?;
+        if bytes == 0 { break; }
+        offset += bytes as u64;
+        // Ignore a record the writer has not finished publishing yet.
+        if !line.ends_with('\n') { break; }
+        if line_has_assistant_text(format, &line) {
+            assistant_line_offset = Some(offset);
+        }
+        lines.push(std::mem::take(&mut line));
+    }
+    let text = parse_transcript(format, lines.into_iter(), 1).last_assistant_message?;
+    let offset = assistant_line_offset?;
+    Some(AssistantReport {
+        // Revisions identify the assistant content plus its position. Hashing
+        // the normalized text keeps file-backed providers consistent with the
+        // OpenCode report reader; the offset still distinguishes identical
+        // responses emitted at different points in one transcript.
+        revision: format!("{offset}:{:x}", Sha256::digest(text.as_bytes())),
+        text,
+    })
+}
+
+/// Identify a line that can advance `Parsed::last_assistant_message` without
+/// invoking one of the full rolling transcript parsers. This is deliberately
+/// a single structural JSON inspection per line; the complete parser runs once
+/// over the collected window below, avoiding the old O(lines × full-parser)
+/// loop on large transcript tails.
+fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    match format {
+        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => {
+            value.get("type").and_then(|kind| kind.as_str()) == Some("assistant")
+                && value
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(|role| role.as_str())
+                    == Some("assistant")
+                && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
+                    .trim()
+                    .is_empty()
+        }
+        TranscriptFormat::Codex => {
+            matches!(
+                value.get("type").and_then(|kind| kind.as_str()),
+                Some("response_item") | Some("event_msg")
+            ) && value
+                .get("payload")
+                .is_some_and(|payload| {
+                    payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
+                        && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                        && !payload
+                            .get("content")
+                            .map(codex_concat_text)
+                            .unwrap_or_default()
+                            .trim()
+                            .is_empty()
+                })
+        }
+        TranscriptFormat::CommandCode => {
+            value.get("type").and_then(|kind| kind.as_str()) == Some("message")
+                && value.get("message").is_some_and(|message| {
+                    message.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                        && !concat_text_blocks(message.get("content"))
+                            .trim()
+                            .is_empty()
+                })
+        }
+        TranscriptFormat::Agy => {
+            value.get("source").and_then(|source| source.as_str()) == Some("MODEL")
+                && value
+                    .get("content")
+                    .and_then(|content| content.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+        }
+        TranscriptFormat::Grok => {
+            value.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                && value.get("content").is_some_and(|content| match content {
+                    serde_json::Value::String(text) => !text.trim().is_empty(),
+                    serde_json::Value::Array(blocks) => blocks
+                        .iter()
+                        .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+                        .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
+                        .any(|text| !text.trim().is_empty()),
+                    _ => false,
+                })
+        }
+        TranscriptFormat::OpenCode => false,
+    }
+}
+
 /// Cheap file-level reader. See [`read_last_assistant_message`].
 pub fn read_last_assistant_message_from_file(
     path: &Path,
@@ -2112,6 +2265,29 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn circuit_report_revision_tracks_assistant_response_not_user_or_tool_activity() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let assistant = r#"{"type":"assistant","message":{"id":"a","role":"assistant","content":[{"type":"text","text":"Done."}]}}"#;
+        writeln!(file, "{assistant}").unwrap();
+        let first = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
+        let user = r#"{"type":"user","message":{"role":"user","content":"Now finish and open the PR"}}"#;
+        writeln!(file, "{user}").unwrap();
+        let waiting = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
+        assert_eq!(waiting.revision, first.revision);
+        let tool = r#"{"type":"assistant","message":{"id":"tool","role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"git status"}}]}}"#;
+        writeln!(file, "{tool}").unwrap();
+        assert_eq!(assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap().revision, first.revision);
+        // Even byte-identical responses have distinct positions in the log.
+        writeln!(file, "{assistant}").unwrap();
+        let second = assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap();
+        assert_eq!(second.text, first.text);
+        assert_ne!(second.revision, first.revision);
+        file.write_all(br#"{"type":"assistant""#).unwrap();
+        assert_eq!(assistant_report_from_file(file.path(), TranscriptFormat::ClaudeCode).unwrap().revision, second.revision);
     }
     // --- Shared primitive tests ---
     #[test]
@@ -4151,6 +4327,25 @@ mod tests {
                 "session-id filter leaked a row from the other session id"
             );
         }
+    }
+
+    #[test]
+    fn circuit_opencode_report_identity_survives_restart_and_identical_replies() {
+        let session = "ses_fixedsid000000000000000000001";
+        let tmp = tempfile_opencode_db(&[
+            (100, "assistant", &opencode_text_message("assistant", "Done.")),
+            (200, "user", &opencode_text_message("user", "Finish now")),
+        ]);
+        let first = opencode_assistant_report(tmp.path(), session).unwrap();
+        assert_eq!(first.text, "Done.");
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute("INSERT INTO message (id, session_id, time_created, data) VALUES ('new-reply', ?1, 300, ?2)",
+            rusqlite::params![session, opencode_text_message("assistant", "Done.")]).unwrap();
+        drop(conn);
+        let second = opencode_assistant_report(tmp.path(), session).unwrap();
+        assert_eq!(second.text, first.text);
+        assert_ne!(second.revision, first.revision);
+        assert_eq!(opencode_assistant_report(tmp.path(), session).unwrap().revision, second.revision);
     }
 
     /// A session id that doesn't match any row is not an error — the

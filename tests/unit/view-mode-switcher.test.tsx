@@ -1,10 +1,12 @@
 ﻿/**
- * ViewModeSwitcher (wayfinder #982 / #983 / #986) — the four-segment
- * control in the canvas header that drives uiStore.viewMode. Pins the
- * segment rendering, ARIA semantics, and the deliberate sidebar-sync
- * round-trips (Mesh selects a fallback mesh and lets the uiStore sync
- * flip the mode; All clears the selection the same way the sidebar
- * re-click-deselect does).
+ * ViewModeSwitcher (wayfinder #982 / #983 / #986; Filtered #1609) — the
+ * five-segment control in the canvas header that drives uiStore.viewMode.
+ * Pins the segment rendering, ARIA semantics, and the deliberate
+ * sidebar-sync round-trips (Mesh selects a fallback mesh and lets the
+ * uiStore sync flip the mode; All clears the selection the same way the
+ * sidebar re-click-deselect does). The Filtered segment additionally arms
+ * the focus-grid-search request so the first click lands the user in the
+ * search box.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -41,7 +43,7 @@ beforeEach(() => {
     loading: false,
     error: null,
   });
-  useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+  useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', focusGridSearchRequest: 0 });
 });
 
 describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
@@ -54,16 +56,17 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       expect(screen.getByRole('button', { name: /mesh grid/i })).toBeTruthy();
       expect(screen.getByRole('button', { name: /pinned/i })).toBeTruthy();
       expect(screen.getByRole('button', { name: /all nodes/i })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /filtered/i })).toBeTruthy();
     });
 
     it('marks exactly the active segment with aria-pressed=true', () => {
       useUIStore.setState({ viewMode: 'pinned' });
       render(<ViewModeSwitcher />);
-      const segments = ['Single', 'Mesh Grid', 'Pinned', 'All Nodes'];
+      const segments = ['Single', 'Mesh Grid', 'Pinned', 'All Nodes', 'Filtered'];
       const activeIndexes = segments
         .map((s) => screen.getByRole('button', { name: new RegExp(s, 'i') }))
         .map((btn) => btn.getAttribute('aria-pressed') === 'true');
-      expect(activeIndexes).toEqual([false, false, true, false]);
+      expect(activeIndexes).toEqual([false, false, true, false, false]);
     });
   });
 
@@ -134,6 +137,26 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
       expect(useMeshStore.getState().selectedMeshId).toBe(1);
       expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    it('clicking Filtered switches to the filtered mode AND arms the search-focus request (#1609)', () => {
+      // The segment owns both halves of the gesture: the mode flip makes
+      // TitleBar mount the search bar, the request counter focuses it once
+      // mounted. The counter must bump even though the mode was already
+      // 'filtered' in a prior interaction — the click means "get me to the
+      // search box".
+      render(<ViewModeSwitcher />);
+      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+      expect(useUIStore.getState().viewMode).toBe('filtered');
+      expect(useUIStore.getState().lastNonSingleMode).toBe('filtered');
+      expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
+    });
+
+    it('re-clicking Filtered while already filtered re-arms the focus request without a mode churn', () => {
+      useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+      render(<ViewModeSwitcher />);
+      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+      expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
     });
   });
 });

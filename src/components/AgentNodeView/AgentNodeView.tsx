@@ -5,7 +5,7 @@ import {
 } from '@dnd-kit/core';
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-import { useUIStore } from '../../stores/uiStore';
+import { useUIStore, type NonSingleViewMode } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
@@ -176,11 +176,66 @@ function NoNodesSplash() {
   );
 }
 
+/// Empty state for the Filtered view (issue #1609) when no node matches the
+/// active Grid Controls. Mirrors the Pinned empty state's structure
+/// (centered, max-w-sm, heading + body) but the call to action is "Clear
+/// filters" — the way out is relaxing the search/filters, not switching
+/// scopes. The CTA routes through the store action so the cleared set also
+/// persists (the same contract `resetGridControls` tests pin).
+export function FilteredEmptyState() {
+  const resetGridControls = useUIStore(state => state.resetGridControls);
+  return (
+    <div className="flex-1 flex items-center justify-center text-text-muted">
+      <div className="text-center max-w-sm">
+        <svg
+          className="mx-auto mb-4 w-8 h-8 text-text-muted"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+        </svg>
+        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No matching nodes</p>
+        <p className="text-sm text-text-secondary mb-6 font-sans">
+          No node name matches the current search. Clear it to see every node again.
+        </p>
+        <button
+          onClick={resetGridControls}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+            <line x1="22" y1="3" x2="2" y2="3" />
+          </svg>
+          {/* Labelled "Clear search": the provider/status filters this reset
+              also clears have no setter UI yet (#997 owns the popover), so
+              the label must not advertise controls the user never set. */}
+          Clear search
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /// Empty state for Pinned Grid mode with 0 pinned nodes (wayfinder #982 /
 /// ticket #986). Mirrors the splash's structure (centered, max-w-sm,
 /// heading + body + accent-cyan CTA) but the call to action is "View All
 /// Nodes" — the natural next step when nothing is pinned yet. Pin afford-
 /// ances live in the node header and the sidebar node context menu (#985).
+/** Mode-aware grid empty state (ticket #986, #1609). A function over the
+ *  mode rather than inline ternaries in the render body — the mode→element
+ *  mapping reads as a table, and adding a mode means adding a row, not
+ *  re-nesting a conditional. */
+function gridEmptyState(mode: NonSingleViewMode) {
+  if (mode === 'pinned') return <PinnedEmptyState />;
+  if (mode === 'filtered') return <FilteredEmptyState />;
+  return <NoNodesSplash />;
+}
+
 export function PinnedEmptyState() {
   const setViewMode = useUIStore(state => state.setViewMode);
   return (
@@ -301,8 +356,14 @@ export function AgentNodeView() {
   const singleNode = useMemo(
     () => (viewMode !== 'single'
       ? null
-      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId)),
-    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId],
+      : resolveSingleNode(agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, {
+          gridSearchQuery,
+          gridProviderFilter,
+          gridStatusFilter,
+        })),
+    // Controls shape (not each field) keeps the memo dep list stable and the
+    // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
+    [viewMode, agentNodes, activeNodeId, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
   );
 
   useEffect(() => {
@@ -497,8 +558,9 @@ export function AgentNodeView() {
             )
           ) : visibleNodes.length === 0 ? (
             // Empty states are mode-aware (ticket #986): Pinned explains
-            // pinning and offers All Nodes; mesh/all keep the splash.
-            viewMode === 'pinned' ? <PinnedEmptyState /> : <NoNodesSplash />
+            // pinning and offers All Nodes, Filtered offers clearing the
+            // search (#1609); mesh/all keep the splash.
+            gridEmptyState(viewMode)
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}

@@ -445,8 +445,8 @@ pub enum CircuitEvent {
     /// The user approved a CollaboratorCheck gate parked in Blocked.
     CollaboratorApproved { node_id: String },
     /// The seam classified the piloted agent's latest turn for this
-    /// LlmTurnClassifier gate. `None` = unclassifiable (degrades to
-    /// Working).
+    /// LlmTurnClassifier gate. `None` = classifier unavailable; it is recorded
+    /// as a retryable error and never routed as a step outcome.
     TurnClassified {
         node_id: String,
         classification: Option<Classification>,
@@ -480,13 +480,14 @@ pub enum CircuitEvent {
 // Effects — everything the seam must do on the stepper's behalf.
 // ---------------------------------------------------------------------------
 
-/// One persisted mutation of a step row. `None` fields mean "leave as-is".
+/// One persisted mutation of a step row. For `error`, the outer `None` means
+/// "leave as-is" while `Some(None)` explicitly clears a stored error.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepWrite {
     pub node_id: String,
     pub status: StepStatus,
     pub outcome: Option<Option<StepOutcome>>,
-    pub error: Option<String>,
+    pub error: Option<Option<String>>,
     pub agent_node_id: Option<i64>,
     /// The step's execution count after this write (retry bookkeeping).
     pub attempt: i32,
@@ -658,7 +659,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
                 if let Some(out) = output {
-                    run.context.set(&format!("node.{}.output", step_node), out);
+                    run.context.set(&format!("node.{step_node}.output"), out);
                 }
                 if *success {
                     set_step(run, &mut t, &step_node, StepStatus::Completed);
@@ -746,32 +747,72 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     | CircuitNodeKind::ReviewVerdict { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
+                let Some(attempt) = run.step(node_id).map(|step| step.attempt) else {
+                    return t;
+                };
+                run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
+                run.context.set(&format!("node.{node_id}.classification"), match classification {
+                    Some(Classification::Completed) => "completed",
+                    Some(Classification::Blocked) => "blocked",
+                    Some(Classification::Working) => "working",
+                    None => "unavailable",
+                });
+                t.context_changed = true;
                 if let Some(out) = output {
-                    run.context.set(&format!("node.{}.evaluated_output", node_id), out.clone());
+                    run.context.set(&format!("node.{node_id}.evaluated_output"), out.clone());
                     t.context_changed = true;
                     if run.context.source_agent_id() == run.resolve_target_agent(node_id) {
                         run.context.set("source.output", out.clone());
                     }
                     if let Some(spawn_node_id) = spawn_node_for_agent(run, node_id) {
-                        run.context.set(&format!("node.{}.output", spawn_node_id), out.clone());
+                        run.context.set(&format!("node.{spawn_node_id}.output"), out.clone());
                         t.context_changed = true;
                     }
                 }
-                let outcome = match classification {
-                    Some(Classification::Completed) => StepOutcome::Completed,
-                    Some(Classification::Blocked) => StepOutcome::Blocked,
-                    Some(Classification::Working) | None => StepOutcome::Working,
-                };
-                // A classifier outcome only terminalizes the gate when the
-                // blueprint wires that outcome somewhere. An unwired
-                // BLOCKED/WORKING result is deliberately parked so a human
-                // reply or a later agent turn can be classified again; this
-                // is the issue-driven Autopilot contract and avoids silently
-                // completing a run on a transient yield.
-                if classifier_outcome_is_routed(run, node_id, outcome) {
-                    complete_with_outcome(run, &mut t, node_id, outcome);
-                    cascade_after_completion(run, &mut t, 1);
-                    finish_run_if_done(run, &mut t);
+                if let Some(classification) = classification {
+                    let outcome = match classification {
+                        Classification::Completed => StepOutcome::Completed,
+                        Classification::Blocked => StepOutcome::Blocked,
+                        Classification::Working => StepOutcome::Working,
+                    };
+                    // A classifier outcome only terminalizes the gate when the
+                    // blueprint wires that outcome somewhere. An unwired
+                    // BLOCKED/WORKING result is deliberately parked so a human
+                    // reply or a later agent turn can be classified again; this
+                    // is the issue-driven Autopilot contract and avoids silently
+                    // completing a run on a transient yield.
+                    if classifier_outcome_is_routed(run, node_id, outcome) {
+                        complete_with_outcome(run, &mut t, node_id, outcome);
+                        cascade_after_completion(run, &mut t, 1);
+                        finish_run_if_done(run, &mut t);
+                    } else {
+                        let error = match classification {
+                            Classification::Blocked => "Agent needs input. Continue the agent to produce a new report.",
+                            Classification::Working => "Agent reported work remaining. Waiting for its next report; check the agent for a question or permission prompt.",
+                            Classification::Completed => "Agent reported completion, but no completed route is wired; waiting for a new report.",
+                        }.to_string();
+                        if let Some(step) = run.step_mut(node_id) {
+                            step.error = Some(error.clone());
+                        }
+                        t.step_writes.push(StepWrite {
+                            node_id: node_id.clone(), status: StepStatus::Running,
+                            outcome: None, error: Some(Some(error)), agent_node_id: None,
+                            attempt, fresh_attempt: false,
+                        });
+                    }
+                } else {
+                    // A classifier backend failure is not an agent verdict. Do
+                    // not invent WORKING (or any other route) from None; keep
+                    // the gate running with a visible, retryable explanation.
+                    let error = "Classifier unavailable; retrying after 60 seconds. Check the Mesh Autopilot provider if this persists.".to_string();
+                    if let Some(step) = run.step_mut(node_id) {
+                        step.error = Some(error.clone());
+                    }
+                    t.step_writes.push(StepWrite {
+                        node_id: node_id.clone(), status: StepStatus::Running,
+                        outcome: None, error: Some(Some(error)), agent_node_id: None,
+                        attempt, fresh_attempt: false,
+                    });
                 }
             }
         }
@@ -942,7 +983,7 @@ fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepSt
     };
     if status.is_terminal() {
         let outcome_str = status.outcome().map(|o| o.as_db_str()).unwrap_or(status.as_db_str());
-        run.context.set(&format!("node.{}.status", node_id), outcome_str);
+        run.context.set(&format!("node.{node_id}.status"), outcome_str);
     }
     if changed {
         // Preserve the existing attempt count on re-transitions (a retry's
@@ -964,16 +1005,17 @@ fn complete_with_outcome(
         Some(step) => {
             step.status = StepStatus::Completed;
             step.outcome = Some(outcome);
+            step.error = None;
             step.attempt
         }
         None => 1,
     };
-    run.context.set(&format!("node.{}.status", node_id), outcome.as_db_str());
+    run.context.set(&format!("node.{node_id}.status"), outcome.as_db_str());
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Completed,
         outcome: Some(Some(outcome)),
-        error: None,
+        error: Some(None),
         agent_node_id: None,
         attempt,
         fresh_attempt: false,
@@ -1008,13 +1050,13 @@ fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String
         step.error = Some(error.clone());
         run.steps.push(step);
     }
-    run.context.set(&format!("node.{}.status", node_id), StepOutcome::Failed.as_db_str());
+    run.context.set(&format!("node.{node_id}.status"), StepOutcome::Failed.as_db_str());
     let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Failed,
         outcome: Some(Some(StepOutcome::Failed)),
-        error: Some(error),
+        error: Some(Some(error)),
         agent_node_id: None,
         attempt,
         fresh_attempt: false,
@@ -1062,7 +1104,7 @@ fn fail_step(run: &mut RunView, t: &mut Transition, node_id: &str, error: String
                 node_id: gate,
                 status: StepStatus::Queued,
                 outcome: Some(None),
-                error: None,
+                error: Some(None),
                 agent_node_id: None,
                 attempt,
                 fresh_attempt: true,
@@ -1106,13 +1148,13 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
             run.steps.push(step);
         }
     }
-    run.context.set(&format!("node.{}.status", node_id), StepOutcome::Cancelled.as_db_str());
+    run.context.set(&format!("node.{node_id}.status"), StepOutcome::Cancelled.as_db_str());
     let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
     t.step_writes.push(StepWrite {
         node_id: node_id.to_string(),
         status: StepStatus::Cancelled,
         outcome: Some(Some(StepOutcome::Cancelled)),
-        error: Some(CANCEL_REASON.to_string()),
+        error: Some(Some(CANCEL_REASON.to_string())),
         agent_node_id: None,
         attempt,
         fresh_attempt: false,
@@ -1586,7 +1628,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
             run,
             t,
             node_id,
-            format!("retry budget exhausted after {} attempts", max_retries),
+            format!("retry budget exhausted after {max_retries} attempts"),
         );
     }
 }
@@ -1636,7 +1678,7 @@ fn reset_step_for_retry(
         node_id: node_id.to_string(),
         status: StepStatus::Queued,
         outcome: Some(None),
-        error: None,
+        error: Some(None),
         agent_node_id: None,
         attempt: next_attempt,
         fresh_attempt: true,
@@ -2776,28 +2818,46 @@ mod tests {
     }
 
     #[test]
-    fn classifier_working_and_unparseable_route_the_working_branch() {
-        for classification in [Some(Classification::Working), None] {
-            let mut run = gate_run(
-                "classify",
-                CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
-                &[(StepOutcome::Working, "keep-going"), (StepOutcome::Completed, "done-path")],
-            );
-            fire_to_gate(&mut run, "classify");
-            advance(&mut run, &classified("classify", classification));
-            assert_eq!(run.step("classify").unwrap().outcome, Some(StepOutcome::Working));
-            assert_eq!(status_of(&run, "keep-going"), StepStatus::Completed);
-            assert!(run.step("done-path").is_none());
-        }
+    fn classifier_working_routes_the_working_branch() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
+            &[(StepOutcome::Working, "keep-going"), (StepOutcome::Completed, "done-path")],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &classified("classify", Some(Classification::Working)));
+        assert_eq!(run.step("classify").unwrap().outcome, Some(StepOutcome::Working));
+        assert_eq!(status_of(&run, "keep-going"), StepStatus::Completed);
+        assert!(run.step("done-path").is_none());
+    }
+
+    #[test]
+    fn unavailable_classifier_never_routes_a_working_edge() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
+            &[(StepOutcome::Working, "keep-going"), (StepOutcome::Completed, "done-path")],
+        );
+        fire_to_gate(&mut run, "classify");
+        let transition = advance(&mut run, &classified("classify", None));
+        assert_eq!(run.step("classify").unwrap().status, StepStatus::Running);
+        assert_eq!(run.step("classify").unwrap().outcome, None);
+        assert!(run.step("keep-going").is_none());
+        assert!(transition.step_writes[0].error.as_ref().unwrap().as_ref().is_some());
     }
 
     #[test]
     fn classifier_outcome_without_a_route_stays_parked() {
-        for classification in [Some(Classification::Blocked), Some(Classification::Working), None] {
+        for classification in [
+            Some(Classification::Completed),
+            Some(Classification::Blocked),
+            Some(Classification::Working),
+            None,
+        ] {
             let mut run = gate_run(
                 "classify",
                 CircuitNodeKind::LlmTurnClassifier { target_node_id: None },
-                &[(StepOutcome::Completed, "done-path")],
+                &[(StepOutcome::Failed, "done-path")],
             );
             fire_to_gate(&mut run, "classify");
             let transition = advance(&mut run, &classified("classify", classification));
@@ -2805,7 +2865,7 @@ mod tests {
             assert_eq!(status_of(&run, "classify"), StepStatus::Running);
             assert!(run.step("classify").unwrap().outcome.is_none());
             assert!(run.step("done-path").is_none());
-            assert!(transition.step_writes.is_empty());
+            assert!(transition.step_writes.iter().any(|write| write.error.is_some()));
             assert_eq!(run.state, RunState::Running);
         }
     }

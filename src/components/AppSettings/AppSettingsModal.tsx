@@ -17,6 +17,7 @@ import type {
 } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
@@ -419,6 +420,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [revokingId, setRevokingId] = useState<number | null>(null);
   const [lanEnabled, setLanEnabled] = useState(false);
   const [lanBusy, setLanBusy] = useState(false);
+  // Issue #1501: confirm-before-quit. The value lives in
+  // `useExitPromptStore` (not local state) so the window-close guard reads
+  // the same synchronous source of truth the checkbox writes — no cold IPC
+  // on the close path. `true` is the default (fresh install or older
+  // preferences.json without the field). Optimistic toggle with rollback,
+  // same `optimisticToggle` helper as the coordinator/LAN switches.
+  const confirmBeforeQuit = useExitPromptStore((s) => s.confirmBeforeQuit);
+  const [confirmQuitBusy, setConfirmQuitBusy] = useState(false);
   // Issue #824: the user-configured rename backend. `null` means
   // auto-naming is OFF (the post-v2 default). Distinct from `selected`
   // above (default provider for spawn), since rename runs frequently on
@@ -574,6 +583,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
         setWorktreeDirDraft(storedWorktreeDir);
         worktreeDirSavedRef.current = storedWorktreeDir;
+        // Issue #1501: older preferences.json files predate the field —
+        // `?? true` keeps the safe default (prompt) for those installs.
+        useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
         setHarnessDefaults(prefs.harness_defaults ?? {});
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
@@ -1122,6 +1134,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       onSuccess: refreshNetworkStatus,
     });
 
+  // Issue #1501: flip the exit-confirmation prompt. Optimistic with
+  // rollback so the checkbox never lies about the persisted value. The
+  // store is the single writer: the close guard's synchronous read sees
+  // the new value immediately, even before the backend confirms.
+  const handleToggleConfirmQuit = (enabled: boolean) =>
+    optimisticToggle({
+      current: useExitPromptStore.getState().confirmBeforeQuit,
+      next: enabled,
+      setValue: (v) => useExitPromptStore.getState().setConfirmBeforeQuit(v),
+      setBusy: setConfirmQuitBusy,
+      setError,
+      mutation: async () => {
+        await api.setAppConfirmBeforeQuit(enabled);
+      },
+    });
+
   // Mint (or replace) the read token. The value is returned exactly once, here —
   // get_coordinator_status only ever reports whether one exists, never its value.
   const handleGenerateToken = async () => {
@@ -1357,6 +1385,28 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             }}
             className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           />
+        </div>
+
+        {/* Issue #1501: exit confirmation. On by default — closing the
+            window with active sessions prompts instead of terminating. */}
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label className="block text-lg font-medium text-text-secondary">
+            Exiting
+          </label>
+          <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={confirmBeforeQuit}
+              disabled={!loaded || confirmQuitBusy}
+              onChange={e => handleToggleConfirmQuit(e.target.checked)}
+              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+            />
+            <span>Confirm before quitting when agent sessions are active</span>
+          </label>
+          <p className="text-base text-text-muted">
+            When on, closing the window while agents are running asks for
+            confirmation and warns about sessions that can&apos;t resume.
+          </p>
         </div>
 
         {/* Issue #1150 / #1148: Application-level Agent Harness defaults.

@@ -53,6 +53,16 @@ pub fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
     preferences::save(prefs)
 }
 
+/// Set whether to confirm before quitting when agent sessions are active
+/// (issue #1501). `true` (the default) surfaces the exit-confirmation modal
+/// on window close with active nodes; `false` closes without friction.
+#[command]
+pub fn set_app_confirm_before_quit(confirm: bool) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.confirm_before_quit = confirm;
+    preferences::save(prefs)
+}
+
 /// Set the Buildmesh-wide default Worktree Node directory (issue #1519).
 /// `None` (or blank, which collapses to `None`) clears the override and
 /// restores the `.claude/worktrees` default under each Mesh root.

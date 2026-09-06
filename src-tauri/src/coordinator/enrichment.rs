@@ -111,6 +111,18 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
     )))
 }
 
+pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    if !adapter.produces_readable_transcript() { return None; }
+    let mut report = transcript_reader::read_assistant_report(
+        TranscriptFormat::for_harness(adapter.id()),
+        node.cli_session_id.as_deref(),
+        &transcript_dir(node),
+    )?;
+    report.text = SecretScrubber::scrub(&report.text);
+    Some(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

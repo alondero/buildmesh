@@ -332,7 +332,7 @@ impl HarnessConfigValue {
 /// User-editable, persisted preferences applied across all meshes.
 ///
 /// Generated to src/types/generated/AppPreferences.ts (issue #404).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "AppPreferences.ts")]
 pub struct AppPreferences {
     /// Buildmesh-wide default provider id (e.g. "anthropic", "minimax").
@@ -450,4 +450,37 @@ pub struct AppPreferences {
     /// Additive on disk — older `preferences.json` without it loads as `None`.
     #[serde(default)]
     pub worktree_directory: Option<String>,
+    /// Confirm before quitting when agent sessions are active (issue #1501).
+    /// When `true` (the default), a window close request with active agent
+    /// nodes (`running`, `awaiting_input`, `spawning`, `ready`) surfaces an
+    /// exit-confirmation modal instead of terminating immediately. When
+    /// `false`, close requests proceed without friction.
+    /// Additive on disk — older `preferences.json` without it loads as
+    /// `true` via `#[serde(default = ...)]`.
+    #[serde(default = "default_confirm_before_quit")]
+    pub confirm_before_quit: bool,
+}
+
+/// Default for [`AppPreferences::confirm_before_quit`] (issue #1501).
+/// `true` — a fresh install (or an older `preferences.json` without the
+/// field) confirms before quitting with active sessions.
+pub fn default_confirm_before_quit() -> bool {
+    true
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        // Derive defaults from the serde attributes (the single source of
+        // truth) instead of a hand-written struct literal: every field
+        // carries `#[serde(default)]` or `#[serde(default = "...")]`, so an
+        // empty object deserializes to exactly the default value — including
+        // `confirm_before_quit = true` (issue #1501), which a
+        // `#[derive(Default)]` would wrongly give as `false`. A future field
+        // without a serde default fails loudly here (and in the
+        // `malformed_json_falls_back_to_default` test) instead of silently
+        // compiling with a divergent default.
+        serde_json::from_value(serde_json::json!({})).expect(
+            "AppPreferences must deserialize from {}: every field needs a serde default",
+        )
+    }
 }

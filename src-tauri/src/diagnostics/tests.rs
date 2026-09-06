@@ -73,3 +73,12 @@ fn windows_vitals_report_a_live_process() {
     // Handle count is virtually always non-zero for a running process, but we
     // don't hard-assert it in case a stripped CI sandbox denies the query.
 }
+
+/// Retracting with no watchdog started is a safe no-op (issue #1501): the
+/// exit-confirmation cancel path must never fail a user action, even when
+/// the supervisor handshake never ran (dev profile, `cfg(test)` without
+/// `start()`, watchdog disabled).
+#[test]
+fn clear_expected_exit_without_start_is_noop() {
+    clear_expected_exit();
+}

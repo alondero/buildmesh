@@ -15,6 +15,7 @@ import { TitleBar } from './components/TitleBar/TitleBar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
+import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -22,6 +23,7 @@ import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { useExitPromptStore } from './stores/exitPromptStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
@@ -103,7 +105,7 @@ function App() {
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
   // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid of the active
-  // View Mode (Mesh / Pinned / All — ticket #987).
+  // View Mode (Mesh / Pinned / All / Filtered — tickets #987, #1609).
   // We use TWO modifiers here (not bare Ctrl/Cmd+Arrow) because Ctrl+←/→ is
   // the readline `backward-word` / `forward-word` gesture in bash/zsh/fish/
   // PSReadLine and every node/python REPL — the global-shortcut plugin
@@ -154,6 +156,19 @@ function App() {
   // unit-tested directly without regexing this file. See
   // `src/lib/gridShortcuts.ts` for the full rationale.
   const focusGridSearchShortcut = buildFocusGridSearchBinding(isMac);
+
+  // Controls snapshot for the arrow-traversal + focus-grid-search handlers
+  // below. Read at dispatch time (not subscribed) so App re-renders stay
+  // independent of filter keystrokes — #1609 moved search-driven narrowing
+  // into the Filtered view, and traversal must match that grid exactly.
+  const filteredControls = () => {
+    const s = useUIStore.getState();
+    return {
+      gridSearchQuery: s.gridSearchQuery,
+      gridProviderFilter: s.gridProviderFilter,
+      gridStatusFilter: s.gridStatusFilter,
+    };
+  };
 
   const shortcuts = [
     { key: 'CommandOrControl+T', action: 'new-agent' },
@@ -249,21 +264,33 @@ function App() {
 
       if (action === 'focus-grid-search') {
         // Issue #998 — Ctrl+F (Win/Linux) / ⌘+⌥+F (macOS) focuses the grid
-        // search input. The actual `.focus()` + `.select()` calls live
-        // in the `GridControls` component's `useLayoutEffect` (which
-        // subscribes to `useUIStore.focusGridSearchRequest`); we just
-        // bump the request counter here. A request counter is the
+        // search input. Since #1609 the search lives in the Filtered view
+        // (its controls are hidden in other modes), so the shortcut first
+        // lands the canvas there — matching every editor's "find in files"
+        // gesture — then bumps the request counter. The actual `.focus()`
+        // + `.select()` calls live in the `GridControls` component's
+        // `useLayoutEffect` (which subscribes to
+        // `useUIStore.focusGridSearchRequest`). A request counter is the
         // React-idiomatic channel for "imperative command from outside
         // the component tree" — no ref forwarding, no module-level
-        // singleton, no leaky DOM registration. The component handles
-        // the "no input mounted" case as a no-op (the effect's
-        // `inputRef.current?.focus()` short-circuits).
+        // singleton, no leaky DOM registration. Ordering is guaranteed by
+        // React, not by defensive no-ops: `setViewMode('filtered')` and
+        // the counter bump happen in this same event handler, so React
+        // re-renders ONCE (18 batching) with both values — TitleBar mounts
+        // GridControls, the input ref attaches during commit, and
+        // GridControls' `useLayoutEffect` runs after the DOM mutation but
+        // before paint, reading the already-bumped counter. There is no
+        // intermediate committed frame in which the input is absent, so
+        // no press can be dropped; no "input not mounted yet" state
+        // exists to defend against.
         //
         // No cooldown: a held key must not burn a window — the user
         // re-pressing while already focused is a harmless re-focus, and
         // the counter pattern (0 → 1 → 2) naturally fires the effect
         // on every distinct press.
-        useUIStore.getState().requestFocusGridSearch();
+        const ui = useUIStore.getState();
+        if (ui.viewMode !== 'filtered') ui.setViewMode('filtered');
+        ui.requestFocusGridSearch();
         return;
       }
 
@@ -323,7 +350,8 @@ function App() {
 
       // Phase 2: walk the grid the active View Mode actually renders. Ticket
       // #987 — `scopeNodesForMode` returns exactly the on-screen node set (Mesh
-      // for the resolved mesh, Pinned cross-mesh, or All) in the store's
+      // for the resolved mesh, Pinned cross-mesh, All, or Filtered narrowed by
+      // the Grid Controls — #1609) in the store's
       // canonical (mesh_id, position) order, so traversal matches AgentNodeView
       // cell-for-cell. This replaces the old `mesh_id === activeNode.mesh_id`
       // filter, which stranded Ctrl+Alt+Arrow on the active node's mesh in
@@ -339,7 +367,9 @@ function App() {
       // `awaitingInputShortcuts` / `meshStore.deleteMesh`.
       const agentNodes = useAgentNodeStore.getState().getAgentNodes();
       const selectedMeshId = useMeshStore.getState().selectedMeshId;
-      const visibleNodes = scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id);
+      // #1609 — pass the Grid Controls so traversal in Filtered walks the
+      // same narrowed set the grid renders (the other scopes ignore them).
+      const visibleNodes = scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls());
       const targetId = traversalTargetId(visibleNodes, activeNode.id, direction);
       if (targetId !== null) {
         useAgentNodeStore.getState().setActiveNode(targetId);
@@ -414,6 +444,11 @@ function App() {
   const init = useCallback(async () => {
     setInitError(null);
     setInitBusy(true);
+    // Issue #1501: hydrate the exit-confirm prompt preference. Deliberately
+    // NOT in the `allSettled` gate below — a prefs-read failure must neither
+    // block boot nor flip the guard off; the store keeps its fail-closed
+    // `true` default and the guard decides synchronously from it.
+    void useExitPromptStore.getState().initConfirmBeforeQuit();
     try {
       // No data dependency between these — run the IPC round-trips
       // concurrently so first paint isn't gated on three serial calls.
@@ -618,18 +653,25 @@ function App() {
   if (initError) {
     // Issue #1250 — instead of an infinite pulsing splash, surface the
     // formatted init error with a Retry button. The user can re-trigger
-    // `init` (the same callback the mount effect ran) without a full
-    // app restart.
+    // `init` (the same callback the mount effect ran) without unmounting
+    // the whole App.
+    // The close guard mounts here too (issue #1501 review): a close
+    // during boot must still prompt rather than silently kill spawns.
     return (
-      <BootErrorPanel
-        error={initError}
-        onRetry={init}
-        busy={initBusy}
-      />
+      <>
+        <BootErrorPanel
+          error={initError}
+          onRetry={init}
+          busy={initBusy}
+        />
+        <WindowCloseGuard />
+      </>
     );
   }
 
   if (!isReady) {
+    // Close guard mounted alongside the splash (issue #1501 review) —
+    // same reason as the error branch above.
     return (
       <div className="flex flex-col h-screen w-screen bg-bg-base">
         <TitleBar />
@@ -640,6 +682,7 @@ function App() {
         >
           <div className="text-accent-cyan text-2xl animate-pulse">●</div>
         </div>
+        <WindowCloseGuard />
       </div>
     );
   }
@@ -661,6 +704,7 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
+      <WindowCloseGuard />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => useUIStore.getState().closeCheatsheet()} />
       {/* Universal Command Omnibar (issue #1411). Same mount/unmount
           discipline as the cheatsheet: it renders only while

@@ -262,6 +262,7 @@ export const APP_COMMANDS: readonly AppCommand[] = [
   { id: 'view-mesh', label: 'Switch view: Mesh Grid', subtitle: 'Scope to the selected mesh', icon: 'mesh', keywords: ['grid', 'scope'] },
   { id: 'view-pinned', label: 'Switch view: Pinned', subtitle: 'Pinned nodes across all meshes', icon: 'pinned', keywords: ['pin'] },
   { id: 'view-all', label: 'Switch view: All Nodes', subtitle: 'Every loaded node', icon: 'all', keywords: ['all', 'nodes'] },
+  { id: 'view-filtered', label: 'Switch view: Filtered', subtitle: 'Nodes matching the search and filters', icon: 'filtered', keywords: ['search', 'filter', 'narrow'] },
   // 'settings' is an explicit alias so the dedicated command outranks the
   // "Open Project Settings" destination (whose label also matches the
   // query) when the user types a bare `settings` (issue #1375).
