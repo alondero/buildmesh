@@ -214,12 +214,15 @@ export function CircuitsProbeTab() {
     () => circuitActivityStats(rows, queue.length),
     [rows, queue.length]
   );
-  const statusText = [
-    activityStats.attentionCount > 0 ? `${activityStats.attentionCount} need attention` : null,
-    activityStats.activeCount > 0 ? `${activityStats.activeCount} active` : null,
-    activityStats.queuedCount > 0 ? `${activityStats.queuedCount} queued` : null,
-  ].filter((part): part is string => part !== null).join(' · ') ||
-    (rows.length > 0 ? `${rows.length} circuits idle` : 'No circuits configured');
+  const statusText = useMemo(() => {
+    const parts = [
+      activityStats.attentionCount > 0 ? `${activityStats.attentionCount} need attention` : null,
+      activityStats.activeCount > 0 ? `${activityStats.activeCount} active` : null,
+      activityStats.queuedCount > 0 ? `${activityStats.queuedCount} queued` : null,
+    ].filter((part): part is string => part !== null);
+    return parts.join(' · ') ||
+      (rows.length > 0 ? `${rows.length} circuits idle` : 'No circuits configured');
+  }, [activityStats, rows.length]);
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
    * "use the computed default" — live and failed diagnostics open while
