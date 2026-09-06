@@ -195,6 +195,21 @@ export function SearchIcon({ className }: IconProps) {
   );
 }
 
+/** Lucide `layout-grid` — the tool rail's "All tools" affordance (ADR-0032).
+ *  App-launcher language: reads as "browse every tool", matching the
+ *  grouped tool grid (ADR-0031) it opens. Deliberately not a "+" — that
+ *  reads as "create a new tool". */
+export function LayoutGridIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <rect width="7" height="7" x="3" y="3" rx="1" />
+      <rect width="7" height="7" x="14" y="3" rx="1" />
+      <rect width="7" height="7" x="14" y="14" rx="1" />
+      <rect width="7" height="7" x="3" y="14" rx="1" />
+    </Svg>
+  );
+}
+
 /**
  * One icon per inspector destination. The map lives here (not in
  * `ProbePanel`) so other surfaces — e.g. the command palette's tool

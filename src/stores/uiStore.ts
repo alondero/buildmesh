@@ -3,6 +3,7 @@ import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeContextPin } from '../lib/probeContext';
+import { pushProbeWorkingSet } from '../lib/probeWorkingSet';
 
 // The five canvas View Modes (wayfinder #982 — tickets #983 state model,
 // #986 rendering). 'single' solos the active node (it subsumes the old
@@ -298,6 +299,11 @@ interface UIState extends GridControls {
   // card, keyboard shortcut) reads/writes the same source of truth.
   probeOpen: boolean;
   probeTab: ProbeTab;
+  // Working set for the Probe tool rail (ADR-0032): destinations the user
+  // has opened this session, most-recently-used first, capped at
+  // PROBE_WORKING_SET_CAP. Updated by `setProbeTab` (so `openProbeTab`
+  // records visits transitively); session-only — never persisted.
+  probeMru: readonly ProbeTab[];
   // Destination-local context captures (issue #1456). Host-lens tabs do
   // not use these. Mesh/Agent tabs follow selection until the user pins the
   // current stable id; the resolver keeps a missing pin visible instead of
@@ -423,6 +429,7 @@ export const useUIStore = create<UIState>((set, get) => {
   return {
     probeOpen: false,
     probeTab: 'files',
+    probeMru: [],
     probeContextPins: {},
     activeDiffFile: null,
 
@@ -436,7 +443,13 @@ export const useUIStore = create<UIState>((set, get) => {
       // switching tabs no longer clears `activeDiffFile`. The overlay closes
       // only via `closeDiff` (Esc / "Back to Terminals") or its own auto-close
       // when the focused node or selected mesh changes.
-      set({ probeTab: tab });
+      // Every activation also records a working-set visit for the tool rail
+      // (ADR-0032); `openProbeTab` inherits this via its `setProbeTab` call,
+      // so palette, title-bar, and contextual entries all feed the MRU.
+      set((state) => ({
+        probeTab: tab,
+        probeMru: pushProbeWorkingSet(state.probeMru, tab),
+      }));
     },
 
     pinProbeContext: (pin) => {
