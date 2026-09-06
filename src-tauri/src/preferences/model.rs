@@ -332,7 +332,7 @@ impl HarnessConfigValue {
 /// User-editable, persisted preferences applied across all meshes.
 ///
 /// Generated to src/types/generated/AppPreferences.ts (issue #404).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "AppPreferences.ts")]
 pub struct AppPreferences {
     /// Buildmesh-wide default provider id (e.g. "anthropic", "minimax").
@@ -450,4 +450,42 @@ pub struct AppPreferences {
     /// Additive on disk — older `preferences.json` without it loads as `None`.
     #[serde(default)]
     pub worktree_directory: Option<String>,
+    /// Confirm before quitting when agent sessions are active (issue #1501).
+    /// When `true` (the default), a window close request with active agent
+    /// nodes (`running`, `awaiting_input`, `spawning`, `ready`) surfaces an
+    /// exit-confirmation modal instead of terminating immediately. When
+    /// `false`, close requests proceed without friction.
+    /// Additive on disk — older `preferences.json` without it loads as
+    /// `true` via `#[serde(default = ...)]`.
+    #[serde(default = "default_confirm_before_quit")]
+    pub confirm_before_quit: bool,
+}
+
+/// Default for [`AppPreferences::confirm_before_quit`] (issue #1501).
+/// `true` — a fresh install (or an older `preferences.json` without the
+/// field) confirms before quitting with active sessions.
+pub fn default_confirm_before_quit() -> bool {
+    true
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            default_provider: None,
+            minimax_api_key: None,
+            google_cloud_project: None,
+            harness_profiles: Vec::new(),
+            provider_accounts: Vec::new(),
+            harness_order: Vec::new(),
+            provider_pairings: Vec::new(),
+            pairing_verifications: Vec::new(),
+            proxied_provider_order: Vec::new(),
+            ad0025_account_pairings_migrated: false,
+            naming_provider: None,
+            autopilot_pool_size: None,
+            harness_defaults: HashMap::new(),
+            worktree_directory: None,
+            confirm_before_quit: default_confirm_before_quit(),
+        }
+    }
 }

@@ -1024,6 +1024,12 @@ export const setAppNamingProvider = (provider: string | null) =>
 export const setAppAutopilotPoolSize = (size: number | null) =>
   _invoke('set_app_autopilot_pool_size', { size });
 
+/** Whether to confirm before quitting with active agent sessions (issue #1501).
+ *  `true` (default) surfaces the exit-confirmation modal; `false` closes
+ *  without friction. */
+export const setAppConfirmBeforeQuit = (confirm: boolean) =>
+  _invoke('set_app_confirm_before_quit', { confirm });
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;

@@ -15,6 +15,7 @@ use std::path::PathBuf;
 mod accounts_tests;
 mod catalog_tests;
 mod compatibility_tests;
+mod confirm_quit_tests;
 mod default_provider_tests;
 mod harness_tests;
 mod migrations_tests;

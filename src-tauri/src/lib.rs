@@ -455,6 +455,7 @@ pub fn run() {
             commands::preferences::set_app_default_provider,
             commands::preferences::set_app_naming_provider,
             commands::preferences::set_app_autopilot_pool_size,
+            commands::preferences::set_app_confirm_before_quit,
             commands::preferences::set_harness_order,
             commands::preferences::set_proxied_provider_order,
             commands::preferences::get_provider_accounts,
