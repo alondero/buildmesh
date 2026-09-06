@@ -655,6 +655,11 @@ fn drive_run(
 
     for event in observe(app, active, &view) {
         let transition = advance(&mut view, &event);
+        // Capture the pre-prompt transcript revision in the same transaction
+        // as the pure transition. This keeps the durable turn boundary on the
+        // normal commit path; effect execution only performs the in-memory
+        // PTY boundary immediately before writing bytes.
+        let turn_boundary_changed = prepare_turn_boundaries(&mut view, &transition.effects)?;
 
         // Commit FIRST (atomically), then execute effects — a crash
         // after the commit is repaired by observation next pass. The
@@ -664,6 +669,7 @@ fn drive_run(
         if !transition.step_writes.is_empty()
             || transition.run_state_changed
             || transition.context_changed
+            || turn_boundary_changed
         {
             let ops = transition
                 .step_writes
@@ -719,7 +725,7 @@ let ops = failed
                     node_id: node_id.clone(),
                     status: "failed".to_string(),
                     outcome: Some(Some("failed".to_string())),
-                    error: Some(e.clone()),
+                    error: Some(Some(e.clone())),
                     agent_node_id: None,
                     attempt: 1,
                     fresh_attempt: false,
@@ -748,6 +754,7 @@ let ops = failed
         if !transition.step_writes.is_empty()
             || transition.run_state_changed
             || transition.context_changed
+            || turn_boundary_changed
         {
             let _ = app.emit(
                 "circuit-run-updated",
@@ -1221,26 +1228,56 @@ fn classify_step_turn(
 ) -> Option<(i64, Option<crate::autopilot::evaluator::Classification>, String)> {
     use crate::autopilot::evaluator;
     let agent_node_id = view.resolve_target_agent(node_id)?;
+    let step = view.step(node_id)?;
+    if view.state != RunState::Running || step.status != StepStatus::Running {
+        return None;
+    }
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) {
         return None;
     }
+    let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
+    let prefix = format!("node.{node_id}");
+    let retry_due = view.context.get(&format!("{prefix}.evaluated_attempt"))
+        .and_then(|attempt| attempt.parse::<i32>().ok()) == Some(step.attempt)
+        && view.context.get(&format!("{prefix}.classification")) == Some("unavailable")
+        && since_evaluation_ms.is_some_and(|elapsed| elapsed >= 60_000);
+    let agent_node = db::get_agent_node_by_id(agent_node_id).ok()?;
     let yielded = matches!(
-        db::get_agent_node_by_id(agent_node_id).map(|n| n.status),
-        Ok(SessionStatus::AwaitingInput)
-            | Ok(SessionStatus::Ready)
-            | Ok(SessionStatus::Completed)
+        agent_node.status,
+        SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
     );
     if !yielded {
         return None;
     }
+    // Do not open a transcript, clone/scrub the PTY tail, or hit the regex
+    // cleaner unless this gate/attempt has fresh output, needs its one
+    // post-restart recovery probe, or is due for the bounded backend retry.
+    // Probe ownership is per gate attempt, not per agent: two downstream
+    // classifiers may legitimately consume one unchanged assistant report.
+    let probe_key = format!("run:{}:node:{node_id}:attempt:{}", active.run.id, step.attempt);
+    let probe_generation = evaluator::begin_circuit_probe(
+        agent_node_id,
+        &probe_key,
+        retry_due,
+    )?;
     let initial_source = matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::AwaitAgentTurn { .. }));
-    let mut output = select_turn_report(
-        latest_agent_report(agent_node_id),
-        evaluator::cleaned_turn_tail(agent_node_id),
+    let Some(output) = select_turn_report(
+        crate::coordinator::enrichment::assistant_report(&agent_node),
         view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
         evaluator::has_turn_start(agent_node_id),
-    );
-    if !should_classify_report(view, node_id, &output, evaluator::millis_since_last_evaluation(agent_node_id)) {
+        || evaluator::cleaned_turn_tail(agent_node_id),
+    ) else {
+        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
+        return None;
+    };
+    // A redraw suppression or a yielded agent with no published report is not
+    // a classifier failure. It must not reach an LLM or emit a stepper event.
+    if output.trim().is_empty() {
+        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
+        return None;
+    }
+    if !should_classify_report(view, node_id, &output, since_evaluation_ms) {
+        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
         return None;
     }
     // Evaluator backend env: the mesh's Autopilot provider side-channel
@@ -1250,22 +1287,14 @@ fn classify_step_turn(
         .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
         .unwrap_or_else(|| "claude".to_string());
     let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
+    evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
     evaluator::note_evaluation(agent_node_id);
     let classification = if initial_source {
-        let verdict = if output.trim().is_empty() { None } else {
-            evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
-        };
-        if verdict.is_none() {
-            output = "Task completion could not be verified. Confirm the source task is finished using the approval step in this Circuit, or cancel and continue the agent.".into();
-        }
-        Some(verdict.unwrap_or(evaluator::Classification::Blocked))
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
     } else if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
-        Some(evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::review_prompt(&output))
-            .unwrap_or(evaluator::Classification::Blocked))
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::review_prompt(&output))
     } else {
-        if output.trim().is_empty() { None } else {
-            evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
-        }
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::classify_prompt(&output))
     };
     tracing::info!(
         "circuits: turn classifier for run {} step {} agent {} → {:?}",
@@ -1277,35 +1306,67 @@ fn classify_step_turn(
     Some((agent_node_id, classification, output))
 }
 
-fn latest_agent_report(agent_node_id: i64) -> Option<crate::services::transcript_reader::AssistantReport> {
-    db::get_agent_node_by_id(agent_node_id).ok()
-        .and_then(|node| crate::coordinator::enrichment::assistant_report(&node))
-}
-
-fn select_turn_report(transcript: Option<crate::services::transcript_reader::AssistantReport>, current_tail: String, previous_revision: Option<&str>, has_turn_start: bool) -> String {
-    // A resumed terminal can redraw the entire preceding turn. Only a turn
-    // boundary recorded in this process makes its PTY fallback trustworthy.
-    if !has_turn_start && previous_revision.is_some()
-        && transcript.as_ref().is_none_or(|report| Some(report.revision.as_str()) == previous_revision)
-    {
-        return String::new();
+fn select_turn_report(
+    transcript: Option<crate::services::transcript_reader::AssistantReport>,
+    previous_revision: Option<&str>,
+    has_turn_start: bool,
+    current_tail: impl FnOnce() -> String,
+) -> Option<String> {
+    if let Some(report) = transcript.filter(|report| {
+        !report.text.trim().is_empty()
+            && previous_revision.is_none_or(|previous| report.revision != previous)
+    }) {
+        return Some(report.text);
     }
-    transcript.filter(|report| !report.text.trim().is_empty() && Some(report.revision.as_str()) != previous_revision)
-        .map(|report| report.text)
-        .unwrap_or(current_tail)
+    // A resumed terminal can redraw the entire preceding turn. Without a
+    // boundary recorded in this process, the PTY tail is unanchored even when
+    // there is no durable previous revision to compare against.
+    if !has_turn_start {
+        return None;
+    }
+    Some(current_tail()).filter(|tail| !tail.trim().is_empty())
 }
 
-/// Persist the pre-prompt report before sending input. A permission yield or
-/// restart before the next assistant response must not reuse that report.
-fn prepare_circuit_turn(view: &mut RunView, agent_node_id: i64) -> Result<(), String> {
-    view.context.set(
-        &format!("agent.{agent_node_id}.previous_report_revision"),
-        latest_agent_report(agent_node_id).map(|report| report.revision).unwrap_or_default(),
-    );
-    db::commit_circuit_advance(view.run_id, None, Some(&view.context.to_json()?), &[])
-        .map_err(|error| format!("could not persist the turn boundary: {error}"))?;
-    crate::autopilot::evaluator::note_turn_start(agent_node_id);
-    Ok(())
+/// Persist the assistant revision that existed immediately before a prompt
+/// effect is delivered. This is an observation in the impure seam, but its
+/// context update is committed together with the step transition before any
+/// external effect runs. New spawns do not need a baseline: their launch path
+/// records a live turn boundary after the process is attached.
+fn prepare_turn_boundaries(
+    view: &mut RunView,
+    effects: &[crate::autopilot::circuit::stepper::Effect],
+) -> Result<bool, String> {
+    let mut seen = HashSet::new();
+    let mut changed = false;
+    for effect in effects {
+        let agent_node_id = match effect {
+            crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. } => {
+                view.resolve_target_agent(node_id)
+                    .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id))
+            }
+            crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } => view
+                .step(node_id)
+                .and_then(|step| step.agent_node_id)
+                .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
+            _ => None,
+        };
+        let Some(agent_node_id) = agent_node_id else {
+            continue;
+        };
+        if !seen.insert(agent_node_id) {
+            continue;
+        }
+        let agent = db::get_agent_node_by_id(agent_node_id).map_err(|error| error.to_string())?;
+        let revision = crate::coordinator::enrichment::assistant_report(&agent)
+            .map(|report| report.revision)
+            .unwrap_or_default();
+        let key = format!("agent.{agent_node_id}.previous_report_revision");
+        if view.context.get(&key) != Some(revision.as_str()) {
+            view.context.set(&key, revision);
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 fn should_classify_report(view: &RunView, node_id: &str, output: &str, since_evaluation_ms: Option<u128>) -> bool {
@@ -1589,7 +1650,15 @@ fn call_github_effect(
     };
 
     let transition = advance(view, &event);
-    if !transition.step_writes.is_empty() || transition.run_state_changed {
+    // GitHub actions can cascade directly into a wrap-up correction prompt.
+    // Capture that prompt's pre-turn report in this same transition commit;
+    // otherwise the recursive effect path would bypass the normal drive loop.
+    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
+    if !transition.step_writes.is_empty()
+        || transition.run_state_changed
+        || transition.context_changed
+        || turn_boundary_changed
+    {
         let ops = transition
             .step_writes
             .iter()
@@ -1721,7 +1790,7 @@ fn execute_effects(
                             tracing::warn!("circuits: run {}: {}", active.run.id, reason);
                             return Err(reason);
                         }
-                        prepare_circuit_turn(view, target)?;
+                        crate::autopilot::evaluator::note_turn_start(target);
                         crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app)
                             .map_err(|e| format!("PTY injection failed: {}", e))?;
                         let _ = db::update_agent_node_status(target, SessionStatus::Running);
@@ -2187,7 +2256,7 @@ fn spawn_step_agent(
                 run_id
             );
             let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
-            prepare_circuit_turn(view, existing_agent_id)?;
+            crate::autopilot::evaluator::note_turn_start(existing_agent_id);
             crate::autopilot::pipeline::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
                 .map_err(|e| format!("PTY write failed on retry: {}", e))?;
             return Ok(());
@@ -2555,7 +2624,7 @@ fn fail_run_step(
             node_id: node_id.to_string(),
             status: status.to_string(),
             outcome: Some(Some(status.to_string())),
-            error: Some(error.to_string()),
+            error: Some(Some(error.to_string())),
             agent_node_id: None,
             attempt: 1,
             fresh_attempt: false,
@@ -2843,7 +2912,11 @@ mod tests {
         let result = advance(&mut view, &CircuitEvent::TurnClassified {
             node_id: "finish_classifier".into(), classification: None, output: Some(report.into()),
         });
-        assert!(result.step_writes[0].error.as_ref().unwrap().contains("retrying"));
+        assert!(result.step_writes[0]
+            .error
+            .as_ref()
+            .and_then(|error| error.as_ref())
+            .is_some_and(|error| error.contains("retrying")));
         assert!(!should_classify_report(&view, "finish_classifier", report, Some(59_999)));
         assert!(should_classify_report(&view, "finish_classifier", report, Some(60_000)));
         assert!(should_classify_report(&view, "finish_classifier", report, None), "restart permits recovery");
@@ -2867,20 +2940,33 @@ mod tests {
         evaluator::on_output(id, old);
         evaluator::note_turn_start(id);
         // A gate just opened, but the agent has not answered the new prompt.
-        assert_eq!(select_turn_report(old_report(), evaluator::cleaned_turn_tail(id), Some("turn-1"), evaluator::has_turn_start(id)), "");
+        assert_eq!(select_turn_report(old_report(), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)), None);
         evaluator::on_output(id, "Permission required to run tests.");
-        assert_eq!(select_turn_report(old_report(), evaluator::cleaned_turn_tail(id), Some("turn-1"), evaluator::has_turn_start(id)), "Permission required to run tests.");
+        assert_eq!(select_turn_report(old_report(), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)), Some("Permission required to run tests.".into()));
         evaluator::unregister(id);
         evaluator::register_circuit(id);
         evaluator::on_output(id, old); // resume redraw, not a new response
-        assert_eq!(select_turn_report(old_report(), evaluator::cleaned_turn_tail(id), Some("turn-1"), evaluator::has_turn_start(id)), "");
-        assert_eq!(select_turn_report(None, evaluator::cleaned_turn_tail(id), Some(""), false), "", "unreadable transcript cannot authorize a resume redraw");
+        assert_eq!(select_turn_report(old_report(), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)), None);
+        assert_eq!(select_turn_report(None, None, false, || "unanchored redraw".into()), None, "unreadable transcript cannot authorize a resume redraw");
+        assert_eq!(
+            select_turn_report(
+                Some(crate::services::transcript_reader::AssistantReport {
+                    text: "   \n".into(),
+                    revision: "turn-empty".into(),
+                }),
+                None,
+                true,
+                || "\t".into(),
+            ),
+            None,
+            "empty reports are not classifier input",
+        );
         // A concise new response made while capture was offline is recoverable.
-        let report = select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: "Done. PR updated.".into(), revision: "turn-2".into() }), evaluator::cleaned_turn_tail(id), Some("turn-1"), evaluator::has_turn_start(id));
+        let report = select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: "Done. PR updated.".into(), revision: "turn-2".into() }), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)).unwrap();
         assert_eq!(report, "Done. PR updated.");
         assert!(should_classify_report(&report_gate_view(), "finish_classifier", &report, None));
         assert!(crate::autopilot::evaluator::classify_prompt(&report).contains(&report));
-        assert_eq!(select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: old.into(), revision: "turn-2".into() }), String::new(), Some("turn-1"), false), old, "identical text in a new assistant response is fresh");
+        assert_eq!(select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: old.into(), revision: "turn-2".into() }), Some("turn-1"), false, String::new), Some(old.into()), "identical text in a new assistant response is fresh");
         evaluator::unregister(id);
     }
 

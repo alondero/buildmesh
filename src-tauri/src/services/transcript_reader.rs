@@ -1104,7 +1104,7 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
         offset += reader.read_until(b'\n', &mut Vec::new()).ok()? as u64;
     }
     let mut lines = Vec::new();
-    let mut revision = None;
+    let mut assistant_line_offset = None;
     loop {
         line.clear();
         let bytes = reader.read_line(&mut line).ok()?;
@@ -1112,15 +1112,91 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
         offset += bytes as u64;
         // Ignore a record the writer has not finished publishing yet.
         if !line.ends_with('\n') { break; }
-        if parse_transcript(format, std::iter::once(line.clone()), 1).last_assistant_message.is_some() {
-            revision = Some(format!("{offset}:{:x}", Sha256::digest(line.as_bytes())));
+        if line_has_assistant_text(format, &line) {
+            assistant_line_offset = Some(offset);
         }
-        lines.push(line.clone());
+        lines.push(std::mem::take(&mut line));
     }
+    let text = parse_transcript(format, lines.into_iter(), 1).last_assistant_message?;
+    let offset = assistant_line_offset?;
     Some(AssistantReport {
-        text: parse_transcript(format, lines.into_iter(), 1).last_assistant_message?,
-        revision: revision?,
+        // Revisions identify the assistant content plus its position. Hashing
+        // the normalized text keeps file-backed providers consistent with the
+        // OpenCode report reader; the offset still distinguishes identical
+        // responses emitted at different points in one transcript.
+        revision: format!("{offset}:{:x}", Sha256::digest(text.as_bytes())),
+        text,
     })
+}
+
+/// Identify a line that can advance `Parsed::last_assistant_message` without
+/// invoking one of the full rolling transcript parsers. This is deliberately
+/// a single structural JSON inspection per line; the complete parser runs once
+/// over the collected window below, avoiding the old O(lines × full-parser)
+/// loop on large transcript tails.
+fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    match format {
+        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => {
+            value.get("type").and_then(|kind| kind.as_str()) == Some("assistant")
+                && value
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(|role| role.as_str())
+                    == Some("assistant")
+                && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
+                    .trim()
+                    .is_empty()
+        }
+        TranscriptFormat::Codex => {
+            matches!(
+                value.get("type").and_then(|kind| kind.as_str()),
+                Some("response_item") | Some("event_msg")
+            ) && value
+                .get("payload")
+                .is_some_and(|payload| {
+                    payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
+                        && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                        && !payload
+                            .get("content")
+                            .map(codex_concat_text)
+                            .unwrap_or_default()
+                            .trim()
+                            .is_empty()
+                })
+        }
+        TranscriptFormat::CommandCode => {
+            value.get("type").and_then(|kind| kind.as_str()) == Some("message")
+                && value.get("message").is_some_and(|message| {
+                    message.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                        && !concat_text_blocks(message.get("content"))
+                            .trim()
+                            .is_empty()
+                })
+        }
+        TranscriptFormat::Agy => {
+            value.get("source").and_then(|source| source.as_str()) == Some("MODEL")
+                && value
+                    .get("content")
+                    .and_then(|content| content.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+        }
+        TranscriptFormat::Grok => {
+            value.get("role").and_then(|role| role.as_str()) == Some("assistant")
+                && value.get("content").is_some_and(|content| match content {
+                    serde_json::Value::String(text) => !text.trim().is_empty(),
+                    serde_json::Value::Array(blocks) => blocks
+                        .iter()
+                        .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+                        .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
+                        .any(|text| !text.trim().is_empty()),
+                    _ => false,
+                })
+        }
+        TranscriptFormat::OpenCode => false,
+    }
 }
 
 /// Cheap file-level reader. See [`read_last_assistant_message`].

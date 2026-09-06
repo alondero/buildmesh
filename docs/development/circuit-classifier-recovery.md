@@ -28,8 +28,9 @@ must retain evaluator ownership throughout finish, review, and feedback gates.
   per-agent evaluation clock cannot identify which gate consumed a turn.
 - A transcript can recover a report produced before output capture resumed.
   Classification uses the same report persisted for feedback. Before prompt
-  delivery, the worker persists the preceding assistant-record revision. The
-  bounded JSONL reader combines record position with SHA-256 of that record:
+  delivery, the worker persists the preceding assistant-record revision in the
+  transition commit. The bounded JSONL reader combines record position with
+  SHA-256 of the normalized assistant text:
   user/tool activity cannot make an old report fresh, while identical responses
   at different positions remain distinct. OpenCode uses the assistant message's
   SQLite ID and text hash through its existing read-only resolver. An unreadable or unsupported transcript
@@ -37,7 +38,14 @@ must retain evaluator ownership throughout finish, review, and feedback gates.
 - Trimming the bounded PTY buffer must adjust its turn-start offset; an empty
   new turn must not expose the previous turn's completed report.
 - A classifier backend failure is not a WORKING verdict. Recovery needs a
-  bounded retry cadence and a visible explanation while it waits.
+  bounded retry cadence and a visible explanation while it waits. Empty or
+  suppressed reports are ignored rather than sent to the classifier.
+- The reactive PTY path checks node yield state and evaluator freshness before
+  opening transcript stores or cleaning terminal output. Evaluator ownership,
+  tail, turn boundary, and freshness clocks share one per-node state lock.
+  Freshness is keyed by run, gate, and attempt so one downstream classifier
+  cannot suppress another; a short bounded probe cooldown covers transcript
+  publication that lags the PTY yield.
 
 The existing review blueprint additionally gates review on clean, pushed Git
 state and an existing open PR, retries wrap-up corrections, closes reviewers,

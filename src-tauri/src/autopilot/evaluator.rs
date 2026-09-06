@@ -17,8 +17,9 @@
 //!
 //! ## Safe degradation (#483 AC)
 //! Every failure path — spawn error, timeout, unparseable output — returns
-//! `None` from [`classify`], which the pipeline treats as `WORKING` (do
-//! nothing). A broken classifier CLI can never corrupt a node's DB status.
+//! `None` from [`classify`]. Legacy Autopilot treats that as no action; the
+//! circuit seam records it as an unavailable classifier and parks the gate for
+//! a bounded retry. A broken classifier CLI can never route a circuit edge.
 //!
 //! The LLM call mirrors `session_naming::summarize_and_rename_with`: the
 //! Claude Code CLI in `--print` mode reading the prompt from stdin, with the
@@ -27,7 +28,7 @@
 //! silently through an expensive default (the #824 lesson).
 
 use once_cell::sync::Lazy;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Upper bound for a node's buffered PTY tail. Enough for a full turn of
@@ -36,6 +37,7 @@ const MAX_TAIL_CHARS: usize = 16_000;
 
 /// How much *cleaned* tail is handed to the classifier.
 const CLASSIFY_TAIL_CHARS: usize = 6_000;
+const CIRCUIT_PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One word out of the classifier, or `None` = "could not tell" (degrade to
 /// no action).
@@ -46,126 +48,173 @@ pub enum Classification {
     Working,
 }
 
-/// Node ids whose output we buffer (auto-spawned + manual `/finish` nodes).
-static PILOTED: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// All in-memory evaluator properties for one node live under one lock. The
+/// PTY reader is hot, so splitting these fields across several mutexes made
+/// every chunk pay multiple lock/unlock cycles and created avoidable lock-order
+/// hazards during tail rollover.
+#[derive(Debug, Default)]
+struct NodeEvaluatorState {
+    legacy_owned: bool,
+    circuit_owned: bool,
+    tail: String,
+    output_generation: u64,
+    last_output: Option<std::time::Instant>,
+    last_evaluation: Option<std::time::Instant>,
+    turn_start: Option<usize>,
+    circuit_probes: HashMap<String, CircuitProbeState>,
+}
 
-/// Circuit-owned piloted nodes. Circuits share the evaluator's PTY blackboard
-/// and freshness clocks, but they do not have a legacy `autopilot_runs` row.
-/// Keeping ownership explicit prevents the legacy pipeline from treating a
-/// circuit node as stale and unregistering its evaluator state on the first
-/// Node Turn.
-static CIRCUIT_PILOTED: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+#[derive(Debug)]
+struct CircuitProbeState {
+    output_generation: u64,
+    checked_at: std::time::Instant,
+}
 
-/// Per-node PTY tail. Entries exist only for piloted nodes.
-static TAILS: Lazy<Mutex<HashMap<i64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// When each piloted node last produced PTY output. The launch watcher
-/// (`autopilot::launch`) reads this to detect output quiescence — "the CLI
-/// has finished drawing and is sitting idle at its input box".
-static LAST_OUTPUT: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// When each piloted node's turn evaluation last *started*. The poller
-/// watchdog (`pipeline::watchdog_pass`) compares this against
-/// [`LAST_OUTPUT`] to find yields no evaluation ever reacted to — the
-/// lost-turn stall of issue #874. Stamped at evaluation start (not end) so
-/// output produced *during* an evaluation still counts as unevaluated.
-static LAST_EVAL: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Where each piloted node's current turn started (raw char offset in TAILS).
-/// Used by the circuits blackboard to capture strictly per-turn terminal output
-/// rather than the entire process history.
-static TURN_STARTS: Lazy<Mutex<HashMap<i64, usize>>> =
+static NODES: Lazy<Mutex<HashMap<i64, NodeEvaluatorState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Start buffering PTY output for a node. Idempotent.
 pub fn register(node_id: i64) {
-    PILOTED.lock().unwrap().insert(node_id);
+    NODES.lock().unwrap().entry(node_id).or_default().legacy_owned = true;
 }
 
 /// Start buffering PTY output for a circuit-owned node. Circuit nodes share
 /// the evaluator blackboard with legacy Autopilot, but are deliberately not
 /// backed by an `autopilot_runs` ledger row.
 pub fn register_circuit(node_id: i64) {
-    PILOTED.lock().unwrap().insert(node_id);
-    CIRCUIT_PILOTED.lock().unwrap().insert(node_id);
+    let mut nodes = NODES.lock().unwrap();
+    let state = nodes.entry(node_id).or_default();
+    state.circuit_owned = true;
 }
 
 /// Is this node under Autopilot management (fast, in-memory)?
 pub fn is_piloted(node_id: i64) -> bool {
-    PILOTED.lock().unwrap().contains(&node_id)
+    NODES
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .is_some_and(|state| state.legacy_owned || state.circuit_owned)
 }
 
 /// Whether this node is owned by an Autopilot Circuit rather than the legacy
 /// issue-driven pipeline.
 pub fn is_circuit_piloted(node_id: i64) -> bool {
-    CIRCUIT_PILOTED.lock().unwrap().contains(&node_id)
+    NODES
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .is_some_and(|state| state.circuit_owned)
 }
 
 /// Stop buffering and drop all state for a node (close / pipeline terminal
 /// state).
 pub fn unregister(node_id: i64) {
-    PILOTED.lock().unwrap().remove(&node_id);
-    CIRCUIT_PILOTED.lock().unwrap().remove(&node_id);
-    TAILS.lock().unwrap().remove(&node_id);
-    LAST_OUTPUT.lock().unwrap().remove(&node_id);
-    LAST_EVAL.lock().unwrap().remove(&node_id);
-    TURN_STARTS.lock().unwrap().remove(&node_id);
+    NODES.lock().unwrap().remove(&node_id);
 }
 
 /// Record the start of a fresh turn for this node (at the current tail position).
 pub fn note_turn_start(node_id: i64) {
-    let tails = TAILS.lock().unwrap();
-    let raw_len = tails.get(&node_id).map(|s| s.len()).unwrap_or(0);
-    TURN_STARTS.lock().unwrap().insert(node_id, raw_len);
+    let mut nodes = NODES.lock().unwrap();
+    let Some(state) = nodes.get_mut(&node_id) else {
+        return;
+    };
+    state.turn_start = Some(state.tail.len());
 }
 
 pub(crate) fn has_turn_start(node_id: i64) -> bool {
-    TURN_STARTS.lock().unwrap().contains_key(&node_id)
+    NODES
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .and_then(|state| state.turn_start)
+        .is_some()
 }
 
 /// Milliseconds since the node last produced PTY output, or `None` if it has
 /// produced none since registration (or isn't piloted).
 pub fn millis_since_last_output(node_id: i64) -> Option<u128> {
-    LAST_OUTPUT
+    NODES
         .lock()
         .unwrap()
         .get(&node_id)
-        .map(|t| t.elapsed().as_millis())
+        .and_then(|state| state.last_output)
+        .map(|time| time.elapsed().as_millis())
 }
 
 /// Record that a turn evaluation for this node is starting now.
 pub fn note_evaluation(node_id: i64) {
-    LAST_EVAL
-        .lock()
-        .unwrap()
-        .insert(node_id, std::time::Instant::now());
+    if let Some(state) = NODES.lock().unwrap().get_mut(&node_id) {
+        state.last_evaluation = Some(std::time::Instant::now());
+    }
+}
+
+/// Mark a circuit report probe without claiming that an LLM classifier ran.
+/// The observed generation is captured before disk/PTY inspection so output
+/// arriving during that inspection remains fresh for the next probe. The key
+/// belongs to one run, gate, and attempt; one classifier may not suppress a
+/// sibling gate targeting the same agent.
+pub(crate) fn note_circuit_probe(node_id: i64, probe_key: &str, output_generation: u64) {
+    if let Some(state) = NODES.lock().unwrap().get_mut(&node_id) {
+        state.circuit_probes.insert(
+            probe_key.to_string(),
+            CircuitProbeState {
+                output_generation,
+                checked_at: std::time::Instant::now(),
+            },
+        );
+    }
 }
 
 /// Milliseconds since the node's last turn evaluation started, or `None` if
 /// none has run since registration.
 pub fn millis_since_last_evaluation(node_id: i64) -> Option<u128> {
-    LAST_EVAL
+    NODES
         .lock()
         .unwrap()
         .get(&node_id)
-        .map(|t| t.elapsed().as_millis())
+        .and_then(|state| state.last_evaluation)
+        .map(|time| time.elapsed().as_millis())
+}
+
+/// Begin an expensive circuit report probe, returning the output generation
+/// that must be recorded when the probe finishes. A gate gets one recovery
+/// probe after registration/restart, then only fresh PTY output, a bounded
+/// transcript-publication retry, or an explicitly due classifier retry can
+/// wake the transcript reader. Probe keys include the gate attempt so another
+/// gate targeting the same agent is not suppressed by this gate's read.
+pub(crate) fn begin_circuit_probe(
+    node_id: i64,
+    probe_key: &str,
+    retry_due: bool,
+) -> Option<u64> {
+    let nodes = NODES.lock().unwrap();
+    let state = nodes.get(&node_id)?;
+    if retry_due {
+        return Some(state.output_generation);
+    }
+    let Some(previous) = state.circuit_probes.get(probe_key) else {
+        return Some(state.output_generation);
+    };
+    if state.output_generation > previous.output_generation
+        || previous.checked_at.elapsed() >= CIRCUIT_PROBE_RETRY
+    {
+        Some(state.output_generation)
+    } else {
+        None
+    }
 }
 
 /// PTY reader hook — called for every output chunk (see `agent::spawn`'s
 /// reader thread, next to `session_naming::on_output`). Non-piloted nodes
 /// return after one set lookup.
 pub fn on_output(node_id: i64, data: &str) {
-    if !is_piloted(node_id) {
+    let mut nodes = NODES.lock().unwrap();
+    let Some(state) = nodes.get_mut(&node_id) else {
         return;
-    }
-    LAST_OUTPUT
-        .lock()
-        .unwrap()
-        .insert(node_id, std::time::Instant::now());
-    let mut tails = TAILS.lock().unwrap();
-    let tail = tails.entry(node_id).or_default();
+    };
+    state.output_generation = state.output_generation.saturating_add(1);
+    state.last_output = Some(std::time::Instant::now());
+    let tail = &mut state.tail;
     tail.push_str(data);
     if tail.len() > MAX_TAIL_CHARS {
         let mut drain_to = tail.len() - MAX_TAIL_CHARS;
@@ -173,11 +222,11 @@ pub fn on_output(node_id: i64, data: &str) {
             drain_to += 1;
         }
         tail.drain(..drain_to);
-        if let Some(start) = TURN_STARTS.lock().unwrap().get_mut(&node_id) {
+        if let Some(start) = state.turn_start.as_mut() {
             *start = start.saturating_sub(drain_to);
         }
     }
-    drop(tails);
+    drop(nodes);
     // Reactive gate evaluation (#1207): a circuit LlmTurnClassifier
     // waiting on this agent's turn yield must not sit out the 2s tick.
     // Cheap notify; redundant classifications are prevented by the
@@ -187,11 +236,11 @@ pub fn on_output(node_id: i64, data: &str) {
 
 /// The current cleaned (ANSI-stripped, tail-capped) buffer for a node.
 pub fn cleaned_tail(node_id: i64) -> String {
-    let raw = TAILS
+    let raw = NODES
         .lock()
         .unwrap()
         .get(&node_id)
-        .cloned()
+        .map(|state| state.tail.clone())
         .unwrap_or_default();
     let cleaned = crate::session_naming::ANSI_ESCAPE
         .replace_all(&raw, "")
@@ -210,18 +259,12 @@ pub fn cleaned_tail(node_id: i64) -> String {
 /// The cleaned output produced during the current turn (since [`note_turn_start`]).
 /// If no turn start was recorded, returns the tail.
 pub fn cleaned_turn_tail(node_id: i64) -> String {
-    let tails = TAILS.lock().unwrap();
-    let raw = tails
-        .get(&node_id)
-        .cloned()
-        .unwrap_or_default();
-    let start_offset = TURN_STARTS
+    let (raw, start_offset) = NODES
         .lock()
         .unwrap()
         .get(&node_id)
-        .copied()
-        .unwrap_or(0);
-    drop(tails);
+        .map(|state| (state.tail.clone(), state.turn_start.unwrap_or(0)))
+        .unwrap_or_default();
     let mut slice_start = start_offset.min(raw.len());
     while !raw.is_char_boundary(slice_start) {
         slice_start += 1;
@@ -512,9 +555,9 @@ mod tests {
         on_output(id, &chunk);
         on_output(id, &chunk);
         on_output(id, &chunk);
-        let tails = TAILS.lock().unwrap();
-        assert!(tails.get(&id).unwrap().len() <= MAX_TAIL_CHARS);
-        drop(tails);
+        let nodes = NODES.lock().unwrap();
+        assert!(nodes.get(&id).unwrap().tail.len() <= MAX_TAIL_CHARS);
+        drop(nodes);
         unregister(id);
     }
 
@@ -538,6 +581,55 @@ mod tests {
             None,
             "unregister drops the evaluation timestamp"
         );
+    }
+
+    #[test]
+    fn probe_gate_only_reopens_for_fresh_output_or_due_retry() {
+        let id = 910_006;
+        register_circuit(id);
+        let key = "run:gate:1";
+        let generation = begin_circuit_probe(id, key, false)
+            .expect("registration permits one recovery probe");
+        note_circuit_probe(id, key, generation);
+        assert!(
+            begin_circuit_probe(id, key, false).is_none(),
+            "unchanged silent output stays cold"
+        );
+        assert!(
+            begin_circuit_probe(id, key, true).is_some(),
+            "durable backend retry bypasses freshness"
+        );
+        assert!(
+            begin_circuit_probe(id, "run:sibling:1", false).is_some(),
+            "one gate cannot suppress a sibling gate"
+        );
+        on_output(id, "new turn");
+        let generation = begin_circuit_probe(id, key, false)
+            .expect("PTY output invalidates the probe clock");
+        note_circuit_probe(id, key, generation);
+        assert!(begin_circuit_probe(id, key, false).is_none());
+        unregister(id);
+    }
+
+    #[test]
+    fn circuit_probe_cooldown_does_not_reset_classifier_retry_clock() {
+        let id = 910_007;
+        register_circuit(id);
+        note_evaluation(id);
+        let before = NODES
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|state| state.last_evaluation);
+        let generation = begin_circuit_probe(id, "run:gate:1", false).unwrap();
+        note_circuit_probe(id, "run:gate:1", generation);
+        let after = NODES
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|state| state.last_evaluation);
+        assert_eq!(after, before, "transcript probes must not postpone backend retry");
+        unregister(id);
     }
 
     #[test]
