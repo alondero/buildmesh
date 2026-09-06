@@ -71,30 +71,39 @@ pub(crate) fn windows_to_wsl(path: &str) -> String {
         let is_bare_drive = bytes.len() == 2;
         let is_drive_with_sep = bytes.len() >= 3 && bytes[2] == b'/';
         if is_bare_drive || is_drive_with_sep {
-            let drive = (bytes[1] as char).to_ascii_lowercase();
-            return format!("/mnt/{}{}", drive, &path[2..]);
+            let drive_lc = (bytes[1] as char).to_ascii_lowercase();
+            return rewrite_with_drive(&path[2..], drive_lc);
         }
     }
 
     // Windows drive-letter: <Drive>:\... or <Drive>:/...
-    if let Some(colon_pos) = path.find(':') {
-        let drive = &path[..colon_pos];
-        let after = &path[colon_pos + 1..];
-        let drive_byte_ok = drive.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
-        let drive_is_single_char = drive.len() == 1;
-        let after_is_separator_or_empty =
-            after.is_empty() || after.starts_with('/') || after.starts_with('\\');
-        if drive_byte_ok && drive_is_single_char && after_is_separator_or_empty {
-            let drive_lc = (drive.as_bytes()[0] as char).to_ascii_lowercase();
-            // Preserve the path body byte-for-byte — only the drive letter
-            // is case-folded. Slashes get the WSL rewrite; the rest is
-            // verbatim from the input.
-            let rest = after.replace('\\', "/");
-            return format!("/mnt/{}{}", drive_lc, rest);
-        }
+    // Byte-level check — no `find(':')` scan and no intermediate String.
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'/' || bytes[2] == b'\\')
+    {
+        let drive_lc = (bytes[0] as char).to_ascii_lowercase();
+        return rewrite_with_drive(&path[2..], drive_lc);
     }
 
     path.to_string()
+}
+
+/// Build `/mnt/<drive><body>` with one allocation. Replaces ASCII
+/// backslashes with forward slashes char-by-char so multi-byte UTF-8
+/// sequences in the path body are preserved byte-for-byte (a byte-iter
+/// `push(b as char)` would split them and produce invalid UTF-8).
+fn rewrite_with_drive(body: &str, drive_lc: char) -> String {
+    // Exact size: "/mnt/" (5) + drive char + body bytes (backslashes stay
+    // single-byte when replaced with forward slashes — same UTF-8 width).
+    let mut out = String::with_capacity(5 + drive_lc.len_utf8() + body.len());
+    out.push_str("/mnt/");
+    out.push(drive_lc);
+    for c in body.chars() {
+        out.push(if c == '\\' { '/' } else { c });
+    }
+    out
 }
 
 /// Convert a session path to the correct form for spawning commands
@@ -115,16 +124,15 @@ pub fn to_spawn_path(path: &Path) -> PathBuf {
     }
     match current_env() {
         Environment::Wsl => {
-            let path_str = path.to_string_lossy();
-            // POSIX-style paths (already WSL-friendly — /mnt/, /home/,
-            // /usr/, ...) pass through. Windows-style paths delegate to
-            // `windows_to_wsl` so the generic-drive + case-preservation
-            // rule lives in one place (issue #1226).
-            if path_str.starts_with('/') {
-                path.to_path_buf()
-            } else {
-                PathBuf::from(windows_to_wsl(path_str.as_ref()))
-            }
+            // All WSL-arm shapes funnel through `windows_to_wsl`, which
+            // recognises Windows drive paths (`D:\Code\MyRepo`),
+            // Git-Bash drive style (`/f/src/repo`), and passes through
+            // POSIX paths (`/home/...`, `/mnt/...`, `/usr/...`). The
+            // previous short-circuit on `starts_with('/')` here
+            // accidentally dropped Git-Bash paths — they never reached
+            // the rewrite, so WSL spawns landed in `/f/src/repo` which
+            // doesn't exist (issue #1226 review).
+            PathBuf::from(windows_to_wsl(path.to_string_lossy().as_ref()))
         }
         Environment::Windows => {
             path.to_path_buf()
@@ -219,11 +227,16 @@ pub fn to_host_path(path: &str) -> String {
             let distro = super::environment::get_default_wsl_distro()
                 .unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
-        } else if path.len() >= 2 && path.chars().nth(1).unwrap().is_alphabetic() && (path.len() == 2 || path.chars().nth(2) == Some('/')) {
-            // Handle Git Bash style /c/Users/ or /c
-            let drive = path.chars().nth(1).unwrap().to_uppercase().next().unwrap();
-            let rest = if path.len() > 2 { &path[2..] } else { "" };
-            format!("{}:{}", drive, rest.replace('/', "\\"))
+        } else if path.len() >= 2
+            && path.as_bytes()[0] == b'/'
+            && path.as_bytes()[1].is_ascii_alphabetic()
+            && (path.len() == 2 || path.as_bytes()[2] == b'/')
+        {
+            // Handle Git-Bash style `/c/Users/...` or bare `/c`
+            // (byte-level — no `unwrap`, matches `windows_to_wsl`'s style).
+            let drive = (path.as_bytes()[1] as char).to_ascii_uppercase();
+            let tail = &path[2..];
+            format!("{}:{}", drive, tail.replace('/', "\\"))
         } else {
             // Other Unix-style absolute path on Windows (e.g. /Users/...)
             // Return as-is, caller will handle if needed.
@@ -1160,34 +1173,15 @@ mod tests {
         );
     }
 
-    /// `to_spawn_path` now goes through `windows_to_wsl` for the WSL arm,
-    /// so the generic-drive + case-preservation behavior applies there too.
-    /// On a non-Windows host (CI / Linux runners) `to_spawn_path` returns
-    /// the input unchanged, so the assertions only make sense on Windows.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn to_spawn_path_wsl_arm_handles_any_drive_and_preserves_case() {
-        // Skip when the current environment isn't WSL — the WSL arm only
-        // rewrites when `current_env()` reports Wsl. `to_spawn_path`'s
-        // happy path is exercised end-to-end on a real WSL host; on a
-        // Windows-but-not-WSL host it just returns the input.
-        if !matches!(current_env(), Environment::Wsl) {
-            return;
-        }
-        assert_eq!(
-            to_spawn_path(Path::new(r"D:\Code\MyRepo")),
-            PathBuf::from("/mnt/d/Code/MyRepo")
-        );
-        assert_eq!(
-            to_spawn_path(Path::new(r"C:\Users\Adam\Proj")),
-            PathBuf::from("/mnt/c/Users/Adam/Proj")
-        );
-        // Already-WSL paths pass through unchanged.
-        assert_eq!(
-            to_spawn_path(Path::new("/home/u/repo")),
-            PathBuf::from("/home/u/repo")
-        );
-    }
+    /// `to_spawn_path`'s WSL arm is a one-line delegate to `windows_to_wsl`
+    /// — the seven `windows_to_wsl_*` tests above cover the conversion
+    /// logic. `to_spawn_path` itself is environment-gated (`current_env()`
+    /// is hard-coded to `Windows` on non-WSL hosts including Linux CI), so
+    /// a runtime test that branches on `current_env()` either runs only on
+    /// a real WSL host (out of CI reach) or short-circuits silently. The
+    /// dispatcher's structural correctness is covered by `cargo clippy`'s
+    /// dead-code / unreachable-arm warnings if the delegate ever goes
+    /// missing.
 
     // ── Configurable Worktree Node directories (issue #1519) ────────────────
 

@@ -1464,35 +1464,43 @@ mod tests {
         );
     }
 
-    /// Integration check: `convert_link_path_for_env` is now a thin
-    /// dispatcher into the canonical converters in `env::host_path`
-    /// (issue #1226 — the duplicate converter previously here violated
-    /// the CLAUDE.md hard rule that `env::host_path` is the SOLE module
-    /// allowed to build `/mnt/` and WSL UNC strings). The pure-conversion
-    /// tests live next to `windows_to_wsl` in `host_path.rs`; this test
-    /// pins the dispatcher wiring so a regression that re-inlines the
-    /// conversion (and re-opens the hard-rule violation) is caught.
+    /// Pure conversion table for both env targets — in particular the
+    /// Git-Bash `/f/...` drive style (what an MSYS git writes into link
+    /// files, the 2026-07-17 corruption) must repair under BOTH targets,
+    /// and already-correct paths must pass through unchanged.
+    ///
+    /// `convert_link_path_for_env` is now a 2-line dispatcher into the
+    /// canonical converters in `env::host_path` (issue #1226 — the
+    /// duplicate converter previously here violated the CLAUDE.md hard
+    /// rule that `env::host_path` is the SOLE module allowed to build
+    /// `/mnt/` and WSL UNC strings). Assertions target the BEHAVIOR
+    /// (literal output strings), not the underlying call — so a
+    /// regression in `windows_to_wsl` or `to_host_path` fails this test,
+    /// not just the dispatcher wiring.
     #[test]
-    fn convert_link_path_dispatches_to_env_host_path() {
-        // → WSL: must go through `windows_to_wsl`.
+    fn convert_link_path_covers_git_bash_drive_style_for_both_envs() {
+        // → WSL
         assert_eq!(
             convert_link_path_for_env("/f/src/repo/.git/worktrees/wt", EnvType::Wsl),
-            windows_to_wsl("/f/src/repo/.git/worktrees/wt")
+            "/mnt/f/src/repo/.git/worktrees/wt"
         );
         assert_eq!(
             convert_link_path_for_env("F:\\src\\repo", EnvType::Wsl),
-            windows_to_wsl("F:\\src\\repo")
+            "/mnt/f/src/repo"
         );
-        // → Windows: must go through `to_host_path`.
+        // Real WSL paths must NOT be re-mangled.
+        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
+        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        // → Windows (host conversion is a Windows-host behaviour).
         #[cfg(windows)]
         {
             assert_eq!(
                 convert_link_path_for_env("/f/src/repo", EnvType::Windows),
-                to_host_path("/f/src/repo")
+                "F:\\src\\repo"
             );
             assert_eq!(
                 convert_link_path_for_env("/mnt/c/Users", EnvType::Windows),
-                to_host_path("/mnt/c/Users")
+                "C:\\Users"
             );
         }
     }
