@@ -45,19 +45,25 @@ function makeAgentNode(overrides: Partial<AgentNode> = {}): AgentNode {
  *  Each render increments `onRender` so the parent can count. */
 function AppSubscriptionPattern({ onRender }: { onRender: () => void }) {
   onRender();
-  const fetchMeshes = useMeshStore((s) => s.fetchMeshes);
-  const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
-  const initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
-  const storeError = useAgentNodeStore((state) => state.error);
+  const _fetchMeshes = useMeshStore((s) => s.fetchMeshes);
+  const _fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
+  const _initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
+  const _storeError = useAgentNodeStore((state) => state.error);
   return null;
 }
 
-/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246). */
+/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246).
+ *  The whole-store hook call subscribes the component to every state
+ *  change (Zustand's default `Object.is` on the entire store object),
+ *  which is exactly what re-renders the app on every `patchAgentNode`.
+ *  We discard the return value — the test asserts render-count behaviour,
+ *  not which specific field was subscribed. PR #1635 review feedback:
+ *  destructure-with-rename syntax would subscribe to a single field,
+ *  turning the "anti-pattern" harness into the fix's behaviour. */
 function AppWholeStoreAntiPattern({ onRender }: { onRender: () => void }) {
   onRender();
-  const { fetchMeshes } = useMeshStore();
-  const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
-  const storeError = useAgentNodeStore((state) => state.error);
+  useMeshStore();
+  useAgentNodeStore();
   return null;
 }
 

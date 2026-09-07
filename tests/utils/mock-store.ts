@@ -32,7 +32,7 @@ export function createMockSessionStore(initial: Partial<MockSessionStore> = {}):
     }),
     fetchSessions: vi.fn().mockResolvedValue(undefined),
     createSession: vi.fn().mockResolvedValue({ id: Date.now(), name: 'test-session' }),
-    setActiveSession: vi.fn().mockImplementation(async (id: number | null) => {
+    setActiveSession: vi.fn().mockImplementation(async (_id: number | null) => {
       // This needs to update activeSessionId - we use a workaround since vi.fn() doesn't close over state
     }),
     archiveSession: vi.fn().mockResolvedValue(undefined),

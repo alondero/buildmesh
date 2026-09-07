@@ -76,6 +76,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Issue #1542 — enforced ESLint + React Hooks gate. Runs before
+      # `npm run build` so a lint regression surfaces as the FIRST
+      # failure a PR author sees, before the slower TS + Vite steps
+      # start. `npm run lint` is `eslint . --max-warnings 0` so any
+      # warning (not just an error) fails the step; the baseline is
+      # intentionally zero-warnings. The companion gate test
+      # (tests/agent-infra/eslint-config-gate.test.mjs) verifies the
+      # rules catch conditional-hook + missing-deps violations against
+      # a fixture file that's excluded from this pass.
+      - name: Lint frontend (issue #1542)
+        run: npm run lint
+
       # Typecheck the frontend against the committed bindings and build the
       # desktop + mobile bundles the Rust tests embed and the budget gate
       # below measures. `npm run build` runs `tsc` itself, so this step is

@@ -47,6 +47,10 @@ interface NodeCardProps {
 function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, draggable = true }: NodeCardProps) {
   const memberIds = memberIdsProp ?? [nodeId];
   const memberIdKey = memberIds.join(',');
+  // The memo's stable-reference contract is keyed off `memberIdKey`
+  // (the joined string), not `memberIds` directly — a new array
+  // reference each render would defeat it. Issue #1542.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- deps keyed off memberIdKey (joined string); depending on memberIds would defeat the stable-reference contract.
   const stableMemberIds = useMemo(() => memberIds, [memberIdKey]);
   const members = useAgentNodeStore(useShallow(s => stableMemberIds
     .map(id => s.nodesById[id])

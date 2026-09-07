@@ -63,5 +63,10 @@ export function useAsyncEffect(effect: AsyncEffectCallback, deps?: DependencyLis
       controller.abort();
       cleanup?.();
     };
+    // The dep list is forwarded verbatim from the caller — this hook
+    // is a typed wrapper around `useEffect` that adds AbortSignal
+    // semantics. ESLint can't statically verify a dynamic dep array.
+    // Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- this hook is a typed wrapper around useEffect; deps are forwarded verbatim from the caller.
   }, deps);
 }

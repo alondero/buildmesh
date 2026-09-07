@@ -21,7 +21,6 @@ declare global {
 }
 
 function install(fixtures?: Record<string, unknown>) {
-  // eslint-disable-next-line no-eval
   eval(buildInitScript(fixtures));
   window.__BUILDMESH_MOCK__.quiet = true; // silence the unmocked-command log
 }

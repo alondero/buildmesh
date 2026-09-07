@@ -108,7 +108,10 @@ function payloadToBytes(payload: string | BuildRunOutputPayload): string | Uint8
  *  Unicode 11+ glyph alignment so emoji output doesn't shear box-drawing
  *  borders. Mirrors TerminalRegistry.ts's `measureAndFit`. */
 function measureAndFit(inst: BuildRunInstance): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // Same xterm internal-cell-width hook as TerminalRegistry.ts; the
+  // mirror is intentional so emoji rows don't shear box-drawing borders
+  // in the build-run terminal either. Issue #1542.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirrors TerminalRegistry.ts:62; xterm public API doesn't expose charSizeService.
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
   charSizeService?.measure();
   inst.fitAddon.fit();
@@ -392,8 +395,7 @@ export class BuildRunTerminalRegistry {
       const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
       this.sessionGenerations.set(sessionId, generation);
 
-      let inst: BuildRunInstance;
-      inst = {
+      const inst: BuildRunInstance = {
         sessionId,
         mode,
         useWorktree,

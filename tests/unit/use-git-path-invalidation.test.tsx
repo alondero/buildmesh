@@ -125,16 +125,13 @@ describe('useGitPathInvalidation (issue #357)', () => {
     // hook re-subscribed on every cb change, the captured counter would
     // be the new value on the first emit after the rerender. With the
     // ref pattern, the LATEST cb runs on every emit, so the new
-    // counter value is observed.
-    let counter = 0;
-    const cb1 = vi.fn(() => {
-      // The current closure captures `counter = 0` — if the hook called
-      // this on the second emit, we'd see counter === 0 in the marker.
-    });
-    const cb2 = vi.fn(() => {
-      // The current closure captures `counter = 1` — if the hook called
-      // THIS on the second emit, we'd see counter === 1 in the marker.
-    });
+    // counter value is observed. (No actual counter exists today —
+    // the closures are intentionally empty bodies; the assertions on
+    // `toHaveBeenCalledTimes` below are the observable signal that
+    // the hook routes through cbRef.current, not the stale closure
+    // captured at subscription time.)
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
     const { rerender } = renderHook(
       ({ cb }: { cb: () => void }) =>
         useGitPathInvalidation('/repo', cb),
@@ -151,7 +148,6 @@ describe('useGitPathInvalidation (issue #357)', () => {
     // inline arrow) WITHOUT changing `path`. The hook must NOT
     // re-subscribe — instead, it should call the LATEST cb on the
     // next event (via the ref).
-    counter = 1;
     rerender({ cb: cb2 });
 
     await act(async () => {

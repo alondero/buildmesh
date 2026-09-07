@@ -10,7 +10,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mintWsTicket,
   mintWsTicketWithBackoff,
-  terminalWsUrl,
   eventsWsUrl,
   isRateLimited,
   ApiError,

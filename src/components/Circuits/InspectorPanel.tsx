@@ -391,13 +391,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
   // Dep on `props.node?.id` (not `props.node`) so the BFS only re-
   // walks when the selected node identity changes — not on every
   // parent re-render where the node object reference shifts but the
-  // id is identical (review feedback round 2: a `props.node` dep
-  // busts the memo on every keystroke because the canvas editor's
-  // working copy mints a fresh React Flow node each render).
+  // id is identical (issue #1359 round 2: a `props.node` dep busts
+  // the memo on every keystroke because the canvas editor's working
+  // copy mints a fresh React Flow node each render).
   const reachable = useMemo(
     () => (props.graph !== undefined && props.node !== null
       ? getReachableContext(props.node.id, props.graph)
       : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `props.node` intentionally excluded; canvas editor mints a fresh React Flow node on every keystroke (issue #1359 round 2).
     [props.graph, props.node?.id]
   );
 

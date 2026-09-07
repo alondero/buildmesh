@@ -385,7 +385,6 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   // activeNodeId is read once at attach time for the initial focus; the
   // dedicated focus effect above handles later changes, so it's intentionally
   // not a dependency here.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId]);
 
   // Auto-spawn the agent for a freshly created (idle) node. Separated from the

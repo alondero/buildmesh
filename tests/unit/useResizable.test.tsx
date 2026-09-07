@@ -237,7 +237,7 @@ describe('useResizable', () => {
   });
 
   it('does not respond to mousemove when not dragging', () => {
-    const { Probe, captured, parent } = makeProbe();
+    const { Probe, _captured, parent } = makeProbe();
     render(<Probe width={256} />);
     act(() => {
       fireEvent.mouseMove(document, { clientX: 500 });
@@ -440,7 +440,7 @@ describe('useResizable — splitter shape (issue #726)', () => {
   });
 
   it('axis: "row" reads clientY (not clientX) for the delta', () => {
-    const { Probe, captured, log } = makeSplitterProbe({ axis: 'row' });
+    const { Probe, captured, _log } = makeSplitterProbe({ axis: 'row' });
     render(<Probe />);
 
     act(() => {

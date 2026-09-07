@@ -12,13 +12,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import type { LoopStatusDto } from '../../src/types/generated/LoopStatus';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
@@ -285,7 +283,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('numeric loop fields parse to integers; blank max iterations means continuous', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
-    const user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
@@ -326,7 +323,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('rejects invalid numeric input with a SaveIndicator error and skips the IPC', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
-    const user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
@@ -511,7 +507,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('surfaces a backend rejection in the SaveIndicator', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }), { rejectLoopConfig: true });
-    const user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);

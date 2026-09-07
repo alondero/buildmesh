@@ -20,7 +20,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiffOverlay';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH: Mesh = {

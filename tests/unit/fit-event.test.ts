@@ -181,7 +181,7 @@ describe('fit timing constants', () => {
   // These are the actual delay values used in the codebase
   const MOUNT_FIT_DELAY = 50; // Terminal.tsx line 108
   const SESSION_CHANGE_FIT_DELAYS = [100, 300]; // Terminal.tsx lines 116-117
-  const VIEW_FIT_DELAYS = [100, 300]; // SessionView.tsx lines 42-43
+  const _VIEW_FIT_DELAYS = [100, 300]; // SessionView.tsx lines 42-43
 
   it('mount fit happens at 50ms', () => {
     vi.useFakeTimers();

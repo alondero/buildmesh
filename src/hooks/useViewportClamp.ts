@@ -81,6 +81,6 @@ export function useViewportClamp(
     // intentionally do NOT include `ref` or `margin` — a ref object is
     // stable across renders, and `margin` is a static config value in
     // practice (every current caller uses the default).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- caller-supplied deps; ref/margin are intentionally omitted (stable across renders).
   }, deps);
 }

@@ -257,14 +257,18 @@ export function MeshPropertiesTab() {
   // as the form below them. The hook clears the prior error before
   // each save and surfaces the rejection's `.message` on fail.
   const saveStatus = useSaveStatus();
+  // Destructured so the deps array can include the stable reset
+  // callback without an eslint-disable directive (PR #1635 review
+  // feedback).
+  const { reset: resetSaveStatus } = saveStatus;
 
   // Reset the indicator on mesh-switch so a stale "Save failed" from
   // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
   // bare useEffect that tracks `activeMeshId` is sufficient — the
   // hook's own reset() cancels the pending saved→idle timer cleanly.
   useEffect(() => {
-    saveStatus.reset();
-  }, [activeMeshId, saveStatus.reset]);
+    resetSaveStatus();
+  }, [activeMeshId, resetSaveStatus]);
 
   // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
   // `wrappedSave` can read the CURRENT mesh id at resolve time, not

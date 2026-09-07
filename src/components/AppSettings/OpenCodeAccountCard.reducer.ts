@@ -215,6 +215,11 @@ export function opencodeAccountReducer(state: State, action: Action): State {
         case 'error':
           return { kind: 'error', message: errorMessageFor(status) };
       }
+      // Unreachable today — every `status.kind` returned by the
+      // backend maps to one of the cases above — but the parent switch
+      // would silently fall through to `SIGNED_IN_FROM_TOKEN` if the
+      // backend ever emitted a new variant (issue #1542 / no-fallthrough).
+      return state;
     }
 
     case 'SIGNED_IN_FROM_TOKEN': {

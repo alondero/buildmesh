@@ -24,25 +24,27 @@
                        self-deadlock or interfere when run in parallel)
 
 .PARAMETER Target
-  unit | integration | rust | all | all-ts  (default: all)
+  unit | integration | lint | rust | all | all-ts  (default: all)
 
-  all    = agent checks + frontend build + unit + integration + cargo test
-           (the default green bar; integration added in issue #1257 to
-           match the GitHub Actions quality job)
-  all-ts = unit vitest + integration vitest + npm run build (full TS
-           green bar, mirrors the TS gates the GitHub Actions quality job
-           runs on PRs — local parity with CI without spending 13
-           minutes on a Rust build)
+  all    = agent checks + frontend build + lint + unit + integration +
+           cargo test (the default green bar; integration added in
+           issue #1257 to match the GitHub Actions quality job; lint
+           added in issue #1542)
+  all-ts = unit vitest + integration vitest + lint + npm run build
+           (full TS green bar, mirrors the TS gates the GitHub Actions
+           quality job runs on PRs — local parity with CI without
+           spending 13 minutes on a Rust build)
 
 .EXAMPLE
-  scripts\check.ps1                 # full green bar (mobile build + unit + integration + rust)
+  scripts\check.ps1                 # full green bar (mobile build + lint + unit + integration + rust)
   scripts\check.ps1 unit            # just the TS unit suite, correct pool
+  scripts\check.ps1 lint            # just the ESLint gate (issue #1542)
   scripts\check.ps1 rust -SerialRust
-  scripts\check.ps1 all-ts          # full TS gates (unit + integration + build)
+  scripts\check.ps1 all-ts          # full TS gates (lint + unit + integration + build)
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('unit', 'integration', 'rust', 'all', 'all-ts')]
+  [ValidateSet('unit', 'integration', 'lint', 'rust', 'all', 'all-ts')]
   [string]$Target = 'all',
   [switch]$CleanRust,
   [switch]$SerialRust
@@ -169,6 +171,21 @@ function Invoke-BundleBudget {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'bundle-budget' }
 }
 
+function Invoke-Lint {
+  # Issue #1542 — ESLint + React Hooks gate. Runs `npm run lint` which
+  # uses `eslint . --max-warnings 0` so any warning or error fails the
+  # step. The companion gate test (tests/agent-infra/eslint-config-gate.test.mjs)
+  # asserts the configured rules catch conditional-hook + missing-deps
+  # violations; this invocation only lints the non-fixture source so the
+  # gate can stay green while still proving the rule set is wired.
+  Write-Host '== lint (issue #1542) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  try {
+    & npm run lint --silent
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'lint' }
+}
+
 function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
   # Clear the leaked env var for this process only.
@@ -199,7 +216,10 @@ function Invoke-Rust {
 Write-Host '== agent infrastructure and diff rules ==' -ForegroundColor Cyan
 Push-Location $repo
 try {
-  & node --test tests/agent-infra/check-agent-diff.test.mjs
+  # PR #1635 review feedback — the previous hardcoded `check-agent-diff.test.mjs`
+  # silently skipped the new eslint-config-gate.test.mjs. Globbing the whole
+  # directory means future agent-infra tests get picked up automatically.
+  & node --test tests/agent-infra/*.test.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-tests' }
   & node scripts/check-agent-diff.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
@@ -208,6 +228,10 @@ try {
 # Build before Rust so embedded mobile assets reflect the current source.
 if ($Target -in @('all', 'all-ts')) { Invoke-TsBuild }
 if ($Target -eq 'rust') { Ensure-MobileBuilt }
+# Issue #1542 — lint runs before the test suites so a fresh violation
+# surfaces in the same green-bar pass the developer is iterating on.
+# Standalone `scripts\check.ps1 lint` is supported for quick iteration.
+if ($Target -in @('lint', 'all', 'all-ts')) { Invoke-Lint }
 if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
 # Issue #1257 — integration must run in the default green bar (`all`)
 # as well as `integration` and `all-ts`, otherwise a developer who only

@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
 import type { DiffResult, FileNode, GitStatus } from '../../src/lib/tauri';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 

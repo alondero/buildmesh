@@ -22,7 +22,6 @@ import { listen } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
 import { WORKTREE_DIR_CHANGED_EVENT } from '../../src/lib/events';

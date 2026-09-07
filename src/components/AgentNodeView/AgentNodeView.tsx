@@ -374,7 +374,11 @@ export function AgentNodeView() {
     return () => {
       unwatchAgentNode(activeNode.id).catch(console.error);
     };
-  // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
+  // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree.
+  // The dep list deliberately lists `activeNode?.id` and `activeNode?.cli_session_id` rather than
+  // the whole `activeNode` object: other activeNode field changes (title, status, …) shouldn't
+  // re-attach the watcher. Issue #1542 — react-hooks/exhaustive-deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- activeNode field changes other than id/cli_session_id must not re-attach the watcher.
   }, [activeNode?.id, activeNode?.cli_session_id]);
 
   // Grid-mode invariant (ticket #986): the active node is always one of the
@@ -394,7 +398,10 @@ export function AgentNodeView() {
     if (activeNode) {
       terminalManager.fit(activeNode.id);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `terminalManager` is a stable singleton identity (issue #1542);
+    // depending on the whole `activeNode` object would re-fit on every
+    // unrelated field change (status, title, …).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- terminalManager is a stable singleton; depending on activeNode would re-fit on unrelated field changes.
   }, [activeNode?.id]);
 
   // Escape exits Single mode. Only bound while single is active so we don't

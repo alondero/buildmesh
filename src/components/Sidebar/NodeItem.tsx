@@ -102,6 +102,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // the trigger ref lets Escape / outside-click restore focus to the
   // row, and roving tabindex allows arrow keys to move focus between items.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  // Boolean mirror of the menu-open signal so the layout effect at L347
+  // (and any future boolean-only deps) can key off this primitive
+  // instead of the full `contextMenu` object reference — depending on
+  // the object would re-run the focus dance whenever any field
+  // changed (PR #1635 review feedback).
+  const isMenuOpen = contextMenu !== null;
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -283,6 +289,13 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
+    // `closeContextMenu` and `regenSubmenu` are local closures that
+    // capture `regenSubmenu` (itself a fresh object each render);
+    // depending on either would re-attach the keydown listener on
+    // every render. The handler reads the live ref values via
+    // `activeIndexRef.current` / `regenSubmenu.submenuContainsFocus()`,
+    // so the stale-closure trap doesn't apply here. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- local closures; handler reads live refs so stale-closure trap doesn't apply.
   }, [contextMenu, getParentMenuItems]);
 
   // Issue #776 — viewport clamping. Runs after the menu mounts so we
@@ -338,11 +351,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // (not `useEffect` + setTimeout) — fires synchronously after commit
   // so subsequent arrow-key presses don't race a deferred focus call.
   useLayoutEffect(() => {
-    if (!contextMenu) return;
+    if (!isMenuOpen) return;
     setActiveIndex(0);
     const parentItems = getParentMenuItems();
     if (parentItems[0]) focusWithoutScroll(parentItems[0]);
-  }, [contextMenu !== null, getParentMenuItems]);
+  }, [isMenuOpen, getParentMenuItems]);
 
   return (
     <div

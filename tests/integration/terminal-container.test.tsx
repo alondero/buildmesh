@@ -5,7 +5,6 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { terminalManager } from '../../src/components/Terminal/Terminal';
-import { useSessionStore } from '../../src/stores/sessionStore';
 
 // ============================================================
 // Mocks for Tauri API

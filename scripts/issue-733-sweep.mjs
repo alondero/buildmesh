@@ -50,7 +50,7 @@ for (const file of files) {
   let fileChanged = false;
   let fileReplaced = 0;
 
-  const next = lines.map((line, idx) => {
+  const next = lines.map((line) => {
     if (KEEP_FRAGMENTS.some((frag) => line.includes(frag))) {
       // Leave the rounded unchanged; user adds // allow-bare-rounded separately if needed.
       return line;

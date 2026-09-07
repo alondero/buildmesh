@@ -399,6 +399,7 @@ export function AutopilotProbeTab() {
   // the master "Autopilot on" checkbox + Start button are enabled.
   const [compatibility, setCompatibility] = useState<AutopilotCompatibility | null>(null);
   const saveStatus = useSaveStatus();
+  const { reset: resetSaveStatus } = saveStatus;
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -411,9 +412,11 @@ export function AutopilotProbeTab() {
   // Reset the SaveIndicator on mesh-switch so a stale "Save failed"
   // from the outgoing mesh doesn't bleed onto the incoming mesh's
   // form (same defensive pattern as `MeshPropertiesTab.tsx`).
+  // `resetSaveStatus` is destructured so the deps array can include
+  // it without a disable directive (PR #1635 review feedback).
   useEffect(() => {
-    saveStatus.reset();
-  }, [activeMeshId, saveStatus.reset]);
+    resetSaveStatus();
+  }, [activeMeshId, resetSaveStatus]);
 
   // Mesh-switch guard for in-flight saves (review finding #1 from
   // `MeshPropertiesTab.tsx`) — capture `activeMeshId` at IPC start,

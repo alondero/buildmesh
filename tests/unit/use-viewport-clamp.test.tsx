@@ -23,7 +23,7 @@ afterEach(() => {
 
 function Menu({ margin }: { margin?: number }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [version, setVersion] = useState(0);
+  const [version] = useState(0);
   useViewportClamp(ref, [version], margin !== undefined ? { margin } : undefined);
   return (
     <div ref={ref} role="menu" data-testid="menu">

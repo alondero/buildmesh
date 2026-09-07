@@ -20,9 +20,7 @@ import {
 } from '../../src/lib/omnibar/fuzzySearch';
 import type {
   IndexedItem,
-  IndexedField,
   FuzzyResult,
-  MatchRange,
 } from '../../src/lib/omnibar/fuzzySearch';
 import {
   indexAgentNodes,

@@ -312,7 +312,12 @@ export default function TerminalScreen({
       term.dispose(); // allow-dispose — mobile SPA owns this per-mount xterm; no TerminalManager here
       termRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Mobile screen — mount the per-screen terminal on first paint and
+    // tear it down on unmount. The dep list intentionally pins this to
+    // `node.id` only: the term is created once and replaced wholesale
+    // when the user navigates to a different node. Re-creating on every
+    // dependency churn would discard xterm buffer state mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- term is created once per mount; refs captured inside are stable across renders.
   }, [node.id]);
 
   function handleAuthFailure() {

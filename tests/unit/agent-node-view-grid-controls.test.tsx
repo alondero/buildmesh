@@ -22,7 +22,6 @@ vi.mock('../../src/components/AgentNodeView/NodeCard', () => ({
   NodeCard: ({ nodeId, draggable = true }: { nodeId: number; draggable?: boolean }) => {
     // The mock factory is hoisted above the import, so the imported
     // `useAgentNodeStore` binding is in scope by render-time.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const node = useAgentNodeStore.getState().nodesById[nodeId];
     if (!node) return null;
     return (

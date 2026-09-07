@@ -333,7 +333,7 @@ export function useResizable<T extends number | unknown[]>(
     }
 
     setIsResizing(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `startResize` reads every config via refs kept in sync every render; arming once per mount is intentional.
   }, []);
   // Empty deps: the callback reads every config via refs; no reason to
   // re-allocate each render. The stable identity (stable across renders)
@@ -429,7 +429,7 @@ export function useResizable<T extends number | unknown[]>(
         isResizingRef.current = false;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- drag listener reads every config via refs; re-attaching the document listener on each render would lose pointer capture mid-drag.
   }, []);
   // Intentionally empty deps: every value the listener reads at drag time
   // comes from a ref kept in sync during the render body. See the

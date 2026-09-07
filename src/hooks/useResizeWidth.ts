@@ -66,6 +66,9 @@ export function useResizeWidth(ref: RefObject<HTMLElement | null>): number {
     // across renders, so `[ref]` would be a one-shot. A consumer can
     // unmount/remount the host (conditional render, Suspense,
     // StrictMode double-invoke) and we'd miss the swap without this.
+    // The lint rule treats the ref access as a missing dep on `ref`
+    // itself; this is intentional. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- depending on the `ref` object would miss host unmount/remount cycles (Suspense, StrictMode double-invoke).
   }, [ref.current]);
 
   return width;

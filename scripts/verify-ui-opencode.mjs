@@ -8,7 +8,7 @@
 // URL is a full https:// URL that's both openable in a browser AND
 // copy/paste-able.
 
-export default async function ({ page, invoke }) {
+export default async function ({ page }) {
   // The dev profile's CDP attach lands on the existing Settings modal
   // (re-opened from the last-known tab). The title-bar icon click is
   // blocked by the modal's backdrop, so navigate by tab directly via
