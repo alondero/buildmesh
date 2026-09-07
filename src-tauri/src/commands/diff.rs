@@ -1029,19 +1029,84 @@ mod tests {
         assert!(result.contains("random text"));
     }
 
-    fn tempdir_via_env() -> std::path::PathBuf {
-        let base = std::env::temp_dir();
-        let unique = format!(
-            "buildmesh-diff-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+    /// RAII guard for hand-built Git repos created in this module's tests
+    /// (issue #1544). Holds the underlying `tempfile::TempDir` so the
+    /// directory is removed when the test returns — without this the diff
+    /// tests leaked ~150 MB / 7,000+ directories on the review machine.
+    ///
+    /// Set `BUILDMESH_KEEP_DIFF_FIXTURES=1` in the environment to preserve
+    /// the directory across the test process for post-mortem inspection
+    /// of a failing test; the path is printed to stderr so the contributor
+    /// can `cd` into it. Without the opt-in the directory is gone before
+    /// the test framework can print the path, which is the right default
+    /// (a green test has no on-disk trace).
+    struct DiffFixture {
+        // `None` only in the keep-fixture opt-in path: the TempDir is
+        // intentionally leaked there so the directory outlives the test.
+        // `Some` is the default; the TempDir's own `Drop` removes the
+        // directory, so we don't need a manual cleanup impl.
+        _guard: Option<tempfile::TempDir>,
+        path: std::path::PathBuf,
+    }
+
+    impl DiffFixture {
+        fn new() -> Self {
+            let temp = tempfile::Builder::new()
+                .prefix("buildmesh-diff-test-")
+                .tempdir()
+                .expect("create fixture tempdir");
+            let path = temp.path().to_path_buf();
+            if std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").is_some() {
+                eprintln!(
+                    "[buildmesh diff fixture] preserved at {}",
+                    path.display()
+                );
+                // Intentionally drop the TempDir handle so its cleanup
+                // `Drop` does not run; the directory survives the test
+                // process and the printed path is the only handle for
+                // manual cleanup.
+                std::mem::forget(temp);
+                Self {
+                    _guard: None,
+                    path,
+                }
+            } else {
+                Self {
+                    _guard: Some(temp),
+                    path,
+                }
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    /// Pins the cleanup contract from issue #1544: a `DiffFixture` must
+    /// remove its temp directory when it drops, so the test suite doesn't
+    /// accumulate `buildmesh-diff-test-*` entries in `%TEMP%` across
+    /// runs (the previous helper returned a bare `PathBuf` with no Drop
+    /// semantics and leaked ~150 MB / 7,000+ dirs on the review machine).
+    ///
+    /// The assertion is skipped under `BUILDMESH_KEEP_DIFF_FIXTURES=1`
+    /// because that opt-in intentionally preserves the directory.
+    #[test]
+    fn diff_fixture_cleans_up_tempdir_on_drop() {
+        if std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").is_some() {
+            // Opt-in preserves the directory on purpose.
+            return;
+        }
+        let captured = {
+            let fx = DiffFixture::new();
+            assert!(fx.path().exists(), "fixture must exist while in scope");
+            fx.path().to_path_buf()
+        };
+        assert!(
+            !captured.exists(),
+            "fixture must be removed after drop (issue #1544 leak at {})",
+            captured.display()
         );
-        let dir = base.join(unique);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -1165,9 +1230,9 @@ mod tests {
         // `diff_file_against_head`. We assert a budget that the unfixed
         // implementation violates (~102 lines) and the fixed implementation
         // satisfies (under 30 lines).
-        let tmp = tempdir_via_env();
-        let old = tmp.join("old.txt");
-        let new = tmp.join("new.txt");
+        let tmp = DiffFixture::new();
+        let old = tmp.path().join("old.txt");
+        let new = tmp.path().join("new.txt");
         std::fs::write(&old, &old_content).unwrap();
         std::fs::write(&new, &new_content).unwrap();
 
@@ -1231,16 +1296,17 @@ mod tests {
 
     #[test]
     fn diff_against_base_shows_committed_and_uncommitted_work() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let repo = init_repo_with_base(tmp.path());
 
         // The agent commits a new file after branching...
-        std::fs::write(tmp.join("committed.txt"), "a\nb\n").unwrap();
+        std::fs::write(tmp.path().join("committed.txt"), "a\nb\n").unwrap();
         commit_all(&repo, "agent work");
         // ...and leaves an uncommitted edit to an existing file.
-        std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(tmp.path().join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+        let result =
+            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"committed.txt"), "committed file missing: {:?}", paths);
         assert!(paths.contains(&"base.txt"), "uncommitted edit missing: {:?}", paths);
@@ -1253,11 +1319,11 @@ mod tests {
 
     #[test]
     fn diff_against_base_detects_rename() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let repo = init_repo_with_base(tmp.path());
 
-        std::fs::remove_file(tmp.join("base.txt")).unwrap();
-        std::fs::write(tmp.join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(tmp.path().join("base.txt")).unwrap();
+        std::fs::write(tmp.path().join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
         {
             let mut index = repo.index().unwrap();
             index.remove_path(std::path::Path::new("base.txt")).unwrap();
@@ -1266,7 +1332,8 @@ mod tests {
         }
         commit_all(&repo, "rename base.txt");
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+        let result =
+            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
         let renamed = result
             .files
             .iter()
@@ -1279,14 +1346,19 @@ mod tests {
 
     #[test]
     fn diff_against_base_falls_back_to_head_when_base_unresolvable() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let _repo = init_repo_with_base(tmp.path());
 
-        std::fs::write(tmp.join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(tmp.path().join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
         // A base_ref that doesn't resolve must fall back to HEAD, not error.
-        let result =
-            diff_against_base(tmp.to_str().unwrap(), "origin/does-not-exist", None, None).unwrap();
+        let result = diff_against_base(
+            tmp.path().to_str().unwrap(),
+            "origin/does-not-exist",
+            None,
+            None,
+        )
+        .unwrap();
         let f = result.files.iter().find(|f| f.path == "base.txt").unwrap();
         assert_eq!(f.status, "modified");
         assert_eq!(f.additions, 1);
@@ -1295,12 +1367,13 @@ mod tests {
 
     #[test]
     fn diff_against_base_flags_binary_without_hunks() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let _repo = init_repo_with_base(tmp.path());
 
-        std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
+        std::fs::write(tmp.path().join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
+        let result =
+            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
         let bin = result.files.iter().find(|f| f.path == "blob.bin").unwrap();
         assert!(bin.binary, "binary file should be flagged");
         assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
@@ -1330,14 +1403,20 @@ mod tests {
 
     #[test]
     fn diff_against_base_only_restricts_to_one_path() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let repo = init_repo_with_base(tmp.path());
 
-        std::fs::write(tmp.join("a.txt"), "x\n").unwrap();
-        std::fs::write(tmp.join("b.txt"), "y\n").unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "x\n").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "y\n").unwrap();
         commit_all(&repo, "two files");
 
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", Some("a.txt"), None).unwrap();
+        let result = diff_against_base(
+            tmp.path().to_str().unwrap(),
+            "base",
+            Some("a.txt"),
+            None,
+        )
+        .unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["a.txt"], "only the filtered path should appear");
     }
@@ -1367,10 +1446,10 @@ mod tests {
     #[test]
     fn diff_node_inspects_worktree_not_project_root() {
         // Project root: a clean repo with a `base` branch, nothing pending.
-        let root = tempdir_via_env();
-        let _root_repo = init_repo_with_base(&root);
+        let root = DiffFixture::new();
+        let _root_repo = init_repo_with_base(root.path());
 
-        let node = make_node(root.to_str().unwrap(), true, Some("wt"));
+        let node = make_node(root.path().to_str().unwrap(), true, Some("wt"));
         let wt_path = crate::env::node_working_path(&node).host_path;
         assert!(
             wt_path.replace('\\', "/").ends_with("/.claude/worktrees/wt"),
@@ -1471,13 +1550,18 @@ mod tests {
     /// proof that the polling seam works.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_pre_set() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let _repo = init_repo_with_base(tmp.path());
 
-        std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(tmp.path().join("edit.rs"), "fn main() {}\n").unwrap();
 
         let token = AtomicBool::new(true);
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
+        let result = diff_against_base(
+            tmp.path().to_str().unwrap(),
+            "base",
+            None,
+            Some(&token),
+        );
         assert_eq!(
             result.as_ref().err().map(|s| s.as_str()),
             Some(DIFF_CANCELLED),
@@ -1496,8 +1580,8 @@ mod tests {
     /// the test still flips within 1s the poll is in the right place.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        let _repo = init_repo_with_base(tmp.path());
 
         // Enough files × lines that the highlight pass dominates the
         // cost and the 1ms flipper delay fires unambiguously mid-walk.
@@ -1510,7 +1594,7 @@ mod tests {
             for line in 0..100 {
                 body.push_str(&format!("file {} line {} {}\n", i, line, "x".repeat(40)));
             }
-            std::fs::write(tmp.join(format!("f{i}.txt")), body).unwrap();
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), body).unwrap();
         }
 
         let token = Arc::new(AtomicBool::new(false));
@@ -1524,7 +1608,12 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
+        let result = diff_against_base(
+            tmp.path().to_str().unwrap(),
+            "base",
+            None,
+            Some(&token),
+        );
         let elapsed = start.elapsed();
 
         flipper.join().unwrap();
