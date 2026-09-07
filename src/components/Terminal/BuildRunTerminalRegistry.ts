@@ -395,16 +395,6 @@ export class BuildRunTerminalRegistry {
     inst.term.dispose(); // allow-dispose — explicit X-button close; the React lifecycle calls `detach`, never this path
     this.instances.delete(key);
 
-    // If no other instance for this sessionId exists, clear the
-    // generation counter so a fresh attach later starts at 1.
-    let stillHasSession = false;
-    for (const other of this.instances.values()) {
-      if (other.sessionId === inst.sessionId) { stillHasSession = true; break; }
-    }
-    if (!stillHasSession) {
-      this.sessionGenerations.delete(inst.sessionId);
-    }
-
     return this.queueSessionTeardown(inst.sessionId, async () => {
       const teardownTasks: Promise<unknown>[] = [api.unsubscribeBuildRunOutput(inst.sessionId)];
       if (ptyWasAlive) teardownTasks.push(api.closeBuildRun(inst.sessionId));
@@ -419,7 +409,9 @@ export class BuildRunTerminalRegistry {
     for (const key of [...this.instances.keys()]) {
       this.disposeInstance(key);
     }
-    this.sessionGenerations.clear();
+    // Keep the latest per-session generations as tombstones. A delayed exit
+    // event from a disposed PTY must not match a newly reopened PTY that
+    // happens to reuse the same session id.
     this.sessionLocks.clear();
     // Issue #734: release the theme-listener so a destroyed build-run
     // registry doesn't keep firing flips into a now-empty entry map.
@@ -559,6 +551,7 @@ export class BuildRunTerminalRegistry {
       // reader thread's exit event onto the new instance.
       const exitEventName = `build-run-exited-${sessionId}`;
       const exitUnlisten = await listen<BuildRunExitedPayload>(exitEventName, () => {
+        if (this.instances.get(instanceKey(sessionId, mode, useWorktree)) !== inst) return;
         if ((this.sessionGenerations.get(sessionId) ?? -1) !== generation) return;
         inst.ptyAlive = false;
         if (inst.attachedContainer) {

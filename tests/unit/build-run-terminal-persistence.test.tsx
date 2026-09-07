@@ -560,6 +560,40 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     expect(written).toContain('[process exited]');
   });
 
+  it('ignores a delayed exit from a disposed PTY after reopening the same session', async () => {
+    const delayedExitHandlers: Array<(event: { payload: unknown }) => void> = [];
+    const defaultListen = vi.mocked(listen).getMockImplementation();
+    vi.mocked(listen).mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'build-run-exited-84') delayedExitHandlers.push(handler);
+      // Keep the old exit callback registered so this test models a late
+      // backend event whose frontend unlisten has not taken effect yet.
+      return Promise.resolve(() => {});
+    });
+
+    try {
+      const container = document.createElement('div');
+      const first = await buildRunTerminalManager.attach(84, 'terminal', true, container);
+      const firstGeneration = first!.generation;
+      await buildRunTerminalManager.dispose(84, 'terminal', true);
+
+      const replacement = await buildRunTerminalManager.attach(84, 'terminal', true, container);
+      expect(replacement!.generation).toBeGreaterThan(firstGeneration);
+      expect(delayedExitHandlers).toHaveLength(2);
+      replacement!.term.write.mockClear();
+
+      // The old PTY's event must be rejected by both the tombstoned
+      // generation and the current-instance identity check. The replacement
+      // remains alive and does not show a false process-exited banner.
+      delayedExitHandlers[0]({ payload: {} });
+      expect(replacement!.ptyAlive).toBe(true);
+      expect(replacement!.term.write).not.toHaveBeenCalledWith(
+        expect.stringContaining('[process exited]'),
+      );
+    } finally {
+      if (defaultListen) vi.mocked(listen).mockImplementation(defaultListen);
+    }
+  });
+
   it('H: subscribes to the binary Channel on create and unsubscribes only on dispose', async () => {
     const container = document.createElement('div');
     await buildRunTerminalManager.attach(70, 'build', true, container);
