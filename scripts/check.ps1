@@ -222,6 +222,15 @@ try {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-tests' }
   & node scripts/check-agent-diff.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
+  # Issue #1647 review — tsc never ran on tests/, so prop renames
+  # like `setActiveNode` → `onActivateNode` slipped through and
+  # broke the unit suite silently on main. The gate is snapshot-based
+  # against `tests/.typecheck-baseline.txt` so pre-existing test-
+  # fixture drift doesn't break the world; it only fails on NEW
+  # errors. To shrink the baseline as errors are fixed, run with
+  # `--update-baseline`.
+  & npm run check:test-typecheck
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'test-typecheck' }
 } finally { Pop-Location }
 
 # Static-docs block: README drift gate + its test suite. Both are

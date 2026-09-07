@@ -66,9 +66,11 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 
 type Props = React.ComponentProps<typeof MeshItem>;
 
-function renderMeshItem(overrides: Partial<Props> = {}) {
-  const props: Props = {
-    mesh: MESH,
+/// Returns a fresh mock-prop set so `vi.fn()` spies don't cross-contaminate
+/// across tests sharing a constant.
+function makeMeshItemProps(mesh: Mesh, overrides: Partial<Props> = {}): Props {
+  return {
+    mesh,
     isSelected: false,
     isDropdownOpen: false,
     isSpawning: false,
@@ -87,20 +89,16 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
-    // Issue #1631 renamed the prop `setActiveNode` → `onActivateNode` to
-    // match the click-handler naming used elsewhere in the sidebar (see
-    // `MeshItem.tsx:63`). The old name no longer exists on the component,
-    // so passing it here is a silent no-op — the NodeItem's onSelect
-    // then throws `onActivateNode is not a function` when the user
-    // (or this test) clicks the node row. Pin the new name so the
-    // click assertion below actually fires `onActivateNode(10)` and
-    // the row lands the mesh+node selection.
     onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
     ...overrides,
   };
+}
+
+function renderMeshItem(overrides: Partial<Props> = {}) {
+  const props = makeMeshItemProps(MESH, overrides);
   const result = render(
     <DndContext>
       <SortableContext items={[MESH.id]}>
@@ -779,28 +777,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
         <SortableContext items={[MESH_A.id, MESH_B.id, MESH_C.id]} strategy={verticalListSortingStrategy}>
           <div data-testid="mesh-list">
             {[MESH_A, MESH_B, MESH_C].map(mesh => (
-              <MeshItem
-                key={mesh.id}
-                mesh={mesh}
-                isSelected={false}
-                isDropdownOpen={false}
-                isSpawning={false}
-                providerList={PROVIDERS}
-                onSelectMesh={vi.fn()}
-                onNewNode={vi.fn()}
-                onSelectProvider={vi.fn()}
-                onOpenFilesProbe={vi.fn()}
-                onOpenPropertiesProbe={vi.fn()}
-                onOpenWorktreesProbe={vi.fn()}
-                onOpenIssuesProbe={vi.fn()}
-                onOpenSessionHistoryProbe={vi.fn()}
-                meshNodes={[]}
-                activeNodeId={null}
-                onActivateNode={vi.fn()}
-                selectMesh={vi.fn()}
-                onDeleteNode={vi.fn()}
-                getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
-              />
+              <MeshItem key={mesh.id} {...makeMeshItemProps(mesh)} />
             ))}
           </div>
         </SortableContext>
