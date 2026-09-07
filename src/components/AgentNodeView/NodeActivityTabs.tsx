@@ -24,6 +24,10 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // A click event alone cannot reliably distinguish pointer activation from
+  // keyboard or assistive-technology activation. Pointer events are explicit
+  // for mouse and touch; keyboard activation leaves this at the safe default.
+  const activationRef = useRef<'pointer' | 'keyboard'>('keyboard');
   const menuId = `activity-list-${rootId}`;
   const tabs = members.flatMap(member => {
     const role = member.id === rootId ? (members.length > 1 ? 'Implementation' : 'Agent')
@@ -51,13 +55,21 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
       <div role="tablist" aria-label="Node activities" className="flex min-w-0 flex-1 overflow-x-auto">
         {tabs.map((tab, index) => {
           const selected = index === selectedIndex;
-          return <div key={tab.key} role="presentation"
-            className={`flex shrink-0 items-center border-b-2 ${selected ? 'border-accent-cyan bg-accent-cyan/5' : 'border-transparent'}`}>
-            <button ref={el => { tabRefs.current[index] = el; }} type="button" role="tab"
+          return <button key={tab.key} ref={el => { tabRefs.current[index] = el; }} type="button" role="tab"
               id={`activity-${rootId}-${tab.key}`} aria-controls={`activity-panel-${rootId}`}
               aria-label={fullLabel(tab)} title={fullLabel(tab)} aria-selected={selected} tabIndex={selected ? 0 : -1}
-              onClick={event => { event.stopPropagation(); onSelect(tab.member.id, tab.utility); }}
+              onPointerDown={() => { activationRef.current = 'pointer'; }}
+              onClick={event => {
+                event.stopPropagation();
+                const focusTerminal = activationRef.current === 'pointer';
+                activationRef.current = 'keyboard';
+                onSelect(tab.member.id, tab.utility, focusTerminal);
+              }}
               onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  activationRef.current = 'keyboard';
+                  return;
+                }
                 const target = event.key === 'ArrowRight' ? (index + 1) % tabs.length
                   : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
                   : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
@@ -66,16 +78,18 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
                 onSelect(tabs[target].member.id, tabs[target].utility, false);
                 tabRefs.current[target]?.focus({ preventScroll: true });
               }}
-              className={`flex h-8 max-w-48 items-center gap-1.5 px-2.5 text-xs transition-colors ${selected ? 'text-text-primary' : 'text-text-muted hover:text-text-primary hover:bg-bg-card'}`}>
+              className={`flex h-8 shrink-0 max-w-48 items-center gap-1.5 border-b-2 px-2.5 text-xs transition-colors ${selected ? 'border-accent-cyan bg-accent-cyan/5 text-text-primary' : 'border-transparent text-text-muted hover:bg-bg-card hover:text-text-primary'}`}>
               {!tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
               <span className="truncate">{tab.label}</span>
               {!tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
-            </button>
-            {tab.utility && <button type="button" aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
-              onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
-              className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-text-muted hover:bg-status-error-bg hover:text-status-error">×</button>}
-          </div>;
+            </button>;
         })}
+      </div>
+      <div role="group" aria-label="Close utility sessions" className="flex shrink-0 items-center border-b-2 border-transparent">
+        {tabs.filter(tab => tab.utility).map(tab => <button key={`close-${tab.key}`} type="button"
+          aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
+          onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
+          className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-text-muted hover:bg-status-error-bg hover:text-status-error">×</button>)}
       </div>
       <button ref={triggerRef} type="button" data-dropdown-for={menuId} aria-label={`All sessions (${tabs.length})`} title="All sessions"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
@@ -88,14 +102,15 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
         style={{ top: 0, left: 0 }}>
         {tabs.map((tab, index) => <button key={tab.key} type="button" role="menuitem" tabIndex={index === activeIndex ? 0 : -1}
           aria-label={fullLabel(tab)} aria-current={index === selectedIndex ? 'true' : undefined}
+          onPointerDown={() => { activationRef.current = 'pointer'; }}
+          onKeyDown={event => {
+            if (event.key === 'Enter' || event.key === ' ') activationRef.current = 'keyboard';
+          }}
           onClick={event => {
             event.stopPropagation();
             setOpen(false);
-            // Native button activation reports detail=0 for keyboard
-            // activation and a positive detail for pointer clicks. Pointer
-            // selection should move focus into the terminal; keyboard
-            // selection keeps the roving tab focus on the selected tab.
-            const focusTerminal = event.detail > 0;
+            const focusTerminal = activationRef.current === 'pointer';
+            activationRef.current = 'keyboard';
             onSelect(tab.member.id, tab.utility, focusTerminal);
             if (!focusTerminal) {
               requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));

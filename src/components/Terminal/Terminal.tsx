@@ -89,9 +89,18 @@ export function resetTerminalZoomListenerForTests(): void {
   terminalZoomListenerInstalled = false;
 }
 
-export function AgentTerminal({ nodeId, focusOnAttach = true }: { nodeId: number; focusOnAttach?: boolean }) {
+export function AgentTerminal({ nodeId, focusOnAttach = true, focusRequest = 0 }: { nodeId: number; focusOnAttach?: boolean; focusRequest?: number }) {
   const focusOnAttachRef = useRef(focusOnAttach);
   focusOnAttachRef.current = focusOnAttach;
+
+  // Node activity tabs own the focus intent, while the terminal owns the
+  // actual xterm focus. This effect handles a mounted terminal when a pointer
+  // selects it; attach-time focus remains in the async attach callback below.
+  useEffect(() => {
+    if (focusRequest === 0 || !focusOnAttachRef.current) return;
+    if (nodeId !== useAgentNodeStore.getState().activeNodeId) return;
+    terminalManager.getInstance(nodeId)?.term.focus();
+  }, [focusRequest, nodeId]);
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);

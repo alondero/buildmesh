@@ -302,6 +302,38 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(buildRunTerminalManager.getInstance(81, 'terminal', true)).toBeUndefined();
   });
 
+  it('queues a late close from a cancelled spawn before a reopened session can spawn', async () => {
+    let resolveOldBuildRun!: () => void;
+    let resolveClose!: () => void;
+    let buildRunCount = 0;
+    const oldBuildRun = new Promise<void>(resolve => { resolveOldBuildRun = resolve; });
+    const closePending = new Promise<void>(resolve => { resolveClose = resolve; });
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === 'build_run' && buildRunCount++ === 0) return oldBuildRun;
+      if (command === 'close_build_run') return closePending;
+      return Promise.resolve({});
+    });
+
+    const container = document.createElement('div');
+    const firstAttach = buildRunTerminalManager.attach(85, 'build', true, container);
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(true);
+
+    // Dispose while the backend spawn is unresolved, then immediately reopen
+    // the same session in another mode. The replacement must wait for the
+    // late spawn's close to settle.
+    void buildRunTerminalManager.dispose(85, 'build', true);
+    const replacement = buildRunTerminalManager.attach(85, 'terminal', true, container);
+    resolveOldBuildRun();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(1);
+
+    resolveClose();
+    await expect(firstAttach).resolves.toBeNull();
+    await expect(replacement).resolves.toBeDefined();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(2);
+  });
+
   it('awaits deferred PTY close and output unsubscribe before a replacement spawn', async () => {
     let resolveClose!: () => void;
     let resolveUnsubscribe!: () => void;

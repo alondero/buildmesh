@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { buildRunTerminalManager } from './BuildRunTerminalRegistry';
@@ -8,6 +8,7 @@ interface BuildRunTerminalProps {
   mode?: 'build' | 'run' | 'terminal';
   useWorktree?: boolean;
   focusOnAttach?: boolean;
+  focusRequest?: number;
 }
 
 /**
@@ -27,10 +28,17 @@ interface BuildRunTerminalProps {
  * the effect runs `attach`, and the same xterm + scrollback is re-parented
  * into the new container without respawning the PTY.
  */
-export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, focusOnAttach = true }: BuildRunTerminalProps) {
+export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, focusOnAttach = true, focusRequest = 0 }: BuildRunTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const focusOnAttachRef = useRef(focusOnAttach);
   focusOnAttachRef.current = focusOnAttach;
+
+  // The wrapper owns focus for an already-mounted xterm. Attach-time focus is
+  // still handled by the promise below, which covers a cold lazy mount.
+  useEffect(() => {
+    if (focusRequest === 0 || !focusOnAttachRef.current) return;
+    buildRunTerminalManager.getInstance(sessionId, mode, useWorktree)?.term.focus();
+  }, [focusRequest, sessionId, mode, useWorktree]);
 
   useAsyncEffect((signal) => {
     if (!containerRef.current) return;

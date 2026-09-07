@@ -105,9 +105,11 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(header.textContent).not.toContain('Repository root');
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     const menu = screen.getByRole('menu', { name: 'Agent node actions' });
-    expect(menu.textContent).toContain('demo');
-    expect(menu.textContent).toContain('Repository root');
-    expect(menu.textContent).toContain('6 changed files');
+    expect(menu).toBeTruthy();
+    const details = screen.getByTestId('grid-node-details');
+    expect(details.textContent).toContain('demo');
+    expect(details.textContent).toContain('Repository root');
+    expect(details.textContent).toContain('6 changed files');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Session details' }));
     expect(useUIStore.getState().probeTab).toBe('properties');
     expect(useUIStore.getState().probeOpen).toBe(true);
@@ -145,6 +147,31 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.queryByTestId('circuit-run-pill')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     expect(screen.getByTestId('circuit-run-pill').textContent).toBe('Review workflow · #2');
+  });
+
+  it.each([
+    ['implementing', 'autopilot'],
+    ['finishing', 'autopilot · wrap-up'],
+    ['suffix_pending', 'autopilot · suffix'],
+    ['completed', 'autopilot · complete'],
+    ['merged', 'autopilot · merged'],
+    ['failed', 'autopilot ✗'],
+  ] as const)('keeps the %s Autopilot status visible in the details menu with its tooltip', (state, label) => {
+    useAgentNodeStore.setState({ autopilotStates: { 1: state } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    const pill = screen.getByTestId('autopilot-pill');
+    expect(pill.textContent).toContain(label);
+    expect(pill.getAttribute('title')).toContain('Autopilot:');
+    expect(pill.className).toContain('ring-');
+  });
+
+  it('keeps git summary additions, modifications, and deletions semantically coloured in details', () => {
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    expect(screen.getByText('+3').className).toContain('text-accent-green');
+    expect(screen.getByText('~2').className).toContain('text-accent-amber');
+    expect(screen.getByText('-1').className).toContain('text-accent-red');
   });
 
   it('keeps aggregate attention actionable even when its session tab is offscreen', () => {

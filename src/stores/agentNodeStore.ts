@@ -18,6 +18,8 @@ import { useMeshStore } from './meshStore';
 // `toggleNodePinned` hand-rolled is now a generic helper.
 import { withOptimistic, type OptimisticSurface } from '../lib/optimistic';
 import { attachAgentNodeListeners } from './agentNodeListeners';
+import { useNodeActivityStore, type UtilityMode } from './nodeActivityStore';
+import { activityRootId } from '../lib/nodeActivities';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -289,7 +291,14 @@ interface AgentNodeState {
   toggleNodePinned: (nodeId: number) => Promise<AgentNode>;
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
-  setActiveNode: (id: number | null) => void;
+  /**
+   * Select an entity and, when supplied, one of its activity tabs.  The
+   * optional activity arguments keep the active-node and activity stores in
+   * one transition so secondary navigation entrypoints cannot leave a card
+   * showing a stale tab. A utility mode opens the utility in that same
+   * transition rather than requiring a caller to update the activity store.
+   */
+  setActiveNode: (id: number | null, rootId?: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   spawnAgent: (
     nodeId: number,
     provider: string,
@@ -822,15 +831,23 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     await persistPositions(set, get, swapped);
   },
 
-  setActiveNode: (id) => {
-    // Explicit navigation changes the entity focus. Utility and member tab
-    // selection are deliberately handled by the activity-card UI.
-    // The entity store owns navigation only; transient activity tab state
-    // lives in the activity store and is updated by UI-level actions.
-    // A plain synchronous state write — the active-node highlight, terminal
-    // focus, and file-watch all key off activeNodeId, so the switch must feel
-    // instant with no backend round-trip in the way.
+  setActiveNode: (id, requestedRootId, requestedUtility, requestedUtilityMode) => {
+    // The active node is the primary navigation transition. Keep the card's
+    // activity selection coherent here as well: sidebar, omnibar, keyboard,
+    // lifecycle, and card entrypoints all arrive through this setter.
     set({ activeNodeId: id });
+    if (id === null) return;
+
+    const state = get();
+    const rootId = requestedRootId ?? activityRootId(id, state.nodesById, state.circuitOwnerships);
+    // Plain navigation selects the agent activity. Callers that deliberately
+    // open a utility pass `utility=true` in the same transition.
+    const utility = requestedUtility ?? false;
+    if (utility && requestedUtilityMode) {
+      useNodeActivityStore.getState().openUtility(rootId, id, requestedUtilityMode);
+    } else {
+      useNodeActivityStore.getState().select(rootId, id, utility);
+    }
   },
 
   spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {

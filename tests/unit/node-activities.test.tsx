@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
@@ -18,7 +19,10 @@ const { disposeUtility, focusAgentTerminal } = vi.hoisted(() => ({
   focusAgentTerminal: vi.fn(),
 }));
 vi.mock('../../src/components/Terminal/Terminal', () => ({
-  AgentTerminal: ({ nodeId }: { nodeId: number }) => <textarea aria-label={`Agent ${nodeId}`} />,
+  AgentTerminal: ({ nodeId, focusRequest }: { nodeId: number; focusRequest?: number }) => {
+    useEffect(() => { if (focusRequest) focusAgentTerminal(); }, [focusRequest]);
+    return <textarea aria-label={`Agent ${nodeId}`} />;
+  },
   terminalManager: { getInstance: () => ({ term: { focus: focusAgentTerminal } }) },
 }));
 vi.mock('../../src/components/Terminal/BuildRunTerminal', () => ({
@@ -49,7 +53,8 @@ const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilt
   gridSortBy: 'custom' as const, gridSortDirection: 'asc' as const };
 
 function card() {
-  return <NodeCard nodeId={1} memberIds={[1, 2, 4]} isActive onActivate={id => useAgentNodeStore.getState().setActiveNode(id)} />;
+  return <NodeCard nodeId={1} memberIds={[1, 2, 4]} isActive
+    onActivate={(id, rootId, utility, utilityMode) => useAgentNodeStore.getState().setActiveNode(id, rootId, utility, utilityMode)} />;
 }
 
 beforeEach(() => {
@@ -95,7 +100,7 @@ describe('node activities', () => {
     first.unmount();
     render(card());
     expect(screen.getByLabelText('Agent 2')).toBeTruthy();
-    act(() => useAgentNodeStore.setState({ activeNodeId: 1 }));
+    act(() => useAgentNodeStore.getState().setActiveNode(2));
     expect(screen.getByLabelText('Agent 2')).toBeTruthy();
   });
 

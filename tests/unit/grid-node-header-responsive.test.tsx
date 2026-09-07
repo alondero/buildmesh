@@ -107,7 +107,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 
 // Imported AFTER mocks so it sees the stubbed BuildRunDropdown etc.
 import { seedAgentNodes } from './helpers/seedAgentNodes';
-import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
+import { GridNodeHeader, HEADER_TIER_BREAKPOINTS } from '../../src/components/AgentNodeView/GridNodeHeader';
 
 const NODE: AgentNode = {
   id: 1,
@@ -210,5 +210,24 @@ describe('GridNodeHeader compact layout behaviour', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('GridNodeHeader width contracts', () => {
+  beforeEach(setupCommonState);
+
+  it('uses the named compact breakpoint for the narrow warning badge', () => {
+    seedAgentNodes([{ ...NODE, status: 'suspended', cli_session_id: null }], NODE.id);
+    const { root } = renderHeader(HEADER_TIER_BREAKPOINTS.compact - 1);
+    expect(root.querySelector('[aria-label="Missing session ID"]')).toBeTruthy();
+    fireResize(root, HEADER_TIER_BREAKPOINTS.compact + 1);
+    expect(root.textContent).toContain('Missing session ID');
+    expect(root.querySelector('[aria-label="Missing session ID"]')).toBeNull();
+  });
+
+  it('uses named attention and PR thresholds instead of inline literals', () => {
+    expect(HEADER_TIER_BREAKPOINTS.attentionLabel).toBe(500);
+    expect(HEADER_TIER_BREAKPOINTS.pr).toBe(640);
+    expect(HEADER_TIER_BREAKPOINTS.menuWidth).toBe(240);
   });
 });

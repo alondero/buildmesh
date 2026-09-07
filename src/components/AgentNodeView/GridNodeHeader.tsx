@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -12,6 +12,7 @@ import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderList } from '../../hooks/useProviderList';
 import { useRegenerateAction } from '../../hooks/useRegenerateAction';
 import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
+import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
@@ -93,6 +94,15 @@ const AUTOPILOT_PILL_STYLES: Record<AutopilotRunState, { label: string; classNam
   },
 };
 
+/** Width contracts for the compact header. Keep layout decisions named so a
+ * pane resize cannot quietly grow a collection of unrelated magic numbers. */
+export const HEADER_TIER_BREAKPOINTS = {
+  compact: 380,
+  attentionLabel: 500,
+  pr: 640,
+  menuWidth: 240,
+} as const;
+
 export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attentionCount = 0, onAttention, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const titleNode = useAgentNodeStore(s => s.nodesById[titleNodeId]);
@@ -163,21 +173,21 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           <InlineEditableText value={titleNode.name} onCommit={next => renameAgentNode(titleNode.id, next)}
             className="text-sm font-semibold text-text-primary" />
         </span>
-        {hasLostConversation(node, !!autopilotState || !!circuitOwnership) && <MissingSessionIdBadge compact={width < 380} />}
-        {node.signal_health === 'unavailable' && <span role="img" aria-label="Attention signal unavailable"
+        {hasLostConversation(node, !!autopilotState || !!circuitOwnership) && <MissingSessionIdBadge compact={width < HEADER_TIER_BREAKPOINTS.compact} />}
+        {node.signal_health === 'unavailable' && !(hasLostConversation(node, !!autopilotState || !!circuitOwnership) && width < HEADER_TIER_BREAKPOINTS.compact) && <span role="img" aria-label="Attention signal unavailable"
           title="Attention signal unavailable — watch this session's terminal directly."
           className="shrink-0 text-xs text-status-warning">⚠</span>}
       </div>
-      {attentionCount > 0 && <button type="button" onPointerDown={event => event.stopPropagation()}
+        {attentionCount > 0 && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onAttention?.(); }}
         aria-label={`${attentionCount} ${attentionCount === 1 ? 'session needs' : 'sessions need'} attention. Show next session`}
         title={`${activity?.label ?? 'Needs attention'} · Show next session`}
-        className={`flex h-7 shrink-0 items-center gap-1 rounded-sm px-1.5 text-2xs font-medium ${attentionTone}`}>
-        <span aria-hidden="true">!</span><span>{attentionCount}</span>{width >= 500 && <span>needs attention</span>}
+         className={`flex h-7 shrink-0 items-center gap-1 rounded-sm px-1.5 text-2xs font-medium ${attentionTone}`}>
+        <span aria-hidden="true">!</span><span>{attentionCount}</span>{width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span>needs attention</span>}
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
-        {width >= 640 && openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />}
+        {width >= HEADER_TIER_BREAKPOINTS.pr && openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <AgentReviewButton node={node} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
@@ -201,8 +211,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
             {circuitOwnership && <div data-testid="circuit-run-pill" className="mt-1 text-accent-violet">{circuitOwnership.circuit_name} · #{circuitOwnership.run_id}</div>}
             {!circuitOwnership && autopilotState && <div data-testid="autopilot-pill" title={AUTOPILOT_PILL_STYLES[autopilotState].title}
-              className="mt-1 text-accent-violet">{AUTOPILOT_PILL_STYLES[autopilotState].label}</div>}
-            {summary && <div className="mt-1 text-text-muted">{summary.total} changed files · +{summary.added} ~{summary.modified} -{summary.deleted}</div>}
+              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${AUTOPILOT_PILL_STYLES[autopilotState].className}`}>{AUTOPILOT_PILL_STYLES[autopilotState].label}</div>}
+            {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
+              <span>{summary.total} changed files · </span>
+              <span className={summary.added ? 'text-accent-green' : 'text-text-muted'}>+{summary.added}</span>{' '}
+              <span className={summary.modified ? 'text-accent-amber' : 'text-text-muted'}>~{summary.modified}</span>{' '}
+              <span className={summary.deleted ? 'text-accent-red' : 'text-text-muted'}>-{summary.deleted}</span>
+            </div>}
           </>} />
       </div>
       {regen.pendingRegenerate && <ConfirmDialog title="Regenerate this node?"
@@ -266,9 +281,10 @@ const KEBAB_MIN_WIDTH = 160;
 
 function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, canResume, onResume, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const popoverRef = useRef<HTMLDivElement>(null);
   // Issue #1502 — Regenerate picker submenu via the shared `useSubmenu`
   // hook (same hook drives the sidebar `NodeItem` picker): hover/click
   // opens, ArrowRight opens-and-focuses, ArrowLeft closes, ArrowDown/Up
@@ -284,7 +300,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
   const menuId = menuIdRef.current;
   // Resume adds one row; navigation wraps over the current set of commands.
-  const itemCount = (canResume ? 8 : 7);
+  const itemCount = canResume ? 8 : 7;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     regenSubmenu.closeSubmenu();
@@ -317,123 +333,51 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
     setOpen(false);
   });
 
-  // Outside click + Escape close. Same `document`-vs-`window` jsdom
-  // caveat as `MeshItem` (issue #735): tests dispatch on `document`,
-  // not `window`, because in jsdom the two are independent targets.
-  // Submenu arrows delegate to the shared `useSubmenu` hook (same as
-  // `NodeItem`); only the parent-menu traversal below is kebab-local.
-  // The listener attaches once per open: submenu state lives in the
-  // hook behind stable callbacks, so hovering the picker never churns
-  // this subscription.
+  useAriaMenu({
+    rootRef: menuRef,
+    itemCount,
+    activeIndex,
+    setActiveIndex,
+    onClose: closeAndReturnFocus,
+    enabled: open,
+    itemSelector: '[data-aria-menu-item]',
+    skipDisabled: true,
+  });
+
+  // The shared menu hook owns Escape, Tab, and roving Arrow/Home/End focus.
+  // This listener only handles the regenerate submenu's horizontal arrows.
   useEffect(() => {
     if (!open) return;
-    // Issue #1502 — skip disabled rows (the Regenerate trigger is
-    // disabled when the mesh offers no providers). Focusing a disabled
-    // button is a no-op, so a naive modulo walk would stall on the
-    // disabled slot and break Arrow-wrap.
-    const focusSibling = (currentIdx: number, dir: 1 | -1) => {
-      for (let step = 1; step <= itemCount; step++) {
-        const next = (currentIdx + dir * step + itemCount) % itemCount;
-        const el = menuItemRefs.current[next];
-        if (el && !el.hasAttribute('disabled')) {
-          el.focus();
-          return;
-        }
-      }
-    };
     const onKeyDown = (e: KeyboardEvent) => {
       const menu = menuRef.current;
       const active = document.activeElement;
       const inMenu = menu && active instanceof Node && menu.contains(active);
       const inSubmenu = regenSubmenu.submenuContainsFocus();
       if (!inMenu && !inSubmenu) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        closeAndReturnFocus();
-        return;
-      }
-      if (e.key === 'Tab') {
-        // Non-modal popover (matches MeshItem, #735): Tab leaves the
-        // menu and closes it; the browser moves focus to the next
-        // tabbable element naturally.
-        regenSubmenu.closeSubmenu();
-        setOpen(false);
-        return;
-      }
       if (e.key === 'ArrowRight' && inMenu && !inSubmenu) {
         if (active?.getAttribute('aria-haspopup') !== 'menu') return;
         e.preventDefault();
         regenSubmenu.openSubmenuViaKeyboard();
         return;
       }
-      if (
-        e.key === 'ArrowLeft' &&
-        (inSubmenu || (inMenu && regenSubmenu.isSubmenuOpen()))
-      ) {
+      if (e.key === 'ArrowLeft' && (inSubmenu || (inMenu && regenSubmenu.isSubmenuOpen()))) {
         e.preventDefault();
         regenSubmenu.closeSubmenu();
         const trigger = menu?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
         if (trigger) focusWithoutScroll(trigger);
         return;
       }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (inSubmenu) {
-          regenSubmenu.stepSubmenuFocus(1);
-        } else {
-          const items = menuItemRefs.current;
-          const activeIdx = items.findIndex((el) => el === document.activeElement);
-          if (activeIdx >= 0) focusSibling(activeIdx, 1);
-        }
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (inSubmenu) {
-          regenSubmenu.stepSubmenuFocus(-1);
-        } else {
-          const items = menuItemRefs.current;
-          const activeIdx = items.findIndex((el) => el === document.activeElement);
-          if (activeIdx >= 0) focusSibling(activeIdx, -1);
-        }
-        return;
-      }
+      if (inSubmenu && e.key === 'ArrowDown') { e.preventDefault(); regenSubmenu.stepSubmenuFocus(1); return; }
+      if (inSubmenu && e.key === 'ArrowUp') { e.preventDefault(); regenSubmenu.stepSubmenuFocus(-1); return; }
     };
     document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-    };
-    // `itemCount` is constant while open (`canResume` can't flip
-    // mid-menu); everything submenu-shaped comes from the hook's stable
-    // callbacks — hence no `regenSubmenuOpen` dep and no listener churn
-    // on hover.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, itemCount]);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, regenSubmenu]);
 
   // Fixed-menu anchoring, viewport clamping, and scroll tracking are shared
   // with the PR pill so both title-bar menus follow the same positioning rules.
-  useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
+  useAnchoredPosition(triggerRef, popoverRef, open, { align: 'end' });
 
-  // Autofocus the first ENABLED menuitem on open (WAI-ARIA menu contract).
-  // Issue #1502 — the first row is now Regenerate, which is disabled when
-  // the mesh offers no providers (the common case in tests, where
-  // `listProviders` isn't mocked and resolves to `[]`). Focusing a
-  // disabled button is a no-op in browsers/jsdom, which would leave focus
-  // outside the menu and break the Escape-to-close contract (the key
-  // handler gates on focus-inside-menu). Skip disabled rows so Escape
-  // always has a focused item to gate on.
-  // Issue #1291 — `preventScroll: true` keeps Chromium from auto-scrolling
-  // a flex/scroll ancestor to bring the focused item into view. The kebab
-  // lives inside the GridNodeHeader row inside the splitter; without the
-  // flag, opening the menu would visibly nudge the grid. Local-only —
-  // `useSubmenu`'s `focusWithoutScroll` and the inline `useAriaMenu` both
-  // have their own scroll behaviour (e.g. ProviderDropdown relies on the
-  // scroll-into-view side effect), so we DON'T route this through them.
-  useLayoutEffect(() => {
-    if (!open) return;
-    const firstEnabled = menuItemRefs.current.find((el) => el && !el.hasAttribute('disabled'));
-    firstEnabled?.focus({ preventScroll: true });
-  }, [open]);
 
   return (
     <>
@@ -457,18 +401,17 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
       </button>
       {open && createPortal(
         <div
-          ref={menuRef}
+          ref={popoverRef}
           id={menuId}
           // Issue #814 — scoped attribute for `useClickOutside`. The
           // menu's per-instance `menuId` ensures sibling kebabs (one per
           // agent node in the grid) don't share the selector.
           data-dropdown-for={menuId}
-          role="menu"
-          aria-label="Agent node actions"
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-right z-[100] py-1"
-          style={{ top: 0, left: 0, minWidth: KEBAB_MIN_WIDTH, width: 240, maxWidth: 'calc(100vw - 16px)' }}
+          style={{ top: 0, left: 0, minWidth: KEBAB_MIN_WIDTH, width: HEADER_TIER_BREAKPOINTS.menuWidth, maxWidth: 'calc(100vw - 16px)' }}
         >
-          <div role="presentation" className="mb-1 border-b border-border-subtle px-3 py-2 text-xs">{details}</div>
+          <div data-testid="grid-node-details" className="mb-1 border-b border-border-subtle px-3 py-2 text-xs">{details}</div>
+          <div ref={menuRef} role="menu" aria-label="Agent node actions">
           {/* Issue #1502 — Regenerate row (first, mirrors the sidebar
               context-menu order). Hover or ArrowRight/click opens the
               provider picker submenu pinned with `Current (<label>)` on
@@ -486,8 +429,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             onMouseLeave={() => regenSubmenu.closeSubmenu()}
           >
             <button
-              ref={(el) => { menuItemRefs.current[0] = el; }}
-              role="menuitem"
+              role="menuitem" data-aria-menu-item
               aria-haspopup="menu"
               aria-expanded={regenSubmenu.submenuOpen}
               disabled={regenDisabled}
@@ -534,8 +476,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             )}
           </div>
           <button
-            ref={(el) => { menuItemRefs.current[1] = el; }}
-            role="menuitem"
+            role="menuitem" data-aria-menu-item
             onClick={(e) => { closeAndReturnFocus(); onOpenInExplorer(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
@@ -543,8 +484,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             Open in file explorer
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[2] = el; }}
-            role="menuitem"
+            role="menuitem" data-aria-menu-item
             aria-pressed={isPinned}
             onClick={(e) => { closeAndReturnFocus(); onTogglePin(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
@@ -556,8 +496,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             {isPinned ? 'Unpin node' : 'Pin node'}
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[3] = el; }}
-            role="menuitem"
+            role="menuitem" data-aria-menu-item
             onClick={(e) => { closeAndReturnFocus(); onToggleSolo(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
@@ -571,8 +510,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             {isSingleMode ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[4] = el; }}
-            role="menuitem"
+            role="menuitem" data-aria-menu-item
             aria-label={`Close session · ${node.name}`}
             onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
@@ -582,8 +520,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
           </button>
           {canResume && (
             <button
-              ref={(el) => { menuItemRefs.current[5] = el; }}
-              role="menuitem"
+              role="menuitem" data-aria-menu-item
               onClick={(e) => { closeAndReturnFocus(); onResume(e); }}
               data-testid="grid-resume-button"
               className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
@@ -592,12 +529,13 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               Resume agent
             </button>
           )}
-          <button type="button" role="menuitem" ref={el => { menuItemRefs.current[canResume ? 6 : 5] = el; }}
+          <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onDetails(); }}
             className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">Session details</button>
-          <button type="button" role="menuitem" ref={el => { menuItemRefs.current[canResume ? 7 : 6] = el; }}
+          <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
             className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">View changes</button>
+          </div>
         </div>,
         document.body,
       )}

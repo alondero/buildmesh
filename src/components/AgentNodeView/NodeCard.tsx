@@ -3,8 +3,8 @@ import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'rea
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { activityStatus } from '../../lib/nodeActivities';
-import { useNodeActivityStore } from '../../stores/nodeActivityStore';
-import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
+import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
+import { AgentTerminal } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
 import { NodeDropCue } from './nodeDrag';
 import { SemanticTurnBanner } from './SemanticTurnBanner';
@@ -18,7 +18,7 @@ interface NodeCardProps {
   nodeId: number;
   memberIds?: readonly number[];
   isActive: boolean;
-  onActivate: (nodeId: number) => void;
+  onActivate: (nodeId: number, rootId?: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   /// When false (e.g. the maximized solo view), the card is not a drag target
   /// or handle — there's nothing to reorder against.
   draggable?: boolean;
@@ -47,6 +47,7 @@ interface NodeCardProps {
 /// (a DragOverlay renders the moving preview) and just dim the source instead.
 function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, draggable = true }: NodeCardProps) {
   const [keyboardSelection, setKeyboardSelection] = useState<{ nodeId: number; utility: boolean } | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
   const memberIds = memberIdsProp ?? [nodeId];
   const memberIdKey = memberIds.join(',');
   const stableMemberIds = useMemo(() => memberIds, [memberIdKey]);
@@ -60,11 +61,12 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     () => new Map(stableMemberIds.map((id, index) => [id, utilityModes[index]] as const)),
     [stableMemberIds, utilityModes],
   );
-  const select = useNodeActivityStore(s => s.select);
-  const openUtility = useNodeActivityStore(s => s.openUtility);
   const closeUtility = useNodeActivityStore(s => s.closeUtility);
   const activeMember = members.find(n => n.id === activeNodeId);
-  const selectedId = members.find(n => n.id === selection?.nodeId)?.id ?? activeMember?.id ?? nodeId;
+  // The entity store is the primary navigation source. Activity selection is
+  // a detail of that entity and only supplies the fallback used before an
+  // external navigation action has committed.
+  const selectedId = activeMember?.id ?? members.find(n => n.id === selection?.nodeId)?.id ?? nodeId;
   const selectedUtilityMode = utilities.get(selectedId);
   const showingUtility = selection?.nodeId === selectedId && !!selection?.utility && !!selectedUtilityMode;
   const focusOnAttach = keyboardSelection?.nodeId !== selectedId || keyboardSelection.utility !== showingUtility;
@@ -106,17 +108,12 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id));
   const choose = (id: number, utility = false, focusTerminal = true) => {
     setKeyboardSelection(focusTerminal ? null : { nodeId: id, utility });
-    select(nodeId, id, utility);
-    onActivate(id);
-    if (focusTerminal) {
-      requestAnimationFrame(() => {
-        if (utility) {
-          const member = members.find(candidate => candidate.id === id);
-          const mode = utilities.get(id);
-          if (member && mode) buildRunTerminalManager.getInstance(id, mode, member.use_worktree)?.term.focus();
-        } else terminalManager.getInstance(id)?.term.focus();
-      });
-    }
+    // setActiveNode owns the cross-store transition. The terminal receives a
+    // monotonically changing focus request; it focuses itself once mounted,
+    // so a cold lazy utility attach cannot lose a request in an animation
+    // frame race.
+    onActivate(id, nodeId, utility);
+    if (focusTerminal) setFocusRequest(request => request + 1);
   };
   const status = activityStatus(root, members);
   const attention = members.filter(member => member.status === 'awaiting_input' || member.status === 'error');
@@ -176,7 +173,11 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         activity={hasTabs ? status : undefined}
         attentionCount={attention.length}
         onAttention={revealAttention}
-        onBuildRun={(id, mode) => { setKeyboardSelection(null); openUtility(nodeId, id, mode); onActivate(id); }}
+        onBuildRun={(id, mode) => {
+          setKeyboardSelection(null);
+          onActivate(id, nodeId, true, mode);
+          setFocusRequest(request => request + 1);
+        }}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}
       />
       {hasTabs && (
@@ -197,10 +198,11 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         {showingUtility && selectedUtilityMode ? (
           <Suspense fallback={<span className="p-2 text-text-muted">Loading terminal…</span>}>
             <BuildRunTerminal key={`${node.id}-${selectedUtilityMode}`} sessionId={node.id}
-              mode={selectedUtilityMode} useWorktree={node.use_worktree} focusOnAttach={focusOnAttach} />
+              mode={selectedUtilityMode} useWorktree={node.use_worktree} focusOnAttach={focusOnAttach}
+              focusRequest={focusRequest} />
           </Suspense>
         ) : (
-          <AgentTerminal key={node.id} nodeId={node.id} focusOnAttach={focusOnAttach} />
+          <AgentTerminal key={node.id} nodeId={node.id} focusOnAttach={focusOnAttach} focusRequest={focusRequest} />
         )}
       </div>
       {draggable && <NodeDropCue nodeId={nodeId} />}
