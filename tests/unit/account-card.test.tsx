@@ -269,4 +269,146 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       expect(screen.getByRole('button', { name: /^remove deepseek$/i })).toBeTruthy();
     });
   });
+
+  // -----------------------------------------------------------------
+  // Issue #1535: preserve dirty provider credentials across the
+  // prop-synchronisation race the parent causes. The card must keep
+  // a typed API key when (a) the user toggles Enabled on a draft,
+  // (b) a save IPC rejects and the parent rolls the prop back, and
+  // (c) an unrelated prop refresh fires while the draft is dirty.
+  // -----------------------------------------------------------------
+  describe('dirty credentials survive prop churn (issue #1535)', () => {
+    function claudeCompatibleAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
+      return account({
+        id: 'kimi',
+        name: 'Kimi',
+        billing_mode: 'pay_as_you_go',
+        claude_compatible: true,
+        api_key: null,
+        ...over,
+      });
+    }
+
+    it('toggle commits the typed API key along with the enabled flip', async () => {
+      // The toggle currently calls `onSave({ ...account, enabled })`, dropping
+      // any typed-but-unsaved `api_key`. With #1535, the toggle must commit
+      // whatever is in the draft (atomic save policy).
+      const onSave = vi.fn().mockResolvedValue(true);
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={claudeCompatibleAccount({ enabled: true })}
+          onSave={onSave}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-typed');
+      // Toggle Enabled off — the typed key must travel through the IPC.
+      await user.click(screen.getByRole('checkbox', { name: /enable kimi/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      const payload = onSave.mock.calls[0][0];
+      expect(payload).toMatchObject({
+        id: 'kimi',
+        enabled: false,
+        api_key: 'sk-typed',
+      });
+    });
+
+    it('rejected save preserves the typed key, dirty state, and inline retryable error', async () => {
+      // Parent's optimistic prop replace + rollback races against the card's
+      // draft. After a rejection, the input must still hold the typed key,
+      // the credentials section must remain open, and a Retry button must
+      // re-attempt without re-paste.
+      const onSave = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('backend says nope'))
+        .mockResolvedValueOnce(true);
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={claudeCompatibleAccount()}
+          onSave={onSave}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-precious');
+
+      // First Save rejects.
+      await user.click(screen.getByRole('button', { name: /^save$/i }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+
+      // The typed key is still in the input — the prop-synchronisation race
+      // did not eat it.
+      const apiKeyInput = screen.getByLabelText(/kimi api key/i) as HTMLInputElement;
+      expect(apiKeyInput.value).toBe('sk-precious');
+
+      // The credentials editor stays open so the user can see what happened.
+      expect(screen.getByLabelText(/kimi api key/i)).toBeTruthy();
+
+      // The inline error carries the failure message and offers Retry.
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toMatch(/backend says nope/);
+      const retry = screen.getByRole('button', { name: /^retry$/i });
+      expect(retry).toBeTruthy();
+
+      // Retry re-sends the SAME draft (no re-typing required).
+      await user.click(retry);
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+      expect(onSave.mock.calls[1][0].api_key).toBe('sk-precious');
+    });
+
+    it('external prop refresh updates a pristine card but does not overwrite a dirty one', async () => {
+      // Pristine case: an external refresh (e.g. another account added)
+      // must propagate the new committed value into the draft.
+      const { rerender } = render(
+        <AccountCard
+          account={claudeCompatibleAccount({ api_key: null, enabled: false })}
+          onSave={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole('button', { name: /edit credentials/i }));
+      const pristineInput = screen.getByLabelText(/kimi api key/i) as HTMLInputElement;
+      expect(pristineInput.value).toBe('');
+
+      // External refresh: backend now reports api_key='sk-from-server'.
+      rerender(
+        <AccountCard
+          account={claudeCompatibleAccount({ api_key: 'sk-from-server', enabled: true })}
+          onSave={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+      expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-from-server');
+
+      // Dirty case: type something, then external refresh fires. The typed
+      // key must NOT be overwritten — the prop-sync useEffect must gate on
+      // the draft being pristine. Immutable display fields (the card's
+      // `name`) refresh implicitly because the header reads from the prop.
+      const user = userEvent.setup();
+      await user.clear(screen.getByLabelText(/kimi api key/i));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-half-typed');
+
+      rerender(
+        <AccountCard
+          account={claudeCompatibleAccount({
+            api_key: 'sk-from-server',
+            enabled: true,
+            // Display-only refresh: a rename on the parent must reach the
+            // header even while the user is editing. The bug (#1535) would
+            // clobber the typed key on the way through; the fix must keep
+            // both — typed key untouched, header label refreshed.
+            name: 'Kimi (renamed)',
+          })}
+          onSave={vi.fn().mockResolvedValue(true)}
+        />,
+      );
+      expect(
+        (screen.getByLabelText(/kimi \(renamed\) api key/i) as HTMLInputElement).value,
+      ).toBe('sk-half-typed');
+      expect(screen.getByText('Kimi (renamed)')).toBeTruthy();
+    });
+  });
 });

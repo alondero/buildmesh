@@ -77,21 +77,64 @@ export function AccountCard({
    */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  // Issue #1535: split the saved snapshot from the editable draft so the
+  // parent's optimistic prop cycle (which fires BEFORE the IPC resolves)
+  // can't clobber a half-typed credential. `committedAccount` is the card's
+  // private dirty baseline — it only advances on a successful save. The
+  // `account` prop is treated as a hint: pristine drafts adopt it, dirty
+  // drafts shadow it. Without this split, a typed API key gets wiped the
+  // moment the user toggles Enabled or hits Save, because the parent's
+  // `setAccounts(...prev.map(...))` (handleSaveAccount) lands in the
+  // `useEffect([account])` and resets `draft` back to the pre-save value
+  // before the IPC can resolve.
+  const [committedAccount, setCommittedAccount] = useState<ProviderAccount>(account);
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setDraft(account), [account]);
-  useEffect(() => setConfirmingRemove(false), [account.id]);
-
-  // Dirty = editable fields diverge from the saved account (API key + billing).
+  // Mirror isDirty into a ref so the prop-sync effect below can gate on the
+  // LATEST dirty value without depending on it directly (depending on it
+  // would create a feedback loop — the effect also sets state that feeds
+  // isDirty). The ref is the closure-staleness fix used by the rest of the
+  // codebase (e.g. `providersRef`, `poolSavedRef`).
   const isDirty = useMemo(() => {
-    if (draft.api_key !== account.api_key) return true;
-    if (draft.billing_mode !== account.billing_mode) return true;
-    if (draft.enabled !== account.enabled) return true;
+    if (draft.api_key !== committedAccount.api_key) return true;
+    if (draft.billing_mode !== committedAccount.billing_mode) return true;
+    if (draft.enabled !== committedAccount.enabled) return true;
     return false;
-  }, [draft, account]);
+  }, [draft, committedAccount]);
+  const isDirtyRef = useRef(false);
+  useEffect(() => {
+    isDirtyRef.current = isDirty;
+  }, [isDirty]);
+
+  // Prop sync: when the parent's `account` prop changes (external refresh,
+  // optimistic parent state, successful-save re-fetch), adopt it IFF the
+  // draft is pristine. While the user is editing, ignore prop churn — the
+  // next save will reconcile. Display-only fields (`name`,
+  // `claude_compatible`) still reflect the prop because the JSX reads them
+  // straight from `account`, not from `draft`.
+  useEffect(() => {
+    if (isDirtyRef.current) return;
+    setCommittedAccount(account);
+    setDraft(account);
+    // account.id drives the confirmingRemove reset on row identity change.
+    setConfirmingRemove(false);
+    setError(null);
+  }, [account]);
+
+  // Wrap setDraft so any user edit clears a stale inline error — the user
+  // has acknowledged it and is moving on. A retry that re-fails will set a
+  // fresh error in `persist`.
+  const updateDraft = useCallback((next: ProviderAccount) => {
+    setDraft(next);
+    setError(null);
+  }, []);
+
+  // Dirty notification (issue #730). Compare to `lastReportedDirtyRef` so we
+  // don't re-fire the parent's `setDirtySites` for every keystroke.
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -105,19 +148,52 @@ export function AccountCard({
   // Billing mode is first-class only (self-auth + keyed catalog).
   const showBilling = isFirstClassId(account.id);
 
-  const toggleEnabled = async (enabled: boolean) => {
-    setBusy(true);
+  // Authoritative save: updates `committedAccount` only on success so a
+  // failure leaves both `committedAccount` (and therefore dirty state) and
+  // `draft` untouched — the inline error + Retry button carry the recovery.
+  // `onSave` is expected to return `false` on failure (the parent's
+  // `handleSaveAccount` swallows IPC throws and reports via a top-level
+  // toast), but we still catch throws defensively in case a future adapter
+  // forgets to wrap.
+  const persist = async (next: ProviderAccount): Promise<boolean> => {
     try {
-      await onSave({ ...account, enabled });
+      const ok = await onSave(next);
+      if (ok) {
+        setCommittedAccount(next);
+        setError(null);
+      } else {
+        // Parent already surfaced the failure via its own toast; the inline
+        // message here just flags the offending card with a Retry affordance.
+        setError('Save failed');
+      }
+      return ok;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
+  };
+
+  // Atomic toggle policy (issue #1535, option B): flipping Enabled commits
+  // whatever's currently in the draft, including any half-typed API key.
+  // This matches the user's mental model — the toggle saves what they see —
+  // and avoids introducing a third "toggle-disabled-with-explanation" state.
+  const toggleEnabled = async (enabled: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    const next = { ...draft, enabled };
+    setDraft(next);
+    try {
+      await persist(next);
     } finally {
       setBusy(false);
     }
   };
 
   const saveDraft = async () => {
+    if (busy) return;
     setBusy(true);
     try {
-      await onSave(draft);
+      await persist(draft);
     } finally {
       setBusy(false);
     }
@@ -145,7 +221,7 @@ export function AccountCard({
           <label className="flex items-center gap-2 text-base text-text-secondary cursor-pointer">
             <input
               type="checkbox"
-              checked={account.enabled}
+              checked={draft.enabled}
               disabled={busy}
               onChange={e => toggleEnabled(e.target.checked)}
               className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
@@ -204,7 +280,7 @@ export function AccountCard({
               <input
                 type="password"
                 value={draft.api_key ?? ''}
-                onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
+                onChange={e => updateDraft({ ...draft, api_key: e.target.value || null })}
                 placeholder="Enter API key..."
                 className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                 aria-label={`${account.name} API key`}
@@ -219,7 +295,7 @@ export function AccountCard({
               <label className="block text-sm text-text-muted mb-1">Billing</label>
               <select
                 value={draft.billing_mode}
-                onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
+                onChange={e => updateDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
                 className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                 aria-label={`${account.name} billing mode`}
               >
@@ -228,7 +304,7 @@ export function AccountCard({
               </select>
             </div>
           )}
-          <div className="flex gap-3">
+          <div className="flex gap-3 items-center">
             <button
               onClick={saveDraft}
               disabled={busy}
@@ -237,6 +313,23 @@ export function AccountCard({
               {busy ? 'Saving...' : 'Save'}
             </button>
           </div>
+          {error && (
+            <div
+              role="alert"
+              data-testid="account-card-error"
+              className="flex items-center gap-2 text-sm text-status-error"
+            >
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={saveDraft}
+                disabled={busy}
+                className="underline hover:no-underline disabled:opacity-50"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
