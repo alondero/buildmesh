@@ -1054,12 +1054,12 @@ mod tests {
                 .prefix("buildmesh-diff-test-")
                 .tempdir()
                 .expect("create fixture tempdir");
-            // `TempDir::into_path()` disables the cleanup `Drop` and
+            // `TempDir::keep()` disables the cleanup `Drop` and
             // returns the path - exactly the "preserve this directory"
             // semantic the opt-in wants. Stays inside `TempDir`'s own
             // RAII machinery instead of reaching for `mem::forget`.
             if keep_diff_fixtures() {
-                let path = temp.into_path();
+                let path = temp.keep();
                 eprintln!("[buildmesh diff fixture] preserved at {}", path.display());
                 Self::Kept(path)
             } else {
