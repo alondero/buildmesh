@@ -2,17 +2,94 @@
 
 ![Buildmesh Wordmark](./src/assets/wordmark.png)
 
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Anthropic (Claude Code), Minimax, Kimi, OpenCode, Antigravity, and Codex** — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
+
+## Install Buildmesh
+
+Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
+
+### Download
+
+Grab the latest installer from the [GitHub Releases page](https://github.com/alondero/buildmesh/releases/latest). Each Windows release publishes **two** installers (pick whichever you prefer):
+
+| File | Format | Notes |
+|---|---|---|
+| `Buildmesh_<version>_x64-setup.exe` | NSIS `.exe` | Smallest download; per-user install. |
+| `Buildmesh_<version>_x64_en-US.msi` | Windows Installer `.msi` | MSI deployment; per-machine install. |
+
+Each installer ships with its matching `.sig` (the **auto-updater** signature — see [Upgrade](#upgrade)) and a `latest.json` updater feed; existing installs read that feed to detect new releases.
+
+### Supported platforms
+
+| Platform | Status | How to get it |
+|---|---|---|
+| **Windows 10/11** (x64) | **Stable** — installer shipped on every tag. | Download from the Releases page above. |
+| **WSL2** (hybrid Windows/WSL mode) | **Stable** on Windows 10/11 hosts — Linux agents run inside WSL2, the Windows-side backend drives the UI. | Install Windows first, then enable WSL2 from Mesh settings. |
+| macOS (Apple Silicon + Intel) | **Preview** — the macOS bundles compile on every weekly CI smoke run, but no signed `.dmg` is published yet. | [Build from source](#build-from-source). |
+| Linux (Ubuntu) | **Preview** — same caveat as macOS. | [Build from source](#build-from-source). |
+
+### First-run prerequisites
+
+Buildmesh itself has no host dependencies — it bundles WebView2 on Win 11 and ships the React UI as a Tauri webview. The **agents** you spawn are a separate question:
+
+- **`Terminal` harness** — works out of the box (PowerShell on Windows; routed through `wsl.exe` on WSL meshes).
+- **Every other harness** — install the agent CLI on the host (or inside WSL for a WSL mesh), then sign in or add an API key from **App Settings → Providers**. Buildmesh detects the CLI binary on `PATH` and surfaces enabled harnesses in the Spawn Menu.
+- **(Optional) `gh` CLI** — only required for the GitHub Issues / PR features.
+- **(Optional) WSL2** — only for hybrid Windows/WSL meshes.
+
+### SmartScreen & Gatekeeper warnings (unsigned installers)
+
+Buildmesh installers are **not** OS-code-signed yet. This is **expected** for now and is unrelated to the in-app updater — every update is verified with the app's own minisign signature regardless. To get past the OS trust prompt:
+
+- **Windows (SmartScreen)** — *"Windows protected your PC … unknown publisher."* Click **More info → Run anyway**.
+- **macOS (Gatekeeper)** — *"cannot be opened because the developer cannot be verified."* Right-click the app → **Open** → **Open** again (or System Settings → Privacy & Security → **Open Anyway**).
+
+Verify the installer against its `.sig` with [minisign](https://jedisct1.github.io/minisign/) before bypassing the prompt on a machine you don't fully control. The full verification command lives in [`docs/development/releasing.md`](docs/development/releasing.md).
+
+### Data location, logs, backup, uninstall
+
+Buildmesh stores everything under a single per-profile directory. The stable and dev profiles are independent and use different bundle identifiers (`com.alond.buildmesh` vs `com.alond.buildmesh.dev`), so they can be installed side-by-side without colliding.
+
+- **Windows stable** — `%APPDATA%\com.alond.buildmesh\`
+- **Windows dev profile** — `%APPDATA%\com.alond.buildmesh.dev\`
+
+Inside:
+
+| Path | Contents |
+|---|---|
+| `buildmesh.db` | SQLite database (meshes, Agent Nodes, settings). |
+| `logs\buildmesh.log` | Rotating Rust + frontend log, size-bounded and name-stable. The `/use`, `/verify`, and `scripts\tail-dev-log.ps1` helpers tail this exact file. |
+| `logs\panic.log` | External crash-watchdog dump (Windows only). |
+| `autopilot\finish.md` | Per-mesh autopilot wrap-up template. |
+
+OAuth secrets for each provider are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory).
+
+To **uninstall** Buildmesh and **remove all user data**: uninstall from *Windows Settings → Apps → Installed apps → Buildmesh → Uninstall*, **then** delete the profile directory above. The MSI/NSIS uninstaller removes the binary and registry entries but does **not** delete the data dir, so the two-step matters if you want a clean slate.
+
+There is **no automatic cloud backup** — your meshes, prompts, and Provider configuration live only in the local directory above. Back it up the way you would any other project folder.
+
+### Upgrade
+
+Existing installs check the updater feed at `https://github.com/alondero/buildmesh/releases/latest/download/latest.json` on launch and surface an *"Update available"* prompt. Install the update from inside the app — no separate download needed. Locally-built dev builds disable the updater via their `.dev` bundle identifier, so they never nag you about a release you already have.
+
+To upgrade manually, install the new `.msi` or `-setup.exe` over the existing install — both installers support in-place upgrade.
+
+### Get help
+
+- **Bug or unexpected behaviour?** Open an issue using the [bug template](.github/ISSUE_TEMPLATE/bug.md). Include the contents of `logs\buildmesh.log` for the relevant session and your version (from *Help → About*, or the installer filename).
+- **Feature request?** Use the [feature template](.github/ISSUE_TEMPLATE/feature.md).
+- **Question / "how do I…"** — open a [GitHub Discussion](https://github.com/alondero/buildmesh/discussions) (or an issue with no template).
+- **Security vulnerability** — **do not** file a public issue; report privately through [GitHub Security Advisories](https://github.com/alondero/buildmesh/security/advisories/new). See [`SECURITY.md`](SECURITY.md) for the supported-versions policy and response timeline.
 
 ## Features
 
 ### Multi-agent orchestration
-- **Six providers, one workflow**: Anthropic (Claude Code), Minimax, Kimi, OpenCode, Antigravity, and Codex. Switch providers per agent node.
+- **Twelve harnesses, one workflow**: Claude Code, Codex, Antigravity, OpenCode, Grok Code, Cursor, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, and a plain `Terminal` harness — switch harnesses per Agent Node. Some harnesses pair with a *Model Provider* (Anthropic, MiniMax, Kimi) so each Agent Node can carry live quota / balance widgets; custom Claude-compatible endpoints attach as proxied providers.
 - **Multi-mesh workspaces**: open several meshes side by side. Each mesh is its own grid of agent terminals.
 - **Tiled grid view**: split each mesh into a 1–6 pane grid. Layouts are saved per mesh.
-- **Persistent terminals**: agents run as background processes. Switching meshes, panes, or even quitting the app never interrupts a running agent — `TerminalManager` is a singleton, terminals survive React remounts.
+- **Persistent terminals**: agents run as durable background processes and their PTY state survives mesh and pane switches. Quitting the app prompts you to confirm when there are non-resumable sessions; on relaunch anything still running is restored automatically and anything suspended shows up in the Resume menu. The plain `Terminal` harness and any harness that hasn't yet captured a session id are **non-resumable** — exiting loses their progress.
 - **Git worktree isolation**: every agent node gets its own worktree branch, so concurrent agents on the same repo never collide.
 
 ### Productivity
@@ -44,15 +121,15 @@ a host with no backend it's a safe no-op.
 
 ### What it protects against
 
-| Capability | macOS (Seatbelt, #497) | Windows (restricted token, #528) |
+| Capability | macOS (Seatbelt) | Windows (restricted token) |
 |---|---|---|
 | Agent can spawn child processes (`bash`, `git`, `ripgrep`, hooks) | ✅ | ✅ |
 | Agent reaches the network (Anthropic API, `git push`) | ✅ | ✅ |
-| Agent reaches the hub on loopback (attention hook → `127.0.0.1`) | ✅ | ✅ (fixed in #533) |
-| **Writes** confined to the worktree (rest of disk read-only/denied) | ✅ | ⏳ not yet — see #542 |
-| **Reads** of home credentials (`~/.ssh`, `~/.aws`, registry) denied | ✅ | ⏳ not yet — see #542 |
+| Agent reaches the hub on loopback (attention hook → `127.0.0.1`) | ✅ | ✅ |
+| **Writes** confined to the worktree (rest of disk read-only/denied) | ✅ | ⏳ not yet |
+| **Reads** of home credentials (`~/.ssh`, `~/.aws`, registry) denied | ✅ | ⏳ not yet |
 
-The Windows backend was pivoted off a per-node AppContainer ([ADR-0014](docs/adr/0014-pivot-windows-sandbox-off-appcontainer.md)): the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation (#528) and blocked loopback (#533). The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred to **#542** — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
+The Windows backend was pivoted off a per-node AppContainer: the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation and blocked loopback. The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
 
 ### What it is *not*
 
@@ -81,7 +158,11 @@ so every binding works the same way on Windows, Linux, and macOS.
 - **Runtime** — Windows 10/11, with optional WSL2 support
 - **Testing** — Vitest (unit + integration) + Playwright (e2e)
 
-## Prerequisites
+## Build from source
+
+This section is for contributors and for users on macOS/Linux (which aren't published as releases yet — see [Supported platforms](#supported-platforms)).
+
+### Prerequisites
 
 - **Node.js 20+ (LTS)** and **npm**
 - **Rust stable** (1.74+, the minimum Tauri 2 supports)
@@ -93,13 +174,13 @@ so every binding works the same way on Windows, Linux, and macOS.
 - **(Optional) WSL2** — required only if you want the hybrid Windows/WSL runtime
 - **(Optional) `gh` CLI** — only if you want the GitHub Issues and PR features authenticated
 
-## Install
+### Install
 
 ```bash
 npm install
 ```
 
-## Develop
+### Develop
 
 ```bash
 npm run tauri dev
@@ -107,7 +188,7 @@ npm run tauri dev
 
 This launches the Tauri shell + Vite dev server. First run takes a few minutes while the Rust backend compiles.
 
-## Build a release binary
+### Build a release binary
 
 ```bash
 # Stable profile (com.alond.buildmesh, port 1991)
@@ -135,10 +216,10 @@ npm run test:ci          # all three in one go
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```
 
-## Bundle size budget (issue #1568)
+## Bundle size budget
 
 The desktop entry chunk (`dist/assets/index-*.js`) is the single largest
-byte-cost on first paint. After #1568's lazy-xterm + lazy-Probe-tab
+byte-cost on first paint. After the lazy-xterm + lazy-Probe-tab
 split, it sits at roughly 894 kB minified / 274 kB gzip — with xterm and
 its five addons (≈430 kB / ≈100 kB gzip) only fetched the first time a
 terminal pane is opened, and each Probe tab (≈2–24 kB / ≈1–7 kB gzip)
