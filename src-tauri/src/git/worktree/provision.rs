@@ -1728,10 +1728,7 @@ mod tests {
         }
     }
 
-    // DB init routes through `db::test_support::ensure_db_for_tests`
-    // (raised on PR #1643 review — the previous local copy repeated the
-    // per-process scratch path + `Once::call_once` dance that now lives in
-    // `db::test_support`).
+    // DB init routes through `db::test_support::ensure_db_for_tests`.
 
     /// End-to-end regression for #1080. A Manual spawn that claims a warm
     /// pool entry must persist the pool's pre-assigned slug into BOTH

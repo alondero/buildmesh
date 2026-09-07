@@ -74,9 +74,8 @@ fn shm_sibling(db: &Path) -> PathBuf {
 /// downstream "database not initialized" panics far from the
 /// actual cause.
 ///
-/// No-op when the test binary doesn't need the DB at all. Tests
-/// that exercise only pure logic (no DB) should not call this
-/// helper.
+/// Tests that exercise only pure logic (no DB) should not call this
+/// helper — every first call pays the `db::init` cost.
 pub fn ensure_db_for_tests() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -93,11 +92,10 @@ pub fn ensure_db_for_tests() {
 mod tests {
     use super::*;
 
-    /// Calling `ensure_db_for_tests` more than once must be safe —
-    /// the second call observes the populated `db::DB` and
-    /// short-circuits without panic. Pinning the idempotency
-    /// contract so a future refactor that drops the `Once`
-    /// (re-introducing the warm_pool bug class) fails here.
+    /// Pinning the Once/idempotency contract: the second call observes
+    /// the populated `db::DB` and short-circuits without panic.
+    /// Catches a regression that drops the `Once` (every call would
+    /// then acquire the `INIT_LOCK` and re-run `init_schema`).
     #[test]
     fn ensure_db_for_tests_is_idempotent() {
         ensure_db_for_tests();

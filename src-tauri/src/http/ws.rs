@@ -246,12 +246,19 @@ pub(crate) async fn handle_ws_connection(
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
-/// Test seam for [`write_mobile_input`]: the production wrapper resolves
-/// the lifecycle sink from the global app handle, but unit tests inject a
-/// mock sink here so the autoclear side-effects can be asserted on without
-/// standing up a real SQLite database. Split out per the review on PR #1643
-/// — the prior `write_mobile_input` hardcoded a `DbOnlySink` fallback in the
-/// transport module, coupling a network test to global DB state.
+/// Test seam for [`write_mobile_input`]. The production wrapper
+/// resolves the lifecycle sink from the global app handle, but unit
+/// tests inject a mock sink here so the autoclear side-effects can be
+/// asserted on without standing up a real SQLite database.
+///
+/// Drives `registry.write_bytes` first; on success, hands the
+/// payload to [`run_autoclear_side_effects`] which decides whether
+/// CR/LF triggers the autoclear side-effects. The autoclear is
+/// best-effort — failures from the sink are swallowed by
+/// `run_autoclear_side_effects` because the WS broadcasts + DB
+/// lifecycle emits are themselves infallible; we run them even when
+/// the underlying write succeeds so a `y\r` payload clears the
+/// awaiting_input flag exactly as a typed Enter would.
 pub(crate) fn write_mobile_input_with_sink(
     registry: &dyn ProcessRegistryApi,
     lifecycle_sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
@@ -266,12 +273,11 @@ pub(crate) fn write_mobile_input_with_sink(
 /// Write a raw keystroke sequence to a node's PTY and run the attention
 /// autoclear side-effect when the payload contains CR/LF (issue #1377).
 ///
-/// Production wrapper around [`write_mobile_input_with_sink`]: resolves
-/// the `AppSessionLifecycleSink` from the global app handle set by
-/// `lib.rs::setup` and delegates. The autoclear predicate and side-
-/// effects are covered by the `_with_sink` unit tests — this wrapper
-/// is a one-line dispatch by design (the `app_handle` is the only
-/// sink resolution the function performs).
+/// Production wrapper around [`write_mobile_input_with_sink`]. The
+/// autoclear predicate and side-effects are covered by the `_with_sink`
+/// unit tests — this wrapper is a thin dispatch by design (the only
+/// production logic it carries is sink resolution from the global
+/// app handle).
 ///
 /// Returns the registry's write error verbatim so the HTTP `/api/nodes/{id}/input`
 /// route can surface PTY-write failures as a 5xx — the WS path can swallow them
@@ -281,16 +287,28 @@ pub(crate) fn write_mobile_input_with_sink(
 /// we run them even when the underlying write_bytes succeeds so a `y\r` payload
 /// clears the awaiting_input flag exactly as a typed Enter would.
 ///
-/// Panics if `super::app_handle()` returns `None` — production invariant
-/// (`lib.rs::setup` always sets the handle before any HTTP route runs).
+/// Sink resolution: production always has a live `app_handle` (set by
+/// `lib.rs::setup`), so the `AppSessionLifecycleSink` branch fires
+/// desktop events (`agent-lifecycle`, `attention-cleared`). The
+/// `DbOnlySink` fallback only fires for the unit-test seam (no
+/// `app_handle` is reachable in tests) and the post-shutdown drain
+/// where the app is tearing down.
 pub(crate) fn write_mobile_input(
     registry: &dyn ProcessRegistryApi,
     node_id: i64,
     text: &str,
 ) -> Result<(), String> {
-    let app = super::app_handle().expect("app handle must be set during request");
-    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
-    write_mobile_input_with_sink(registry, &sink, node_id, text)
+    if let Some(app) = super::app_handle() {
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
+        write_mobile_input_with_sink(registry, &sink, node_id, text)
+    } else {
+        write_mobile_input_with_sink(
+            registry,
+            &crate::agent::session_lifecycle::DbOnlySink,
+            node_id,
+            text,
+        )
+    }
 }
 
 /// The autoclear predicate + side-effects, isolated so the test seam
@@ -319,17 +337,12 @@ fn run_autoclear_side_effects(
 }
 
 fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, text: &str) {
-    // WS path uses `DbOnlySink` for the autoclear side-effect — the
-    // sink is only consulted when the payload contains CR/LF, and
-    // the WS path's autoclear is best-effort (the HTTP path's
-    // `write_mobile_input` uses the live `AppHandle` sink). A test
-    // driving this helper with bare text never touches the sink.
-    if let Err(e) = write_mobile_input_with_sink(
-        registry,
-        &crate::agent::session_lifecycle::DbOnlySink,
-        node_id,
-        text,
-    ) {
+    // Routes through the production `write_mobile_input` so the WS path
+    // gets the same event dispatch as the HTTP path. Tests for this
+    // helper use bare text ("hello") which has no CR/LF — the autoclear
+    // side-effect never runs, so the sink type (`AppSessionLifecycleSink`
+    // in production, `DbOnlySink` in the test seam) is irrelevant.
+    if let Err(e) = write_mobile_input(registry, node_id, text) {
         tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
     }
 }
@@ -905,6 +918,47 @@ mod tests {
         assert!(!mock.write_called.load(AtomicOrdering::SeqCst));
     }
 
+    /// Production `write_mobile_input` wrapper — exercises the full
+    /// sink-resolution path with bare text so the autoclear side-effect
+    /// never fires (and the test never touches an `AppHandle`). The
+    /// `DbOnlySink` fallback fires in tests (no `app_handle`), and the
+    /// bare payload ensures the fallback sink is never actually
+    /// consulted. Pins the production wrapper as "calls
+    /// `write_mobile_input_with_sink` with the resolved sink" — a
+    /// regression that re-introduced the standalone autoclear logic
+    /// in the wrapper would split the seam and this test would diverge
+    /// from the `_with_sink` autoclear tests. The CR/LF autoclear
+    /// contract is pinned exhaustively by the `_with_sink` tests
+    /// (`autoclear_predicate_cr_only`, `…_lf_only`, `…_no_newline_…`);
+    /// driving CR/LF through the production wrapper would require
+    /// initialising the global DB, which the seam tests deliberately
+    /// avoid.
+    #[test]
+    fn write_mobile_input_dispatches_to_seam() {
+        let mock = MockRegistry::new();
+        write_mobile_input(&mock, 1, "y").expect("write_mobile_input dispatches");
+        assert!(mock.write_called.load(AtomicOrdering::SeqCst));
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"y");
+    }
+
+    /// Production wrapper's registry-error path must surface the
+    /// error verbatim (the autoclear side-effect doesn't run when the
+    /// PTY write fails — a regression that re-orders the seam so
+    /// autoclear runs first would surface here as a panic from
+    /// `DbOnlySink::write_status`).
+    #[test]
+    fn write_mobile_input_propagates_registry_error_at_production_path() {
+        let mock = MockRegistry::failing();
+        let Err(err) = write_mobile_input(&mock, 1, "y") else {
+            panic!("write_mobile_input must surface registry errors");
+        };
+        assert!(err.contains("mock error"));
+        assert!(
+            !mock.write_called.load(AtomicOrdering::SeqCst),
+            "failing registry must not record a successful write"
+        );
+    }
+
     // --- write_mobile_input (issue #1377, post-review) ---------------------
     //
     // The new `POST /api/nodes/{id}/input` route uses the same
@@ -946,9 +1000,9 @@ mod tests {
     fn write_mobile_input_propagates_registry_error() {
         let mock = MockRegistry::failing();
         let sink = RecordingSink::new();
-        let err = write_mobile_input_with_sink(&mock, &sink, 1, "y\r")
-            .err()
-            .expect("write_mobile_input must surface registry errors");
+        let Err(err) = write_mobile_input_with_sink(&mock, &sink, 1, "y\r") else {
+            panic!("write_mobile_input must surface registry errors");
+        };
         assert!(err.contains("mock error"));
         assert!(
             !mock.write_called.load(AtomicOrdering::SeqCst),

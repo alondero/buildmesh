@@ -1027,11 +1027,7 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
 
 // ── v22 / issue #611 — `delete_worktrees` rejects pool paths ────────────────
 
-// DB init routes through `db::test_support::ensure_db_for_tests`
-// (raised on PR #1643 review — the previous local copy constructed
-// `std::sync::Once::new()` on every call, only relying on
-// `db::init`'s own `is_initialized` guard to avoid duplicate schema
-// work; same latent bug as `services::warm_pool::ensure_maintenance_db`).
+// DB init routes through `db::test_support::ensure_db_for_tests`.
 
 /// Pin the `delete_worktrees` → `remove_worktrees` pool-rejection
 /// contract (issue #611). A pool entry's directory is owned by the

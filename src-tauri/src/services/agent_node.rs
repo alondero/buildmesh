@@ -932,10 +932,7 @@ mod tests {
     //     wrapper boundary with zero infrastructure.
     // -------------------------------------------------------------------
 
-    // DB init routes through `db::test_support::ensure_db_for_tests`
-    // (raised on PR #1643 review — the previous local copy repeated the
-    // per-process scratch path + `Once::call_once` dance that now lives in
-    // `db::test_support`).
+    // DB init routes through `db::test_support::ensure_db_for_tests`.
 
     /// Create a fresh mesh in the global DB at a unique per-test path and
     /// return its id. Each call uses a monotonic counter so parallel tests

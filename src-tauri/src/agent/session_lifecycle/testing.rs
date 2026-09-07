@@ -1,37 +1,34 @@
 //! Shared [`SessionLifecycleSink`] fixture for backend unit tests.
 //!
-//! Three test files previously rolled their own sink stub (each near
-//! identical to the others with different field names):
+//! Single source of truth for the `SessionLifecycleSink` test double.
+//! Any test that needs to observe lifecycle writes or event emits
+//! without touching the global DB or `AppHandle` constructs one of
+//! these.
 //!
-//! - `agent::session_lifecycle::tests::FakeSink`
-//! - `commands::attention::tests::FakeLifecycleSink`
-//! - `http::ws::tests::MockSink`
-//!
-//! All three implement the same trait, all three record `write_status`
-//! calls and event emits, none touch the global DB or `AppHandle`.
-//! They belong in one place so a regression that adds a new
-//! `SessionLifecycleSink` method surfaces once (a compile error in
-//! this file's `impl`) instead of three times.
-//!
-//! The fields are public via accessors that return owned `Vec`s so a
-//! test that calls `sink.writes()` twice gets two snapshots — `RefCell`
-//! borrow semantics don't leak into the test code.
+//! Accessors return owned `Vec`s so a test that calls `sink.writes()`
+//! twice gets two snapshots — `RefCell` borrow semantics don't leak
+//! into the test code.
 
 use std::cell::RefCell;
 
 use crate::agent::session_lifecycle::{
-    LifecycleChangedPayload, SessionLifecycleSink, SessionStatus,
+    LifecycleChangedPayload, SemanticTurnPayload, SessionLifecycleSink, SessionStatus,
 };
 
-/// Records every status write and event emit. Single shared fixture
-/// for any test that needs to observe a `SessionLifecycleSink` without
-/// touching the global DB or `AppHandle`.
+/// Records every status write and event emit.
 #[derive(Default)]
 pub struct RecordingSink {
     writes: RefCell<Vec<(i64, SessionStatus)>>,
     writes_if: RefCell<Vec<(i64, SessionStatus, SessionStatus)>>,
     writes_unless: RefCell<Vec<(i64, SessionStatus, Vec<SessionStatus>)>>,
     attention_needed: RefCell<Vec<i64>>,
+    /// Pairs of `(node_id, semantic_turn)` for every
+    /// `emit_attention_needed_with_payload` call. The default
+    /// `SessionLifecycleSink::emit_attention_needed_with_payload`
+    /// implementation silently drops the payload — overriding it here
+    /// so a test that asserts on the payload (issue #1364
+    /// classification) gets a real observation seam.
+    attention_needed_with_payload: RefCell<Vec<(i64, Option<SemanticTurnPayload>)>>,
     attention_cleared: RefCell<Vec<i64>>,
     resume_failed: RefCell<Vec<(i64, String)>>,
     lifecycle_changed: RefCell<Vec<LifecycleChangedPayload>>,
@@ -56,6 +53,12 @@ impl RecordingSink {
 
     pub fn attention_needed(&self) -> Vec<i64> {
         self.attention_needed.borrow().clone()
+    }
+
+    pub fn attention_needed_with_payload(
+        &self,
+    ) -> Vec<(i64, Option<SemanticTurnPayload>)> {
+        self.attention_needed_with_payload.borrow().clone()
     }
 
     pub fn attention_cleared(&self) -> Vec<i64> {
@@ -103,6 +106,22 @@ impl SessionLifecycleSink for RecordingSink {
 
     fn emit_attention_needed(&self, node_id: i64) {
         self.attention_needed.borrow_mut().push(node_id);
+    }
+
+    fn emit_attention_needed_with_payload(
+        &self,
+        node_id: i64,
+        semantic_turn: Option<SemanticTurnPayload>,
+    ) {
+        // Mirror the trait default's call to `emit_attention_needed`
+        // so callers that go through the payload variant still
+        // surface in `attention_needed()` (tests using the simpler
+        // accessor keep working). The payload itself goes to the
+        // dedicated `attention_needed_with_payload` list.
+        SessionLifecycleSink::emit_attention_needed(self, node_id);
+        self.attention_needed_with_payload
+            .borrow_mut()
+            .push((node_id, semantic_turn));
     }
 
     fn emit_attention_cleared(&self, node_id: i64) {
