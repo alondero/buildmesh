@@ -650,9 +650,9 @@ impl CircuitGraph {
     }
 
     /// Normalize the original issue-review blueprint so already-saved circuits
-    /// use their real task as the spawned agent's first turn. Match the exact
-    /// server-authored prompts and two-edge intermediary shape: prompts and
-    /// topology are editable, so a customized graph must not be rewritten.
+    /// use their real task as the spawned agent's first turn. Match the node
+    /// kinds and two-edge intermediary shape; copy the authored prompt
+    /// verbatim so migration never replaces it with a server default.
     pub(crate) fn upgrade_legacy_issue_review_first_turns(&mut self) -> bool {
         let marker_changed = self.blueprint.is_none() && self.has_legacy_issue_review_shape();
         if marker_changed {
@@ -684,83 +684,71 @@ impl CircuitGraph {
             "implementer",
             "implementation_prompt",
             "implementation_classifier",
-            "",
-            "{{issue.prefill}}",
-            "{{issue.prefill}}",
         );
         let reviewer_changed = self.replace_legacy_injected_first_turn(
             "reviewer",
             "review_prompt",
             "review_classifier",
-            "The pull request URL is {{pr.url}}. Use it as additional review context.",
-            Self::PR_REVIEW_PROMPT,
-            &format!(
-                "{}. The pull request URL is {{{{pr.url}}}}.",
-                Self::PR_REVIEW_PROMPT
-            ),
         );
         marker_changed || policy_changed || implementer_changed || reviewer_changed
     }
 
-    /// Only upgrade the shipped topology. User-authored wiring is never
-    /// replaced by a newly generated preset; spawn overrides stay intact.
+    /// Upgrade the legacy review topology structurally. User-authored prompt
+    /// text and spawn overrides are never rewritten; a graph whose spawn
+    /// already has a non-empty prompt keeps its intermediary injection so a
+    /// custom first turn cannot be lost.
     pub(crate) fn upgrade_issue_review_verdict(&mut self) -> bool {
         if !self.is_issue_driven_autopilot_review()
             || !matches!(self.node("review_classifier").map(|n| &n.kind),
-                Some(CircuitNodeKind::LlmTurnClassifier { target_node_id })
-                    if target_node_id.as_deref() == Some("reviewer"))
+                Some(CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. }))
+            || !matches!(self.node("review_retry").map(|n| &n.kind), Some(CircuitNodeKind::RetryLimit { .. }))
+        {
+            return false;
+        }
+        let has_legacy_route = |from: &str, to: &str, condition: EdgeCondition| {
+            self.edges.iter().any(|edge| edge.from == from && edge.to == to && edge.condition == condition)
+        };
+        if !has_legacy_route("review_classifier", "follow_feedback", EdgeCondition::OnOutcome(StepOutcome::Completed))
+            || !has_legacy_route("review_retry", "finish", EdgeCondition::OnOutcome(StepOutcome::Completed))
+            || !has_legacy_route("review_retry", "complete", EdgeCondition::OnOutcome(StepOutcome::Failed))
         {
             return false;
         }
         let canonical = Self::issue_driven_autopilot_review("");
-        let mut legacy_edges = canonical.edges.clone();
-        legacy_edges.retain(|e| e.to != "close_approved" && e.from != "close_approved"
-            && !(e.from == "review_classifier" && e.to == "review_exhausted"));
-        for edge in &mut legacy_edges {
-            if edge.from == "review_classifier" && edge.to == "follow_feedback" {
-                edge.condition = EdgeCondition::OnOutcome(StepOutcome::Completed);
-            }
-            if edge.from == "review_retry" && edge.to == "review_exhausted" {
-                edge.to = "complete".into();
+        let mut changed = false;
+        if matches!(self.node("review_classifier").map(|n| &n.kind), Some(CircuitNodeKind::LlmTurnClassifier { .. })) {
+            if let Some(node) = self.nodes.iter_mut().find(|node| node.id == "review_classifier") {
+                node.kind = canonical.node("review_classifier").expect("canonical review node").kind.clone();
+                changed = true;
             }
         }
-        if self.edges != legacy_edges
-            || self.node("close_approved").is_some()
-            || self.node("review_exhausted").is_some()
-        {
-            return false;
-        }
-        for node in &mut self.nodes {
-            if node.id == "implementer" {
-                if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
-                    if prompt == "{{issue.prefill}}" {
-                        *prompt = Self::AUTONOMOUS_IMPLEMENTATION_PROMPT.into();
-                    }
-                }
-            }
-            let default_completion = node.id == "complete" && matches!(&node.kind,
-                CircuitNodeKind::Notify { message } if message == "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})");
-            if node.id == "review_classifier" || default_completion {
-                node.kind = canonical.node(&node.id).expect("canonical review node").kind.clone();
-            }
-            if node.id == "reviewer" {
-                if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
-                    let legacy_default = format!(
-                        "{}. The pull request URL is {{{{pr.url}}}}.",
-                        Self::PR_REVIEW_PROMPT
-                    );
-                    if *prompt == legacy_default {
-                        prompt.push(' ');
-                        prompt.push_str(Self::REVIEW_VERDICT_INSTRUCTION);
-                    }
-                }
+        for id in ["close_approved", "review_exhausted", "review_blocked"] {
+            if self.node(id).is_none() {
+                self.nodes.push(canonical.node(id).expect("canonical review node").clone());
+                changed = true;
             }
         }
-        for id in ["close_approved", "review_exhausted"] {
-            self.nodes.push(canonical.node(id).expect("canonical review node").clone());
+        let before_edges = self.edges.len();
+        self.edges.retain(|edge| {
+            !(edge.from == "review_classifier" && edge.to == "review_exhausted")
+                && !(edge.from == "review_retry"
+                    && edge.to == "complete"
+                    && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Failed))
+        });
+        changed |= self.edges.len() != before_edges;
+        let missing_edge = |from: &str, to: &str, condition: EdgeCondition, edges: &[CircuitEdge]| {
+            !edges.iter().any(|edge| edge.from == from && edge.to == to && edge.condition == condition)
+        };
+        for edge in canonical.edges.iter().filter(|edge| {
+            matches!(edge.from.as_str(), "review_classifier" | "review_retry" | "close_approved")
+                && matches!(edge.to.as_str(), "follow_feedback" | "close_approved" | "review_exhausted" | "review_blocked" | "complete")
+        }) {
+            if missing_edge(&edge.from, &edge.to, edge.condition, &self.edges) {
+                self.edges.push(edge.clone());
+                changed = true;
+            }
         }
-        self.edges = canonical.edges;
-        true
+        changed
     }
 
     fn replace_legacy_injected_first_turn(
@@ -768,20 +756,16 @@ impl CircuitGraph {
         spawn_id: &str,
         prompt_id: &str,
         next_id: &str,
-        expected_spawn_prompt: &str,
-        expected_injected_prompt: &str,
-        replacement_prompt: &str,
     ) -> bool {
         let spawn_matches = matches!(
             self.node(spawn_id).map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
-                if prompt == expected_spawn_prompt
+                if prompt.trim().is_empty()
         );
         let prompt_matches = matches!(
             self.node(prompt_id).map(|node| &node.kind),
             Some(CircuitNodeKind::InjectPty { prompt, target_node_id })
-                if prompt == expected_injected_prompt
-                    && target_node_id.as_deref() == Some(spawn_id)
+                if !prompt.trim().is_empty() && target_node_id.as_deref() == Some(spawn_id)
         );
         let incident_edges: Vec<&CircuitEdge> = self
             .edges
@@ -804,12 +788,16 @@ impl CircuitGraph {
             return false;
         }
 
+        let migrated_prompt = match self.node(prompt_id).map(|node| &node.kind) {
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) => prompt.clone(),
+            _ => return false,
+        };
         if let Some(CircuitNode {
             kind: CircuitNodeKind::SpawnAgentNode { prompt, .. },
             ..
         }) = self.nodes.iter_mut().find(|node| node.id == spawn_id)
         {
-            *prompt = replacement_prompt.to_string();
+            *prompt = migrated_prompt;
         }
         self.nodes.retain(|node| node.id != prompt_id);
         for edge in &mut self.edges {
@@ -1039,6 +1027,9 @@ impl CircuitGraph {
                 node("review_exhausted", CircuitNodeKind::Notify {
                     message: "Review limit reached for PR #{{pr.number}}. Latest fixes have not been approved. Resume the saved implementation session and request a fresh review.".to_string(),
                 }),
+                node("review_blocked", CircuitNodeKind::Notify {
+                    message: "Review is blocked for PR #{{pr.number}}. Resume the saved implementation session and resolve the reviewer blocker before requesting another review.".to_string(),
+                }),
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
@@ -1061,7 +1052,7 @@ impl CircuitGraph {
                 edge("reviewer", "review_classifier"),
                 outcome("review_classifier", "follow_feedback", StepOutcome::Working),
                 outcome("review_classifier", "close_approved", Completed),
-                outcome("review_classifier", "review_exhausted", StepOutcome::Blocked),
+                outcome("review_classifier", "review_blocked", StepOutcome::Blocked),
                 edge("close_approved", "complete"),
                 edge("follow_feedback", "close_reviewer"),
                 edge("close_reviewer", "feedback_classifier"),
@@ -1895,7 +1886,9 @@ mod tests {
         assert!(parsed.upgrade_legacy_issue_review_first_turns());
 
         assert!(parsed.node("implementation_prompt").is_none());
-        assert!(parsed.node("review_prompt").is_none());
+        // The saved reviewer spawn prompt is an authored override, so its
+        // intermediary remains intact rather than being silently replaced.
+        assert!(parsed.node("review_prompt").is_some());
         assert!(matches!(
             parsed.node("implementer").map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
@@ -1904,8 +1897,7 @@ mod tests {
         assert!(matches!(
             parsed.node("reviewer").map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
-                if prompt.contains(CircuitGraph::PR_REVIEW_PROMPT)
-                    && prompt.contains("{{pr.url}}")
+                if prompt == "The pull request URL is {{pr.url}}. Use it as additional review context."
         ));
         parsed.validate().unwrap();
     }
@@ -1965,6 +1957,43 @@ mod tests {
                 open_pr_policy: Some(OpenPrPolicy::RequireExisting),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn legacy_custom_injected_review_prompt_is_copied_verbatim() {
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == "reviewer") {
+            if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                prompt.clear();
+            }
+        }
+        graph.nodes.push(CircuitNode {
+            id: "review_prompt".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: "Use our internal security checklist and preserve this wording.".into(),
+                target_node_id: Some("reviewer".into()),
+            },
+        });
+        let reviewer_edge = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == "reviewer" && edge.to == "review_classifier")
+            .unwrap();
+        reviewer_edge.to = "review_prompt".into();
+        graph.edges.push(CircuitEdge {
+            from: "review_prompt".into(),
+            to: "review_classifier".into(),
+            condition: EdgeCondition::Always,
+        });
+        graph.blueprint = None;
+
+        assert!(graph.upgrade_legacy_issue_review_first_turns());
+        assert!(graph.node("review_prompt").is_none());
+        assert!(matches!(
+            graph.node("reviewer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
+                if prompt == "Use our internal security checklist and preserve this wording."
         ));
     }
 }

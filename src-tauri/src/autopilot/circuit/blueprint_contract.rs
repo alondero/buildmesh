@@ -124,6 +124,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "review_retry",
             "close_approved",
             "review_exhausted",
+            "review_blocked",
             "complete",
         ],
         required_edges: &[
@@ -165,6 +166,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 EdgeCondition::OnOutcome(StepOutcome::Working),
             ),
             ("review_classifier", "close_approved", EdgeCondition::OnOutcome(StepOutcome::Completed)),
+            ("review_classifier", "review_blocked", EdgeCondition::OnOutcome(StepOutcome::Blocked)),
             ("close_approved", "complete", EdgeCondition::Always),
             ("follow_feedback", "close_reviewer", EdgeCondition::Always),
             ("close_reviewer", "feedback_classifier", EdgeCondition::Always),

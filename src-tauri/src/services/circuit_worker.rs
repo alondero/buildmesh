@@ -903,29 +903,59 @@ fn archive_failed_circuit_agent(node_id: i64, claim: &str, on_archived: impl Fn(
     if db::claim_circuit_agent_cleanup(node_id).ok().flatten().as_deref() != Some(claim) {
         return Ok(());
     }
-    archive_failed_circuit_agent_with(
+    let result = archive_failed_circuit_agent_with(
         node_id,
-        || crate::agent::process::kill_agent_blocking(node_id),
+        || {
+            let owned = db::renew_circuit_agent_cleanup(node_id, claim)
+                .map_err(|error| error.to_string())?;
+            if !owned {
+                return Err("cleanup lease was lost before process termination".into());
+            }
+            crate::agent::process::kill_agent_blocking(node_id)
+        },
         || db::archive_circuit_agent(node_id, claim),
         on_archived,
-    )
+        |error| {
+            // A failed external kill or archive transaction must surrender
+            // the lease immediately. The cleanup request remains durable, so
+            // the next sweep can retry; a transient OS/SQLite failure must
+            // never brick the node behind a permanent claim.
+            if let Err(release_error) = db::release_circuit_agent_cleanup(node_id, claim) {
+                tracing::warn!(
+                    "circuits: could not release failed cleanup lease for agent {} after {}: {}",
+                    node_id,
+                    error,
+                    release_error
+                );
+            }
+        },
+    );
+    result
 }
 
-fn archive_failed_circuit_agent_with<K, A>(
+fn archive_failed_circuit_agent_with<K, A, F>(
     node_id: i64,
     kill: K,
     archive: A,
     on_archived: impl Fn(i64, String),
+    on_failure: F,
 ) -> Result<(), String>
 where
     K: FnOnce() -> Result<(), String>,
     A: FnOnce() -> rusqlite::Result<Vec<(i64, String)>>,
+    F: FnOnce(&str),
 {
-    kill()?;
-    let runs = archive().map_err(|e| e.to_string())?;
-    crate::autopilot::evaluator::unregister(node_id);
-    for (run_id, state) in runs { on_archived(run_id, state); }
-    Ok(())
+    let result: Result<(), String> = (|| {
+        kill()?;
+        let runs = archive().map_err(|e| e.to_string())?;
+        crate::autopilot::evaluator::unregister(node_id);
+        for (run_id, state) in runs { on_archived(run_id, state); }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        on_failure(error);
+    }
+    result
 }
 
 fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
@@ -2310,7 +2340,8 @@ fn spawn_circuit_agent_in_background(
             &app_for_spawn,
             crate::agent::spawn::SpawnRequest::new(node_id, intent, Default::default())
                 .with_explicit(explicit)
-                .with_worktree_policy(worktree_policy),
+                .with_worktree_policy(worktree_policy)
+                .with_lifecycle_lease(),
         )
         .await
         {
@@ -3035,9 +3066,10 @@ mod tests {
             let claim = crate::db::circuit::claim_circuit_agent_cleanup_inner(&conn, 42).unwrap().unwrap();
             (conn, claim)
         };
-        let assert_recovery = |conn: &Connection, claim: &str| {
-            assert_eq!(crate::db::circuit::circuit_agent_cleanup_claim_inner(conn, 42).unwrap().as_deref(), Some(claim));
+        let assert_recovery = |conn: &Connection| {
+            assert!(crate::db::circuit::circuit_agent_cleanup_claim_inner(conn, 42).unwrap().is_none());
             assert_eq!(crate::db::circuit::failed_circuit_agents_for_cleanup_inner(conn).unwrap(), vec![42]);
+            assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=42", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
             assert_eq!(conn.query_row("SELECT status FROM agent_nodes WHERE id=42", [], |row| row.get::<_, String>(0)).unwrap(), "ready");
             assert_eq!(conn.query_row("SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='owned'", [], |row| row.get::<_, i64>(0)).unwrap(), 42);
             assert!(conn.query_row("SELECT json_extract(context_json, '$.\"cleanup.retired.42\"') FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, Option<String>>(0)).unwrap().is_none());
@@ -3049,9 +3081,11 @@ mod tests {
             || Err("kill failed".to_string()),
             || Ok(Vec::new()),
             |_, _| panic!("cleanup notification must follow committed archive"),
+            |error| crate::db::circuit::release_circuit_agent_cleanup_inner(&kill_conn, 42, &kill_claim)
+                .unwrap_or_else(|release| panic!("{error}: {release}")),
         );
         assert_eq!(kill_failed, Err("kill failed".to_string()));
-        assert_recovery(&kill_conn, &kill_claim);
+        assert_recovery(&kill_conn);
 
         let (archive_conn, archive_claim) = setup();
         let archive_failed = archive_failed_circuit_agent_with(
@@ -3059,9 +3093,11 @@ mod tests {
             || Ok(()),
             || Err(rusqlite::Error::InvalidQuery),
             |_, _| panic!("cleanup notification must follow committed archive"),
+            |error| crate::db::circuit::release_circuit_agent_cleanup_inner(&archive_conn, 42, &archive_claim)
+                .unwrap_or_else(|release| panic!("{error}: {release}")),
         );
         assert!(archive_failed.is_err());
-        assert_recovery(&archive_conn, &archive_claim);
+        assert_recovery(&archive_conn);
     }
 
     #[test]

@@ -24,6 +24,7 @@ export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 
 export interface ReviewCircuitMetadata {
   verdictNodeId: string;
+  retryNodeIds: readonly string[];
 }
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
@@ -33,7 +34,13 @@ export function reviewCircuitMetadata(
   try {
     const graph = parseGraph(circuit.graph_json);
     const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
-    return verdict ? { verdictNodeId: verdict.id } : null;
+    if (!verdict) return null;
+    return {
+      verdictNodeId: verdict.id,
+      retryNodeIds: graph.nodes
+        .filter((node) => node.type.type === 'retry_limit')
+        .map((node) => node.id),
+    };
   } catch {
     return null;
   }
@@ -44,13 +51,11 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
   if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
   const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
   if (!review) return null;
-  let context: Record<string, unknown> = {};
-  try { context = JSON.parse(detail.run.context_json) ?? {}; } catch { /* No approval evidence. */ }
   const exhausted = detail.steps.some((s) =>
-    (s.node_id === 'review_retry' || s.node_id === 'retry') && s.outcome === 'failed');
-  const approved = detail.run.state === 'completed' && !exhausted &&
-    context[`node.${review.node_id}.review_verdict`] === 'approved' &&
-    context[`node.${review.node_id}.review_verdict_attempt`] === String(review.attempt);
+    reviewCircuit.retryNodeIds.includes(s.node_id) && s.outcome === 'failed');
+  // The persisted ReviewVerdict step already carries the typed routing
+  // outcome. Do not reconstruct approval from arbitrary context_json keys.
+  const approved = detail.run.state === 'completed' && !exhausted && review.outcome === 'completed';
   return approved
     ? { label: 'Review approved', detail: 'Check the current PR head and required checks before merging.', needsAttention: false }
     : { label: exhausted ? 'Review limit reached' : 'Review needs attention',
@@ -95,16 +100,30 @@ export interface CircuitProbeRow extends CircuitWithRuns {
   visibleRuns: CircuitRunDetail[];
   hasAttention: boolean;
   runningSteps: number;
+  reviewCircuit: ReviewCircuitMetadata | null;
+}
+
+/** Parse each persisted graph once per backend snapshot. */
+export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] {
+  return rows.map((row) => ({
+    ...row,
+    reviewCircuit: reviewCircuitMetadata(row.circuit),
+    visibleRuns: [],
+    hasAttention: false,
+    runningSteps: 0,
+  }));
 }
 
 /** Build the stable, view-specific row model used by the Probe. */
 export function buildCircuitProbeRows(
-  rows: CircuitWithRuns[],
+  rows: Array<CircuitWithRuns | CircuitProbeRow>,
   view: CircuitProbeView
 ): CircuitProbeRow[] {
   return rows
     .map((row) => {
-      const reviewCircuit = reviewCircuitMetadata(row.circuit);
+      const reviewCircuit = 'reviewCircuit' in row
+        ? row.reviewCircuit
+        : reviewCircuitMetadata(row.circuit);
       const visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
@@ -116,6 +135,7 @@ export function buildCircuitProbeRows(
         visibleRuns,
         hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuit)),
         runningSteps: countRunningSteps(row.runs),
+        reviewCircuit,
       };
     })
     .sort((a, b) => Number(b.hasAttention) - Number(a.hasAttention) ||
@@ -132,14 +152,17 @@ export interface CircuitActivityStats {
 
 /** Summarize the monitoring header without rebuilding arrays in the component. */
 export function circuitActivityStats(
-  rows: CircuitWithRuns[],
+  rows: Array<CircuitWithRuns | CircuitProbeRow>,
   queuedCount: number
 ): CircuitActivityStats {
   let activityCount = 0;
   let activeCount = 0;
   let attentionCount = 0;
-  for (const { circuit, runs } of rows) {
-    const reviewCircuit = reviewCircuitMetadata(circuit);
+  for (const row of rows) {
+    const { runs, circuit } = row;
+    const reviewCircuit = 'reviewCircuit' in row
+      ? row.reviewCircuit
+      : reviewCircuitMetadata(circuit);
     for (const detail of runs) {
       if (runBelongsToActivity(detail, reviewCircuit)) {
         activityCount += 1;

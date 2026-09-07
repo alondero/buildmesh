@@ -149,7 +149,9 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `autopilot_circuit_run_steps.parent_agent_node_id`. The circuit domain
 /// resolves upstream agent relationships when a step is attached; the
 /// persistence read path remains independent of blueprint JSON and step IDs.
-pub(crate) const SCHEMA_VERSION: u32 = 42;
+/// v43 adds the durable node lifecycle lease table. Cleanup intent and
+/// transient spawn/cleanup ownership no longer live in historical run JSON.
+pub(crate) const SCHEMA_VERSION: u32 = 43;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -285,6 +287,8 @@ pub(crate) enum AlwaysStep {
     /// Collapse duplicate built-in review preset rows left by pre-v40 builds,
     /// preserving their run history on the oldest row for each mesh.
     DeduplicateReviewPresets,
+    /// Materialise node lifecycle leases and import legacy cleanup intents.
+    EnsureAgentNodeLifecycleLeases,
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +664,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
     AlwaysStep::DeduplicateReviewPresets,
+    AlwaysStep::EnsureAgentNodeLifecycleLeases,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1040,6 +1045,39 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 [],
             )?;
             tx.commit()?;
+        }
+        AlwaysStep::EnsureAgentNodeLifecycleLeases => {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS agent_node_lifecycle_leases (
+                    node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+                    cleanup_requested INTEGER NOT NULL DEFAULT 0,
+                    cleanup_generation TEXT,
+                    cleanup_expires_at INTEGER,
+                    spawn_generation TEXT,
+                    spawn_expires_at INTEGER,
+                    retired INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                );",
+            )?;
+            // Pre-v43 builds stored only the durable cleanup intent in a
+            // terminal run's context. Import that intent once; lease tokens
+            // themselves were transient and are intentionally discarded.
+            if table_present(conn, "autopilot_circuit_runs")?
+                && table_present(conn, "autopilot_circuit_run_steps")?
+            {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+                     SELECT DISTINCT s.agent_node_id, 1
+                     FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
+                     JOIN agent_nodes a ON a.id = s.agent_node_id
+                     WHERE s.agent_node_id IS NOT NULL
+                       AND a.status != 'archived'
+                       AND s.agent_node_id IS NOT r.source_agent_node_id
+                       AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'",
+                    [],
+                )?;
+            }
         }
         AlwaysStep::UpgradeIssueReviewFirstTurns | AlwaysStep::UpgradeIssueReviewVerdicts => {
             // v2 also backfills the explicit OpenPr policy on persisted

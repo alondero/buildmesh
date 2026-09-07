@@ -160,16 +160,23 @@ pub struct SpawnAgentRequest {
 /// combined on the wire.
 #[command]
 pub async fn spawn_agent(app: AppHandle, request: SpawnAgentRequest) -> Result<(), String> {
+    let intent = request.intent.into_spawn_intent();
+    let spawn_request = SpawnRequest::new(
+        request.session_id,
+        intent.clone(),
+        TerminalSize {
+            rows: request.rows.unwrap_or(24),
+            cols: request.cols.unwrap_or(80),
+        },
+    );
+    let spawn_request = if matches!(intent, SpawnIntent::Resume { .. }) {
+        spawn_request.with_lifecycle_lease()
+    } else {
+        spawn_request
+    };
     crate::agent::spawn::spawn_with_intent(
         &app,
-        SpawnRequest::new(
-            request.session_id,
-            request.intent.into_spawn_intent(),
-            TerminalSize {
-                rows: request.rows.unwrap_or(24),
-                cols: request.cols.unwrap_or(80),
-            },
-        ),
+        spawn_request,
     )
     .await
     .map(|_| ())
@@ -775,7 +782,7 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
                     cause: crate::agent::spawn::ResumeCause::Startup,
                 },
                 TerminalSize::default(),
-            ),
+            ).with_lifecycle_lease(),
         )
         .await
         {

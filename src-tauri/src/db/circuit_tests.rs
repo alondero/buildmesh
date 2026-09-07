@@ -49,15 +49,11 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
     assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty(), "another run borrows this agent");
     conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2", []).unwrap();
     let stale_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().unwrap();
-    conn.execute(
-        "UPDATE autopilot_circuit_runs SET context_json=json_set(context_json, '$.\"cleanup.claim.1\"', 'newer-generation') WHERE id=1",
-        [],
-    ).unwrap();
+    super::circuit::release_circuit_agent_cleanup_inner(&conn, 1, &stale_claim).unwrap();
+    let newer_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().unwrap();
     assert!(super::circuit::archive_circuit_agent_inner(&conn, 1, &stale_claim).unwrap().is_empty());
     assert_ne!(conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(), "archived");
-    let claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().unwrap();
-    assert_eq!(claim, "newer-generation");
-    assert_eq!(super::circuit::archive_circuit_agent_inner(&conn, 1, &claim).unwrap(), vec![(1, "failed".into())]);
+    assert_eq!(super::circuit::archive_circuit_agent_inner(&conn, 1, &newer_claim).unwrap(), vec![(1, "failed".into())]);
     assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
     assert_eq!(conn.query_row("SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='owned'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     conn.execute("UPDATE agent_nodes SET status = 'running' WHERE id = 1", []).unwrap();
@@ -76,15 +72,24 @@ fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
         INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
             VALUES (1,'owned',1,'failed');").unwrap();
 
+    let cleanup_generation = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .expect("cleanup should initially own the terminal node");
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases SET cleanup_expires_at = unixepoch() - 1 WHERE node_id = 1",
+        [],
+    ).unwrap();
     let generation = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
         .unwrap()
         .expect("the resume must claim the durable spawn generation");
+    assert!(super::circuit::archive_circuit_agent_inner(&conn, 1, &cleanup_generation).unwrap().is_empty());
+    assert_ne!(conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |row| row.get::<_, String>(0)).unwrap(), "archived");
     assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
     assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
     assert_eq!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap(), Some(generation.clone()));
     assert_eq!(
         conn.query_row(
-            "SELECT json_extract(context_json, '$.\"cleanup.resumed.1\"') FROM autopilot_circuit_runs WHERE id=1",
+            "SELECT spawn_generation FROM agent_node_lifecycle_leases WHERE node_id=1",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -96,7 +101,29 @@ fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
     assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
     assert!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap().is_none());
     super::circuit::clear_finished_circuit_cleanup_inner(&conn).unwrap();
-    assert_eq!(conn.query_row("SELECT json_extract(context_json, '$.\"cleanup.pending\"') FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
+    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn expired_spawn_lease_keeps_cleanup_request_for_the_next_sweep() {
+    let conn = Connection::open_in_memory().unwrap();
+    super::init_schema(&conn).unwrap();
+    conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'lease-expiry', '/repo');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready');
+        INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'lease-expiry','{}');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+            VALUES (1,1,1,'expiry','failed','{\"cleanup.pending\":\"1\"}');
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
+            VALUES (1,'owned',1,'failed');").unwrap();
+
+    let first = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1).unwrap().unwrap();
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases SET spawn_expires_at = unixepoch() - 1 WHERE node_id = 1",
+        [],
+    ).unwrap();
+    let second = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1).unwrap().unwrap();
+    assert_ne!(first, second, "an expired spawn lease must be replaceable");
+    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
 }
 
 #[test]
@@ -143,7 +170,7 @@ fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     // No worker cleanup was called: inspect the terminal transaction itself.
     let stored = get_circuit_run(run).unwrap().unwrap();
     let context: serde_json::Value = serde_json::from_str(&stored.context_json).unwrap();
-    assert_eq!(context["cleanup.pending"], "1");
+    assert!(context.get("cleanup.pending").is_none());
     assert_eq!(circuit_agent_slots_reserved(run).unwrap(), 0);
     assert_eq!(count_active_circuit_runs(mesh.id).unwrap(), 0);
 }
@@ -524,20 +551,51 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
 }
 
 #[test]
-fn review_preset_history_is_not_dropped_by_the_recent_runs_limit() {
-    let path = init_temp_db("review_history_unbounded");
+fn review_preset_history_keeps_a_bounded_recovery_window() {
+    let path = init_temp_db("review_history_recovery_window");
     let mesh = create_mesh("review-history", "/tmp/review-history").unwrap();
     let circuit = create_autopilot_circuit(mesh.id, "review history", "", 2, &sample_graph_json()).unwrap();
     {
         let conn = write_conn();
         conn.execute("UPDATE autopilot_circuits SET is_preset = 1 WHERE id = ?1", [circuit.id]).unwrap();
     }
-    for index in 0..12 {
+    for index in 0..60 {
         let run_id = create_circuit_run(circuit.id, mesh.id, &format!("review:{index}"), "{}").unwrap();
         commit_circuit_advance(run_id, Some("failed"), None, &[]).unwrap();
     }
     let rows = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
-    assert_eq!(rows[0].1.len(), 12);
+    assert_eq!(rows[0].1.len(), 50);
+    assert!(!rows[0].1.iter().any(|ledger| ledger.run.trigger_identity == "review:0"));
+    assert!(rows[0].1.iter().any(|ledger| ledger.run.trigger_identity == "review:59"));
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn completed_review_verdict_needing_attention_stays_in_the_recovery_window() {
+    let path = init_temp_db("review_attention_window");
+    let mesh = create_mesh("review-attention", "/tmp/review-attention").unwrap();
+    let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:review");
+    let circuit = create_autopilot_circuit(
+        mesh.id,
+        "review attention",
+        "",
+        2,
+        &graph.to_json().unwrap(),
+    ).unwrap();
+    let run = create_circuit_run(circuit.id, mesh.id, "review:attention", "{}").unwrap();
+    commit_circuit_advance(run, Some("completed"), None, &[CircuitStepOp {
+        node_id: "review_classifier".into(),
+        status: "completed".into(),
+        outcome: Some(Some("working".into())),
+        error: None,
+        agent_node_id: None,
+        attempt: 1,
+        fresh_attempt: false,
+    }]).unwrap();
+
+    let rows = list_circuits_with_recent_runs(mesh.id, 0).unwrap();
+    assert_eq!(rows[0].1.iter().map(|ledger| ledger.run.id).collect::<Vec<_>>(), vec![run]);
     let _ = get();
     std::fs::remove_file(&path).ok();
 }
@@ -619,7 +677,7 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
 
     let run = get_circuit_run(run_id).unwrap().unwrap();
     assert_eq!(run.state, "cancelled");
-    assert_eq!(run.context_json, r#"{"cleanup.pending":"1"}"#);
+    assert_eq!(run.context_json, "{}");
     assert!(list_circuit_run_steps(run_id).unwrap().is_empty());
     assert!(!transition_circuit_run_state(run_id, "running", "paused").unwrap());
 

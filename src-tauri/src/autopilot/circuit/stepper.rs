@@ -1802,19 +1802,10 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
         reset_step_for_retry(run, t, &target, next_attempt);
         complete_with_outcome(run, t, node_id, StepOutcome::Completed);
     } else if is_feedback_cycle {
-        // The review blueprint has no semantic PR-approval event yet, so
-        // its bounded loop reports exhaustion through the graph's explicit
+        // A review loop reports exhaustion through the graph's explicit
         // Failed route instead of silently leaving a completed gate with no
         // successor. Ordinary RetryLimit gates retain fail-fast semantics.
         complete_with_outcome(run, t, node_id, StepOutcome::Failed);
-        // RetryLimit has an ordinary `finish` child as its first edge, so a
-        // bounded cascade can otherwise stop before the explicit exhaustion
-        // notification. Start the terminal notification directly while the
-        // run is still active; its effect is then delivered before Failed is
-        // persisted.
-        if let Some(kind) = run.graph.node("review_exhausted").map(|node| node.kind.clone()) {
-            start_step(run, t, "review_exhausted", &kind);
-        }
         cascade_after_completion(run, t, 1);
         finish_run_if_done(run, t);
     } else {
@@ -4158,9 +4149,9 @@ mod tests {
         ));
         let terminal = advance(&mut run, &tick(8, 8));
         assert_eq!(run.state, RunState::Failed);
-        assert_eq!(status_of(&run, "review_exhausted"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
         assert!(transition.effects.iter().chain(&terminal.effects).any(|effect| matches!(effect,
-            Effect::Notify { message } if message.contains("Review limit reached"))));
+            Effect::Notify { message } if message.contains("Review is blocked"))));
     }
 
     #[test]

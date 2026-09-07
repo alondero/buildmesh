@@ -9,8 +9,16 @@ export default async function ({ page, invoke }) {
   try {
     db.prepare('UPDATE meshes SET path=?, pre_spawn_pool_size=0 WHERE id=?')
       .run(process.cwd(), mesh.id);
-    const circuit = db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled) VALUES (?,?,'{}',0)")
-      .run(mesh.id, 'Review status verification').lastInsertRowid;
+    const graph = JSON.stringify({
+      version: 2,
+      nodes: [
+        { id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } },
+      ],
+      edges: [],
+    });
+    const circuit = db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled) VALUES (?,?,?,0)")
+      .run(mesh.id, 'Review status verification', graph).lastInsertRowid;
     const run = db.prepare("INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json) VALUES (?,?,'manual:review-recovery','completed','{}')")
       .run(circuit, mesh.id).lastInsertRowid;
     const insertStep = db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome) VALUES (?,?,'completed',3,?)");
