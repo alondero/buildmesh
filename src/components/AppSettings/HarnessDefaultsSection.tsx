@@ -35,6 +35,11 @@ interface HarnessDefaultsSectionProps {
   /** Mirror the dirty state of any card to the modal so an Escape or
    *  backdrop click is intercepted by the discard banner (issue #730). */
   onDirtyChange?: (dirty: boolean) => void;
+  /** When `true`, every input / select / button is disabled. Used by
+   *  the parent to gate the section on a failed preferences load
+   *  (issue #1534) — without it, a `defaults = {}` placeholder would
+   *  be writable as if it were the real persisted state. */
+  disabled?: boolean;
 }
 
 const EMPTY_DEFAULT: HarnessConfigValue = { model: null, effort: null };
@@ -88,6 +93,7 @@ export function HarnessDefaultsSection({
   onChange,
   onReset,
   onDirtyChange,
+  disabled = false,
 }: HarnessDefaultsSectionProps) {
   const harnesses = useMemo(() => uniqueNativeHarnesses(providers), [providers]);
 
@@ -193,6 +199,7 @@ export function HarnessDefaultsSection({
           onUpdate={(patch) => updateDraft(h.harness_id, patch)}
           onCommit={() => commit(h.harness_id)}
           onReset={() => reset(h.harness_id)}
+          disabled={disabled}
         />
       ))}
     </div>
@@ -205,12 +212,14 @@ function HarnessDefaultCard({
   onUpdate,
   onCommit,
   onReset,
+  disabled,
 }: {
   provider: ProviderInfo;
   draft: HarnessDraft;
   onUpdate: (patch: Partial<HarnessConfigValue>) => void;
   onCommit: () => void | Promise<void>;
   onReset: () => void | Promise<void>;
+  disabled: boolean;
 }) {
   const caps = provider.capabilities;
   const showModel = caps.supports_model_override;
@@ -232,7 +241,8 @@ function HarnessDefaultCard({
           <button
             type="button"
             onClick={() => void onReset()}
-            className="ml-auto px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25"
+            disabled={disabled}
+            className="ml-auto px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
             aria-label={`Reset ${provider.label} defaults`}
             data-testid={`harness-default-reset-${provider.harness_id}`}
           >
@@ -262,7 +272,8 @@ function HarnessDefaultCard({
                 placeholder={provider.harness_id === 'codex' ? 'model id' : 'model id'}
                 onChange={(e) => onUpdate({ model: e.target.value || null })}
                 onBlur={() => void onCommit()}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                disabled={disabled}
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${provider.label} default model`}
                 data-testid={`harness-default-model-input-${provider.harness_id}`}
               />
@@ -283,7 +294,8 @@ function HarnessDefaultCard({
                 value={draft.draft.effort ?? ''}
                 onChange={(e) => onUpdate({ effort: e.target.value || null })}
                 onBlur={() => void onCommit()}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                disabled={disabled}
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${provider.label} effort`}
                 data-testid={`harness-default-effort-select-${provider.harness_id}`}
               >
