@@ -2331,17 +2331,10 @@ mod tests {
             .join("tests/fixtures/claude_code_transcript.jsonl");
         std::fs::copy(&src, &target).expect("copy fixture");
 
-        // 3) Init the global DB if not already (the OnceCell pattern here
-        //    mirrors `commands::agent::tests::ensure_pr_db`). Another test
-        //    family may have beat us — `db::init` returns an error in that
-        //    case which we silently ignore: the schema is the same.
-        if !crate::db::is_initialized() {
-            let db_path = std::env::temp_dir().join(format!(
-                "buildmesh_log_happy_test_{}.db",
-                std::process::id()
-            ));
-            let _ = crate::db::init(&db_path);
-        }
+        // 3) Init the global DB if not already (via the shared
+        //    `db::test_support` helper — see that module for the
+        //    Once + scratch-path contract).
+        crate::db::test_support::ensure_db_for_tests();
 
         // 4) Seed only if our node isn't already there. Use INSERT OR IGNORE
         //    so a parallel run that started first doesn't blow up under us.

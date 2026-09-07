@@ -2288,8 +2288,6 @@ mod tests {
     // DB init routes through `db::test_support::ensure_db_for_tests`
     // — every test in this file (and the rest of the lib test binary)
     // shares one global DB.
-    // `db::init`'s own `is_initialized` guard to avoid duplicate
-    // schema work).
 
     /// Fresh temp dir with a real git repo: `git init` + an empty initial
     /// commit on `main`. Returns the temp dir + the repo path.

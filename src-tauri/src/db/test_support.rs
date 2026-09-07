@@ -1,43 +1,36 @@
 //! Shared test infrastructure for backend unit/integration tests that
 //! need a real SQLite database.
 //!
-//! Six modules in the backend previously copied the same
-//! "per-process scratch path + `std::sync::Once` + `db::init`"
-//! bootstrap (raised on PR #1643 review): `commands::agent::tests`,
-//! `commands::prune_tests`, `services::agent_node::tests`,
-//! `services::warm_pool::tests`, `git::worktree::provision::tests`,
-//! and `http::ws::tests`. Each grew a near-identical
-//! `ensure_*_db()` helper plus a `*_test_db_path()` resolver. One
-//! of them (`services::warm_pool`) had a latent bug where
-//! `std::sync::Once::new().call_once(|| …)` constructed a fresh
-//! `Once` on every call — only `db::init`'s own
-//! `if DB.get().is_some() { return Ok(()) }` guard prevented
-//! duplicate work.
-//!
-//! Call sites that previously rolled their own should now call
-//! [`ensure_db_for_tests`] instead. The shared scratch path is
-//! process-unique (PID-suffixed) so concurrent test binaries never
-//! collide; the `Once` is module-scoped so a test that wins the
-//! race initialises the global `db::DB` and every later caller
-//! short-circuits on the second `is_initialized` probe without
+//! Each test in the backend that needs the global DB calls
+//! [`ensure_db_for_tests`] instead of standing up its own scratch
+//! path + `Once` + `db::init` boilerplate. The shared scratch path
+//! is process-unique (PID-suffixed) so concurrent test binaries never
+//! collide; the `Once` is module-scoped so the first caller
+//! initialises the global `db::DB` and every later caller
+//! short-circuits on the `is_initialized` probe without
 //! re-acquiring the `INIT_LOCK`.
 //!
-//! Migration is incremental — sites with extra concerns (e.g.
-//! `commands::agent::tests::PR_TEST_LOCK`, which holds a mutex
-//! across the whole test body for serialisation) keep their
-//! local lock but can call this helper instead of their own
-//! path/`Once` pair.
+//! Sites that need extra serialisation (e.g. test bodies holding a
+//! mutex for write/read interleaving) keep their own local lock but
+//! can still call this helper for the init step — the lock and the
+//! DB init are orthogonal concerns.
 //!
 //! The `.db` suffix on the path is load-bearing —
 //! `Connection::open(path)` expects a file, not a directory.
 //! `db::mesh_tests` uses the same `*.db` shape; that contract
 //! is the test-DB seam.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 
 /// Per-process scratch path under the OS temp directory. PID-suffixed
 /// so concurrent test binaries never collide on the SQLite file.
+///
+/// The `-wal` and `-shm` siblings must be removed alongside the
+/// `.db` itself — a previous crashed run leaves the WAL header on
+/// disk, and SQLite refuses to open a database whose header SHA
+/// disagrees with the live WAL. The remove-best-effort pattern is
+/// `let _ = ...` because the files may not exist on a fresh run.
 fn scratch_path() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
@@ -45,10 +38,24 @@ fn scratch_path() -> PathBuf {
             "buildmesh_lib_test_{}.db",
             std::process::id()
         ));
-        let _ = std::fs::remove_file(&p);
+        for sibling in [p.clone(), wal_sibling(&p), shm_sibling(&p)] {
+            let _ = std::fs::remove_file(&sibling);
+        }
         p
     })
     .clone()
+}
+
+fn wal_sibling(db: &Path) -> PathBuf {
+    let mut s = db.to_owned().into_os_string();
+    s.push("-wal");
+    PathBuf::from(s)
+}
+
+fn shm_sibling(db: &Path) -> PathBuf {
+    let mut s = db.to_owned().into_os_string();
+    s.push("-shm");
+    PathBuf::from(s)
 }
 
 /// One-shot `db::init` for any test that needs the global DB.
@@ -59,20 +66,26 @@ fn scratch_path() -> PathBuf {
 /// (so a sibling test file that won the race first is fine — we
 /// just reuse its connection).
 ///
+/// `db::init` failures are fatal — propagating the error from
+/// `call_once` via `expect` would be cleaner, but `Once::call_once`
+/// doesn't return its closure's result, so the next best thing is
+/// to panic with a clear message. Silently swallowing the error
+/// masks SQLite header corruption / disk-permission failures as
+/// downstream "database not initialized" panics far from the
+/// actual cause.
+///
 /// No-op when the test binary doesn't need the DB at all. Tests
 /// that exercise only pure logic (no DB) should not call this
 /// helper.
 pub fn ensure_db_for_tests() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // `db::init` is the canonical entry point — it acquires the
-        // process-wide `INIT_LOCK` and runs `init_schema` against the
-        // scratch path. A second concurrent caller (without the
-        // `Once` wrapper) would block on the lock, then see the
-        // `DB.get().is_some()` short-circuit and return Ok without
-        // doing extra work — but the lock + short-circuit is wasted
-        // overhead, so we funnel everything through the `Once`.
-        let _ = crate::db::init(&scratch_path());
+        if let Err(e) = crate::db::init(&scratch_path()) {
+            panic!(
+                "db::test_support::ensure_db_for_tests: db::init failed: {e}; \
+                 see db/mod.rs for the canonical init path"
+            );
+        }
     });
 }
 

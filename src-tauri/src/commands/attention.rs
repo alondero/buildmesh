@@ -130,49 +130,8 @@ fn status_is_awaiting(node: &AgentNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Named import so the `impl SessionLifecycleSink for FakeLifecycleSink`
-    // below resolves the trait by name (the `as _` form only brings the
-    // trait's methods into scope, not the trait identifier itself).
-    use crate::agent::session_lifecycle::SessionLifecycleSink;
+    use crate::agent::session_lifecycle::testing::RecordingSink;
     use rusqlite::Connection;
-    use std::cell::RefCell;
-
-    /// Records every status write and emit so the transition test
-    /// can assert exactly one DB write + exactly one event emit.
-    #[derive(Default)]
-    struct FakeLifecycleSink {
-        writes: RefCell<Vec<(i64, SessionStatus)>>,
-        attention_needed: RefCell<Vec<i64>>,
-    }
-
-    impl SessionLifecycleSink for FakeLifecycleSink {
-        fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
-            self.writes.borrow_mut().push((node_id, new));
-            Ok(())
-        }
-        fn write_status_if(
-            &self,
-            _node_id: i64,
-            _new: SessionStatus,
-            _expected: SessionStatus,
-        ) -> Result<bool, String> {
-            Ok(true)
-        }
-        fn write_status_unless_in(
-            &self,
-            _node_id: i64,
-            _new: SessionStatus,
-            _forbidden: &[SessionStatus],
-        ) -> Result<bool, String> {
-            Ok(true)
-        }
-        fn emit_attention_needed(&self, node_id: i64) {
-            self.attention_needed.borrow_mut().push(node_id);
-        }
-        fn emit_attention_cleared(&self, _node_id: i64) {}
-        fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
-        fn emit_lifecycle_changed(&self, _payload: crate::agent::session_lifecycle::LifecycleChangedPayload) {}
-    }
 
     /// The decoupling payoff: attention marking is now exercisable on its own,
     /// with no `AppHandle` and no session-naming/LLM machinery in the way.
@@ -181,15 +140,15 @@ mod tests {
     /// `SessionLifecycleSink` seam.
     #[test]
     fn mark_attention_sets_status_and_emits() {
-        let sink = FakeLifecycleSink::default();
+        let sink = RecordingSink::new();
         crate::agent::session_lifecycle::on_attention(&sink, 42).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            sink.writes(),
             vec![(42, SessionStatus::AwaitingInput)],
             "on_attention must write AwaitingInput exactly once"
         );
         assert_eq!(
-            *sink.attention_needed.borrow(),
+            sink.attention_needed(),
             vec![42],
             "on_attention must emit attention-needed exactly once"
         );
