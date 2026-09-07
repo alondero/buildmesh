@@ -804,76 +804,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     );
   }, [setResource]);
 
-  const loadProviders = useCallback(async () => {
-    const result = await withResourceLoad(
-      (next) => setResource('providers', next),
-      () => api.listProviders(),
-      (list) => {
-        setProviders(list);
-      },
-    );
-    // Pairings derive their `compatibleByHarness` map from the providers
-    // list, so a successful providers load is the trigger for loading
-    // pairings — and a failed one means pairings must stay idle until
-    // providers succeeds (via retry). `loadPairings` is also responsible
-    // for refusing to run with empty providers, so we never pass the
-    // empty-array-of-zero-harnesses shortcut.
-    if (result) {
-      void loadPairings(result);
-    }
-  }, [setResource]);
-
-  const loadAccounts = useCallback(async () => {
-    await withResourceLoad(
-      (next) => setResource('accounts', next),
-      async () => {
-        const [accountList, catalog] = await Promise.all([
-          api.getProviderAccounts(),
-          api.getKeyedFirstClassCatalog(),
-        ]);
-        return { accountList, catalog } as const;
-      },
-      ({ accountList, catalog }) => {
-        setAccounts(accountList);
-        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-      },
-    );
-  }, [setResource]);
-
-  const loadCoordinator = useCallback(async () => {
-    await withResourceLoad(
-      (next) => setResource('coordinator', next),
-      () => api.getCoordinatorStatus(),
-      (coord) => {
-        setCoordEnabled(coord.enabled);
-        setCoordHasToken(coord.has_token);
-      },
-    );
-  }, [setResource]);
-
-  const loadDevices = useCallback(async () => {
-    await withResourceLoad(
-      (next) => setResource('devices', next),
-      () => api.listDeviceSessions(),
-      (list) => {
-        setDevices(list);
-      },
-    );
-  }, [setResource]);
-
-  const loadNetwork = useCallback(async () => {
-    await withResourceLoad(
-      (next) => setResource('network', next),
-      () => api.getNetworkStatus(),
-      (network) => {
-        setLanEnabled(network.lan_exposure_enabled);
-        // Realized bind state from the live ServerListeners (issue #586).
-        setTlsActive(network.tls_active);
-        setExposedInterfaces(network.exposed_interfaces);
-      },
-    );
-  }, [setResource]);
-
+  // Pairings is defined BEFORE `loadProviders` because `loadProviders`
+  // chains into `loadPairings` on success. Defining it first means
+  // the closure caught by `loadProviders`' `useCallback` dep array
+  // references the real function rather than a TDZ-bound identifier
+  // (issue #1534 review round 2 — exhaustive-deps).
   const loadPairings = useCallback(async (providerList: ProviderInfo[]) => {
     // Issue #1534 (review round 2) — pairings need at least one
     // provider to know which harnesses to query. Retrying with an
@@ -934,6 +869,81 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setPairingVerifications(verifications);
         setStoredPairingKeys(storedKeys);
         setCompatibleByHarness(compatible);
+      },
+    );
+  }, [setResource]);
+
+  const loadProviders = useCallback(async () => {
+    const result = await withResourceLoad(
+      (next) => setResource('providers', next),
+      () => api.listProviders(),
+      (list) => {
+        setProviders(list);
+      },
+    );
+    // Pairings derive their `compatibleByHarness` map from the providers
+    // list, so a successful providers load is the trigger for loading
+    // pairings — and a failed one means pairings must stay idle until
+    // providers succeeds (via retry). `loadPairings` is also responsible
+    // for refusing to run with empty providers, so we never pass the
+    // empty-array-of-zero-harnesses shortcut.
+    if (result) {
+      void loadPairings(result);
+    }
+    // Issue #1534 (review round 2) — exhaustive-deps: `loadPairings`
+    // is referenced inside the callback. Including it here means the
+    // callback re-binds when `loadPairings` identity changes (it
+    // does, every render via `setResource`), so a stale closure
+    // can't pin the wrong `loadPairings` reference.
+  }, [setResource, loadPairings]);
+
+  const loadAccounts = useCallback(async () => {
+    await withResourceLoad(
+      (next) => setResource('accounts', next),
+      async () => {
+        const [accountList, catalog] = await Promise.all([
+          api.getProviderAccounts(),
+          api.getKeyedFirstClassCatalog(),
+        ]);
+        return { accountList, catalog } as const;
+      },
+      ({ accountList, catalog }) => {
+        setAccounts(accountList);
+        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+      },
+    );
+  }, [setResource]);
+
+  const loadCoordinator = useCallback(async () => {
+    await withResourceLoad(
+      (next) => setResource('coordinator', next),
+      () => api.getCoordinatorStatus(),
+      (coord) => {
+        setCoordEnabled(coord.enabled);
+        setCoordHasToken(coord.has_token);
+      },
+    );
+  }, [setResource]);
+
+  const loadDevices = useCallback(async () => {
+    await withResourceLoad(
+      (next) => setResource('devices', next),
+      () => api.listDeviceSessions(),
+      (list) => {
+        setDevices(list);
+      },
+    );
+  }, [setResource]);
+
+  const loadNetwork = useCallback(async () => {
+    await withResourceLoad(
+      (next) => setResource('network', next),
+      () => api.getNetworkStatus(),
+      (network) => {
+        setLanEnabled(network.lan_exposure_enabled);
+        // Realized bind state from the live ServerListeners (issue #586).
+        setTlsActive(network.tls_active);
+        setExposedInterfaces(network.exposed_interfaces);
       },
     );
   }, [setResource]);
@@ -1036,6 +1046,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   // Attach a provider to a harness (ADR-0025). Client supplies base URL and
   // (for Anthropic) model tiers; backend seeds the global key set-if-absent.
+  // Issue #1534 (review round 2) — mutation handlers previously
+  // re-fetched providers/accounts/pairings via raw `api.listProviders()`
+  // and friends, bypassing the resource-load state machine. A
+  // post-mutation refresh failure used to silently leave stale data
+  // with no visible signal. Now every refresh routes through the
+  // named loaders so failures show in the per-resource banners
+  // exactly like a fresh-modal-open failure.
+  //
+  // The mutation itself (e.g. `api.attachProxiedProvider`) still
+  // uses `setError` — write failures are transient and the mutation
+  // caller is right there to retry. Only the *refresh* goes through
+  // the state machine.
+
   const handleAttachProvider = async (
     harnessId: string,
     providerId: string,
@@ -1046,13 +1069,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.attachProxiedProvider(harnessId, providerId, apiKey, baseUrl, modelTiers);
-      const [providerList, accountList] = await Promise.all([
-        api.listProviders(),
-        api.getProviderAccounts(),
-      ]);
-      setProviders(providerList);
-      setAccounts(accountList);
-      await loadPairings(providerList);
+      // Refresh routes through loaders so a post-attach refresh
+      // failure (e.g. transient `listProviders` rejection) surfaces
+      // in the resource banner instead of leaving stale data.
+      // `loadProviders` chains `loadPairings` on success, so we only
+      // need to refresh accounts.
+      await Promise.all([loadProviders(), loadAccounts()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1068,9 +1090,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.updateProviderPairing(harnessId, providerId, baseUrl, modelTiers);
-      const providerList = await api.listProviders();
-      setProviders(providerList);
-      await loadPairings(providerList);
+      await loadProviders();
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1081,9 +1101,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.removeProviderPairing(harnessId, providerId);
-      const providerList = await api.listProviders();
-      setProviders(providerList);
-      await loadPairings(providerList);
+      await loadProviders();
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1098,6 +1116,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.verifyProviderPairing(harnessId, providerId, envType);
+      // Verifications are a small auxiliary read that pairings
+      // *uses* but the modal tracks separately. Re-fetching it
+      // here mirrors the previous "best-effort" behaviour — a
+      // failure falls back to an empty list (the modal still
+      // renders pairings via the resource state machine).
       setPairingVerifications(await getHostPairingVerifications());
     } catch (e) {
       setError(formatError(e));
@@ -1358,15 +1381,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.upsertProviderAccount(account);
-      // Independent reads — fetch in parallel. The upsert may register a paired
-      // harness profile, so re-read the provider catalogue too, keeping this
-      // modal's default-provider dropdown in step with the new entry (#534).
-      const [accountList, providerList] = await Promise.all([
-        api.getProviderAccounts(),
-        api.listProviders(),
-      ]);
-      setAccounts(accountList);
-      setProviders(providerList);
+      // Issue #1534 (review round 2) — refresh through the loaders
+      // so any failure surfaces in the resource banner instead of
+      // silently leaving the optimistic data stale. The optimistic
+      // roll-back below catches the *mutation* failure; the loader
+      // catches the *refresh* failure.
+      await Promise.all([loadAccounts(), loadProviders()]);
       return true;
     } catch (e) {
       setAccounts(previous);
@@ -1385,29 +1405,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
-      const [accountList, catalog, providerList] = await Promise.all([
-        api.getProviderAccounts(),
-        api.getKeyedFirstClassCatalog(),
-        api.listProviders(),
-      ]);
-      setAccounts(accountList);
-      setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-      setProviders(providerList);
+      // Route through the loaders (issue #1534 review round 2) so
+      // the providers/accounts resource states reflect the post-
+      // remove snapshot. A refresh failure surfaces in the per-
+      // resource banners, not as silent staleness.
+      await Promise.all([loadAccounts(), loadProviders()]);
     } catch (e) {
       setError(formatError(e));
     }
   };
 
   const refreshAccountsAndCatalog = async () => {
-    const [accountList, catalog, providerList] = await Promise.all([
-      api.getProviderAccounts(),
-      api.getKeyedFirstClassCatalog(),
-      api.listProviders(),
-    ]);
-    setAccounts(accountList);
-    setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-    setProviders(providerList);
-    await loadPairings(providerList);
+    // Route through the loaders (issue #1534 review round 2) —
+    // the loaders update both data and resource status atomically,
+    // so a refresh failure is visible in the banner rather than
+    // leaving stale data + `loaded` status.
+    await Promise.all([loadAccounts(), loadProviders()]);
   };
 
   /** Materialise a keyed first-class template from the catalog (ADR-0025). */
@@ -1442,6 +1455,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
     });
+    // handleSaveAccount already refreshes via loadAccounts; the
+    // catalog is a separate read that doesn't have its own
+    // resource state. Refresh it best-effort — a catalog failure
+    // doesn't block the user.
     if (ok) {
       siteDirtyChange('add-custom-form', false);
       setAddingProvider(false);
