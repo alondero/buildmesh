@@ -26,6 +26,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
+use crate::db;
+
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
@@ -1585,6 +1587,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             auth::AuthOutcome::Forbidden => {
                 let _ = request::write_status_only(&mut lines, "403 Forbidden").await;
             }
+            auth::AuthOutcome::ServiceUnavailable => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+            }
         }
         return;
     }
@@ -1708,7 +1713,23 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         // it opens can be force-closed on revocation; `None` for the root token.
         // Opening a terminal is also a natural "last active" signal, so refresh
         // the device here too (cheaper than touching on every poll).
-        let device_id = auth::resolve_device_session(&headers);
+        //
+        // Issue #1533 review: surface reader-pool exhaustion as a retryable
+        // 503 rather than minting a ticket for an unverified device (which
+        // would silently log the request in under a `None` device id and
+        // skip the `last_active` touch).
+        let device_id = match auth::resolve_device_session(&headers) {
+            Ok(id) => id,
+            Err(db::DbError::ReaderPoolExhausted { .. }) => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                return;
+            }
+            Err(db::DbError::Sqlite(error)) => {
+                tracing::warn!(%error, "ws ticket mint failed to resolve device session");
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                return;
+            }
+        };
         if let Some(id) = device_id {
             let peer_ip = addr.ip().to_string();
             let _ = crate::db::touch_device_session(id, Some(&peer_ip));

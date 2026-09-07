@@ -1090,7 +1090,8 @@ mod tests {
         );
 
         // Sanity: the probe DELETE really did remove the row.
-        let still_present: i64 = crate::db::read_conn()
+        let still_present: i64 = crate::db::try_read_conn()
+            .expect("DB must be initialized for tests")
             .query_row(
                 "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
                 rusqlite::params![probe_row_id],

@@ -43,7 +43,7 @@ pub enum RequiredScope {
 }
 
 /// The result of an authorization check, carrying the HTTP status the dispatcher
-/// must return on the two failure paths.
+/// must return on the failure paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthOutcome {
     /// Authorized — proceed, carrying the resolved role.
@@ -52,23 +52,36 @@ pub enum AuthOutcome {
     Unauthorized,
     /// A valid credential of the wrong role → `403 Forbidden`.
     Forbidden,
+    /// The reader pool is saturated — the request would otherwise be
+    /// authenticated, but we can't read the credential row to confirm.
+    /// `503 Service Unavailable` (issue #1533 review: distinguishing
+    /// "no credentials" from "DB busy" prevents the pre-#1533 regression
+    /// where valid clients under load got logged out and had their
+    /// sessions cleared by a misleading 401).
+    ServiceUnavailable,
 }
 
 /// Resolve the role proven by a request's headers. A request carrying no cookie
-/// and no bearer token returns `None` *without* touching the DB — so an
+/// and no bearer token returns `Ok(None)` *without* touching the DB — so an
 /// unauthenticated probe never reaches a lookup (and the inline dispatcher
 /// tests, which run without an initialized global DB, stay DB-free). Otherwise it
 /// locks the DB once and delegates to [`resolve_role_inner`], the single
 /// resolution implementation the unit tests also drive against a seeded
 /// connection — so there is no production/test logic to keep in lockstep.
-pub fn resolve_role(headers: &str) -> Option<Role> {
+///
+/// Returns [`db::DbResult<Option<Role>>`] (issue #1533 review) so the caller
+/// can distinguish "no credentials" (`Ok(None)` → `401`) from "DB busy"
+/// (`Err(DbError::ReaderPoolExhausted { .. })` → `503`). The pre-#1533
+/// `Option<Role>` collapsed these two into `401`, logging valid clients
+/// out under load.
+pub fn resolve_role(headers: &str) -> db::DbResult<Option<Role>> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
     {
-        return None;
+        return Ok(None);
     }
-    let conn = db::try_read_conn().ok()?;
-    resolve_role_inner(&conn, headers)
+    let conn = db::try_read_conn()?;
+    Ok(resolve_role_inner(&conn, headers))
 }
 
 /// The credential → [`Role`] resolution, checked in priority order against a
@@ -122,14 +135,17 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
 /// to stamp `last_active` and to bind a minted WS ticket to the device, so a
 /// later revocation can find and kick that device's live socket. Mirrors
 /// [`resolve_role`]'s DB-free fast path for unauthenticated probes.
-pub fn resolve_device_session(headers: &str) -> Option<i64> {
+///
+/// Returns [`db::DbResult<Option<i64>>`] so callers can distinguish "no
+/// credentials" (`Ok(None)`) from "DB busy" (`Err(DbError::ReaderPoolExhausted { .. })`).
+pub fn resolve_device_session(headers: &str) -> db::DbResult<Option<i64>> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
     {
-        return None;
+        return Ok(None);
     }
-    let conn = db::try_read_conn().ok()?;
-    resolve_device_session_inner(&conn, headers)
+    let conn = db::try_read_conn()?;
+    Ok(resolve_device_session_inner(&conn, headers))
 }
 
 fn resolve_device_session_inner(conn: &Connection, headers: &str) -> Option<i64> {
@@ -161,11 +177,25 @@ fn satisfies(role: Role, required: RequiredScope) -> bool {
 }
 
 /// Authorize a request for a required scope. `None` resolved → `Unauthorized`
-/// (401); a role that doesn't satisfy the scope → `Forbidden` (403).
+/// (401); a role that doesn't satisfy the scope → `Forbidden` (403);
+/// pool exhaustion → `ServiceUnavailable` (503).
 pub fn authorize(headers: &str, required: RequiredScope) -> AuthOutcome {
-    outcome(resolve_role(headers), required)
+    match resolve_role(headers) {
+        Ok(None) => AuthOutcome::Unauthorized,
+        Ok(Some(role)) if satisfies(role, required) => AuthOutcome::Ok(role),
+        Ok(Some(_)) => AuthOutcome::Forbidden,
+        Err(db::DbError::ReaderPoolExhausted { .. }) => AuthOutcome::ServiceUnavailable,
+        // Other DB errors (e.g. SQLITE_BUSY from the writer) propagate as
+        // 503 — the dispatcher treats them as retryable too. A real
+        // `Sqlite(...)` failure here would be a deeper bug (the resolver
+        // only does single-row reads), but matching on it explicitly keeps
+        // a future failure from being silently classified as `Unauthorized`.
+        Err(db::DbError::Sqlite(_)) => AuthOutcome::ServiceUnavailable,
+    }
 }
 
+#[doc(hidden)]
+#[cfg(test)]
 fn outcome(role: Option<Role>, required: RequiredScope) -> AuthOutcome {
     match role {
         None => AuthOutcome::Unauthorized,
@@ -190,6 +220,10 @@ pub async fn guard(
         }
         AuthOutcome::Forbidden => {
             let _ = request::write_status_only(lines, "403 Forbidden").await;
+            None
+        }
+        AuthOutcome::ServiceUnavailable => {
+            let _ = request::write_status_only(lines, "503 Service Unavailable").await;
             None
         }
     }

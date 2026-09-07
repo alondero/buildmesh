@@ -67,7 +67,7 @@ mod pool_exhaustion_tests;
 use rusqlite::{Connection, OpenFlags, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,27 +93,47 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 /// rusqlite::Error>`), so we provide a blanket `From<DbError> for
 /// rusqlite::Error` that preserves the underlying sqlite error verbatim and
 /// maps pool exhaustion to a `SQLITE_BUSY` `SqliteFailure` (callers that want
-/// the rich diagnostics — wait time, leases in use, longest lease — should
-/// switch their return type to [`DbResult<T>`] and pattern-match on
-/// [`DbError::ReaderPoolExhausted`]).
+/// the rich diagnostics — wait time, leases in use, current and historical
+/// longest lease — should switch their return type to [`DbResult<T>`] and
+/// pattern-match on [`DbError::ReaderPoolExhausted`]).
 ///
 /// The exhaustive variant exists so HTTP/command boundaries can map pool
 /// exhaustion to a retryable 503-style response (issue #1533 verification
 /// step 4) rather than a generic internal failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DbError {
     /// Underlying SQLite error from a checked-out reader or the writer.
-    Sqlite(rusqlite::Error),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     /// All reader-pool leases were held past the configured checkout
-    /// deadline (issue #1533). Carries the wait time observed, the leases
-    /// still in use at the moment of failure, the configured pool size, and
-    /// the longest lease we've ever recorded since process start — enough
-    /// to diagnose a slow holder without leaking SQL parameters or secrets.
+    /// deadline (issue #1533). Carries:
+    ///
+    /// - `waited_ms`: how long this caller waited before giving up.
+    /// - `in_use` / `pool_size`: how saturated the pool was at the moment
+    ///   of failure (always `pool_size` here, but the field lets callers
+    ///   surface a ratio without recomputing).
+    /// - `current_longest_lease_ms`: the **age of the longest currently
+    ///   held lease** at the moment of failure. This is the actionable
+    ///   signal — a high value points at a caller holding a connection
+    ///   across filesystem / network work; a low value points at a
+    ///   deadlock or a hot loop. (Issue #1533 review: this replaces the
+    ///   original process-lifetime high-water mark, which was blind to
+    ///   currently-hung leases.)
+    /// - `historical_longest_lease_ms`: longest lease ever observed since
+    ///   process start — kept as a lifetime baseline so a fresh process
+    ///   that just hit its first timeout has something to compare against.
+    #[error(
+        "reader pool exhausted after {waited_ms}ms \
+         ({in_use}/{pool_size} in use; \
+         longest current lease {current_longest_lease_ms}ms; \
+         longest ever {historical_longest_lease_ms}ms)"
+    )]
     ReaderPoolExhausted {
         waited_ms: u64,
         in_use: usize,
         pool_size: usize,
-        longest_lease_ms: u64,
+        current_longest_lease_ms: u64,
+        historical_longest_lease_ms: u64,
     },
 }
 
@@ -121,12 +141,6 @@ pub enum DbError {
 /// continue to return [`SqlResult<T>`] — see [`DbError`] for the conversion
 /// story.
 pub type DbResult<T> = Result<T, DbError>;
-
-impl From<rusqlite::Error> for DbError {
-    fn from(err: rusqlite::Error) -> Self {
-        DbError::Sqlite(err)
-    }
-}
 
 impl From<DbError> for rusqlite::Error {
     fn from(err: DbError) -> Self {
@@ -149,32 +163,6 @@ impl From<DbError> for rusqlite::Error {
     }
 }
 
-impl std::fmt::Display for DbError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DbError::Sqlite(err) => write!(f, "sqlite error: {err}"),
-            DbError::ReaderPoolExhausted {
-                waited_ms,
-                in_use,
-                pool_size,
-                longest_lease_ms,
-            } => write!(
-                f,
-                "reader pool exhausted after {waited_ms}ms ({in_use}/{pool_size} in use, longest lease {longest_lease_ms}ms)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for DbError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DbError::Sqlite(err) => Some(err),
-            DbError::ReaderPoolExhausted { .. } => None,
-        }
-    }
-}
-
 struct Database {
     // `std::sync::Mutex` is intentional: issue #1224 requires poison recovery
     // after a panic in a writer, while reader-pool bookkeeping uses
@@ -190,12 +178,23 @@ struct ReaderPool {
     ready: parking_lot::Condvar,
     db_path: PathBuf,
     flags: OpenFlags,
-    /// Longest reader-pool lease observed since process start, in
-    /// milliseconds. Diagnostic only — surfaced via
-    /// [`DbError::ReaderPoolExhausted`] so callers can spot slow lease
-    /// holders without logging query parameters or secrets (issue #1533
-    /// verification step 5).
-    longest_lease_ms: AtomicU64,
+    /// Map of lease_id → checkout Instant for currently-held leases. On
+    /// checkout, we insert the new lease's `Instant::now()`; on `Drop for
+    /// ReadConnection`, we remove it. At checkout timeout we compute
+    /// `current_longest_lease_ms` as the max age of the values — the
+    /// actionable "what's hung right now" signal (issue #1533 review:
+    /// replaces the original process-lifetime high-water mark that was
+    /// blind to currently-hung leases).
+    in_flight: parking_lot::Mutex<HashMap<u64, Instant>>,
+    /// Monotonic counter handed out as the lease_id at every checkout. Even
+    /// if a lease is dropped mid-flight, the id is never reused, which keeps
+    /// the in-flight map's keys unambiguous without generational tagging.
+    next_lease_id: AtomicU64,
+    /// Longest reader-pool lease ever observed since process start, in
+    /// milliseconds. Lifetime baseline — separate from `current_longest_lease_ms`
+    /// (the real-time diagnostic above) because the two answer different
+    /// questions: "what's hung right now" vs "what's the worst-case been".
+    historical_longest_lease_ms: AtomicU64,
 }
 
 impl ReaderPool {
@@ -219,7 +218,9 @@ impl ReaderPool {
             ready: parking_lot::Condvar::new(),
             db_path: db_path.to_path_buf(),
             flags,
-            longest_lease_ms: AtomicU64::new(0),
+            in_flight: parking_lot::Mutex::new(HashMap::with_capacity(READER_POOL_SIZE)),
+            next_lease_id: AtomicU64::new(1),
+            historical_longest_lease_ms: AtomicU64::new(0),
         })
     }
 
@@ -240,29 +241,49 @@ impl ReaderPool {
                         "database reader pool contention ended"
                     );
                 }
+                let now = Instant::now();
+                let lease_id = self.next_lease_id.fetch_add(1, Ordering::Relaxed);
+                self.in_flight.lock().insert(lease_id, now);
                 return Ok(ReadConnection {
                     pool: self,
                     conn: Some(conn),
-                    checked_out_at: Instant::now(),
+                    checked_out_at: now,
+                    lease_id,
                 });
             }
             let now = Instant::now();
             if now >= deadline {
                 let waited_ms = started.elapsed().as_millis() as u64;
+                // Compute the actionable "what's hung right now" diagnostic:
+                // the longest currently-held lease at the moment of failure.
+                // Walk the snapshot of in-flight start times under the lock;
+                // `now` is captured just before the walk so all deltas use a
+                // consistent reference.
+                let current_longest_lease_ms = {
+                    let in_flight = self.in_flight.lock();
+                    in_flight
+                        .values()
+                        .map(|start| now.duration_since(*start).as_millis() as u64)
+                        .max()
+                        .unwrap_or(0)
+                };
+                let historical_longest_lease_ms =
+                    self.historical_longest_lease_ms.load(Ordering::Relaxed);
                 let in_use = READER_POOL_SIZE - available.len();
-                let longest_lease_ms = self.longest_lease_ms.load(Ordering::Relaxed);
                 tracing::warn!(
                     waited_ms,
                     in_use,
                     pool_size = READER_POOL_SIZE,
-                    longest_lease_ms,
+                    current_longest_lease_ms,
+                    historical_longest_lease_ms,
                     "database reader pool checkout timed out"
                 );
                 return Err(DbError::ReaderPoolExhausted {
                     waited_ms,
                     in_use,
                     pool_size: READER_POOL_SIZE,
-                    longest_lease_ms,
+                    current_longest_lease_ms,
+                    historical_longest_lease_ms,
                 });
             }
             // Wait for the *remaining* time, not a fresh
@@ -274,15 +295,40 @@ impl ReaderPool {
             let _ = self.ready.wait_for(&mut available, remaining);
         }
     }
+
+    /// Test-only accessor: fire a `Condvar` notification **without**
+    /// releasing a lease. Lets the
+    /// [`super::pool_exhaustion_tests::spurious_notifications_do_not_extend_deadline`]
+    /// test simulate the exact spurious-wake condition the absolute-deadline
+    /// loop exists to handle (issue #1533 review).
+    #[cfg(test)]
+    pub(crate) fn notify_one_for_test(&self) {
+        self.ready.notify_one();
+    }
+
+    /// Test-only accessor: snapshot the current `in_flight` set size. Lets
+    /// the pool-exhaustion tests assert that `Drop for ReadConnection`
+    /// actually removes the lease from the in-flight map (so a later
+    /// timeout's `current_longest_lease_ms` doesn't see a stale entry).
+    #[cfg(test)]
+    pub(crate) fn in_flight_len_for_test(&self) -> usize {
+        self.in_flight.lock().len()
+    }
 }
 
 pub struct ReadConnection<'a> {
     pool: &'a ReaderPool,
     conn: Option<Connection>,
-    /// `Instant::now()` at checkout. `None` only after the inner `Option` has
-    /// been moved out by `Drop`, which is the only legitimate way the field is
-    /// observed by anyone outside this module.
+    /// `Instant::now()` captured at checkout. Always populated while the
+    /// connection is alive; `Drop` is the only legitimate place that
+    /// observes it after `self.conn` has been moved out of the `Option`.
     checked_out_at: Instant,
+    /// Lease id minted by [`ReaderPool::next_lease_id`] at checkout, used
+    /// to remove this entry from the pool's `in_flight` map on `Drop`
+    /// (so the timeout path's `current_longest_lease_ms` doesn't see a
+    /// stale lease id). The id is unique for the life of the process and
+    /// is never reused.
+    lease_id: u64,
 }
 
 impl Deref for ReadConnection<'_> {
@@ -298,16 +344,24 @@ impl Deref for ReadConnection<'_> {
 impl Drop for ReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            // Track lease duration for diagnostics — `fetch_max` so concurrent
-            // leases don't tear each other's longest-record down. A lease
-            // exceeding 500ms is unusual and points at a caller holding a
-            // connection across filesystem / network work; surface a warning
-            // without leaking query parameters (issue #1533 verification
-            // step 5).
+            // Track lease duration for diagnostics. Two distinct counters:
+            //
+            //   * `historical_longest_lease_ms` — process-lifetime
+            //     high-water mark, useful as a baseline.
+            //   * The `in_flight` map removal makes the lease invisible to
+            //     a concurrent timeout's `current_longest_lease_ms` walk
+            //     (the actionable "what's hung right now" signal).
+            //
+            // `fetch_max` so concurrent leases don't tear each other's
+            // longest-record down. A lease exceeding 500ms is unusual and
+            // points at a caller holding a connection across filesystem /
+            // network work; surface a warning without leaking query
+            // parameters (issue #1533 verification step 5).
             let lease_ms = self.checked_out_at.elapsed().as_millis() as u64;
             self.pool
-                .longest_lease_ms
+                .historical_longest_lease_ms
                 .fetch_max(lease_ms, Ordering::Relaxed);
+            self.pool.in_flight.lock().remove(&self.lease_id);
             if lease_ms >= 500 {
                 tracing::warn!(
                     lease_ms,
@@ -1874,29 +1928,22 @@ fn get() -> &'static Database {
 /// must surface pool exhaustion as a typed [`DbError::ReaderPoolExhausted`]
 /// instead of panicking and aborting the release process (issue #1533).
 ///
-/// Returns [`DbResult<ReadConnection<'static>>`]. Callers that previously used
-/// the infallible [`read_conn()`] should now use the `?` operator:
+/// Returns [`DbResult<ReadConnection<'static>>`]. Callers use the `?`
+/// operator to propagate pool exhaustion through their own `SqlResult`
+/// boundary:
 ///
 /// ```ignore
 /// let db = try_read_conn()?;
 /// foo_inner(&db)
 /// ```
+///
+/// Tests that exercise this helper directly (rather than through a public
+/// accessor) should pattern-match on [`DbError::ReaderPoolExhausted`] to
+/// assert the typed error path; `try_read_conn().expect(...)` is
+/// acceptable in `#[cfg(test)]` code where pool exhaustion is structurally
+/// impossible.
 pub fn try_read_conn() -> DbResult<ReadConnection<'static>> {
     get().readers.checkout()
-}
-
-/// Infallible reader-pool checkout, available only inside the `db` module's
-/// tests and the few external test files that historically relied on a panic
-/// when the global DB was uninitialized (issue #1533).
-///
-/// Production code MUST use [`try_read_conn()`] — panicking on
-/// `panic = "abort"` release builds is exactly what this helper exists to
-/// keep that one panic out of the hot path. Tests use it because pool
-/// exhaustion is structurally impossible when only the test thread holds
-/// leases.
-#[cfg(test)]
-pub fn read_conn() -> ReadConnection<'static> {
-    try_read_conn().expect("database reader pool checkout failed")
 }
 
 /// Lock the dedicated writer connection, recovering from a poisoned mutex instead of
@@ -3982,19 +4029,25 @@ pub struct WarmReconcileEntry {
 pub fn list_warm_worktrees_to_reconcile(
     stale_after_minutes: i64,
 ) -> SqlResult<Vec<WarmReconcileEntry>> {
-    let db = try_read_conn()?;
-    list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)
+    // SQL first (under the pool lease), then drop the connection *before*
+    // doing the per-row `Path::exists()` filesystem syscall. Holding the
+    // reader-pool mutex across a `stat` would extend every other reader's
+    // checkout latency by however long the FS is slow (issue #1533 Item 6).
+    let rows = {
+        let db = try_read_conn()?;
+        list_warm_worktrees_to_reconcile_rows_inner(&db, stale_after_minutes)?
+    };
+    Ok(rows.into_iter().filter_map(classify_warm_row).collect())
 }
 
-pub(crate) fn list_warm_worktrees_to_reconcile_inner(
+/// Raw SQL-only half of [`list_warm_worktrees_to_reconcile`]: returns every
+/// `warm_worktrees` row (excluding `claimed`) with its computed `age_stale`
+/// flag. **No filesystem I/O** — the caller is expected to drop the
+/// `Connection` before invoking [`classify_warm_row`] on each row.
+pub(crate) fn list_warm_worktrees_to_reconcile_rows_inner(
     conn: &Connection,
     stale_after_minutes: i64,
-) -> SqlResult<Vec<WarmReconcileEntry>> {
-    // SQLite computes the age flag (`created_at` older than the threshold); the
-    // disk-existence check can't be pushed into SQL so the final
-    // in-flight-vs-available decision is made in Rust. The modifier string is
-    // assembled with `||` so the threshold binds as a parameter rather than
-    // being interpolated into SQL.
+) -> SqlResult<Vec<WarmReconcileRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, path, status,
                 (created_at <= datetime('now', '-' || ?1 || ' minutes')) AS age_stale
@@ -4002,32 +4055,65 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
          WHERE status != 'claimed'",
     )?;
     let rows = stmt.query_map(params![stale_after_minutes], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)? != 0,
-        ))
+        Ok(WarmReconcileRow {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            status: row.get(2)?,
+            age_stale: row.get::<_, i64>(3)? != 0,
+        })
     })?;
-    let mut out = Vec::new();
-    for r in rows {
-        let (id, path, status, age_stale) = r?;
-        let in_flight = status == WarmWorktreeStatus::Filling.as_str()
-            || status == WarmWorktreeStatus::Refreshing.as_str();
-        let dir_present = std::path::Path::new(&path).exists();
-        // In-flight rows are reconciled only when old enough to be a
-        // crash-orphan (never a row a worker is filling right now); a settled
-        // `available` row is reconciled when its directory has vanished.
-        let qualifies = if in_flight { age_stale } else { !dir_present };
-        if qualifies {
-            out.push(WarmReconcileEntry {
-                id,
-                path,
-                dir_present,
-            });
-        }
+    rows.collect()
+}
+
+/// Apply the in-flight / available qualifier and the disk-existence check
+/// to one row. Pure helper — takes its data by value so callers can run
+/// this *after* dropping the reader connection.
+fn classify_warm_row(row: WarmReconcileRow) -> Option<WarmReconcileEntry> {
+    let WarmReconcileRow {
+        id,
+        path,
+        status,
+        age_stale,
+    } = row;
+    let in_flight = status == WarmWorktreeStatus::Filling.as_str()
+        || status == WarmWorktreeStatus::Refreshing.as_str();
+    let dir_present = std::path::Path::new(&path).exists();
+    // In-flight rows are reconciled only when old enough to be a
+    // crash-orphan (never a row a worker is filling right now); a settled
+    // `available` row is reconciled when its directory has vanished.
+    let qualifies = if in_flight { age_stale } else { !dir_present };
+    if qualifies {
+        Some(WarmReconcileEntry {
+            id,
+            path,
+            dir_present,
+        })
+    } else {
+        None
     }
-    Ok(out)
+}
+
+/// Back-compat shim: `list_warm_worktrees_to_reconcile_inner` was the
+/// pre-#1533 entry point that did SQL + I/O under one connection. Tests
+/// that pass an in-memory `&Connection` (no pool mutex to hold) can still
+/// call this; production callers MUST use the public
+/// [`list_warm_worktrees_to_reconcile`] instead so the FS work runs
+/// outside the pool lease.
+#[cfg(test)]
+pub(crate) fn list_warm_worktrees_to_reconcile_inner(
+    conn: &Connection,
+    stale_after_minutes: i64,
+) -> SqlResult<Vec<WarmReconcileEntry>> {
+    let rows = list_warm_worktrees_to_reconcile_rows_inner(conn, stale_after_minutes)?;
+    Ok(rows.into_iter().filter_map(classify_warm_row).collect())
+}
+
+#[derive(Debug)]
+pub(crate) struct WarmReconcileRow {
+    id: i64,
+    path: String,
+    status: String,
+    age_stale: bool,
 }
 
 /// Delete rows that are stuck in `claimed` status. The only path that
