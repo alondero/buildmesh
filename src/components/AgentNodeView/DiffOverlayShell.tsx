@@ -35,6 +35,7 @@ import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useDiffViewMode, type DiffViewMode } from '../Diff/Diff';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 export interface DiffOverlayShellProps {
   diff: DiffContext;
@@ -91,14 +92,10 @@ export function DiffOverlayShell({
   // Esc returns to the terminal grid. Bound only while the overlay is
   // mounted, so it never swallows Escape during normal grid use (where
   // agent CLIs read it). The grid is fully covered, so intercepting
-  // Escape here is safe.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // Escape here is safe. Issue #649 — driven by the shared `useEscapeKey`
+  // hook so stacked overlays (Diff above Single-view AgentNodeView)
+  // dispatch to the right surface instead of closing both.
+  useEscapeKey(() => onClose());
 
   // Auto-close when the lens diverges from the one the diff was opened
   // under: a different node focused, or a different project selected.

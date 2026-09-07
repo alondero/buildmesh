@@ -217,7 +217,7 @@ pub async fn import_and_resume(
                 rows: req.rows,
                 cols: req.cols,
             },
-        ),
+        ).with_lifecycle_lease(),
     )
     .await
     {

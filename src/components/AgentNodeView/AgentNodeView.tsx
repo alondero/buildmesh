@@ -20,6 +20,7 @@ import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent 
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
 import { CanvasEmptyStateContainer } from './CanvasEmptyStateContainer';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 const MIN_PANE_PERCENT = 15;
 
@@ -87,7 +88,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   };
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
   const isMultiPane = nodes.length > 1;
 
   return (
@@ -107,7 +108,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
                 nodeId={node.id}
                 memberIds={activityMembersByRoot[node.id] ?? [node.id]}
                 isActive={node.id === activeNodeId}
-                onActivate={setActiveNode}
+                onActivate={activateNode}
                 draggable={draggable}
               />
             </div>
@@ -159,7 +160,7 @@ export function AgentNodeView() {
       new Set(agentNodes.filter(node => node.status !== 'archived').map(node => node.id)),
     );
   }, [agentNodes]);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
 
@@ -246,9 +247,9 @@ export function AgentNodeView() {
   useEffect(() => {
     if (viewMode === 'single') return;
     if (visibleNodes.length > 0 && activeNode && !visibleNodes.find(s => s.id === activeRootId)) {
-      setActiveNode(visibleNodes[0].id);
+      activateNode(visibleNodes[0].id);
     }
-  }, [viewMode, visibleNodes, activeNode, activeRootId, setActiveNode]);
+  }, [viewMode, visibleNodes, activeNode, activeRootId, activateNode]);
 
   // Fit terminal when active node changes (e.g. container might have resized)
   useEffect(() => {
@@ -258,20 +259,18 @@ export function AgentNodeView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
 
-  // Escape exits Single mode. Only bound while single is active so we don't
-  // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
-  // the Center Diff Overlay (#379) or the Circuit Editor (#1209) is open it
-  // sits on top of the solo terminal and owns Escape — without this guard,
-  // Escape would close the overlay AND exit single in one press. When an
-  // overlay closes, this effect re-runs and re-binds the handler.
-  useEffect(() => {
-    if (viewMode !== 'single' || activeDiffFile != null || circuitEditorOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') exitSingleMode();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [viewMode, activeDiffFile, circuitEditorOpen, exitSingleMode]);
+  // Escape exits Single mode. Issue #649 review: only `viewMode === 'single'`
+  // belongs in `enabled` — the LIFO stack owned by `useEscapeKey` already
+  // guarantees that the most-recently-mounted surface (Center Diff Overlay,
+  // Circuit Editor, etc.) is on top of the stack and handles Escape before
+  // us. Toggling `enabled` based on overlay state was redundant: when an
+  // overlay opens, it pushes onto the stack above us; when it closes, it
+  // pops, and we're back on top. Re-binding the listener on every overlay
+  // state change was both coupling and churn.
+  useEscapeKey(
+    () => exitSingleMode(),
+    viewMode === 'single',
+  );
 
   // Reflow the terminal grid on every mode transition: switching modes
   // changes which (and how many) NodeCards mount, and entering/leaving
@@ -439,7 +438,7 @@ export function AgentNodeView() {
                   nodeId={singleNode.id}
                   memberIds={activityMembersByRoot[singleNode.id] ?? [singleNode.id]}
                   isActive={singleNode.id === activeNodeId}
-                  onActivate={setActiveNode}
+                  onActivate={activateNode}
                   draggable={false}
                 />
               </div>

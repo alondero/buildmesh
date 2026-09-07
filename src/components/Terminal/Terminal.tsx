@@ -10,6 +10,7 @@ import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { dropdownId } from '../../lib/dropdownId';
 
 export { type TerminalInstance } from './TerminalRegistry';
@@ -89,7 +90,18 @@ export function resetTerminalZoomListenerForTests(): void {
   terminalZoomListenerInstalled = false;
 }
 
-export function AgentTerminal({ nodeId }: { nodeId: number }) {
+export function AgentTerminal({ nodeId, focusOnAttach = true, focusRequest = 0 }: { nodeId: number; focusOnAttach?: boolean; focusRequest?: number }) {
+  const focusOnAttachRef = useRef(focusOnAttach);
+  focusOnAttachRef.current = focusOnAttach;
+
+  // Node activity tabs own the focus intent, while the terminal owns the
+  // actual xterm focus. This effect handles a mounted terminal when a pointer
+  // selects it; attach-time focus remains in the async attach callback below.
+  useEffect(() => {
+    if (focusRequest === 0 || !focusOnAttachRef.current) return;
+    if (nodeId !== useAgentNodeStore.getState().activeNodeId) return;
+    terminalManager.getInstance(nodeId)?.term.focus();
+  }, [focusRequest, nodeId]);
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
@@ -101,7 +113,6 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
-  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   // Subscribe to *this* node only via the normalized `nodesById` map (issue
   // #1384). The store reconciles on every fetch, preserving the same object
   // reference for unchanged rows — so this selector only triggers a re-render
@@ -192,21 +203,18 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   // `useClickOutside` hook (#492) for the outside-mousedown path.
   // `nodeId` scopes the selector (`[data-dropdown-for="<nodeId>"]`)
   // so two terminals with open context menus wouldn't interfere. The
-  // Escape handler is separate — `useClickOutside` doesn't cover keys.
+  // Escape handler is separate — `useClickOutside` doesn't cover keys,
+  // and `useEscapeKey` (issue #649) handles that now. Gated on
+  // `contextMenu !== null` so the listener only arms while the menu
+  // is visible; if a modal opens above the terminal, the modal owns
+  // Escape via the LIFO stack.
   //
   // Issue #1264 — prefix with the surface tag so a terminal-keyed
   // context menu can't collide with a mesh- or node-keyed menu that
   // shares the same numeric id (mesh and node ids both autoincrement
   // from the same SQLite sequence, so collisions are routine).
   useClickOutside<string>(contextMenu ? dropdownId('terminal', nodeId) : null, () => setContextMenu(null));
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [contextMenu]);
+  useEscapeKey(() => setContextMenu(null), contextMenu !== null);
 
   // Focus search input when opened
   useEffect(() => {
@@ -247,6 +255,13 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
+      // Issue #649 review: stopPropagation here so the Escape doesn't
+      // bubble to the document-level `useEscapeKey` dispatcher and trigger
+      // AgentNodeView's single-mode exit (or any other mounted surface
+      // stacked above the terminal). Matches `GridControls.tsx:105-111`'s
+      // opt-out pattern for the search input.
+      e.stopPropagation();
+      e.preventDefault();
       setSearchOpen(false);
       instRef.current?.term.focus();
     } else if (e.key === 'Enter') {
@@ -370,7 +385,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
       // Initial activation focuses the terminal. Subsequent tab selection is
       // delegated by NodeCard, so keyboard navigation keeps focus on the tab.
-      if (nodeId === activeNodeId) {
+      if (nodeId === useAgentNodeStore.getState().activeNodeId && focusOnAttachRef.current) {
         inst.term.focus();
       }
     });
@@ -382,9 +397,8 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       scrollDisposableRef.current = null;
       terminalManager.detach(nodeId);
     };
-  // activeNodeId is read once at attach time for the initial focus; the
-  // dedicated focus effect above handles later changes, so it's intentionally
-  // not a dependency here.
+  // Focus intent and the active node are read after async attachment; keyboard
+  // tab selection must not lose focus when the terminal finishes mounting.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId]);
 

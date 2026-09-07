@@ -790,7 +790,7 @@ describe('CircuitFlowEditor', () => {
     expect(screen.getByTestId('editor-dirty')).toBeTruthy();
     expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
@@ -801,7 +801,7 @@ describe('CircuitFlowEditor', () => {
     const onClose = vi.fn();
     render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -811,10 +811,10 @@ describe('CircuitFlowEditor', () => {
     render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
 
     fireEvent.click(await screen.findByTestId('palette-add-notify'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.queryByTestId('editor-discard-banner')).toBeNull();
@@ -826,7 +826,7 @@ describe('CircuitFlowEditor', () => {
     render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
 
     fireEvent.click(await screen.findByTestId('palette-add-notify'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     const banner = screen.getByTestId('editor-discard-banner');
     expect(banner).toBeTruthy();
 
@@ -841,7 +841,7 @@ describe('CircuitFlowEditor', () => {
     render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />);
 
     fireEvent.click(await screen.findByTestId('palette-add-notify'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('editor-discard-cancel'));
@@ -896,7 +896,7 @@ describe('CircuitFlowEditor', () => {
       <CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={onClose} />
     );
     fireEvent.click(await screen.findByTestId('palette-add-notify'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByTestId('editor-discard-banner')).toBeTruthy();
 
     rerender(
@@ -914,7 +914,7 @@ describe('CircuitFlowEditor', () => {
   it('moves focus to the Keep-editing button when the banner appears (WAI-ARIA APG alertdialog)', async () => {
     render(<CircuitFlowEditor circuit={CIRCUIT} runs={[]} onClose={() => {}} />);
     fireEvent.click(await screen.findByTestId('palette-add-notify'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(document.activeElement).toBe(screen.getByTestId('editor-discard-cancel'));
   });

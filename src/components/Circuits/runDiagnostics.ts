@@ -15,16 +15,56 @@
  * component.
  */
 
-import { isTerminalRunState, ledgerTimestampMs } from './circuitGraphModel';
+import { isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
 import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
 
 export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 
+export interface ReviewCircuitMetadata {
+  verdictNodeId: string;
+  retryNodeIds: readonly string[];
+}
+
+/** Review semantics come from the persisted graph, not `is_preset`. */
+export function reviewCircuitMetadata(
+  circuit: Pick<CircuitWithRuns['circuit'], 'graph_json'>
+): ReviewCircuitMetadata | null {
+  try {
+    const graph = parseGraph(circuit.graph_json);
+    const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
+    if (!verdict) return null;
+    return {
+      verdictNodeId: verdict.id,
+      retryNodeIds: graph.nodes
+        .filter((node) => node.type.type === 'retry_limit')
+        .map((node) => node.id),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Historical completion meant the graph stopped, not that a review approved. */
+export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): { label: string; detail: string; needsAttention: boolean } | null {
+  if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
+  const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
+  if (!review) return null;
+  const exhausted = detail.steps.some((s) =>
+    reviewCircuit.retryNodeIds.includes(s.node_id) && s.outcome === 'failed');
+  // The persisted ReviewVerdict step already carries the typed routing
+  // outcome. Do not reconstruct approval from arbitrary context_json keys.
+  const approved = detail.run.state === 'completed' && !exhausted && review.outcome === 'completed';
+  return approved
+    ? { label: 'Review approved', detail: 'Check the current PR head and required checks before merging.', needsAttention: false }
+    : { label: exhausted ? 'Review limit reached' : 'Review needs attention',
+      detail: 'No final approval is recorded. Continue the implementation agent, or resume its saved session from Archive. Address the latest findings, then request a fresh review. If the old session is unavailable, recover from the PR branch.', needsAttention: true };
+}
+
 /** A run needs a user's attention before the circuit can make progress. */
-export function runNeedsAttention(detail: CircuitRunDetail): boolean {
-  return detail.run.state === 'failed' || detail.run.state === 'paused' ||
+export function runNeedsAttention(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
+  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit)?.needsAttention === true ||
     detail.steps.some((step) => step.status === 'blocked');
 }
 
@@ -34,8 +74,8 @@ export function runNeedsAttention(detail: CircuitRunDetail): boolean {
  * through the queue payload but remain eligible here if a backend snapshot
  * includes one.
  */
-export function runBelongsToActivity(detail: CircuitRunDetail): boolean {
-  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed';
+export function runBelongsToActivity(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
+  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed' || reviewResult(detail, reviewCircuit)?.needsAttention === true;
 }
 
 export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
@@ -60,26 +100,42 @@ export interface CircuitProbeRow extends CircuitWithRuns {
   visibleRuns: CircuitRunDetail[];
   hasAttention: boolean;
   runningSteps: number;
+  reviewCircuit: ReviewCircuitMetadata | null;
+}
+
+/** Parse each persisted graph once per backend snapshot. */
+export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] {
+  return rows.map((row) => ({
+    ...row,
+    reviewCircuit: reviewCircuitMetadata(row.circuit),
+    visibleRuns: [],
+    hasAttention: false,
+    runningSteps: 0,
+  }));
 }
 
 /** Build the stable, view-specific row model used by the Probe. */
 export function buildCircuitProbeRows(
-  rows: CircuitWithRuns[],
+  rows: Array<CircuitWithRuns | CircuitProbeRow>,
   view: CircuitProbeView
 ): CircuitProbeRow[] {
   return rows
     .map((row) => {
+      const reviewCircuit = 'reviewCircuit' in row
+        ? row.reviewCircuit
+        : reviewCircuitMetadata(row.circuit);
       const visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
-          ? row.runs.filter(runBelongsToActivity)
+          ? row.runs.filter((run) => runBelongsToActivity(run, reviewCircuit))
           : [];
       visibleRuns.sort(compareRunsNewestFirst);
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some(runNeedsAttention),
+        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuit)),
         runningSteps: countRunningSteps(row.runs),
+        reviewCircuit,
       };
     })
     .sort((a, b) => Number(b.hasAttention) - Number(a.hasAttention) ||
@@ -96,18 +152,22 @@ export interface CircuitActivityStats {
 
 /** Summarize the monitoring header without rebuilding arrays in the component. */
 export function circuitActivityStats(
-  rows: CircuitWithRuns[],
+  rows: Array<CircuitWithRuns | CircuitProbeRow>,
   queuedCount: number
 ): CircuitActivityStats {
   let activityCount = 0;
   let activeCount = 0;
   let attentionCount = 0;
-  for (const { runs } of rows) {
+  for (const row of rows) {
+    const { runs, circuit } = row;
+    const reviewCircuit = 'reviewCircuit' in row
+      ? row.reviewCircuit
+      : reviewCircuitMetadata(circuit);
     for (const detail of runs) {
-      if (runBelongsToActivity(detail)) {
+      if (runBelongsToActivity(detail, reviewCircuit)) {
         activityCount += 1;
-        if (detail.run.state !== 'failed' && detail.run.state !== 'pending') activeCount += 1;
-        if (runNeedsAttention(detail)) attentionCount += 1;
+        if (detail.run.state === 'running' || detail.run.state === 'paused') activeCount += 1;
+        if (runNeedsAttention(detail, reviewCircuit)) attentionCount += 1;
       }
     }
   }

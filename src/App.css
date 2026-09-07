@@ -55,8 +55,8 @@
   --color-status-warning-bg: rgba(245, 158, 11, 0.10);
   --color-status-error: #ef4444;
   --color-status-error-bg: rgba(239, 68, 68, 0.10);
-  --color-status-idle: #4a5568;
-  --color-status-idle-bg: rgba(74, 85, 104, 0.10);
+  --color-status-idle: #00d4ff;
+  --color-status-idle-bg: rgba(0, 212, 255, 0.10);
   --color-status-running: #00d4ff;
   --color-status-running-bg: rgba(0, 212, 255, 0.10);
   --color-status-blocked: #f59e0b;
@@ -197,8 +197,8 @@
   --color-status-warning-bg: rgba(217, 119, 6, 0.10);
   --color-status-error: #dc2626;
   --color-status-error-bg: rgba(220, 38, 38, 0.10);
-  --color-status-idle: #64748b;
-  --color-status-idle-bg: rgba(100, 116, 139, 0.10);
+  --color-status-idle: #0891b2;
+  --color-status-idle-bg: rgba(8, 145, 178, 0.10);
   --color-status-running: #0891b2;
   --color-status-running-bg: rgba(8, 145, 178, 0.10);
   --color-status-blocked: #d97706;
@@ -290,7 +290,7 @@ html, body {
 /* Status indicator utilities */
 .status-running { color: var(--color-status-running); }
 .status-error   { color: var(--color-status-error); }
-.status-idle    { color: var(--color-accent-cyan); }
+.status-idle    { color: var(--color-status-idle); }
 .status-waiting { color: var(--color-status-warning); }
 .status-blocked { color: var(--color-status-blocked); }
 .status-success { color: var(--color-status-success); }

@@ -20,6 +20,7 @@ import { mapBackendProviders } from '../../lib/groups';
 import { addToast } from '../../stores/toastStore';
 import * as api from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
@@ -128,7 +129,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     const node = useAgentNodeStore.getState().nodesById[nodeId];
     if (!node) return;
     const wasSingle = useUIStore.getState().viewMode === 'single';
-    useAgentNodeStore.getState().setActiveNode(node.id);
+    useNodeActivityStore.getState().activateNode(node.id);
     useMeshStore.getState().selectMesh(node.mesh_id);
     // Mesh selection drives Mesh mode through the shared subscription. Only
     // restore Single when that was the source lens.
@@ -174,6 +175,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
         undefined,
         ctx.initialPrompt,
       )
+      .then(node => useNodeActivityStore.getState().activateNode(node.id))
       .catch(() => {
         // Spawn failures already toast via the store's error surface.
       });

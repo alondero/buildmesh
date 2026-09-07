@@ -572,7 +572,7 @@ fn run_pass(app: &AppHandle) {
     // admission sweep clears it.
     use std::collections::HashMap;
     let mut mesh_cache: HashMap<i64, Option<crate::models::Mesh>> = HashMap::new();
-    retry_failed_cleanup();
+    retry_failed_cleanup(app);
     // Repair leases for active runs created before the reservation table was
     // introduced. This is idempotent and keeps restarts from losing a claim.
     for active in &runs {
@@ -678,7 +678,7 @@ fn drive_run(
         if lost {
             db::commit_circuit_advance(active.run.id, Some("failed"), None, &[])
                 .map_err(|e| e.to_string())?;
-            close_run_agents(&view);
+            close_run_agents(app, &view);
             crate::autopilot::evaluator::unregister(source);
             let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
             return Ok(());
@@ -792,12 +792,10 @@ fn drive_run(
             );
         }
 
-        // A failed circuit has no future step that can close its agents. Do
-        // the same best-effort cleanup used by an explicit CloseAgentNode so
-        // reviewer processes/worktrees cannot leak after a spawn, injection,
-        // classifier, or close effect failure.
-        if view.state == RunState::Failed {
-            close_run_agents(&view);
+        // Terminal review runs release processes while retaining recovery
+        // checkpoints. Ordinary completed graphs opt out via cleanup intent.
+        if matches!(view.state, RunState::Completed | RunState::Failed) {
+            close_run_agents(app, &view);
             break;
         }
     }
@@ -846,7 +844,7 @@ fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) 
 /// Retire every agent attached to a failed circuit run. The operation is
 /// idempotent with the normal close effect: a missing row simply means a
 /// previous cleanup already won the race.
-fn close_run_agents(view: &RunView) {
+fn close_run_agents(app: &AppHandle, view: &RunView) {
     let eligible = db::list_failed_circuit_agents_for_cleanup().unwrap_or_default();
     let mut agent_ids = HashSet::new();
     for agent_node_id in view.steps.iter().filter_map(|step| step.agent_node_id) {
@@ -855,7 +853,10 @@ fn close_run_agents(view: &RunView) {
         }
         match db::get_agent_node_by_id(agent_node_id) {
             Ok(_) => {
-                if let Err(error) = crate::services::agent_node::delete(agent_node_id, true) {
+                let Some(claim) = db::claim_circuit_agent_cleanup(agent_node_id).unwrap_or(None) else { continue };
+                if let Err(error) = archive_failed_circuit_agent(agent_node_id, &claim, |run_id, state| {
+                    let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id, state });
+                }) {
                     tracing::warn!(
                         "circuits: failed to clean up agent {} after run failure: {}",
                         agent_node_id,
@@ -875,14 +876,17 @@ fn close_run_agents(view: &RunView) {
 }
 
 /// Load this run's committed steps into the stepper's view shape.
-fn retry_failed_cleanup() {
+fn retry_failed_cleanup(app: &AppHandle) {
     static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
     let now = chrono::Utc::now().timestamp();
     if now.saturating_sub(LAST_SWEEP.load(Ordering::Relaxed)) < 30 { return; }
     LAST_SWEEP.store(now, Ordering::Relaxed);
     match db::list_failed_circuit_agents_for_cleanup() {
         Ok(ids) => for id in ids {
-            if let Err(error) = crate::services::agent_node::delete(id, true) {
+            let Some(claim) = db::claim_circuit_agent_cleanup(id).unwrap_or(None) else { continue };
+            if let Err(error) = archive_failed_circuit_agent(id, &claim, |run_id, state| {
+                let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id, state });
+            }) {
                 tracing::warn!("circuits: retrying failed cleanup for agent {id}: {error}");
             }
         },
@@ -891,6 +895,67 @@ fn retry_failed_cleanup() {
     if let Err(error) = db::clear_finished_circuit_cleanup() {
         tracing::warn!("circuits: could not settle cleanup ledger: {error}");
     }
+}
+
+/// A failed attempt is a recovery checkpoint: stop its process, but retain
+/// the harness identity, worktree and step association for Archive/Resume.
+fn archive_failed_circuit_agent(node_id: i64, claim: &str, on_archived: impl Fn(i64, String)) -> Result<(), String> {
+    if db::claim_circuit_agent_cleanup(node_id).ok().flatten().as_deref() != Some(claim) {
+        return Ok(());
+    }
+    let result = archive_failed_circuit_agent_with(
+        node_id,
+        || {
+            let owned = db::renew_circuit_agent_cleanup(node_id, claim)
+                .map_err(|error| error.to_string())?;
+            if !owned {
+                return Err("cleanup lease was lost before process termination".into());
+            }
+            crate::agent::process::kill_agent_blocking(node_id)
+        },
+        || db::archive_circuit_agent(node_id, claim),
+        on_archived,
+        |error| {
+            // A failed external kill or archive transaction must surrender
+            // the lease immediately. The cleanup request remains durable, so
+            // the next sweep can retry; a transient OS/SQLite failure must
+            // never brick the node behind a permanent claim.
+            if let Err(release_error) = db::release_circuit_agent_cleanup(node_id, claim) {
+                tracing::warn!(
+                    "circuits: could not release failed cleanup lease for agent {} after {}: {}",
+                    node_id,
+                    error,
+                    release_error
+                );
+            }
+        },
+    );
+    result
+}
+
+fn archive_failed_circuit_agent_with<K, A, F>(
+    node_id: i64,
+    kill: K,
+    archive: A,
+    on_archived: impl Fn(i64, String),
+    on_failure: F,
+) -> Result<(), String>
+where
+    K: FnOnce() -> Result<(), String>,
+    A: FnOnce() -> rusqlite::Result<Vec<(i64, String)>>,
+    F: FnOnce(&str),
+{
+    let result: Result<(), String> = (|| {
+        kill()?;
+        let runs = archive().map_err(|e| e.to_string())?;
+        crate::autopilot::evaluator::unregister(node_id);
+        for (run_id, state) in runs { on_archived(run_id, state); }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        on_failure(error);
+    }
+    result
 }
 
 fn load_steps(run_id: i64) -> Result<Vec<StepView>, String> {
@@ -1872,7 +1937,11 @@ fn execute_effects(
             return Ok(outcome_events);
         }
         let accepts_effect = run_state.as_deref().is_some_and(|state| {
-            effect_allowed_in_state(state, view.state == RunState::Completed, effect)
+            effect_allowed_in_state(
+                state,
+                matches!(view.state, RunState::Completed | RunState::Failed),
+                effect,
+            )
         });
         if !accepts_effect {
             tracing::info!(
@@ -2068,7 +2137,7 @@ fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &cr
         // that completes the run, and must survive its commit-before-effects.
         // InjectPty is intentionally absent: it starts new work after the
         // run has durably finished and would leave an untracked command.
-        || (state == "completed" && completing_transition && matches!(effect,
+        || (matches!(state, "completed" | "failed") && completing_transition && matches!(effect,
             Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
 }
 
@@ -2271,7 +2340,8 @@ fn spawn_circuit_agent_in_background(
             &app_for_spawn,
             crate::agent::spawn::SpawnRequest::new(node_id, intent, Default::default())
                 .with_explicit(explicit)
-                .with_worktree_policy(worktree_policy),
+                .with_worktree_policy(worktree_policy)
+                .with_lifecycle_lease(),
         )
         .await
         {
@@ -2952,6 +3022,7 @@ fn notification_severity(message: &str) -> String {
 mod tests {
     use super::*;
     use crate::autopilot::circuit::model::{CircuitNode, StepOutcome};
+    use rusqlite::Connection;
 
     #[test]
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
@@ -2973,8 +3044,60 @@ mod tests {
         for effect in [notify, set_status, close, spawn, inject] {
             assert!(!effect_allowed_in_state("completed", false, &effect));
             assert!(!effect_allowed_in_state("cancelled", true, &effect));
-            assert!(!effect_allowed_in_state("failed", true, &effect));
+            assert_eq!(
+                effect_allowed_in_state("failed", true, &effect),
+                matches!(effect, Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. })
+            );
         }
+    }
+
+    #[test]
+    fn terminal_cleanup_injected_kill_or_archive_failure_keeps_notifications_quiet() {
+        let setup = || {
+            let conn = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'cleanup-failure', '/repo');
+                INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (42,1,'owned','/repo','ready');
+                INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'cleanup-failure','{}');
+                INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+                    VALUES (1,1,1,'failure','failed','{\"cleanup.pending\":\"1\"}');
+                INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
+                    VALUES (1,'owned',42,'failed');").unwrap();
+            let claim = crate::db::circuit::claim_circuit_agent_cleanup_inner(&conn, 42).unwrap().unwrap();
+            (conn, claim)
+        };
+        let assert_recovery = |conn: &Connection| {
+            assert!(crate::db::circuit::circuit_agent_cleanup_claim_inner(conn, 42).unwrap().is_none());
+            assert_eq!(crate::db::circuit::failed_circuit_agents_for_cleanup_inner(conn).unwrap(), vec![42]);
+            assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=42", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            assert_eq!(conn.query_row("SELECT status FROM agent_nodes WHERE id=42", [], |row| row.get::<_, String>(0)).unwrap(), "ready");
+            assert_eq!(conn.query_row("SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='owned'", [], |row| row.get::<_, i64>(0)).unwrap(), 42);
+            assert!(conn.query_row("SELECT json_extract(context_json, '$.\"cleanup.retired.42\"') FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, Option<String>>(0)).unwrap().is_none());
+        };
+
+        let (kill_conn, kill_claim) = setup();
+        let kill_failed = archive_failed_circuit_agent_with(
+            42,
+            || Err("kill failed".to_string()),
+            || Ok(Vec::new()),
+            |_, _| panic!("cleanup notification must follow committed archive"),
+            |error| crate::db::circuit::release_circuit_agent_cleanup_inner(&kill_conn, 42, &kill_claim)
+                .unwrap_or_else(|release| panic!("{error}: {release}")),
+        );
+        assert_eq!(kill_failed, Err("kill failed".to_string()));
+        assert_recovery(&kill_conn);
+
+        let (archive_conn, archive_claim) = setup();
+        let archive_failed = archive_failed_circuit_agent_with(
+            42,
+            || Ok(()),
+            || Err(rusqlite::Error::InvalidQuery),
+            |_, _| panic!("cleanup notification must follow committed archive"),
+            |error| crate::db::circuit::release_circuit_agent_cleanup_inner(&archive_conn, 42, &archive_claim)
+                .unwrap_or_else(|release| panic!("{error}: {release}")),
+        );
+        assert!(archive_failed.is_err());
+        assert_recovery(&archive_conn);
     }
 
     #[test]
@@ -3306,6 +3429,45 @@ mod tests {
         ));
         crate::db::init(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
+        init_temp_db_at("archive-recovery");
+        let worktree = tempfile::tempdir().unwrap();
+        let file = worktree.path().join("unfinished.txt");
+        std::fs::write(&file, "uncommitted implementation").unwrap();
+        let path = worktree.path().to_str().unwrap();
+        let mesh = db::create_mesh("archive-recovery", path).unwrap();
+        let node = db::create_agent_node(mesh.id, "Recover me", path, "saved-branch",
+            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+        db::write_conn().execute("UPDATE agent_nodes SET worktree_path=?2, cli_session_id='saved-harness-session' WHERE id=?1", rusqlite::params![node.id, path]).unwrap();
+        let circuit = db::create_autopilot_circuit(mesh.id, "recovery", "", 1,
+            &CircuitGraph::walking_skeleton("task").to_json().unwrap()).unwrap();
+        let run_id = db::create_circuit_run(circuit.id, mesh.id, "manual:archive-test", "{}").unwrap();
+        db::commit_circuit_advance(run_id, Some("running"), None, &[
+            db::CircuitStepOp { node_id: "spawn".into(), status: "running".into(), attempt: 1,
+                outcome: None, error: None, agent_node_id: Some(node.id), fresh_attempt: false },
+        ]).unwrap();
+        db::commit_circuit_advance(run_id, Some("failed"), None, &[]).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let claim = db::claim_circuit_agent_cleanup(node.id).unwrap().unwrap();
+        archive_failed_circuit_agent(node.id, &claim, |id, state| {
+            calls.set(calls.get() + 1);
+            assert_eq!((id, state.as_str()), (run_id, "failed"));
+            assert_eq!(db::get_agent_node_by_id(node.id).unwrap().status, SessionStatus::Archived);
+            assert!(!db::list_failed_circuit_agents_for_cleanup().unwrap().contains(&node.id));
+        }).unwrap();
+        assert_eq!(calls.get(), 1);
+        let saved = db::get_agent_node_by_id(node.id).unwrap();
+        assert_eq!(saved.cli_session_id.as_deref(), Some("saved-harness-session"));
+        assert_eq!(saved.worktree_path.as_deref(), Some(path));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "uncommitted implementation");
+        assert_eq!(db::list_circuit_run_steps(run_id).unwrap()[0].agent_node_id, Some(node.id));
+        db::update_agent_node_status(node.id, SessionStatus::Running).unwrap();
+        assert!(!db::list_failed_circuit_agents_for_cleanup().unwrap().contains(&node.id));
+        db::clear_finished_circuit_cleanup().unwrap();
+        assert!(!db::get_circuit_run(run_id).unwrap().unwrap().context_json.contains("cleanup.pending"));
     }
 
     /// The structural pin: `may_admit_run` short-circuits for `running`

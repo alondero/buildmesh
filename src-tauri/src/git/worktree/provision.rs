@@ -1710,8 +1710,8 @@ mod tests {
     /// the sink *call*; this one proves the DB *column*.
     ///
     /// Tests using this sink must initialise the global DB via
-    /// `ensure_test_db()` below; otherwise `db::is_initialized()` returns
-    /// false and the write no-ops.
+    /// `crate::db::test_support::ensure_db_for_tests()`; otherwise
+    /// `db::is_initialized()` returns false and the write no-ops.
     struct DbWritingSink;
     impl ProvisionSink for DbWritingSink {
         fn forget_warm_row(&self, _id: i64) {}
@@ -1728,24 +1728,7 @@ mod tests {
         }
     }
 
-    /// One-shot DB init for tests in this module. Pattern lifted from
-    /// `commands::agent::tests::ensure_pr_db`. The first test to call this
-    /// picks a scratch file path under the OS temp dir; later tests share
-    /// that connection via the global `db::DB` OnceCell. Schema is always
-    /// migrated to current `SCHEMA_VERSION`, so the schema is independent
-    /// of the order tests run.
-    fn ensure_test_db() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            let p = std::env::temp_dir().join(format!(
-                "buildmesh_provisioner_slug_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&p);
-            let _ = crate::db::init(&p);
-        });
-    }
+    // DB init routes through `db::test_support::ensure_db_for_tests`.
 
     /// End-to-end regression for #1080. A Manual spawn that claims a warm
     /// pool entry must persist the pool's pre-assigned slug into BOTH
@@ -1761,7 +1744,7 @@ mod tests {
     /// the SQL-level invariant the spec asked for.
     #[test]
     fn manual_warm_claim_persists_pool_slug_into_agent_node_row() {
-        ensure_test_db();
+        crate::db::test_support::ensure_db_for_tests();
 
         let td = TestDir::new("manual_adopt_db");
         let root = td.path();

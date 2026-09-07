@@ -291,18 +291,33 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         return Ok(vec![]);
     }
     let ids: Vec<String> = circuits.iter().map(|c| c.id.to_string()).collect();
-    // Keep the history bound in SQLite. The old implementation selected the
-    // entire ledger and filtered it in Rust, which made every Probe render
-    // grow with the lifetime of the database. Active runs are always visible;
-    // only terminal history is ranked and bounded per circuit.
+    // Keep both ordinary history and recovery history bounded in SQLite. A
+    // failed run or a node with an outstanding cleanup request gets a small
+    // recovery window even when it is older than the ordinary history cap;
+    // presets are not an excuse to stream their entire lifetime ledger.
+    const RECOVERY_RUNS_PER_CIRCUIT: i64 = 50;
     let mut stmt = db.prepare(&format!(
         "WITH terminal AS ( \
-             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, source_agent_node_id, created_at, updated_at, \
-                    ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS history_rank \
-             FROM autopilot_circuit_runs \
-             WHERE circuit_id IN ({}) \
-               AND state NOT IN ('pending', 'running', 'paused') \
+             SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
+                    r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
+                    c.is_preset, c.graph_json, ROW_NUMBER() OVER (PARTITION BY r.circuit_id ORDER BY r.id DESC) AS history_rank \
+             FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id \
+             WHERE r.circuit_id IN ({}) \
+               AND r.state NOT IN ('pending', 'running', 'paused') \
+         ), attention_candidates AS ( \
+             SELECT DISTINCT terminal.id, terminal.circuit_id, terminal.mesh_id, terminal.trigger_identity, terminal.state, \
+                    terminal.context_json, terminal.source_agent_node_id, terminal.created_at, terminal.updated_at \
+             FROM terminal \
+             LEFT JOIN autopilot_circuit_run_steps s ON s.run_id = terminal.id \
+             LEFT JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+             LEFT JOIN json_each(CASE WHEN json_valid(terminal.graph_json) THEN terminal.graph_json ELSE '{{}}' END, '$.nodes') review_node ON json_extract(review_node.value, '$.type.type') = 'review_verdict' \
+             LEFT JOIN autopilot_circuit_run_steps review_step ON review_step.run_id = terminal.id \
+                 AND review_step.node_id = json_extract(review_node.value, '$.id') \
+             WHERE terminal.state = 'failed' OR l.cleanup_requested = 1 \
+                OR (review_step.id IS NOT NULL AND COALESCE(review_step.outcome, '') <> 'completed') \
+         ), attention AS ( \
+             SELECT attention_candidates.*, ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS attention_rank \
+             FROM attention_candidates \
          ), visible AS ( \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
@@ -312,6 +327,10 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
              FROM terminal WHERE history_rank <= ?1 \
+             UNION \
+             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
+                    context_json, source_agent_node_id, created_at, updated_at \
+             FROM attention WHERE attention_rank <= ?2 \
          ) \
          SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -320,7 +339,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         ids.join(",")
     ))?;
     let visible_runs: Vec<AutopilotCircuitRun> = stmt
-        .query_map(params![runs_per_circuit.max(0)], |row| {
+        .query_map(params![runs_per_circuit.max(0), RECOVERY_RUNS_PER_CIRCUIT], |row| {
             Ok(AutopilotCircuitRun {
                 id: row.get(0)?,
                 circuit_id: row.get(1)?,
@@ -341,21 +360,29 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         runs_by_circuit.entry(run.circuit_id).or_default().push(run);
     }
 
+    let run_ids: Vec<i64> = runs_by_circuit.values().flatten().map(|run| run.id).collect();
+    let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> = std::collections::HashMap::new();
+    if !run_ids.is_empty() {
+        let placeholders = std::iter::repeat("?").take(run_ids.len()).collect::<Vec<_>>().join(",");
+        let mut step_stmt = db.prepare(&format!(
+            "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
+                    outcome, error_message, started_at, completed_at \
+             FROM autopilot_circuit_run_steps WHERE run_id IN ({placeholders}) ORDER BY run_id, id"
+        ))?;
+        let step_rows = step_stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), map_step_row)?;
+        for step in step_rows {
+            let step = step?;
+            steps_by_run.entry(step.run_id).or_default().push(step);
+        }
+    }
+
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
-        let mut ledgers = Vec::with_capacity(runs.len());
-        for run in runs {
-            let mut stmt = db.prepare(
-                "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
-                        outcome, error_message, started_at, completed_at \
-                 FROM autopilot_circuit_run_steps WHERE run_id = ?1 ORDER BY id",
-            )?;
-            let steps = stmt
-                .query_map(params![run.id], map_step_row)?
-                .collect::<SqlResult<_>>()?;
-            ledgers.push(CircuitRunLedger { run, steps });
-        }
+        let ledgers = runs.into_iter().map(|run| CircuitRunLedger {
+            steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+            run,
+        }).collect();
         out.push((circuit, ledgers));
     }
     Ok(out)
@@ -599,8 +626,19 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     };
     if matches!(state.as_str(), "pending" | "running" | "paused") {
         tx.execute(
-            "UPDATE autopilot_circuit_runs SET state = 'cancelled', context_json = json_set(context_json, '$.\"cleanup.pending\"', '1'), updated_at = datetime('now') \
+            "UPDATE autopilot_circuit_runs SET state = 'cancelled', context_json = json_remove(context_json, '$.\"cleanup.pending\"'), updated_at = datetime('now') \
              WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
+            params![run_id],
+        )?;
+        tx.execute(
+            "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+             SELECT DISTINCT s.agent_node_id, 1
+             FROM autopilot_circuit_run_steps s
+             JOIN agent_nodes a ON a.id = s.agent_node_id
+             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
+               AND s.agent_node_id IS NOT (SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1)
+             ON CONFLICT(node_id) DO UPDATE SET
+               cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
             params![run_id],
         )?;
     }
@@ -884,20 +922,29 @@ pub fn commit_circuit_advance(
         tx.commit()?;
         return Ok(());
     }
+    let prior_context_json = if run_state.map(is_terminal_run_state).unwrap_or(false) {
+        tx.query_row(
+            "SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1",
+            params![run_id],
+            |row| row.get::<_, String>(0),
+        ).optional()?
+    } else {
+        None
+    };
     let mut terminal_woke = false;
     match (run_state, context_json) {
         (Some(state), ctx) => {
             let rows_updated = if is_terminal_run_state(state) {
                 tx.execute(
                     "UPDATE autopilot_circuit_runs \
-                     SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
+                     SET state = ?2, context_json = json_remove(COALESCE(?3, context_json), '$.\"cleanup.pending\"'), updated_at = datetime('now') \
                      WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
                     params![run_id, state, ctx],
                 )?
             } else {
                 tx.execute(
                     "UPDATE autopilot_circuit_runs \
-                     SET state = ?2, context_json = COALESCE(?3, context_json), updated_at = datetime('now') \
+                     SET state = ?2, context_json = json_remove(COALESCE(?3, context_json), '$.\"cleanup.pending\"'), updated_at = datetime('now') \
                      WHERE id = ?1",
                     params![run_id, state, ctx],
                 )?
@@ -912,7 +959,7 @@ pub fn commit_circuit_advance(
         (None, Some(ctx)) => {
             tx.execute(
                 "UPDATE autopilot_circuit_runs \
-                 SET context_json = ?2, updated_at = datetime('now') \
+                 SET context_json = json_remove(?2, '$.\"cleanup.pending\"'), updated_at = datetime('now') \
                  WHERE id = ?1",
                 params![run_id, ctx],
             )?;
@@ -964,8 +1011,27 @@ pub fn commit_circuit_advance(
         )?;
     }
     if terminal_woke {
-        if matches!(run_state, Some("failed" | "cancelled")) {
-            tx.execute("UPDATE autopilot_circuit_runs SET context_json = json_set(context_json, '$.\"cleanup.pending\"', '1') WHERE id = ?1", params![run_id])?;
+        // Cleanup ownership is node-scoped and survives run retention. The
+        // legacy context marker is consumed as an input only; it is never
+        // persisted back into the historical ledger.
+        let state = run_state.unwrap_or_default();
+        let cleanup_requested = state == "failed" || state == "cancelled" || context_json.or(prior_context_json.as_deref())
+            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+            .and_then(|ctx| ctx.get("cleanup.pending").and_then(|v| v.as_str()).map(|v| v == "1"))
+            .unwrap_or(false);
+        if cleanup_requested {
+            tx.execute(
+                "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+                 SELECT DISTINCT s.agent_node_id, 1
+                 FROM autopilot_circuit_run_steps s
+                 JOIN autopilot_circuit_runs r ON r.id = s.run_id
+                 JOIN agent_nodes a ON a.id = s.agent_node_id
+                 WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
+                   AND s.agent_node_id IS NOT r.source_agent_node_id
+                 ON CONFLICT(node_id) DO UPDATE SET
+                   cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
+                params![run_id],
+            )?;
         }
         tx.execute(
             "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
@@ -1108,15 +1174,25 @@ fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOw
     let mut ownerships: Vec<AgentOwnershipRow> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
         // Keep source overrides deterministic when an agent has more than one
-        // active circuit run; the later run is applied last below.
+        // circuit run. The latest run remains visible after it completes so
+        // the source node can show the compact Done state until a newer run
+        // takes ownership.
         "SELECT a.id, r.id, c.id, c.name, r.state FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          JOIN agent_nodes a ON a.id = r.source_agent_node_id \
-         WHERE a.status != 'archived' AND r.state IN ('pending','running','paused') \
+         WHERE a.status != 'archived' \
+           AND r.id = (SELECT MAX(r2.id) FROM autopilot_circuit_runs r2 \
+                       WHERE r2.source_agent_node_id = a.id) \
          ORDER BY a.id, r.id",
     )?;
     for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
         let (node, run, circuit, name, state) = row?;
+        if ownerships.iter().any(|owned| owned.0 == node && owned.1 > run) {
+            // A source run is only an override when it is at least as new as
+            // the node's latest step ownership. Historical source runs must
+            // never hide a newer active step run.
+            continue;
+        }
         let source = (node, run, circuit, name, state, None);
         ownerships.retain(|owned| owned.0 != source.0);
         ownerships.push(source);
@@ -1163,6 +1239,53 @@ mod activity_ownership_tests {
         assert_eq!(read_parent(), Some(1), "a retained reviewer remains inspectable");
         db.execute("UPDATE agent_nodes SET status = 'archived' WHERE id = 2", []).unwrap();
         assert!(list_circuit_agent_ownerships_inner(&db).unwrap().iter().all(|r| r.0 != 2));
+    }
+
+    #[test]
+    fn source_ownership_retains_latest_terminal_run_for_done_indicator() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'sources', '/repo');
+          INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider, status)
+            VALUES (4, 1, 'source', '/repo', 'main', 'windows', 'terminal', 'completed');
+          INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json)
+            VALUES (1, 1, 'review', '{}');
+          INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state, source_agent_node_id)
+            VALUES (1, 1, 1, 'issue:1', 'running', 4);").unwrap();
+
+        let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+        assert_eq!(rows, vec![(4, 1, 1, "review".to_owned(), "running".to_owned(), None)]);
+
+        for state in ["completed", "failed", "cancelled"] {
+            db.execute("UPDATE autopilot_circuit_runs SET state = ?1 WHERE id = 1", [state]).unwrap();
+            let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+            assert_eq!(rows[0].4, state);
+        }
+
+        db.execute("INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state, source_agent_node_id) VALUES (2, 1, 1, 'issue:2', 'running', 4)", []).unwrap();
+        let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+        assert_eq!(rows[0].1, 2, "a newer source run supersedes older terminal history");
+        assert_eq!(rows[0].4, "running");
+    }
+
+    #[test]
+    fn older_source_history_does_not_replace_newer_step_ownership() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'mixed', '/repo');
+          INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider, status)
+            VALUES (5, 1, 'mixed-node', '/repo', 'main', 'windows', 'terminal', 'running'),
+                   (8, 1, 'parent-node', '/repo', 'main', 'windows', 'terminal', 'completed');
+          INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json)
+            VALUES (1, 1, 'review', '{}');
+          INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state, source_agent_node_id)
+            VALUES (1, 1, 1, 'issue:1', 'completed', 5),
+                   (2, 1, 1, 'issue:2', 'running', NULL);
+          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id, parent_agent_node_id)
+            VALUES (2, 'worker', 'running', 5, 8);").unwrap();
+
+        let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+        assert_eq!(rows, vec![(5, 2, 1, "review".to_owned(), "running".to_owned(), Some(8))]);
     }
 }
 
@@ -1215,35 +1338,275 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
     )
 }
 
+const NODE_LEASE_TTL_SECS: i64 = 300;
+
 /// Failed associations remain the durable cleanup retry ledger. Historic
-/// terminal runs are not opted in: the user may have kept their agents.
+/// terminal runs are not opted in unless their node-level cleanup request was
+/// recorded by the circuit terminal transition.
 pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
-    failed_circuit_agents_for_cleanup_inner(&super::read_conn())
+    // The legacy-import bridge is intentionally write-on-read for databases
+    // upgraded from the pre-v43 JSON marker, so use the write connection for
+    // this one recovery query.
+    failed_circuit_agents_for_cleanup_inner(&super::write_conn())
+}
+
+fn lifecycle_generation(node_id: i64, prefix: &str) -> String {
+    format!("{prefix}:{}:{node_id}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default())
+}
+
+fn import_legacy_cleanup_requests(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+         SELECT DISTINCT s.agent_node_id, 1
+         FROM autopilot_circuit_runs r
+         JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
+         JOIN agent_nodes a ON a.id = s.agent_node_id
+         WHERE s.agent_node_id IS NOT NULL AND a.status != 'archived'
+           AND s.agent_node_id IS NOT r.source_agent_node_id
+           AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Expire only the lease that timed out.  The cleanup request itself is a
+/// durable recovery fact and must survive an abandoned worker or spawn lease;
+/// deleting the whole row would silently drop that fact.
+fn expire_lifecycle_leases(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_generation = NULL, cleanup_expires_at = NULL,
+             updated_at = unixepoch()
+         WHERE cleanup_expires_at IS NOT NULL AND cleanup_expires_at <= unixepoch()",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET spawn_generation = NULL, spawn_expires_at = NULL,
+             updated_at = unixepoch()
+         WHERE spawn_expires_at IS NOT NULL AND spawn_expires_at <= unixepoch()",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Generic node spawn lease. The low-level spawn pipeline depends only on
+/// this node lifecycle interface; circuit cleanup is one caller, not a
+/// special case in the orchestrator.
+pub fn claim_agent_spawn(node_id: i64) -> SqlResult<Option<String>> {
+    claim_agent_spawn_inner(&super::write_conn(), node_id)
+}
+
+pub(crate) fn claim_agent_spawn_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    let tx = conn.unchecked_transaction()?;
+    import_legacy_cleanup_requests(&tx)?;
+    expire_lifecycle_leases(&tx)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id)
+         SELECT id FROM agent_nodes WHERE id = ?1 AND status != 'archived'",
+        params![node_id],
+    )?;
+    let generation = lifecycle_generation(node_id, "spawn");
+    let updated = tx.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET spawn_generation = ?2, spawn_expires_at = unixepoch() + ?3,
+             updated_at = unixepoch()
+         WHERE node_id = ?1 AND retired = 0
+           AND spawn_generation IS NULL AND cleanup_generation IS NULL",
+        params![node_id, generation, NODE_LEASE_TTL_SECS],
+    )?;
+    tx.commit()?;
+    Ok((updated > 0).then_some(generation))
+}
+
+pub fn release_agent_spawn(node_id: i64, generation: &str, succeeded: bool) -> SqlResult<()> {
+    release_agent_spawn_inner(&super::write_conn(), node_id, generation, succeeded)
+}
+
+pub(crate) fn release_agent_spawn_inner(
+    conn: &Connection,
+    node_id: i64,
+    generation: &str,
+    succeeded: bool,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET spawn_generation = NULL, spawn_expires_at = NULL,
+             cleanup_requested = CASE WHEN ?3 THEN 0 ELSE cleanup_requested END,
+             updated_at = unixepoch()
+         WHERE node_id = ?1 AND spawn_generation = ?2",
+        params![node_id, generation, succeeded],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn agent_spawn_claim_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT spawn_generation FROM agent_node_lifecycle_leases WHERE node_id = ?1",
+        params![node_id],
+        |row| row.get::<_, Option<String>>(0),
+    ).optional()?.flatten())
+}
+
+#[cfg(test)]
+pub(crate) fn claim_circuit_agent_spawn_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    claim_agent_spawn_inner(conn, node_id)
+}
+
+#[cfg(test)]
+pub(crate) fn circuit_agent_spawn_claim_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    agent_spawn_claim_inner(conn, node_id)
+}
+
+#[cfg(test)]
+pub(crate) fn release_circuit_agent_spawn_inner(conn: &Connection, node_id: i64, generation: &str) -> SqlResult<()> {
+    release_agent_spawn_inner(conn, node_id, generation, true)
+}
+
+pub fn circuit_agent_cleanup_claim(node_id: i64) -> SqlResult<Option<String>> {
+    circuit_agent_cleanup_claim_inner(&super::read_conn(), node_id)
+}
+
+/// Generic read seam for spawn callers. The implementation is shared with
+/// circuit cleanup, but the spawn module does not depend on circuit semantics.
+pub fn agent_cleanup_claim(node_id: i64) -> SqlResult<Option<String>> {
+    circuit_agent_cleanup_claim(node_id)
+}
+
+pub(crate) fn circuit_agent_cleanup_claim_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT cleanup_generation FROM agent_node_lifecycle_leases
+         WHERE node_id = ?1 AND cleanup_generation IS NOT NULL
+           AND cleanup_expires_at > unixepoch()",
+        params![node_id],
+        |row| row.get(0),
+    ).optional()
+}
+
+pub fn claim_circuit_agent_cleanup(node_id: i64) -> SqlResult<Option<String>> {
+    claim_circuit_agent_cleanup_inner(&super::write_conn(), node_id)
+}
+
+pub(crate) fn claim_circuit_agent_cleanup_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
+    let tx = conn.unchecked_transaction()?;
+    import_legacy_cleanup_requests(&tx)?;
+    expire_lifecycle_leases(&tx)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+         SELECT id, 1 FROM agent_nodes WHERE id = ?1 AND status != 'archived'",
+        params![node_id],
+    )?;
+    let generation = lifecycle_generation(node_id, "cleanup");
+    let updated = tx.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_generation = ?2, cleanup_expires_at = unixepoch() + ?3,
+             updated_at = unixepoch()
+         WHERE node_id = ?1 AND cleanup_requested = 1 AND retired = 0
+           AND cleanup_generation IS NULL AND spawn_generation IS NULL
+           AND EXISTS (
+             SELECT 1 FROM autopilot_circuit_run_steps s
+             JOIN autopilot_circuit_runs r ON r.id = s.run_id
+             JOIN agent_nodes a ON a.id = s.agent_node_id
+             WHERE s.agent_node_id = agent_node_lifecycle_leases.node_id
+               AND r.state IN ('completed', 'failed', 'cancelled')
+               AND a.status != 'archived'
+               AND a.id IS NOT r.source_agent_node_id
+               AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
+                   WHERE borrowed.source_agent_node_id = a.id
+                     AND borrowed.state IN ('pending', 'running', 'paused'))
+               AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
+                   JOIN autopilot_circuit_runs active ON active.id = other.run_id
+                   WHERE other.agent_node_id = a.id
+                     AND active.state IN ('running', 'paused'))
+           )",
+        params![node_id, generation, NODE_LEASE_TTL_SECS],
+    )?;
+    let result = if updated > 0 {
+        Some(generation)
+    } else {
+        tx.query_row(
+            "SELECT cleanup_generation FROM agent_node_lifecycle_leases
+             WHERE node_id = ?1 AND cleanup_generation IS NOT NULL",
+            params![node_id],
+            |row| row.get(0),
+        ).optional()?
+    };
+    tx.commit()?;
+    Ok(result)
+}
+
+pub fn release_circuit_agent_cleanup(node_id: i64, generation: &str) -> SqlResult<()> {
+    release_circuit_agent_cleanup_inner(&super::write_conn(), node_id, generation)
+}
+
+/// Atomically verify and renew a cleanup lease immediately before the
+/// external process kill.  This closes the gap between selecting a retry
+/// candidate and touching the OS process: a resumed/spawned node cannot take
+/// over while the cleanup worker still owns the renewed generation.
+pub fn renew_circuit_agent_cleanup(node_id: i64, generation: &str) -> SqlResult<bool> {
+    renew_circuit_agent_cleanup_inner(&super::write_conn(), node_id, generation)
+}
+
+pub(crate) fn renew_circuit_agent_cleanup_inner(
+    conn: &Connection,
+    node_id: i64,
+    generation: &str,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_expires_at = unixepoch() + ?3, updated_at = unixepoch()
+         WHERE node_id = ?1 AND cleanup_generation = ?2
+           AND cleanup_requested = 1 AND retired = 0
+           AND cleanup_expires_at > unixepoch() AND spawn_generation IS NULL",
+        params![node_id, generation, NODE_LEASE_TTL_SECS],
+    )?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn release_circuit_agent_cleanup_inner(conn: &Connection, node_id: i64, generation: &str) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_generation = NULL, cleanup_expires_at = NULL,
+             updated_at = unixepoch()
+         WHERE node_id = ?1 AND cleanup_generation = ?2",
+        params![node_id, generation],
+    )?;
+    Ok(())
 }
 
 pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
-    super::write_conn().execute(
-        "UPDATE autopilot_circuit_runs SET context_json = json_remove(context_json, '$.\"cleanup.pending\"')
-         WHERE state IN ('failed', 'cancelled') AND json_extract(context_json, '$.\"cleanup.pending\"') = '1'
-         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id = s.agent_node_id
-             WHERE s.run_id = autopilot_circuit_runs.id AND a.id IS NOT autopilot_circuit_runs.source_agent_node_id)", [])?;
+    clear_finished_circuit_cleanup_inner(&super::write_conn())
+}
+
+pub(crate) fn clear_finished_circuit_cleanup_inner(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_requested = 0, updated_at = unixepoch()
+         WHERE cleanup_requested = 1 AND retired = 0
+           AND EXISTS (SELECT 1 FROM agent_nodes a WHERE a.id = node_id AND a.status = 'archived')
+           AND cleanup_generation IS NULL AND spawn_generation IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
 pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connection) -> SqlResult<Vec<i64>> {
+    import_legacy_cleanup_requests(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id FROM autopilot_circuit_runs r
-         JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
-         JOIN agent_nodes a ON a.id = s.agent_node_id
-         WHERE r.state IN ('failed', 'cancelled')
-           AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'
-           AND a.id IS NOT r.source_agent_node_id
+        "SELECT l.node_id FROM agent_node_lifecycle_leases l
+         JOIN agent_nodes a ON a.id = l.node_id
+         WHERE l.cleanup_requested = 1 AND l.retired = 0
+           AND a.status != 'archived'
+           AND l.cleanup_generation IS NULL AND l.spawn_generation IS NULL
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
-               WHERE borrowed.source_agent_node_id = a.id AND borrowed.state IN ('pending', 'running', 'paused'))
+               WHERE borrowed.source_agent_node_id = l.node_id
+                 AND borrowed.state IN ('pending', 'running', 'paused'))
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
                JOIN autopilot_circuit_runs active ON active.id = other.run_id
-               WHERE other.agent_node_id = a.id AND active.state IN ('running', 'paused'))
-         ORDER BY a.id")?;
+               WHERE other.agent_node_id = l.node_id
+                 AND active.state IN ('running', 'paused'))
+         ORDER BY l.node_id")?;
     let ids = stmt.query_map([], |row| row.get(0))?.collect();
     ids
 }
@@ -1259,6 +1622,48 @@ pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
         params![run_id],
         |row| row.get(0),
     )
+}
+
+/// Archive and acknowledge cleanup together so a later manual resume cannot
+/// be mistaken for unfinished cleanup of the old circuit attempt.
+pub fn archive_circuit_agent(node_id: i64, claim: &str) -> SqlResult<Vec<(i64, String)>> {
+    archive_circuit_agent_inner(&super::write_conn(), node_id, claim)
+}
+
+pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim: &str) -> SqlResult<Vec<(i64, String)>> {
+    let tx = conn.unchecked_transaction()?;
+    let claim_matches: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_node_lifecycle_leases l
+            JOIN agent_nodes a ON a.id = l.node_id
+            WHERE l.node_id = ?1 AND a.status != 'archived'
+              AND l.cleanup_generation = ?2
+              AND l.cleanup_expires_at > unixepoch()
+              AND l.spawn_generation IS NULL
+              AND l.cleanup_requested = 1)",
+        params![node_id, claim],
+        |row| row.get(0),
+    )?;
+    if !claim_matches {
+        tx.commit()?;
+        return Ok(Vec::new());
+    }
+    super::update_agent_node_status_inner(&tx, node_id, crate::models::SessionStatus::Archived)?;
+    let runs = {
+        let mut statement = tx.prepare("SELECT DISTINCT r.id, r.state FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE s.agent_node_id=?1 AND r.state IN ('completed','failed','cancelled')")?;
+        let rows = statement.query_map(params![node_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<SqlResult<Vec<_>>>()?
+    };
+    tx.execute(
+        "UPDATE agent_node_lifecycle_leases
+         SET cleanup_generation = NULL, cleanup_expires_at = NULL,
+             cleanup_requested = 0, retired = 1, updated_at = unixepoch()
+         WHERE node_id = ?1 AND cleanup_generation = ?2",
+        params![node_id, claim],
+    )?;
+    tx.commit()?;
+    Ok(runs)
 }
 
 /// **Admitted** circuit runs on this mesh (issue #1467) — the input to
@@ -1338,7 +1743,9 @@ pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
 const SWEEPABLE_RUNS: &str = "\
     SELECT id FROM autopilot_circuit_runs r \
       WHERE r.state IN ('completed', 'failed') \
-        AND COALESCE(json_extract(r.context_json, '$.\"cleanup.pending\"'), '0') != '1' \
+        AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                        JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+                        WHERE s.run_id = r.id AND l.cleanup_requested = 1) \
         AND r.updated_at < datetime('now', '-' || ?1 || ' days') \
         AND (r.trigger_identity LIKE 'interval:%' OR r.trigger_identity LIKE 'manual:%') \
         AND r.created_at < (SELECT MAX(created_at) FROM autopilot_circuit_runs n \
@@ -1388,7 +1795,9 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     let compacted = conn.execute(
         "UPDATE autopilot_circuit_runs SET context_json = '{}' \
           WHERE state IN ('completed', 'failed') \
-            AND COALESCE(json_extract(context_json, '$.\"cleanup.pending\"'), '0') != '1' \
+            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                            JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
+                            WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
             AND updated_at < datetime('now', '-' || ?1 || ' days') \
             AND trigger_identity NOT LIKE 'interval:%' \
             AND trigger_identity NOT LIKE 'manual:%' \

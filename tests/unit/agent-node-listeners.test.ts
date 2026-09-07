@@ -46,6 +46,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
+    patchCircuitOwnershipState: spy('patchCircuitOwnershipState', () => {}),
     setSemanticTurn: spy('setSemanticTurn', () => {}),
     findAgentNode: spy('findAgentNode', (id: number) =>
       nodes.find(n => n.id === id),
@@ -124,6 +125,31 @@ describe('attachAgentNodeListeners', () => {
 
     unlisten();
     expect(unlistenFns).toHaveLength(12);
+  });
+
+  it('reconciles Circuit ownership for every live and terminal run transition', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'circuit-run-updated') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    for (const state of ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled']) {
+      capturedHandler!({ payload: { run_id: 9, state } });
+    }
+    capturedHandler!({ payload: { run_id: 9, state: 'unknown' } });
+    await Promise.resolve();
+
+    expect(surface.__calls).toEqual(
+      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(state => ({
+        method: 'patchCircuitOwnershipState',
+        args: [9, state],
+      })),
+    );
   });
 
   // The narrow surface contract: every handler must dispatch to the

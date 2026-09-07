@@ -118,7 +118,7 @@ describe('Settings — autopilot pool size', () => {
     // While the draft is uncommitted, the nav rail flags the General pane.
     screen.getByTestId('settings-tab-dirty-general');
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     screen.getByTestId('modal-discard-banner');
     // Opening the banner focuses its Cancel button, which blurs the input —

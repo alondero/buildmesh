@@ -25,6 +25,7 @@ import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { useNodeActivityStore } from './stores/nodeActivityStore';
 import { useExitPromptStore } from './stores/exitPromptStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
@@ -385,7 +386,7 @@ function App() {
       const visibleNodes = groupActivityNodes(scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls()), nodeIndex, ownerships);
       const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships), direction);
       if (targetId !== null) {
-        useAgentNodeStore.getState().setActiveNode(targetId);
+        useNodeActivityStore.getState().activateNode(targetId);
       }
     };
 

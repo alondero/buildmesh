@@ -45,19 +45,17 @@
  * The outside-mousedown close path is already shared via `useClickOutside`
  * (#492). Viewport-clamping for CSS-anchored menus lives in
  * `useViewportClamp`; trigger-relative fixed menus use
- * `useAnchoredPosition`. `KebabActions` in `GridNodeHeader.tsx` has a
- * different keyboard shape (no Home/End, no wrap), so it's intentionally
- * left out —
- * the issue's "third instance is the threshold" rule hasn't been met
- * by a fourth menu yet.
+ * `useAnchoredPosition`. Callers with nested submenus can scope
+ * `itemSelector` to their own items, and `skipDisabled` keeps roving focus
+ * on actionable entries.
  */
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
 export interface UseAriaMenuOptions {
   /** Ref to the menu root. The focus-gate reads `rootRef.current.contains(activeElement)`. */
   rootRef: RefObject<HTMLElement | null>;
-  /** Number of menuitems currently rendered. The arrow handler wraps modulo this. */
-  itemCount: number;
+  /** Optional number of menuitems. When omitted, the rendered item selector is authoritative. */
+  itemCount?: number;
   /** Current roving-tabindex position. */
   activeIndex: number;
   /** Setter for the roving-tabindex position. */
@@ -75,6 +73,10 @@ export interface UseAriaMenuOptions {
    * `false`, neither side-effect runs. Default `true`.
    */
   enabled?: boolean;
+  /** Selector for this menu's own items when it contains a nested menu. */
+  itemSelector?: string;
+  /** Skip disabled menuitems while moving focus. */
+  skipDisabled?: boolean;
 }
 
 export function useAriaMenu({
@@ -85,6 +87,8 @@ export function useAriaMenu({
   onClose,
   closeOnTab = true,
   enabled = true,
+  itemSelector = '[role="menuitem"]',
+  skipDisabled = false,
 }: UseAriaMenuOptions): void {
   // Mirror state into refs so the document-level listener (attached on
   // mount, torn down on unmount) always sees the LIVE values without
@@ -111,7 +115,7 @@ export function useAriaMenu({
       const active = document.activeElement;
       if (!(active instanceof Node) || !root.contains(active)) return;
 
-      const total = itemCountRef.current;
+      const total = itemCountRef.current ?? root.querySelectorAll<HTMLElement>(itemSelector).length;
       if (total === 0) return;
 
       if (e.key === 'Escape') {
@@ -127,29 +131,27 @@ export function useAriaMenu({
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        const next = (activeIndexRef.current + 1) % total;
-        setActiveIndex(next);
-        focusMenuItem(root, next);
+        const next = focusMenuItem(root, (activeIndexRef.current + 1) % total, itemSelector, skipDisabled, 1);
+        if (next !== null) setActiveIndex(next);
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        const next = (activeIndexRef.current - 1 + total) % total;
-        setActiveIndex(next);
-        focusMenuItem(root, next);
+        const next = focusMenuItem(root, (activeIndexRef.current - 1 + total) % total, itemSelector, skipDisabled, -1);
+        if (next !== null) setActiveIndex(next);
         return;
       }
       if (e.key === 'Home') {
         e.preventDefault();
-        setActiveIndex(0);
-        focusMenuItem(root, 0);
+        const next = focusMenuItem(root, 0, itemSelector, skipDisabled, 1);
+        if (next !== null) setActiveIndex(next);
         return;
       }
       if (e.key === 'End') {
         e.preventDefault();
         const last = total - 1;
-        setActiveIndex(last);
-        focusMenuItem(root, last);
+        const next = focusMenuItem(root, last, itemSelector, skipDisabled, -1);
+        if (next !== null) setActiveIndex(next);
         return;
       }
     };
@@ -159,7 +161,7 @@ export function useAriaMenu({
     };
     // The listener attachment is keyed only on `enabled` and `closeOnTab`.
     // `rootRef` and the state setters are stable across renders.
-  }, [enabled, closeOnTab, rootRef]);
+  }, [enabled, closeOnTab, rootRef, itemSelector, skipDisabled]);
 
   // Auto-focus the first menuitem on mount (WAI-ARIA menu contract).
   // `useLayoutEffect` (not `useEffect`) — the layout effect fires
@@ -172,11 +174,11 @@ export function useAriaMenu({
     // Reset to the first item whenever the menu (re)mounts. Set the
     // index synchronously so the roving tabindex render passes `0` to
     // the first menuitem before paint.
-    setActiveIndex(0);
-    focusMenuItem(root, 0);
+    const first = focusMenuItem(root, 0, itemSelector, skipDisabled, 1);
+    if (first !== null) setActiveIndex(first);
     // Re-run only when `enabled` flips — the menu's open/close is the
     // gate, and the layout effect mirrors the lifetime of the listener.
-  }, [enabled, rootRef, setActiveIndex]);
+  }, [enabled, rootRef, setActiveIndex, itemSelector, skipDisabled]);
 }
 
 /**
@@ -187,7 +189,16 @@ export function useAriaMenu({
  * selector matches the WAI-ARIA `menuitem` role; the per-component
  * roving tabindex attributes are left to the component.
  */
-function focusMenuItem(root: HTMLElement, index: number): void {
-  const all = root.querySelectorAll<HTMLElement>('[role="menuitem"]');
-  all[index]?.focus();
+function focusMenuItem(root: HTMLElement, index: number, itemSelector: string, skipDisabled: boolean, direction: 1 | -1): number | null {
+  const all = root.querySelectorAll<HTMLElement>(itemSelector);
+  if (all.length === 0) return null;
+  for (let step = 0; step < all.length; step += 1) {
+    const candidateIndex = (index + direction * step + all.length) % all.length;
+    const candidate = all[candidateIndex];
+    const disabled = candidate instanceof HTMLButtonElement && candidate.disabled;
+    if (skipDisabled && (disabled || candidate.getAttribute('aria-disabled') === 'true')) continue;
+    candidate.focus();
+    return candidateIndex;
+  }
+  return null;
 }

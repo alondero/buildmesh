@@ -276,4 +276,36 @@ test.describe('verify-smoke (issue #157)', () => {
     // renderers (DOM and WebGL).
     await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
   });
+
+  test('utility tabs fill the body and preserve terminal and keyboard state across switches', async ({ page }) => {
+    await page.goto('/');
+    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    const header = page.getByTestId('grid-node-header');
+    await header.getByRole('button', { name: 'Open build menu' }).click();
+    await page.getByRole('menuitem', { name: /^Terminal/ }).click();
+    const panel = page.getByRole('tabpanel');
+    await expect(panel.locator('.xterm')).toHaveCount(1);
+    await expect(panel.locator('.xterm')).toBeVisible();
+    expect(await panel.locator(`[data-node-id="${SMOKE_NODE_ID}"]`).count()).toBe(0);
+    const utilityElement = await panel.locator('.xterm').elementHandle();
+    const panelBounds = await panel.boundingBox();
+    const terminalBounds = await panel.locator('.xterm').boundingBox();
+    expect(terminalBounds!.height).toBeGreaterThan(panelBounds!.height * 0.9);
+
+    const utilityTab = page.getByRole('tab', { name: /^Terminal/ });
+    const agentTab = page.getByRole('tab', { name: /^Agent/ });
+    await utilityTab.focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect(panel.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`)).toBeVisible();
+    await expect(agentTab).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await expect(panel.locator('.xterm')).toHaveCount(1);
+    await expect(utilityTab).toBeFocused();
+    expect(await panel.locator('.xterm').evaluate((element, previous) => element === previous, utilityElement)).toBe(true);
+
+    await page.getByRole('button', { name: /^Close Terminal/ }).click();
+    await expect(page.getByRole('tablist', { name: 'Node activities' })).toHaveCount(0);
+    await expect(page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`)).toBeVisible();
+    await utilityElement?.dispose();
+  });
 });

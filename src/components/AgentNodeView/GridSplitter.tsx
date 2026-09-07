@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
@@ -207,7 +208,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
   };
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
 
   const totalHandleHeightPct = ((rows - 1) * SPLITTER_HANDLE_WIDTH / containerSize.height) * 100;
 
@@ -245,7 +246,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
                       nodeId={node.id}
                       memberIds={activityMembersByRoot[node.id] ?? [node.id]}
                       isActive={node.id === activeNodeId}
-                      onActivate={setActiveNode}
+                      onActivate={activateNode}
                       draggable={draggable}
                     />
                     {colIdx < rowCount - 1 && (

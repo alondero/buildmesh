@@ -289,6 +289,10 @@ interface AgentNodeState {
   toggleNodePinned: (nodeId: number) => Promise<AgentNode>;
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
+  /** Select the active agent entity. Activity-tab navigation is owned by
+   * `useNodeActivityStore.activateNode`, which coordinates both stores at
+   * the UI boundary without adding transient view state here.
+   */
   setActiveNode: (id: number | null) => void;
   spawnAgent: (
     nodeId: number,
@@ -324,6 +328,7 @@ interface AgentNodeState {
   // future refactor needs the same seam.
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  patchCircuitOwnershipState: (runId: number, state: string) => void;
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   initAttentionListeners: () => Promise<void>;
@@ -357,6 +362,11 @@ export function useAllAgentNodes(): AgentNode[] {
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
+  // Serialize full refreshes. Circuit state changes patch the ownership map
+  // directly; other callers that refresh during an in-flight read share one
+  // trailing refresh instead of opening competing IPC/database snapshots.
+  let fetchInFlight: Promise<void> | null = null;
+  let queuedFetch: Promise<void> | null = null;
   // Issue #1054 — shared `OptimisticSurface` for the three sites
   // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
   // route through `withOptimistic`. Built once per `create()` call so
@@ -407,80 +417,96 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     return node?.mesh_id ?? null;
   },
 
-  fetchAgentNodes: async () => {
-    set({ loading: true, error: null });
-    try {
-      // Autopilot states ride along with every node refresh, but their
-      // failure must never blank the node list — degrade to "no pills".
-      const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
-        api.listAgentNodes(),
-        api.listAutopilotRuns().catch(() => []),
-        api.listCircuitAgentOwnerships().catch(() => Object.values(get().circuitOwnerships)),
-        api.listSemanticTurns().catch(() => []),
-      ]);
-      const autopilotStates = Object.fromEntries(
-        (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
-      );
-      // Issue #1384 — shallow reconciliation. For each incoming node, check
-      // against the existing entry under the same id; if all reconciled
-      // fields match, keep the old object reference. The new `nodesById`
-      // and `nodeIds` are always fresh containers (so Zustand subscribers
-      // re-evaluate), but the per-id references they hold are the original
-      // objects for unchanged nodes — `state.nodesById[id]` is the same
-      // reference as before, and per-id selectors skip the render.
-      const oldById = get().nodesById;
-      const newById: Record<number, AgentNode> = {};
-      const newIds: number[] = [];
-      for (const n of agentNodes) {
-        const old = oldById[n.id];
-        newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
-        newIds.push(n.id);
+  fetchAgentNodes: () => {
+    if (fetchInFlight) {
+      if (!queuedFetch) {
+        const inFlight = fetchInFlight;
+        queuedFetch = inFlight.then(() => {
+          queuedFetch = null;
+          return get().fetchAgentNodes();
+        });
       }
-      // Issue #1252 — a schedule that outlives its target node would
-      // fire `send_to_agent` (or `write_to_agent` for the empty-message
-      // "hit Enter" sentinel) at an archived node, the backend would
-      // reject, and App.tsx's generic "System" toast pipeline would
-      // surface a spurious error minutes after the user moved on. The
-      // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
-      // routes through here, so every archive transition sweeps
-      // schedules for free — without this, the only cancellation path
-      // was `deleteAgentNode`, which the archive path never invokes.
-      //
-      // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
-      // is a side effect we don't want running twice under React
-      // StrictMode. We keep the same object reference when nothing was
-      // cancelled, so subscribers that read `state.schedules` don't
-      // re-render on every fetch (the steady-state autopilot case).
-      const oldSchedules = get().schedules;
-      const keptSchedules: Record<number, ScheduledTask> = {};
-      for (const idStr of Object.keys(oldSchedules)) {
-        const id = Number(idStr);
-        const node = newById[id];
-        if (node && node.status !== 'archived') {
-          keptSchedules[id] = oldSchedules[id];
-        } else {
-          clearTimeout(oldSchedules[id].timeoutId);
-        }
-      }
-      const schedulesChanged =
-        Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
-      set({
-        nodesById: newById,
-        nodeIds: newIds,
-        autopilotStates,
-        circuitOwnerships: Object.fromEntries(
-          (Array.isArray(circuitOwnerships) ? circuitOwnerships : []).map((ownership) => [
-            ownership.node_id,
-            ownership,
-          ]),
-        ),
-        semanticTurns: Object.fromEntries((Array.isArray(semanticTurns) ? semanticTurns : []).map((turn) => [turn.node_id, turn])),
-        loading: false,
-        ...(schedulesChanged && { schedules: keptSchedules }),
-      });
-    } catch (e) {
-      set({ error: formatError(e), loading: false });
+      return queuedFetch;
     }
+    const refresh = (async () => {
+      set({ loading: true, error: null });
+      try {
+        // Satellite reads fail independently. A transient failure preserves
+        // the last known satellite state instead of clearing a live path.
+        const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
+          api.listAgentNodes(),
+          api.listAutopilotRuns().catch(() => null),
+          api.listCircuitAgentOwnerships().catch(() => null),
+          api.listSemanticTurns().catch(() => null),
+        ]);
+        const autopilotStates = !Array.isArray(autopilotRuns)
+          ? get().autopilotStates
+          : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
+        // Issue #1384 — shallow reconciliation. For each incoming node, check
+        // against the existing entry under the same id; if all reconciled
+        // fields match, keep the old object reference. The new `nodesById`
+        // and `nodeIds` are always fresh containers (so Zustand subscribers
+        // re-evaluate), but the per-id references they hold are the original
+        // objects for unchanged nodes — `state.nodesById[id]` is the same
+        // reference as before, and per-id selectors skip the render.
+        const oldById = get().nodesById;
+        const newById: Record<number, AgentNode> = {};
+        const newIds: number[] = [];
+        for (const n of agentNodes) {
+          const old = oldById[n.id];
+          newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
+          newIds.push(n.id);
+        }
+        // Issue #1252 — a schedule that outlives its target node would
+        // fire `send_to_agent` (or `write_to_agent` for the empty-message
+        // "hit Enter" sentinel) at an archived node, the backend would
+        // reject, and App.tsx's generic "System" toast pipeline would
+        // surface a spurious error minutes after the user moved on. The
+        // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
+        // routes through here, so every archive transition sweeps
+        // schedules for free — without this, the only cancellation path
+        // was `deleteAgentNode`, which the archive path never invokes.
+        //
+        // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
+        // is a side effect we don't want running twice under React
+        // StrictMode. We keep the same object reference when nothing was
+        // cancelled, so subscribers that read `state.schedules` don't
+        // re-render on every fetch (the steady-state autopilot case).
+        const oldSchedules = get().schedules;
+        const keptSchedules: Record<number, ScheduledTask> = {};
+        for (const idStr of Object.keys(oldSchedules)) {
+          const id = Number(idStr);
+          const node = newById[id];
+          if (node && node.status !== 'archived') {
+            keptSchedules[id] = oldSchedules[id];
+          } else {
+            clearTimeout(oldSchedules[id].timeoutId);
+          }
+        }
+        const schedulesChanged =
+          Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
+        set({
+          nodesById: newById,
+          nodeIds: newIds,
+          autopilotStates,
+          circuitOwnerships: !Array.isArray(circuitOwnerships)
+            ? get().circuitOwnerships
+            : Object.fromEntries(circuitOwnerships.map((ownership) => [ownership.node_id, ownership])),
+          semanticTurns: !Array.isArray(semanticTurns)
+            ? get().semanticTurns
+            : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
+          loading: false,
+          ...(schedulesChanged && { schedules: keptSchedules }),
+        });
+      } catch (e) {
+        set({ error: formatError(e), loading: false });
+      }
+    })();
+    const trackedRefresh = refresh.finally(() => {
+      if (fetchInFlight === trackedRefresh) fetchInFlight = null;
+    });
+    fetchInFlight = trackedRefresh;
+    return trackedRefresh;
   },
 
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
@@ -499,6 +525,19 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
   patchAutopilotState: (id, state) => {
     set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
+  },
+  patchCircuitOwnershipState: (runId, state) => {
+    set((current) => {
+      let changed = false;
+      const circuitOwnerships = Object.fromEntries(
+        Object.entries(current.circuitOwnerships).map(([nodeId, ownership]) => {
+          if (ownership.run_id !== runId || ownership.state === state) return [nodeId, ownership];
+          changed = true;
+          return [nodeId, { ...ownership, state }];
+        }),
+      );
+      return changed ? { circuitOwnerships } : current;
+    });
   },
   findAgentNode: (id) => get().nodesById[id],
 
@@ -523,6 +562,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,
+          patchCircuitOwnershipState: get().patchCircuitOwnershipState,
           setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
         });
@@ -822,16 +862,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     await persistPositions(set, get, swapped);
   },
 
-  setActiveNode: (id) => {
-    // Explicit navigation changes the entity focus. Utility and member tab
-    // selection are deliberately handled by the activity-card UI.
-    // The entity store owns navigation only; transient activity tab state
-    // lives in the activity store and is updated by UI-level actions.
-    // A plain synchronous state write — the active-node highlight, terminal
-    // focus, and file-watch all key off activeNodeId, so the switch must feel
-    // instant with no backend round-trip in the way.
-    set({ activeNodeId: id });
-  },
+  setActiveNode: (id) => { set({ activeNodeId: id }); },
 
   spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {
     const options: SpawnAgentOptions =

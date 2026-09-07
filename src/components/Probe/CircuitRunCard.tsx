@@ -39,10 +39,12 @@ import {
 import {
   activityStatusToken,
   runActivity,
+  reviewResult,
   runStateLabel,
   runStepProgress,
   stepStatusLabel,
   type CircuitCapacity,
+  type ReviewCircuitMetadata,
 } from '../Circuits/runDiagnostics';
 
 interface CircuitRunCardProps {
@@ -57,6 +59,7 @@ interface CircuitRunCardProps {
   onResume: () => void;
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
+  reviewCircuit: ReviewCircuitMetadata | null;
 }
 
 export function CircuitRunCard({
@@ -70,9 +73,11 @@ export function CircuitRunCard({
   onResume,
   onCancel,
   onApprove,
+  reviewCircuit,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
   const activity = runActivity(run, steps, capacity);
+  const review = reviewResult(detail, reviewCircuit);
   const progress = runStepProgress(steps);
   const duration = runDurationMs(run, now);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');
@@ -111,12 +116,12 @@ export function CircuitRunCard({
           </span>
           <span className="text-2xs font-mono text-text-muted shrink-0">#{run.id}</span>
           <span
-            className={`text-xs ${statusTextClass(run.state)} ${
+            className={`text-xs ${statusTextClass(review?.needsAttention ? 'failed' : run.state)} ${
               run.state === 'running' ? 'animate-pulse' : ''
             }`}
             data-testid={`run-state-${run.id}`}
           >
-            {runStateLabel(run.state)}
+            {review?.label ?? runStateLabel(run.state)}
           </span>
           {duration !== null && (
             <span className="text-2xs text-text-muted shrink-0">
@@ -145,8 +150,8 @@ export function CircuitRunCard({
           className="mt-0.5 flex items-baseline gap-1 flex-wrap text-2xs"
           data-testid={`run-activity-${run.id}`}
         >
-          <span className={statusTextClass(activityStatusToken(activity.kind, run.state))}>
-            {activity.label}
+          <span className={statusTextClass(review?.needsAttention ? 'failed' : activityStatusToken(activity.kind, run.state))}>
+            {review?.needsAttention ? 'Needs attention' : activity.label}
           </span>
           {activity.nodeId !== null && (
             <span className="font-mono text-text-secondary break-words min-w-0">
@@ -163,6 +168,8 @@ export function CircuitRunCard({
           </span>
         )}
       </button>
+
+      {review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
 
       {/* Controls. Outside the disclosure button — nesting a button inside
           a button is invalid HTML and breaks keyboard semantics. */}

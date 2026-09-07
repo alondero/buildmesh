@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
 import { getMeshColor } from '../../src/lib/meshColors';
-import type { AgentNode } from '../../src/stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -166,5 +166,47 @@ describe('NodeItem', () => {
       expect(row.style.getPropertyValue('--mesh-bg')).toBe('');
       expect(row.style.getPropertyValue('--mesh-bg-hover')).toBe('');
     });
+
+  });
+
+  it('keeps the 14px ownership cell aligned while hiding unpiloted indicators', () => {
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    const { container, rerender } = render(
+      <NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />,
+    );
+    const cell = container.querySelector('[data-testid="autopilot-indicator-cell"]')!;
+    expect(cell.className).toContain('w-3.5');
+    expect(cell.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+
+    useAgentNodeStore.setState({ autopilotStates: { 10: 'implementing' } });
+    rerender(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Autopilot active' })).toBeTruthy();
+  });
+
+  it('uses Circuit ownership for the terminal Done indicator', () => {
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
+      10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
+    } });
+    render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy();
+  });
+
+  it('does not suppress lost-conversation recovery for terminal Circuit history', () => {
+    const node = makeNode({ status: 'suspended', cli_session_id: '' });
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
+      10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
+    } });
+    render(<NodeItem node={node} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByText('Missing session ID')).toBeTruthy();
+  });
+
+  it('uses the same waiting and failure presentations as the canvas header', () => {
+    useAgentNodeStore.setState({ autopilotStates: { 10: 'finishing' }, circuitOwnerships: {} });
+    const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Autopilot waiting' })).toBeTruthy();
+
+    useAgentNodeStore.setState({ autopilotStates: { 10: 'failed' }, circuitOwnerships: {} });
+    rerender(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Autopilot needs attention' })).toBeTruthy();
   });
 });

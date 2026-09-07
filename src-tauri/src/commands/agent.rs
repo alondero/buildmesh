@@ -160,16 +160,23 @@ pub struct SpawnAgentRequest {
 /// combined on the wire.
 #[command]
 pub async fn spawn_agent(app: AppHandle, request: SpawnAgentRequest) -> Result<(), String> {
+    let intent = request.intent.into_spawn_intent();
+    let spawn_request = SpawnRequest::new(
+        request.session_id,
+        intent.clone(),
+        TerminalSize {
+            rows: request.rows.unwrap_or(24),
+            cols: request.cols.unwrap_or(80),
+        },
+    );
+    let spawn_request = if matches!(intent, SpawnIntent::Resume { .. }) {
+        spawn_request.with_lifecycle_lease()
+    } else {
+        spawn_request
+    };
     crate::agent::spawn::spawn_with_intent(
         &app,
-        SpawnRequest::new(
-            request.session_id,
-            request.intent.into_spawn_intent(),
-            TerminalSize {
-                rows: request.rows.unwrap_or(24),
-                cols: request.cols.unwrap_or(80),
-            },
-        ),
+        spawn_request,
     )
     .await
     .map(|_| ())
@@ -775,7 +782,7 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
                     cause: crate::agent::spawn::ResumeCause::Startup,
                 },
                 TerminalSize::default(),
-            ),
+            ).with_lifecycle_lease(),
         )
         .await
         {
@@ -857,72 +864,20 @@ mod tests {
     // the corresponding test rather than silently regress to the legacy
     // `base_ref`-fallback path on stage-2.
 
-    /// Serialises tests that touch the global DB — `db::init` is a one-shot
-    /// OnceCell and the test files share one process. Held for the duration
-    /// of every test in this section.
+    /// Serialises tests that touch the global DB. Held for the duration
+    /// of every test in this section so the per-test fixtures (mesh
+    /// rows, worktrees) can't observe each other's mutations. This is
+    /// orthogonal to DB init — the shared helper
+    /// `db::test_support::ensure_db_for_tests` handles the one-shot
+    /// `db::init` so we don't need a local `Once` here.
     static PR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// One-shot guard for `db::init`. The first test to run triggers
-    /// initialisation; subsequent tests see the Once has fired and skip.
-    /// `std::sync::Once` is process-scoped, so this is automatically
-    /// correct across the whole `cargo test` invocation — unlike a
-    /// marker file, which persists across runs and would let the
-    /// (process-fresh) DB OnceCell stay `None` on the next run.
-    ///
-    /// We combine this with a `db::is_initialized()` check so we don't
-    /// race with other test files (e.g. `db::mesh_tests`) that also
-    /// call `db::init` directly: whichever test runs first wins, and
-    /// the other tests see "already initialised" and skip without
-    /// unwrapping the error (which is what those tests do, and why
-    /// they break if we beat them to it).
-    static DB_INIT: std::sync::Once = std::sync::Once::new();
-
-    /// Per-process scratch path for the test DB. `db::init` is one-shot,
-    /// so the first test to call this picks a path and every later
-    /// call gets the same one — fine because the global DB static
-    /// remembers the result regardless of path.
-    ///
-    /// The path ends in `.db` because `db::init` calls
-    /// `Connection::open(path)`, which expects a *file* (not a
-    /// directory). A bare `temp_dir()/buildmesh_pr_node_test_<pid>` would
-    /// create a directory, and `Connection::open` would fail with
-    /// "Not a database" (or, on first open, succeed but then
-    /// misbehave). `db::mesh_tests` uses the same `*.db` suffix — the
-    /// shape is the contract.
-    fn pr_test_db_path() -> std::path::PathBuf {
-        use std::sync::OnceLock;
-        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let p = std::env::temp_dir().join(format!(
-                "buildmesh_pr_node_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&p);
-            p
-        })
-        .clone()
-    }
-
-    /// `db::init` the global DB if it hasn't been already. Called from
-    /// each test that touches `create_pr_node_impl` (the function reads
-    /// `db::get_mesh_by_id` which panics on an uninitialised DB).
-    ///
-    /// The `DB` static is a one-shot `OnceCell` — if another test in the
-    /// same binary (e.g. `db::mesh_tests`) already initialised it to a
-    /// different path, we leave it alone: the schema is identical
-    /// (always migrated to the current `SCHEMA_VERSION`), and
-    /// `db::create_mesh` / `db::get_mesh_by_id` operate on whichever
-    /// DB is global — so we share whatever the other test set up. The
-    /// `db::is_initialized()` check is the polite form of "don't
-    /// trample a peer's init" so `db::mesh_tests` doesn't break on
-    /// `.unwrap()`.
+    /// Initialise the global DB exactly once per test process, then
+    /// acquire `PR_TEST_LOCK` so the test's mutations don't race with
+    /// sibling tests. `db::test_support::ensure_db_for_tests` does the
+    /// init; the lock acquisition serialises the *body*.
     fn ensure_pr_db() {
-        if crate::db::is_initialized() {
-            return;
-        }
-        DB_INIT.call_once(|| {
-            let _ = crate::db::init(&pr_test_db_path());
-        });
+        crate::db::test_support::ensure_db_for_tests();
     }
 
     /// Create a temp git repo with a known `origin` URL, and insert a

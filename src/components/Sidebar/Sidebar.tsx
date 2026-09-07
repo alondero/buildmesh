@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { useProviderList } from '../../hooks/useProviderList';
@@ -44,7 +45,7 @@ export function Sidebar() {
   // changes (useShallow equality on the underlying selector).
   const agentNodes = useAllAgentNodes();
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   // Issue #376 / #378: open the unified Probe Panel on a specific tab.
@@ -137,7 +138,8 @@ export function Sidebar() {
     // The create→activate→select-mesh dance + its rollback contract live in
     // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
-      await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
+      const node = await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
+      activateNode(node.id);
     } catch (e) {
       console.error('Failed to create node:', e);
     } finally {
@@ -232,7 +234,7 @@ export function Sidebar() {
                       // `visibleNodes` filter in src/mobile/screens/NodeList.tsx).
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id && w.status !== 'archived')}
                       activeNodeId={activeNodeId}
-                      setActiveNode={setActiveNode}
+                      onActivateNode={activateNode}
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}
                       getDefaultProvider={getDefaultProvider}

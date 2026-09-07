@@ -22,6 +22,7 @@ import { Modal, ModalCloseButton } from '../shared/Modal';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { isWindows } from '../../lib/platform';
+import { useSettingsResources, type ResourceKey, type ResourceState } from './useSettingsResources';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -59,6 +60,31 @@ function paneForDirtySite(site: string): SettingsTabId {
   return 'providers';
 }
 
+/** Per-field editable overlays. Each field is independently tracked:
+ *  - key absent from the object → user hasn't touched this field; the
+ *    card renders the value from `account`.
+ *  - key present → the user's override for that field. `null` for
+ *    `api_key` means "user explicitly cleared the key"; the absence of
+ *    the key means "field is pristine, follow account".
+ *
+ *  Per-field tracking (not a monolithic snapshot) is what fixes the
+ *  field-shadowing bug from the round-3 review (Finding 2): editing only
+ *  `api_key` no longer freezes a snapshot of `billing_mode`, so a
+ *  concurrent server-side billing change rides through to the IPC payload
+ *  instead of being clobbered by the user's stale snapshot. */
+type EditOverrides = {
+  api_key?: string | null;
+  billing_mode?: ProviderAccount['billing_mode'];
+};
+
+/** Normalise empty-string api_key to null on the way in. The Rust side
+ *  sometimes serialises empty keys as `""` rather than `null`; treating
+ *  those as the same value lets the smart collapse actually collapse
+ *  when the user backspaces to empty. */
+function normalizeApiKey(value: string | null | undefined): string | null {
+  return value ? value : null;
+}
+
 export function AccountCard({
   account,
   onSave,
@@ -69,29 +95,88 @@ export function AccountCard({
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
   /**
-   * Fires with `true` when the editable draft diverges from the saved
-   * `account`, and `false` when they match again (or when the card
-   * unmounts). The parent aggregates these signals across the modal so a
-   * stray backdrop click can prompt before destroying half-typed credentials
-   * (issue #730).
+   * Fires with `true` when the card has uncommitted edits, `false` when
+   * it returns to pristine, AND `false` on unmount so the modal's discard
+   * banner doesn't leak a stale dirty site. The parent aggregates these
+   * signals across the modal so a stray backdrop click can prompt before
+   * destroying half-typed credentials (issue #730). The unmount cleanup
+   * is a documented contract — the round-3 review flagged that omitting
+   * it trapped users with the discard banner after removing a dirty card.
    */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [draft, setDraft] = useState<ProviderAccount>(account);
+  // Issue #1535 (round 4, PR #1636 review round 3): per-field overrides
+  // replace the round-3 nullable snapshot. isDirty is derived purely from
+  // `Object.keys(overrides).length > 0` — no ref, no imperative flag, no
+  // nullable-snapshot distinction to manage. The display reads the
+  // override if present, otherwise `account.*` directly. The toggle does
+  // not touch overrides, so it cannot erase typed edits (Finding 1).
+  const [overrides, setOverrides] = useState<EditOverrides>({});
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setDraft(account), [account]);
-  useEffect(() => setConfirmingRemove(false), [account.id]);
+  // Baseline = the latest `account` prop's editable values, normalised
+  // (empty-string api_key collapses to null). Display values fall through
+  // the override first, then the baseline. The fall-through chain means
+  // prop changes are reflected automatically with no useEffect — the bug
+  // round-1/2/3 all danced around is gone by construction.
+  const baselineApiKey = normalizeApiKey(account.api_key);
+  const baselineBillingMode = account.billing_mode;
+  const apiKeyDisplay =
+    overrides.api_key !== undefined ? overrides.api_key : baselineApiKey;
+  const billingDisplay =
+    overrides.billing_mode !== undefined
+      ? overrides.billing_mode
+      : baselineBillingMode;
+  // Pure derivation: isDirty is the count of touched fields. No ref, no
+  // imperative flag.
+  const isDirty = Object.keys(overrides).length > 0;
 
-  // Dirty = editable fields diverge from the saved account (API key + billing).
-  const isDirty = useMemo(() => {
-    if (draft.api_key !== account.api_key) return true;
-    if (draft.billing_mode !== account.billing_mode) return true;
-    if (draft.enabled !== account.enabled) return true;
-    return false;
-  }, [draft, account]);
+  // Per-field setters that remove the override when the user's edit
+  // matches the baseline (round-3 Finding 3 — backspacing to the
+  // original value automatically reverts). Editing one field never
+  // touches the other's override (round-4 Finding 2 — field-shadowing
+  // fix).
+  const editApiKey = useCallback(
+    (rawValue: string) => {
+      const next = normalizeApiKey(rawValue);
+      setOverrides(prev => {
+        if (next === baselineApiKey) {
+          // Revert: drop the api_key override. Preserve other overrides.
+          const { api_key: _dropped, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, api_key: next };
+      });
+      setError(null);
+    },
+    [baselineApiKey],
+  );
+
+  const editBillingMode = useCallback(
+    (value: ProviderAccount['billing_mode']) => {
+      setOverrides(prev => {
+        if (value === baselineBillingMode) {
+          const { billing_mode: _dropped, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, billing_mode: value };
+      });
+      setError(null);
+    },
+    [baselineBillingMode],
+  );
+
+  // account.id drives the confirmingRemove reset on row identity change
+  // (the account was removed and re-added with a different id).
+  useEffect(() => {
+    setConfirmingRemove(false);
+  }, [account.id]);
+
+  // Dirty notification (issue #730). Compare to `lastReportedDirtyRef` so
+  // we don't re-fire the parent's `setDirtySites` for every keystroke.
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -99,14 +184,38 @@ export function AccountCard({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
+  // Unmount cleanup: per the JSDoc on `onDirtyChange` (and issue #730's
+  // contract), fire `false` when the card unmounts so the modal's
+  // `dirtySites` set doesn't retain a stale site. Without this, removing
+  // a dirty card (or any unmount path) traps the user with the discard
+  // banner forever.
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.(false);
+    };
+    // The initial onDirtyChange closes over this card's account.id; the
+    // parent uses stable useCallback chains, so the captured reference
+    // is still valid at unmount time even though we don't list it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const removable = !isSelfAuthId(account.id);
   // Keyed providers show API key; self-auth hold no Buildmesh credentials.
   const showApiKey = account.claude_compatible;
   // Billing mode is first-class only (self-auth + keyed catalog).
   const showBilling = isFirstClassId(account.id);
 
+  // Toggle commits ONLY the enabled flag. The form draft is never touched
+  // — the typed API key (if any) survives the parent re-render that
+  // follows the IPC, because nothing in the toggle path sets `draft`. On
+  // failure the parent's existing top-level toast handles reporting; we
+  // do NOT set a card-local error because the inline alert's Retry button
+  // is wired to `saveDraft` (Finding 4). A toggle retry would need its
+  // own affordance — out of scope for this issue.
   const toggleEnabled = async (enabled: boolean) => {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       await onSave({ ...account, enabled });
     } finally {
@@ -114,10 +223,32 @@ export function AccountCard({
     }
   };
 
+  // Save composes the IPC payload from the latest `account` prop + the
+  // user's overrides. Server-side renames (`account.name`) ride along
+  // via the spread. Fields the user DIDN'T touch come from `account.*`
+  // — that's the field-shadowing fix (round-4 Finding 2): a server-side
+  // billing change is never clobbered by a stale snapshot from when the
+  // user started editing.
   const saveDraft = async () => {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
-      await onSave(draft);
+      const ok = await onSave({
+        ...account,
+        api_key: apiKeyDisplay,
+        billing_mode: billingDisplay,
+      });
+      if (ok) {
+        setOverrides({});
+      } else {
+        // Inline alert is the navigation affordance for the Retry button.
+        // The backend's actual error already surfaces in the parent's top-
+        // level toast, so we deliberately don't echo it here.
+        setError('Save failed');
+      }
+    } catch (e) {
+      setError(formatError(e));
     } finally {
       setBusy(false);
     }
@@ -203,10 +334,11 @@ export function AccountCard({
               <label className="block text-sm text-text-muted mb-1">API key</label>
               <input
                 type="password"
-                value={draft.api_key ?? ''}
-                onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
+                value={apiKeyDisplay ?? ''}
+                disabled={busy}
+                onChange={e => editApiKey(e.target.value)}
                 placeholder="Enter API key..."
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} API key`}
               />
               <p className="mt-1 text-sm text-text-muted">
@@ -218,9 +350,10 @@ export function AccountCard({
             <div>
               <label className="block text-sm text-text-muted mb-1">Billing</label>
               <select
-                value={draft.billing_mode}
-                onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                value={billingDisplay}
+                disabled={busy}
+                onChange={e => editBillingMode(e.target.value as ProviderAccount['billing_mode'])}
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} billing mode`}
               >
                 <option value="plan">Plan / subscription (percentage)</option>
@@ -228,7 +361,7 @@ export function AccountCard({
               </select>
             </div>
           )}
-          <div className="flex gap-3">
+          <div className="flex gap-3 items-center">
             <button
               onClick={saveDraft}
               disabled={busy}
@@ -237,6 +370,23 @@ export function AccountCard({
               {busy ? 'Saving...' : 'Save'}
             </button>
           </div>
+          {error && (
+            <div
+              role="alert"
+              data-testid="account-card-error"
+              className="flex items-center gap-2 text-sm text-status-error"
+            >
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={saveDraft}
+                disabled={busy}
+                className="underline hover:no-underline disabled:opacity-50"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -390,12 +540,202 @@ export function AddProviderForm({
   );
 }
 
+/** Per-resource load status surface (issue #1534). Renders a
+ *  loading message while in flight, and on failure an accessible
+ *  error banner with a Retry button that rehydrates ONLY this
+ *  resource (siblings stay where they are). Replaces the previous
+ *  shape where the global `loaded` flag flipped to `true` even after
+ *  a failure, leaving the user staring at placeholder default state
+ *  with no signal that anything went wrong.
+ *
+ *  Test-IDs follow the `resource-load-<key>` / `resource-load-<key>-retry`
+ *  convention so tests can target a specific resource's banner without
+ *  relying on prose that may change. */
+function ResourceLoadStatus({
+  resource,
+  state,
+  onRetry,
+}: {
+  resource: ResourceKey;
+  state: ResourceState;
+  /** Required for the `failed` banner (renders the Retry button);
+   *  unused by the `loading` branch. If `onRetry` is undefined on
+   *  a failed banner, we render an alert WITHOUT a Retry button
+   *  rather than a button that no-ops — round-5 review caught the
+   *  earlier "render the button unconditionally" hazard. */
+  onRetry?: () => void;
+}) {
+  if (state.status === 'failed') {
+    return (
+      <div
+        className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded-md px-3 py-2"
+        data-testid={`resource-load-${resource}`}
+        // Issue #1534 (review round 2) — the failure banner is an
+        // alert: screen readers announce it as soon as it appears
+        // (`role="alert"` implicitly maps to `aria-live="assertive"`)
+        // and a descriptive label gives the message a name beyond
+        // "alert". Without these, a user relying on assistive tech
+        // would never learn that the resource failed to load.
+        role="alert"
+        aria-live="assertive"
+        aria-label={`Couldn't load ${humanResourceName(resource)}`}
+      >
+        <span className="flex-1 text-base text-text-primary">
+          <span className="font-medium">Couldn’t load {humanResourceName(resource)}.</span>{' '}
+          <span className="text-text-muted">{state.error ?? 'Unknown error.'}</span>
+        </span>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="px-3 py-1 bg-accent-cyan/20 text-accent-cyan text-sm rounded-md hover:bg-accent-cyan/30"
+            data-testid={`resource-load-${resource}-retry`}
+            // Scoped aria-label so a screen reader user hears which
+            // resource this Retry button belongs to — multiple banners
+            // on the same pane (e.g. preferences + providers both
+          // failing) would otherwise announce two indistinguishable
+          // "Retry" buttons.
+          aria-label={`Retry loading ${humanResourceName(resource)}`}
+        >
+          Retry
+        </button>
+        )}
+      </div>
+    );
+  }
+  // loading (default branch — `idle` shouldn't reach the UI yet because
+  // the dependent resource hasn't fired; the only resource that starts
+  // at `idle` is pairings, which is rendered conditionally below).
+  return (
+    <p
+      className="text-base text-text-muted"
+      data-testid={`resource-load-${resource}-loading`}
+      // Polite live region so a screen reader announces the
+      // "Loading…" state change without interrupting whatever's
+      // mid-utterance. `role="status"` carries the implicit
+      // `aria-live="polite"`.
+      role="status"
+      aria-live="polite"
+    >
+      Loading {humanResourceName(resource)}…
+    </p>
+  );
+}
+
+/** Friendly pane name for a resource (issue #1534). Used in the
+ *  per-resource banner so the message reads naturally ("Couldn't load
+ *  paired devices" rather than "Couldn't load devices"). Kept
+ *  inline-only — it's not a domain term the rest of the codebase
+ *  needs. */
+function humanResourceName(resource: ResourceKey): string {
+  switch (resource) {
+    case 'preferences':
+      return 'preferences';
+    case 'providers':
+      return 'providers';
+    case 'accounts':
+      return 'provider accounts';
+    case 'pairings':
+      return 'harness pairings';
+    case 'coordinator':
+      return 'coordinator status';
+    case 'devices':
+      return 'paired devices';
+    case 'network':
+      return 'network status';
+  }
+}
+
 export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  // Issue #1534 — replace the global `loaded: boolean` with per-resource
+  // status. The previous flag was set true even on full failure (the
+  // catch block still called `setLoaded(true)`), which let placeholder
+  // initial state render as authoritative and gave the user writable
+  // controls backed by no real data. Each control now refuses to act
+  // until its backing resource has loaded; failed resources render an
+  // accessible error + Retry and never claim "zero accounts / no
+  // compatible providers / no paired devices" when the real answer is
+  // "we couldn't read the answer".
+  //
+  // Review feedback round 2: collapsed seven `useState<ResourceState>`
+  // hooks into one `Record<ResourceKey, ResourceState>` so adding a new
+  // resource is type-checked (omitting the key from `INITIAL_RESOURCES`
+  // Issue #1534 (review round 5) — the resource state machine is
+  // now owned by `useSettingsResources`. The hook owns the
+  // per-resource status + error + request-id tokens, and exposes
+  // loaders + a `retryResource` handler. The modal retains its
+  // derived state (providers list, accounts, pairings, verifications,
+  // etc.) and wires `onXLoaded` callbacks into the hook so the
+  // loaders commit data through the modal's setters.
+  const {
+    resources,
+    loadPreferences,
+    loadProviders,
+    loadAccounts,
+    loadPairings,
+    loadCoordinator,
+    loadDevices,
+    loadNetwork,
+    retryResource,
+  } = useSettingsResources({
+    onPreferencesLoaded: (prefs) => {
+      const stored = prefs.default_provider;
+      setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+      const storedNaming = prefs.naming_provider;
+      setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
+      const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
+      setPoolDraft(storedPool);
+      poolSavedRef.current = storedPool;
+      const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
+      setWorktreeDirDraft(storedWorktreeDir);
+      worktreeDirSavedRef.current = storedWorktreeDir;
+      useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
+      setHarnessDefaults(prefs.harness_defaults ?? {});
+    },
+    onProvidersLoaded: (list) => {
+      setProviders(list);
+      providersRef.current = list;
+    },
+    onAccountsLoaded: ({ accountList, catalog }) => {
+      setAccounts(accountList);
+      setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+    },
+    onPairingsLoaded: ({ effective, verifications, storedKeys, compatible }) => {
+      setPairings(effective);
+      setPairingVerifications(verifications);
+      setStoredPairingKeys(storedKeys);
+      setCompatibleByHarness(compatible);
+    },
+    onCoordinatorLoaded: (data) => {
+      setCoordEnabled(data.enabled);
+      setCoordHasToken(data.has_token);
+    },
+    onDevicesLoaded: (list) => {
+      setDevices(list);
+    },
+    onNetworkLoaded: (data) => {
+      setLanEnabled(data.lan_exposure_enabled);
+      setTlsActive(data.tls_active);
+      setExposedInterfaces(data.exposed_interfaces);
+    },
+    getHostPairingVerifications,
+  });
+
+  // Per-resource readiness booleans. Controls that read or write a
+  // resource must gate themselves on its `loaded` state — `idle`,
+  // `loading`, and `failed` all disable, so a placeholder initial value
+  // (`false` / `[]` / `{}`) can never be written to the backend as if
+  // it were the real persisted state.
+  const prefsLoaded = resources.preferences.status === 'loaded';
+  const providersLoaded = resources.providers.status === 'loaded';
+  const accountsLoaded = resources.accounts.status === 'loaded';
+  const coordinatorLoaded = resources.coordinator.status === 'loaded';
+  const devicesLoaded = resources.devices.status === 'loaded';
+  const networkLoaded = resources.network.status === 'loaded';
   // Note (issue #601): Usage Meters moved off the Settings modal to the
   // Probe Panel's "Usage" tab. The Settings surface is now credentials +
   // harness config + LAN/Coordinator/Device toggles only. The meters
@@ -468,9 +808,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // backend normalise-on-write (e.g. clearing an all-blank value) is
   // reflected without a stale local cache.
   const [harnessDefaults, setHarnessDefaults] = useState<Record<string, HarnessConfigValue>>({});
-  // `loaded` flag carries over from the existing hydration logic below;
-  // mirrored here so the rename picker only enables after the
-  // preferences load resolves.
+  // Mirrored here so the rename picker only enables after the
+  // preferences load resolves (issue #1534).
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
   // mismatch is detected — `lanEnabled=true` with no interfaces means the
   // toggle is on but the server is still loopback-only (TLS init failure, no
@@ -532,14 +871,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     selectedRef.current = selected;
   }, [selected]);
 
-  // Re-read network status after a toggle completes so the realized state
-  // reflects the post-rebind listeners. Without this the user flips the
-  // switch, the optimistic `lanEnabled` flips, but the realized fields stay
-  // stale until the next modal open. We deliberately do NOT re-write
-  // `lanEnabled` here — the optimistic value is the source of truth between
-  // writes; clobbering it from a possibly-stale read would let a rapid
-  // double-toggle race (toggle A's refresh can land after toggle B's
-  // optimistic flip and revert B).
+  // Re-read the realized network fields after a toggle completes so the
+  // realized state (TLS active, exposed interfaces) reflects the
+  // post-rebind listeners. Without this the user flips the switch, the
+  // optimistic `lanEnabled` flips, but the realized fields stay stale
+  // until the next modal open.
+  //
+  // Issue #1534 (review round 4) — this is NOT the same as
+  // `loadNetwork()`. `loadNetwork()` would also overwrite `lanEnabled`
+  // from the network response, racing with the optimistic toggle
+  // value if a second toggle lands before the read resolves (toggle
+  // A's refresh can land after toggle B's optimistic flip and revert
+  // B). The optimistic `lanEnabled` is the source of truth between
+  // writes; this helper deliberately skips it.
   const refreshNetworkStatus = async () => {
     try {
       const network = await api.getNetworkStatus();
@@ -552,56 +896,72 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // Issue #1534 (review round 5) — the 7 inline `loadX` callbacks
+  // were deleted. The hook (`useSettingsResources`) owns the loaders
+  // now; the modal wires its derived-state setters into the
+  // hook's `onXLoaded` callbacks at hook construction.
+  // Retry a single failed resource (issue #1534). The per-resource
+  // status flips to `loading`, then back to `loaded` | `failed` based
+  // on the read outcome. Other resources are untouched — the user
+  // clicking Retry should rehydrate only what they asked for.
+  //
+  // Issue #1534 (review round 4) — pairings has a hard dependency
+  // on providers: it queries `compatible_providers_for_harness` for
+  // each non-terminal harness in the providers list. If providers
+  // isn't loaded, retrying pairings would either fabricate a clean
+  // state (the bug round 2 caught) or stay permanently failed (the
+  // trap round 4 caught). The boundary check belongs here, not in
+  // the core loader.
+  //
+  // Issue #1534 (review round 5) — the modal's local `retryResource`
+  // was deleted. The hook's `retryResource` (returned from
+  // `useSettingsResources`) handles the pairings guard internally,
+  // accepts the same `(key, options?)` signature the modal's call
+  // sites use, and replaces the 7-case switch with a `Record`-based
+  // dispatch.
+
   useEffect(() => {
-    const init = async () => {
-      try {
-        const [prefs, providerList, accountList, catalog, coord, deviceList, network] = await Promise.all([
-          api.getAppPreferences(),
-          api.listProviders(),
-          api.getProviderAccounts(),
-          api.getKeyedFirstClassCatalog(),
-          api.getCoordinatorStatus(),
-          api.listDeviceSessions(),
-          api.getNetworkStatus(),
-        ]);
-        setProviders(providerList);
-        setAccounts(accountList);
-        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-        loadPairingData(providerList);
-        const stored = prefs.default_provider;
-        setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
-        // Issue #824: the rename-backend picker reads from the same
-        // `AppPreferences` snapshot. `null` here is intentional — that's
-        // the default (auto-naming off until the user opts in). Empty
-        // strings are normalised to `null` so the UI treats a frontend
-        // "" clear the same as the explicit None the backend accepts.
-        const storedNaming = prefs.naming_provider;
-        setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
-        const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
-        setPoolDraft(storedPool);
-        poolSavedRef.current = storedPool;
-        const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
-        setWorktreeDirDraft(storedWorktreeDir);
-        worktreeDirSavedRef.current = storedWorktreeDir;
-        // Issue #1501: older preferences.json files predate the field —
-        // `?? true` keeps the safe default (prompt) for those installs.
-        useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
-        setHarnessDefaults(prefs.harness_defaults ?? {});
-        setCoordEnabled(coord.enabled);
-        setCoordHasToken(coord.has_token);
-        setDevices(deviceList);
-        setLanEnabled(network.lan_exposure_enabled);
-        // Realized bind state from the live ServerListeners (issue #586).
-        setTlsActive(network.tls_active);
-        setExposedInterfaces(network.exposed_interfaces);
-        setLoaded(true);
-      } catch (e) {
-        setError(formatError(e));
-        setLoaded(true);
+    // Fan out the six independent initial loads concurrently.
+    // `Promise.allSettled` here is *defensive*: each `loadX` already
+    // swallows its own errors via `withResourceLoad` and updates
+    // `resources[key]` independently, so a rejection in one loader
+    // doesn't affect the others. `allSettled` just makes the
+    // intent explicit and protects against a loader that escapes
+    // its catch in the future.
+    //
+    // Issue #1534 (review round 5) — pairings is loaded AFTER
+    // providers resolves (rather than auto-chained inside
+    // `loadProviders`) so that account-only handlers don't
+    // re-probe WSL harness verifications. The chain here is
+    // explicit so it's easy to see where pairings enters the
+    // critical path: providers → pairings, not accounts →
+    // providers → pairings.
+    void Promise.allSettled([
+      loadPreferences(),
+      loadProviders(),
+      loadAccounts(),
+      loadCoordinator(),
+      loadDevices(),
+      loadNetwork(),
+    ]).then(async (results) => {
+      // Once providers settles on initial mount, trigger pairings.
+      // We check `results` for the providers outcome so a failed
+      // providers load still leaves pairings at `idle` — pairings
+      // stays off the critical path until the user retries providers.
+      const providersResult = results[1];
+      if (providersResult.status === 'fulfilled' && providersResult.value) {
+        await loadPairings(providersResult.value);
       }
-    };
-    init();
-  }, []);
+    });
+  }, [
+    loadPreferences,
+    loadProviders,
+    loadAccounts,
+    loadCoordinator,
+    loadDevices,
+    loadNetwork,
+    loadPairings,
+  ]);
 
   // Revoke a paired device: optimistically drop it from the list, then call the
   // backend (which deletes the row and force-closes any live socket it holds).
@@ -620,11 +980,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setDevices(prev => prev.filter(d => d.id !== id));
     try {
       await api.revokeDeviceSession(id);
-      try {
-        setDevices(await api.listDeviceSessions());
-      } catch (refreshErr) {
-        console.error('Failed to refresh device list after revoke:', refreshErr);
-      }
+      // Issue #1534 (review round 4) — route the post-revoke
+      // refresh through the named loader. A `listDeviceSessions`
+      // failure now flips `devicesState` to `failed` and surfaces
+      // the banner instead of silently leaving the post-revoke
+      // list stale (the revoke DID happen — the loader just
+      // rehydrates the metadata). The mutation itself still uses
+      // `setError` on the optimistic-rollback path because that's
+      // a transient write-failure surface, not a load failure.
+      await loadDevices();
     } catch (e) {
       setDevices(previous);
       setError(formatError(e));
@@ -633,36 +997,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  // Load the Proxied Provider pairing data (issue #576): the effective pairings
-  // (derived + stored), the stored-key set (detachable vs derived), and the
-  // surface-matched compatible-provider lists per native harness. Takes the
-  // provider list explicitly so it can run from `init` before `providers` state
-  // settles, and re-run after an attach/detach.
-  const loadPairingData = async (providerList: ProviderInfo[]) => {
-    try {
-      const [effective, prefs, verifications] = await Promise.all([
-        api.getProviderPairings(),
-        api.getAppPreferences(),
-        getHostPairingVerifications(),
-      ]);
-      // Defensive: the real backend always returns arrays, but a malformed
-      // response shouldn't crash the settings modal.
-      setPairings(Array.isArray(effective) ? effective : []);
-      setPairingVerifications(Array.isArray(verifications) ? verifications : []);
-      const stored = prefs.provider_pairings ?? [];
-      setStoredPairingKeys(new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`)));
-      const nativeHarnesses = providerList.filter((p) => !p.is_proxied && p.id !== 'terminal');
-      const entries = await Promise.all(
-        nativeHarnesses.map(async (h) => {
-          const list = await api.compatibleProvidersForHarness(h.id);
-          return [h.id, Array.isArray(list) ? list : []] as const;
-        }),
-      );
-      setCompatibleByHarness(Object.fromEntries(entries));
-    } catch (e) {
-      console.error('Failed to load pairing data:', e);
-    }
-  };
+  // Issue #1534 — `loadPairingData` is superseded by the per-resource
+  // `loadPairings(providerList)` above. The legacy function silently
+  // swallowed its errors as `console.error` and left the pairing state
+  // empty, which the Harnesses pane then rendered as "no compatible
+  // providers" — indistinguishable from "no providers actually fit".
+  // The new loader routes its failure through `pairingsState` so the
+  // pane can render an accessible error + Retry instead.
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -676,6 +1017,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   // Attach a provider to a harness (ADR-0025). Client supplies base URL and
   // (for Anthropic) model tiers; backend seeds the global key set-if-absent.
+  // Issue #1534 (review round 2) — mutation handlers previously
+  // re-fetched providers/accounts/pairings via raw `api.listProviders()`
+  // and friends, bypassing the resource-load state machine. A
+  // post-mutation refresh failure used to silently leave stale data
+  // with no visible signal. Now every refresh routes through the
+  // named loaders so failures show in the per-resource banners
+  // exactly like a fresh-modal-open failure.
+  //
+  // The mutation itself (e.g. `api.attachProxiedProvider`) still
+  // uses `setError` — write failures are transient and the mutation
+  // caller is right there to retry. Only the *refresh* goes through
+  // the state machine.
+
   const handleAttachProvider = async (
     harnessId: string,
     providerId: string,
@@ -686,13 +1040,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.attachProxiedProvider(harnessId, providerId, apiKey, baseUrl, modelTiers);
-      const [providerList, accountList] = await Promise.all([
-        api.listProviders(),
-        api.getProviderAccounts(),
-      ]);
-      setProviders(providerList);
-      setAccounts(accountList);
-      await loadPairingData(providerList);
+      // Issue #1534 (review round 5) — attach changes the
+      // providers list AND the pairings (newly attached provider
+      // is now in the effective pairings set), so both refreshes
+      // are needed. `loadProviders` alone is no longer sufficient.
+      // The chain order matters: loadProviders first (its result
+      // drives pairings), then loadPairings(providers).
+      const [providerList] = await Promise.all([loadProviders(), loadAccounts()]);
+      if (providerList) {
+        await loadPairings(providerList);
+      }
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -708,9 +1065,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.updateProviderPairing(harnessId, providerId, baseUrl, modelTiers);
-      const providerList = await api.listProviders();
-      setProviders(providerList);
-      await loadPairingData(providerList);
+      // Update changes pairings too (model tiers / base URL live
+      // on the pairing, not on the provider).
+      const providerList = await loadProviders();
+      if (providerList) {
+        await loadPairings(providerList);
+      }
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -721,9 +1081,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.removeProviderPairing(harnessId, providerId);
-      const providerList = await api.listProviders();
-      setProviders(providerList);
-      await loadPairingData(providerList);
+      // Detach removes the pairing — both providers and pairings
+      // need refresh. Same chain as attach.
+      const providerList = await loadProviders();
+      if (providerList) {
+        await loadPairings(providerList);
+      }
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -738,6 +1101,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.verifyProviderPairing(harnessId, providerId, envType);
+      // Issue #1534 (review round 4) — verifications aren't a
+      // tracked resource (they live in `pairingVerifications`
+      // alongside pairings, but the modal doesn't surface them
+      // independently). The full `loadPairings()` would also
+      // re-query pairings + compatibility, which is wasteful for
+      // a verify-only operation. We keep this as a focused,
+      // best-effort side-channel refresh — a failure here falls
+      // back to an empty list and the modal continues rendering
+      // pairings via the resource state machine.
       setPairingVerifications(await getHostPairingVerifications());
     } catch (e) {
       setError(formatError(e));
@@ -821,6 +1193,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     try {
       const providerArg = newValue === NO_OVERRIDE ? null : newValue;
       await api.setAppDefaultProvider(providerArg);
+      // Issue #1534 (review round 5) — refresh via the loader so a
+      // failed `get_app_preferences` (or a backend normalisation)
+      // flips `prefsState` to `failed` and surfaces the banner
+      // rather than leaving the optimistic value lying.
+      await loadPreferences();
     } catch (e) {
       setSelected(previous);
       setError(formatError(e));
@@ -843,6 +1220,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setAppNamingProvider(next);
+      // Issue #1534 (review round 5) — backend normalises empty
+      // string to `null` (and may reject unknown providers), so a
+      // post-write refresh via the loader is what catches a backend
+      // reject / normalisation that the optimistic update missed.
+      await loadPreferences();
     } catch (e) {
       namingRef.current = previous;
       setNamingProvider(previous);
@@ -885,8 +1267,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setHarnessDefault(profileId, value);
-      const prefs = await api.getAppPreferences();
-      setHarnessDefaults(prefs.harness_defaults ?? {});
+      // Issue #1534 (review round 4) — route the post-write
+      // preferences refresh through the loader so a
+      // `get_app_preferences` rejection flips `prefsState` to
+      // `failed` and surfaces the banner, instead of leaving the
+      // optimistic `harness_defaults` commit silently stale.
+      // `loadPreferences` updates the modal-wide drafts (pool size,
+      // worktree dir, etc.) from the canonical preferences and
+      // re-reads `harness_defaults` on success.
+      await loadPreferences();
       return true;
     } catch (e) {
       setError(formatError(e));
@@ -898,11 +1287,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.clearHarnessDefault(profileId);
-      setHarnessDefaults((prev) => {
-        const next = { ...prev };
-        delete next[profileId];
-        return next;
-      });
+      // Issue #1534 (review round 5) — refresh via the loader so a
+      // failed `get_app_preferences` (or a backend normalisation
+      // that other harness defaults changed alongside) surfaces
+      // in the preferences banner rather than leaving the optimistic
+      // `harness_defaults` mutation silently stale.
+      await loadPreferences();
       return true;
     } catch (e) {
       setError(formatError(e));
@@ -930,10 +1320,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setAppWorktreeDirectory(canonical === '' ? null : canonical);
-      const prefs = await api.getAppPreferences();
-      const stored = prefs.worktree_directory?.trim() ?? '';
-      setWorktreeDirDraft(stored);
-      worktreeDirSavedRef.current = stored;
+      // Issue #1534 (review round 4) — route the post-write
+      // preferences refresh through the loader so a rejection
+      // surfaces in the preferences banner rather than leaving
+      // the optimistic draft silently stale.
+      await loadPreferences();
     } catch (e) {
       worktreeDirSavedRef.current = previous;
       setWorktreeDirDraft(previous);
@@ -973,6 +1364,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setAppAutopilotPoolSize(parsed);
+      // Issue #1534 (review round 5) — refresh via the loader so a
+      // failed `get_app_preferences` (or a backend normalisation
+      // e.g. server-side cap adjustment) surfaces in the preferences
+      // banner rather than leaving the optimistic `autopilot_pool_size`
+      // silently stale.
+      await loadPreferences();
     } catch (e) {
       poolSavedRef.current = previous;
       setPoolDraft(previous);
@@ -998,15 +1395,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.upsertProviderAccount(account);
-      // Independent reads — fetch in parallel. The upsert may register a paired
-      // harness profile, so re-read the provider catalogue too, keeping this
-      // modal's default-provider dropdown in step with the new entry (#534).
-      const [accountList, providerList] = await Promise.all([
-        api.getProviderAccounts(),
-        api.listProviders(),
-      ]);
-      setAccounts(accountList);
-      setProviders(providerList);
+      // Issue #1534 (review round 2) — refresh through the loaders
+      // so any failure surfaces in the resource banner instead of
+      // silently leaving the optimistic data stale. The optimistic
+      // roll-back below catches the *mutation* failure; the loader
+      // catches the *refresh* failure.
+      await Promise.all([loadAccounts(), loadProviders()]);
       return true;
     } catch (e) {
       setAccounts(previous);
@@ -1025,29 +1419,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
-      const [accountList, catalog, providerList] = await Promise.all([
-        api.getProviderAccounts(),
-        api.getKeyedFirstClassCatalog(),
-        api.listProviders(),
-      ]);
-      setAccounts(accountList);
-      setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-      setProviders(providerList);
+      // Route through the loaders (issue #1534 review round 2) so
+      // the providers/accounts resource states reflect the post-
+      // remove snapshot. A refresh failure surfaces in the per-
+      // resource banners, not as silent staleness.
+      await Promise.all([loadAccounts(), loadProviders()]);
     } catch (e) {
       setError(formatError(e));
     }
   };
 
   const refreshAccountsAndCatalog = async () => {
-    const [accountList, catalog, providerList] = await Promise.all([
-      api.getProviderAccounts(),
-      api.getKeyedFirstClassCatalog(),
-      api.listProviders(),
-    ]);
-    setAccounts(accountList);
-    setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-    setProviders(providerList);
-    await loadPairingData(providerList);
+    // Route through the loaders (issue #1534 review round 2) —
+    // the loaders update both data and resource status atomically,
+    // so a refresh failure is visible in the banner rather than
+    // leaving stale data + `loaded` status.
+    await Promise.all([loadAccounts(), loadProviders()]);
   };
 
   /** Materialise a keyed first-class template from the catalog (ADR-0025). */
@@ -1082,15 +1469,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
     });
+    // Issue #1534 (review round 5) — `handleSaveAccount` already
+    // refreshes accounts via `loadAccounts`, which (since the
+    // round-4 catalog fix) also fetches the catalog best-effort.
+    // Re-fetching the catalog here was a duplicate IPC round-trip
+    // and could overwrite the loader's fresh state with stale data
+    // if the loader's refresh was still in flight. Just dismiss
+    // the form; the post-save loader-driven refresh covers both.
     if (ok) {
       siteDirtyChange('add-custom-form', false);
       setAddingProvider(false);
-      try {
-        const catalog = await api.getKeyedFirstClassCatalog();
-        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-      } catch {
-        // non-fatal
-      }
     }
   };
 
@@ -1109,6 +1497,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // `Promise<void>` so it satisfies the helper's contract.
       mutation: async () => {
         await api.setCoordinatorApiEnabled(enabled);
+      },
+      // Issue #1534 (review round 5) — refresh via the loader so a
+      // backend normalisation (e.g. `has_token` flips when the API
+      // gets disabled) surfaces in the coordinator banner. The
+      // refresh is best-effort: a failure here must NOT roll back
+      // the successful mutation, so we swallow the error inside
+      // the wrapper.
+      onSuccess: () => {
+        loadCoordinator().catch((err) => {
+          console.warn('[AppSettings] Failed to refresh coordinator status after toggle:', err);
+        });
       },
     });
 
@@ -1147,6 +1546,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setError,
       mutation: async () => {
         await api.setAppConfirmBeforeQuit(enabled);
+      },
+      // Issue #1534 (review round 5) — refresh via the loader so a
+      // backend rejection on the post-write preferences read surfaces
+      // in the preferences banner. Best-effort: a refresh failure
+      // must NOT roll back the successful mutation (the value is
+      // already persisted).
+      onSuccess: () => {
+        loadPreferences().catch((err) => {
+          console.warn('[AppSettings] Failed to refresh preferences after confirm-quit toggle:', err);
+        });
       },
     });
 
@@ -1245,6 +1654,52 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           hidden={activeTab !== 'general'}
           className="space-y-8"
         >
+        {/* Issue #1534 (review round 5) — the General pane now
+            surfaces a loading indicator while preferences /
+            providers are still loading on modal open. Without this,
+            the user opens the modal, every control is silently
+            disabled, and there's no signal that the data hasn't
+            arrived yet — looks identical to a frozen crash. The
+            indicator is `role="status"` (polite) so screen readers
+            announce the transition without interrupting. */}
+        {(resources.preferences.status === 'loading' ||
+          resources.providers.status === 'loading') && (
+          <p
+            className="text-base text-text-muted"
+            data-testid="resource-load-general-loading"
+            role="status"
+            aria-live="polite"
+          >
+            Loading settings…
+          </p>
+        )}
+        {/* Issue #1534 — preferences-backed controls (default provider,
+            naming backend, pool size, worktree directory, confirm-quit,
+            harness defaults) all stay disabled while preferences are
+            loading or have failed. The error banner above them makes
+            the failure visible at the top of the pane so the user
+            doesn't have to discover the disabled inputs by trial. */}
+        {resources.preferences.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="preferences"
+            state={resources.preferences}
+            onRetry={() => retryResource('preferences')}
+          />
+        )}
+        {/* Issue #1534 (review round 2) — the General pane also
+            surfaces a providers failure. Without this banner, a
+            `listProviders` rejection silently disables the default
+            provider + auto-naming controls and the user is left
+            wondering why. The Providers tab also gets a banner for
+            the same resource, but the General pane is the one most
+            users see first. */}
+        {resources.providers.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="providers"
+            state={resources.providers}
+            onRetry={() => retryResource('providers')}
+          />
+        )}
         <div className="space-y-4">
           <label className="block text-lg font-medium text-text-secondary">
             Default provider
@@ -1255,7 +1710,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           <select
             aria-label="Default provider"
             value={selected}
-            disabled={!loaded || saving}
+            disabled={!prefsLoaded || !providersLoaded || saving}
             onChange={e => handleSave(e.target.value)}
             className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
@@ -1286,7 +1741,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </p>
           <select
             value={namingProvider ?? ''}
-            disabled={!loaded || namingSaving}
+            disabled={!prefsLoaded || !providersLoaded || namingSaving}
             onChange={e => handleSaveNaming(e.target.value || null)}
             className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
@@ -1336,7 +1791,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             aria-label="Autopilot pool size"
             placeholder="No global cap"
             value={poolDraft}
-            disabled={!loaded || poolSaving}
+            disabled={!prefsLoaded || poolSaving}
             onChange={e => {
               setPoolDraft(e.target.value);
               siteDirtyChange('autopilot-pool', e.target.value.trim() !== poolSavedRef.current);
@@ -1374,7 +1829,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             aria-label="Worktree directory"
             placeholder=".claude/worktrees"
             value={worktreeDirDraft}
-            disabled={!loaded || worktreeDirSaving}
+            disabled={!prefsLoaded || worktreeDirSaving}
             onChange={e => {
               setWorktreeDirDraft(e.target.value);
               siteDirtyChange('worktree-dir', e.target.value.trim() !== worktreeDirSavedRef.current);
@@ -1397,7 +1852,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <input
               type="checkbox"
               checked={confirmBeforeQuit}
-              disabled={!loaded || confirmQuitBusy}
+              disabled={!prefsLoaded || confirmQuitBusy}
               onChange={e => handleToggleConfirmQuit(e.target.checked)}
               className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
             />
@@ -1421,6 +1876,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             onChange={handleSetHarnessDefault}
             onReset={handleClearHarnessDefault}
             onDirtyChange={(d) => siteDirtyChange('harness-defaults', d)}
+            disabled={!prefsLoaded}
           />
         </div>
 
@@ -1503,25 +1959,55 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             Set the provider&apos;s API key on the Providers page; set base URL and
             Claude model names here when attaching.
           </p>
-          <HarnessConfigList
-            harnesses={
-              providers
-                .filter((p) => !p.is_proxied && p.id !== 'terminal')
-                .map((p) => ({ id: p.id, label: p.label })) as ProxyHarness[]
-            }
-            compatibleByHarness={compatibleByHarness}
-            pairings={pairings}
-            verifications={pairingVerifications}
-            supportsWsl={isWindows}
-            storedKeys={storedPairingKeys}
-            accounts={accounts}
-            onAttach={handleAttachProvider}
-            onUpdate={handleUpdatePairing}
-            onDetach={handleDetachProvider}
-            onVerify={handleVerifyPairing}
-            onReorderProxied={handleReorderProxiedProviders}
-            onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
-          />
+          {/* Issue #1534 (review round 2) — `idle` is now an explicit
+              branch. Without it, an in-flight tab switch to the
+              Harnesses pane (while `pairings` was still waiting on
+              `providers`) fell through to the empty `HarnessConfigList`
+              and flashed "no compatible providers" — the exact bug
+              #1534 aimed to fix. Order of checks:
+                1. providers failed      → providers error + retry
+                2. pairings failed       → pairings error + retry
+                3. pairings idle/loading → "Loading pairings…" (covers
+                                           the initial-load window)
+                4. otherwise             → HarnessConfigList (real data) */}
+          {resources.providers.status === 'failed' ? (
+            <ResourceLoadStatus
+              resource="providers"
+              state={resources.providers}
+              onRetry={() => retryResource('providers')}
+            />
+          ) : resources.pairings.status === 'failed' ? (
+            <ResourceLoadStatus
+              resource="pairings"
+              state={resources.pairings}
+              onRetry={() => retryResource('pairings')}
+            />
+          ) : resources.pairings.status === 'idle' || resources.pairings.status === 'loading' ? (
+            <ResourceLoadStatus
+              resource="pairings"
+              state={resources.pairings}
+            />
+          ) : (
+            <HarnessConfigList
+              harnesses={
+                providers
+                  .filter((p) => !p.is_proxied && p.id !== 'terminal')
+                  .map((p) => ({ id: p.id, label: p.label })) as ProxyHarness[]
+              }
+              compatibleByHarness={compatibleByHarness}
+              pairings={pairings}
+              verifications={pairingVerifications}
+              supportsWsl={isWindows}
+              storedKeys={storedPairingKeys}
+              accounts={accounts}
+              onAttach={handleAttachProvider}
+              onUpdate={handleUpdatePairing}
+              onDetach={handleDetachProvider}
+              onVerify={handleVerifyPairing}
+              onReorderProxied={handleReorderProxiedProviders}
+              onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
+            />
+          )}
         </div>
         </section>
 
@@ -1539,17 +2025,32 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <span className="font-medium">Usage</span> tab in the side panel.
           </p>
 
-          <div className="space-y-4">
-            {accounts.map(account => (
-              <AccountCard
-                key={account.id}
-                account={account}
-                onSave={handleSaveAccount}
-                onRemove={handleRemoveAccount}
-                onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
-              />
-            ))}
-          </div>
+          {/* Issue #1534 — replace the empty-cards state with an
+              explicit error when the accounts fetch failed. Without
+              this the pane would silently show "no providers" and the
+              + Add provider button as if the catalogue were simply
+              empty, when in reality we don't know. OpenCode lives in
+              its own sub-section that talks to its own commands, so it
+              renders unconditionally below. */}
+          {!accountsLoaded ? (
+            <ResourceLoadStatus
+              resource="accounts"
+              state={resources.accounts}
+              onRetry={() => retryResource('accounts')}
+            />
+          ) : (
+            <div className="space-y-4">
+              {accounts.map(account => (
+                <AccountCard
+                  key={account.id}
+                  account={account}
+                  onSave={handleSaveAccount}
+                  onRemove={handleRemoveAccount}
+                  onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
+                />
+              ))}
+            </div>
+          )}
 
           <div className="pt-6 border-t border-border-subtle space-y-4">
             <OpenCodeAccountCard />
@@ -1594,11 +2095,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             currently-connected LAN device must reconnect over HTTPS.
           </p>
 
+          {/* Issue #1534 — surface network-status failures at the top of
+              the LAN section. Without this, the toggle below would be
+              disabled with `lanEnabled=false`, and the user might read
+              that as "LAN exposure is currently off" — when actually we
+              don't know what the persisted value is. The error banner
+              makes the unknown state visible. */}
+          {!networkLoaded && (
+            <div className="mb-4">
+              <ResourceLoadStatus
+                resource="network"
+                state={resources.network}
+                onRetry={() => retryResource('network')}
+              />
+            </div>
+          )}
+
           <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
             <input
               type="checkbox"
               checked={lanEnabled}
-              disabled={!loaded || lanBusy}
+              disabled={!networkLoaded || lanBusy}
               onChange={e => handleToggleLanExposure(e.target.checked)}
               className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
             />
@@ -1610,7 +2127,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               or per-interface bind failed), warn so the user doesn't hand
               their phone a dead URL. When exposure is working, list the
               actually-bound addresses so the user knows what to type. */}
-          {lanEnabled && loaded && (
+          {lanEnabled && networkLoaded && (
             <div className="mt-4" data-testid="lan-realized-status">
               {exposedInterfaces.length === 0 ? (
                 <div
@@ -1667,11 +2184,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             anywhere else is your own tunnel (Tailscale, Cloudflare, WireGuard).
           </p>
 
+          {/* Issue #1534 — mirror the LAN section: an unknown coordinator
+              status must not look like "off" to the user. The toggle is
+              already disabled (sees `!coordinatorLoaded`) but the banner
+              makes the load failure visible at the section's top. */}
+          {!coordinatorLoaded && (
+            <div className="mb-4">
+              <ResourceLoadStatus
+                resource="coordinator"
+                state={resources.coordinator}
+                onRetry={() => retryResource('coordinator')}
+              />
+            </div>
+          )}
+
           <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
             <input
               type="checkbox"
               checked={coordEnabled}
-              disabled={!loaded || coordBusy}
+              disabled={!coordinatorLoaded || coordBusy}
               onChange={e => handleToggleCoordinator(e.target.checked)}
               className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
             />
@@ -1725,8 +2256,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             with a fresh QR code.
           </p>
 
-          {!loaded ? (
-            <p className="text-base text-text-muted">Loading…</p>
+          {!devicesLoaded ? (
+            <ResourceLoadStatus
+              resource="devices"
+              state={resources.devices}
+              onRetry={() => retryResource('devices')}
+            />
           ) : devices.length === 0 ? (
             <p className="text-base text-text-muted italic">
               No paired devices yet. Scan the Remote Access QR code from a phone to pair one.

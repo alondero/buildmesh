@@ -20,6 +20,11 @@
 
 pub(crate) mod migrations;
 
+/// Shared test infrastructure for backend tests that need a real
+/// SQLite database. See `db::test_support` for the helper.
+#[cfg(test)]
+pub mod test_support;
+
 /// Autopilot Circuits ledger accessors (spec #1205). Re-exported flat so
 /// call sites read `db::list_autopilot_circuits(...)` like every other
 /// table's accessors.
@@ -488,6 +493,22 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             source_pr_pinned_sha TEXT,
             signal_health TEXT,
             worktree_path TEXT
+        );
+
+        -- Node-level lifecycle ownership. Circuit cleanup intent and the
+        -- spawn/cleanup leases live here rather than in historical run JSON.
+        -- The spawn orchestrator uses the generic node lease seam; circuit
+        -- cleanup is one consumer of it, not an implementation detail of the
+        -- global spawn pipeline.
+        CREATE TABLE IF NOT EXISTS agent_node_lifecycle_leases (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            cleanup_requested INTEGER NOT NULL DEFAULT 0,
+            cleanup_generation TEXT,
+            cleanup_expires_at INTEGER,
+            spawn_generation TEXT,
+            spawn_expires_at INTEGER,
+            retired INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (

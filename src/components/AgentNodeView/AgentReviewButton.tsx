@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { cancelCircuitRun, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
@@ -42,7 +43,7 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
 
   function showRun() {
     useMeshStore.getState().selectMesh(node.mesh_id);
-    useAgentNodeStore.getState().setActiveNode(node.id);
+    useNodeActivityStore.getState().activateNode(node.id);
     useUIStore.getState().openProbeTab('circuits');
   }
 
@@ -78,7 +79,7 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
     <button type="button"
       aria-label="Start agent workflow"
       title="Start a review loop or Circuit"
-      disabled={!ownership && !eligible}
+      disabled={!activeOwnership && !eligible}
       onClick={() => setOpen(true)}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
     ><CircuitsIcon className="h-4 w-4" /></button>

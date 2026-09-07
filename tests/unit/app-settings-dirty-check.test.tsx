@@ -105,7 +105,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     await openGenericAddForm(user);
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     screen.getByTestId('modal-discard-banner');
   });
@@ -156,7 +156,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     await user.type(screen.getByLabelText(/deepseek via claude code api key/i), 'sk-half-typed');
 
     // The modal is now dirty: Escape must surface the banner.
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     screen.getByTestId('modal-discard-banner');
   });

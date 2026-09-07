@@ -11,6 +11,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 // Lets `<ModalCloseButton>` (rendered inside the consumer's children) route
 // its click through the Modal's dirty-aware close instead of closing
@@ -141,34 +142,36 @@ export function Modal({
     // existing behaviour for every modal that doesn't opt in).
     (defaultFocusRef?.current ?? panelRef.current)?.focus();
 
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (confirmingDiscardRef.current) {
-        // Banner already showing — Escape dismisses the prompt (Keep editing),
-        // it must NOT confirm the discard. Reflexively pressing Escape to
-        // dismiss a confirmation is the near-universal OS gesture, and it maps
-        // to the SAFE option; only the explicit Discard button abandons the
-        // edits (issue #808). Restore focus to where the user was.
-        setConfirmingDiscard(false);
-        requestAnimationFrame(() => lastFocusRef.current?.focus?.());
-        return;
-      }
-      if (dirtyRef.current) {
-        lastFocusRef.current = document.activeElement as HTMLElement | null;
-        setConfirmingDiscard(true);
-        return;
-      }
-      // Not dirty — Escape closes.
-      onClose();
-    };
-    window.addEventListener('keydown', onKey);
     return () => {
-      window.removeEventListener('keydown', onKey);
       previouslyFocused?.focus?.();
     };
-    // Arm once per mount; onClose identity churn must not re-run focus moves.
+    // Arm focus-once per mount; onClose identity churn must not re-run focus moves.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Issue #649 — Escape is now driven by the shared `useEscapeKey` hook
+  // (module-level LIFO stack + bubble-phase dispatcher). The handler body
+  // stays here: dirty-banner re-fire, focus restoration, and `onClose`
+  // remain Modal-local concerns. The hook only owns listener-attachment.
+  useEscapeKey(() => {
+    if (confirmingDiscardRef.current) {
+      // Banner already showing — Escape dismisses the prompt (Keep editing),
+      // it must NOT confirm the discard. Reflexively pressing Escape to
+      // dismiss a confirmation is the near-universal OS gesture, and it maps
+      // to the SAFE option; only the explicit Discard button abandons the
+      // edits (issue #808). Restore focus to where the user was.
+      setConfirmingDiscard(false);
+      requestAnimationFrame(() => lastFocusRef.current?.focus?.());
+      return;
+    }
+    if (dirtyRef.current) {
+      lastFocusRef.current = document.activeElement as HTMLElement | null;
+      setConfirmingDiscard(true);
+      return;
+    }
+    // Not dirty — Escape closes.
+    onClose();
+  });
 
   // Mirror `confirmingDiscard` into a ref so the unmount-once Escape handler
   // sees the live value without re-subscribing (re-subscribing on each toggle

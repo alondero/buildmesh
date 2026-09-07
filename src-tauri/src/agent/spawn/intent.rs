@@ -201,6 +201,10 @@ pub(crate) struct SpawnRequest {
     /// than the persisted Agent Node so a circuit can use the shared spawn
     /// orchestrator without adding mode-specific DB state.
     pub(crate) worktree_policy: WorktreePolicy,
+    /// Opt into the generic durable node lease used by a caller that owns a
+    /// recoverable lifecycle. Ordinary desktop/HTTP spawns leave this off so
+    /// the low-level orchestrator does not query circuit recovery state.
+    pub(crate) lifecycle_lease: bool,
 }
 
 impl SpawnRequest {
@@ -220,6 +224,7 @@ impl SpawnRequest {
             terminal_size,
             explicit: ExplicitSpawnOverrides::default(),
             worktree_policy: WorktreePolicy::RespectMesh,
+            lifecycle_lease: false,
         }
     }
 
@@ -241,6 +246,13 @@ impl SpawnRequest {
     /// the ordinary mesh policy for all existing callers.
     pub(crate) fn with_worktree_policy(mut self, policy: WorktreePolicy) -> Self {
         self.worktree_policy = policy;
+        self
+    }
+
+    /// Opt this request into the generic durable node lifecycle lease. Circuit
+    /// execution uses it to fence cleanup against a concurrent resume.
+    pub(crate) fn with_lifecycle_lease(mut self) -> Self {
+        self.lifecycle_lease = true;
         self
     }
 }

@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import {
   MUSTACHE_GROUPS,
   MUSTACHE_PATHS,
@@ -147,6 +148,25 @@ export function MustacheTextarea({
     if (highlight >= flatPaths.length) setHighlight(flatPaths.length - 1);
   }, [flatPaths.length, highlight]);
 
+  // Issue #649 — Escape dismisses the menu. Routed through the shared
+  // `useEscapeKey` hook so the menu (mounted after the circuit editor's
+  // listener, now via the LIFO stack) claims Escape before the editor's
+  // close path runs. Note: the previous element-level `e.stopPropagation()`
+  // *would* have stopped the editor's bubble-phase listener in real
+  // browsers — the original migration rationale overstated the problem.
+  // The hook is still the right home for this handler because (a) it lets
+  // the menu be dismissed via the same Escape path whether focus is in the
+  // textarea or elsewhere on the canvas, and (b) the test suite dispatches
+  // keydown to `document`, where a window-level listener (the editor's
+  // pre-PR shape) would have been bypassed entirely.
+  useEscapeKey(
+    () => {
+      setContext(null);
+      setHighlight(-1);
+    },
+    context !== null,
+  );
+
   const handleChange = (next: string) => {
     onChange(next);
     const pos = ref.current?.selectionStart ?? next.length;
@@ -173,11 +193,6 @@ export function MustacheTextarea({
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (context === null) return;
     switch (e.key) {
-      case 'Escape':
-        e.stopPropagation();
-        setContext(null);
-        setHighlight(-1);
-        return;
       case 'ArrowDown': {
         e.preventDefault();
         if (flatPaths.length === 0) return;

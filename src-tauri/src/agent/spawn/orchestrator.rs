@@ -22,6 +22,33 @@ use tauri::Emitter;
 
 pub(crate) use super::prepare::SpawnOptions;
 
+/// Durable node ownership held across prepare, provisioning, launch and
+/// stream startup. Any subsystem that needs to retire a node uses the same
+/// generic SQLite lease, so a stale cleanup cannot kill a spawn in flight.
+struct DurableAgentSpawnLease {
+    node_id: i64,
+    generation: String,
+    succeeded: bool,
+}
+
+impl DurableAgentSpawnLease {
+    fn mark_succeeded(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for DurableAgentSpawnLease {
+    fn drop(&mut self) {
+        if let Err(error) = db::release_agent_spawn(self.node_id, &self.generation, self.succeeded) {
+            tracing::warn!(
+                "spawn_with_intent: could not release durable node spawn lease for node {}: {}",
+                self.node_id,
+                error
+            );
+        }
+    }
+}
+
 /// Pure decision for "given the stored CLI session id, the resume cause,
 /// and whether the adapter auto-resumes on startup, what should
 /// `spawn_with_intent` do?". The Skip variants are the regression-pin
@@ -110,6 +137,7 @@ pub(crate) async fn spawn_with_intent(
         terminal_size,
         explicit,
         worktree_policy,
+        lifecycle_lease,
     } = request;
     // Bind the type name so the `ExplicitSpawnOverrides` re-export stays
     // live at the module scope (the destructure pattern alone doesn't
@@ -123,6 +151,19 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::Skipped(node));
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    let mut durable_claim = if lifecycle_lease {
+        let claim = db::claim_agent_spawn(node_id).map_err(|e| e.to_string())?
+            .map(|generation| DurableAgentSpawnLease { node_id, generation, succeeded: false });
+        if claim.is_none()
+            && db::agent_cleanup_claim(node_id).map_err(|e| e.to_string())?.is_some()
+        {
+            tracing::info!("spawn_with_intent: cleanup generation owns node {}, deferring resume", node_id);
+            return Ok(SpawnOutcome::Skipped(node));
+        }
+        claim
+    } else {
+        None
+    };
     if matches!(intent, SpawnIntent::Resume { cause: ResumeCause::Startup })
         && node.status != crate::models::SessionStatus::Suspended
     {
@@ -253,6 +294,9 @@ pub(crate) async fn spawn_with_intent(
 
     let outcome = match result {
         Ok(()) => {
+            if let Some(claim) = durable_claim.as_mut() {
+                claim.mark_succeeded();
+            }
             let refreshed = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
             let _ = app.emit(
                 "node-spawn-completed",
@@ -277,6 +321,7 @@ pub(crate) async fn spawn_with_intent(
             Err(error)
         }
     };
+    drop(durable_claim);
     drop(claim);
     outcome
 }

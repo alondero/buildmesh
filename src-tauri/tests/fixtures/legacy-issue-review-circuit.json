@@ -1,0 +1,248 @@
+{
+  "version": 2,
+  "blueprint": "issue_driven_autopilot_review",
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": {
+        "type": "github_issue_label",
+        "label": "ready-for-agent"
+      }
+    },
+    {
+      "id": "collaborator_gate",
+      "type": {
+        "type": "collaborator_check",
+        "require_approval": true
+      }
+    },
+    {
+      "id": "implementer",
+      "type": {
+        "type": "spawn_agent_node",
+        "prompt": "{{issue.prefill}}",
+        "name": null,
+        "provider": null,
+        "model": null,
+        "effort": null,
+        "extra_args": null
+      }
+    },
+    {
+      "id": "implementation_classifier",
+      "type": {
+        "type": "llm_turn_classifier",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "finish",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "{{autopilot.finish_prompt}}",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "finish_round",
+      "type": {
+        "type": "any_completed"
+      }
+    },
+    {
+      "id": "finish_classifier",
+      "type": {
+        "type": "llm_turn_classifier",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "open_pr",
+      "type": {
+        "type": "github_action",
+        "action": "open_pr",
+        "open_pr_policy": "require_existing",
+        "label": null,
+        "comment": "Closes #{{issue.number}}"
+      }
+    },
+    {
+      "id": "wrapup_retry",
+      "type": {
+        "type": "retry_limit",
+        "max_retries": 3
+      }
+    },
+    {
+      "id": "wrapup_correction",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "{{autopilot.wrapup_correction}}",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "reviewer",
+      "type": {
+        "type": "spawn_agent_node",
+        "prompt": "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}.",
+        "name": null,
+        "provider": "agy",
+        "model": null,
+        "effort": null,
+        "extra_args": null
+      }
+    },
+    {
+      "id": "review_classifier",
+      "type": {
+        "type": "llm_turn_classifier",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "follow_feedback",
+      "type": {
+        "type": "inject_pty",
+        "prompt": "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "close_reviewer",
+      "type": {
+        "type": "close_agent_node",
+        "target_node_id": "reviewer"
+      }
+    },
+    {
+      "id": "feedback_classifier",
+      "type": {
+        "type": "llm_turn_classifier",
+        "target_node_id": "implementer"
+      }
+    },
+    {
+      "id": "review_retry",
+      "type": {
+        "type": "retry_limit",
+        "max_retries": 3
+      }
+    },
+    {
+      "id": "complete",
+      "type": {
+        "type": "notify",
+        "message": "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "collaborator_gate",
+      "condition": "always"
+    },
+    {
+      "from": "collaborator_gate",
+      "to": "implementer",
+      "condition": "always"
+    },
+    {
+      "from": "implementer",
+      "to": "implementation_classifier",
+      "condition": "always"
+    },
+    {
+      "from": "implementation_classifier",
+      "to": "finish",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "finish",
+      "to": "finish_round",
+      "condition": "always"
+    },
+    {
+      "from": "finish_classifier",
+      "to": "open_pr",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "open_pr",
+      "to": "wrapup_retry",
+      "condition": {
+        "on_outcome": "failed"
+      }
+    },
+    {
+      "from": "wrapup_retry",
+      "to": "wrapup_correction",
+      "condition": "always"
+    },
+    {
+      "from": "wrapup_correction",
+      "to": "finish_round",
+      "condition": "always"
+    },
+    {
+      "from": "finish_round",
+      "to": "finish_classifier",
+      "condition": "always"
+    },
+    {
+      "from": "open_pr",
+      "to": "reviewer",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "reviewer",
+      "to": "review_classifier",
+      "condition": "always"
+    },
+    {
+      "from": "review_classifier",
+      "to": "follow_feedback",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "follow_feedback",
+      "to": "close_reviewer",
+      "condition": "always"
+    },
+    {
+      "from": "close_reviewer",
+      "to": "feedback_classifier",
+      "condition": "always"
+    },
+    {
+      "from": "feedback_classifier",
+      "to": "review_retry",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "review_retry",
+      "to": "finish",
+      "condition": {
+        "on_outcome": "completed"
+      }
+    },
+    {
+      "from": "review_retry",
+      "to": "complete",
+      "condition": {
+        "on_outcome": "failed"
+      }
+    }
+  ]
+}

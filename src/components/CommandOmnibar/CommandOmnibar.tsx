@@ -28,6 +28,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useUIStore, type OmnibarMode, type ProbeTab } from '../../stores/uiStore';
 import { useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -181,21 +182,18 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
   // Escape dismisses from anywhere (backdrop clicks move focus to body, so
   // the input's own keydown can't be the only Escape path). In prompt mode
   // the first Escape backs out to the spawn results instead of closing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      if (promptTarget) {
-        setPromptTarget(null);
-        setQuery(promptReturnQueryRef.current);
-        setActiveIndex(0);
-        return;
-      }
-      onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, promptTarget]);
+  // Issue #649 — driven by the shared `useEscapeKey` hook. The hook owns
+  // `preventDefault` (it always calls it when invoking a handler), so the
+  // inner code is just the dispatch logic.
+  useEscapeKey(() => {
+    if (promptTarget) {
+      setPromptTarget(null);
+      setQuery(promptReturnQueryRef.current);
+      setActiveIndex(0);
+      return;
+    }
+    onClose();
+  });
 
   // Keep the active index valid as the result set shrinks/grows.
   const clampedActive = results.length === 0 ? 0 : Math.min(activeIndex, results.length - 1);
@@ -617,8 +615,14 @@ function ResultRow({
       onMouseDown={onMouseDown}
       onClick={onClick}
       data-testid="command-omnibar-option"
-      className={`flex items-center gap-3 px-4 py-2 cursor-pointer ${
-        active ? 'bg-bg-card' : ''
+      className={`flex items-center gap-3 px-4 py-2 cursor-pointer border-l-2 transition-colors ${
+        // Keyboard caret uses the semantic selection surface (dark #1a2a3a /
+        // light #cce8ff) so text-accent-cyan match marks stay legible.
+        // Hover is CSS-only — never mutates activeIndex (WAI-ARIA combobox).
+        // Transparent idle border keeps row width stable with the active bar.
+        active
+          ? 'bg-bg-selection border-l-accent-cyan'
+          : 'border-l-transparent hover:bg-bg-card-hover'
       }`}
     >
       <div className="flex-1 min-w-0">
