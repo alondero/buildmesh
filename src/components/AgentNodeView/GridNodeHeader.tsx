@@ -23,6 +23,7 @@ import { SignalHealthBadge } from '../shared/SignalHealthBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
+import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
 import { InlineEditableText } from '../shared/InlineEditableText';
@@ -32,6 +33,8 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
+import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone } from '../../lib/autopilotNodePresentation';
+import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 
 interface GridNodeHeaderProps {
   /// Issue #1384 — pass the id only; the header subscribes to
@@ -51,50 +54,30 @@ interface GridNodeHeaderProps {
   dragHandleProps?: Record<string, unknown>;
 }
 
-// Autopilot pill styling per pipeline state (the typed
-// `AutopilotRunState` union — wires in via ts-rs from the Rust enum).
-// Violet is the "automation owns this node" accent; the wrap-up / terminal
-// states reuse the amber / green / red semantics the rest of the header
-// already speaks.
-const AUTOPILOT_PILL_STYLES: Record<AutopilotRunState, { label: string; className: string; title: string }> = {
-  implementing: {
-    label: 'autopilot',
-    className: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
-    title: 'Autopilot: agent is implementing the task',
-  },
-  finishing: {
-    label: 'autopilot · wrap-up',
-    className: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
-    title: 'Autopilot: wrap-up in progress (verify, commit, push, PR)',
-  },
-  // Issue #993: a loop iteration's deterministic wrap-up passed and the
-  // optional `loop_suffix_prompt` is now driving a second PTY turn on the
-  // same node. The node is still active (it holds the mesh capacity slot
-  // and the iteration row) until that suffix turn yields and the run
-  // reaches `completed`. Renders with the same amber treatment as
-  // `finishing` so the user can tell this is still in flight, not a wrap-
-  // up verification failure.
-  suffix_pending: {
-    label: 'autopilot · suffix',
-    className: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
-    title: 'Autopilot: wrap-up verified, running the optional suffix prompt turn before this iteration completes',
-  },
-  completed: {
-    label: 'autopilot · complete',
-    className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
-    title: 'Autopilot: wrap-up verified, hands off — the PR is ready for review; the node closes when it merges',
-  },
-  merged: {
-    label: 'autopilot · merged',
-    className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
-    title: 'Autopilot: PR merged',
-  },
-  failed: {
-    label: 'autopilot ✗',
-    className: 'bg-status-error-bg text-status-error ring-status-error/40',
-    title: 'Autopilot: wrap-up failed after 3 attempts — needs a human',
-  },
+const AUTOPILOT_PILL_CLASSES: Record<AutopilotIndicatorTone, string> = {
+  automation: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
+  warning: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
+  success: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
+  error: 'bg-status-error-bg text-status-error ring-status-error/40',
 };
+
+function getAutopilotPillDetails(node: AgentNode, state: AutopilotRunState) {
+  const presentation = getAutopilotNodePresentation(node, state);
+  const copy = getAutopilotRunDetails(state);
+  return { ...copy, className: AUTOPILOT_PILL_CLASSES[presentation?.tone ?? 'automation'] };
+}
+
+function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership) {
+  const presentation = getAutopilotNodePresentation(node, undefined, ownership);
+  const tone: AutopilotIndicatorTone = presentation?.tone
+    ?? (ownership.state === 'cancelled' ? 'warning' : 'error');
+  const stateLabel = ownership.state.replace(/_/g, ' ');
+  return {
+    label: `${ownership.circuit_name} · #${ownership.run_id}`,
+    title: `Circuit run #${ownership.run_id} (${stateLabel}): ${presentation?.detail ?? 'historical ownership retained for inspection.'}`,
+    className: AUTOPILOT_PILL_CLASSES[tone],
+  };
+}
 
 /** Width contracts for the compact header. Keep layout decisions named so a
  * pane resize cannot quietly grow a collection of unrelated magic numbers. */
@@ -132,7 +115,10 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const mesh = meshesById.get(titleNode.mesh_id);
   const meshColor = getMeshColor(titleNode.mesh_id, mesh?.color);
   const canResume = canResumeSuspendedNode(node);
-  const lostConversation = hasLostConversation(node, !!autopilotState || !!circuitOwnership);
+  const lostConversation = hasLostConversation(node, hasActiveAutopilotOwnership(autopilotState, circuitOwnership));
+  const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
+  const autopilotPill = autopilotState ? getAutopilotPillDetails(node, autopilotState) : null;
+  const circuitPill = circuitOwnership ? getCircuitPillDetails(node, circuitOwnership) : null;
   const signalUnavailable = node.signal_health === 'unavailable';
   const compactHeader = width < HEADER_TIER_BREAKPOINTS.compact;
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
@@ -172,6 +158,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         <span role="status" aria-label={activity?.label ?? getStatusConfig(node.status).label}
           title={activity?.label ?? getStatusConfig(node.status).label}
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getStatusConfig(titleNode.status).bgColor}`} />
+        <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
           title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">
@@ -212,9 +199,10 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {circuitOwnership && <div data-testid="circuit-run-pill" className="mt-1 text-accent-violet">{circuitOwnership.circuit_name} · #{circuitOwnership.run_id}</div>}
-            {!circuitOwnership && autopilotState && <div data-testid="autopilot-pill" title={AUTOPILOT_PILL_STYLES[autopilotState].title}
-              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${AUTOPILOT_PILL_STYLES[autopilotState].className}`}>{AUTOPILOT_PILL_STYLES[autopilotState].label}</div>}
+            {circuitPill && <div data-testid="circuit-run-pill" title={circuitPill.title}
+              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${circuitPill.className}`}>{circuitPill.label}</div>}
+            {!circuitOwnership && autopilotPill && <div data-testid="autopilot-pill" title={autopilotPill.title}
+              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${autopilotPill.className}`}>{autopilotPill.label}</div>}
             {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
               <span>{summary.total} changed files · </span>
               <span className={summary.added ? 'text-accent-green' : 'text-text-muted'}>+{summary.added}</span>{' '}

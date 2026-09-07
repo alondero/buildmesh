@@ -78,6 +78,14 @@ describe('agent workflow title-bar control', () => {
     void cancelCircuitRun;
   });
 
+  it.each(['completed', 'failed', 'cancelled'] as const)('does not let terminal %s history enable an ineligible node', state => {
+    useAgentNodeStore.setState({ circuitOwnerships: {
+      42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state },
+    } });
+    render(<AgentReviewButton node={{ ...node, status: 'error' }} />);
+    expect((screen.getByRole('button', { name: 'Start agent workflow' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it.each(['suspended', 'archived', 'error'])('disables starting for %s agents', status => {
     render(<AgentReviewButton node={{ ...node, status: status as AgentNode['status'] }} />);
     expect((screen.getByRole('button', { name: 'Start agent workflow' }) as HTMLButtonElement).disabled).toBe(true);
