@@ -507,6 +507,7 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
+
     it('clears the active node when setting null', () => {
       useAgentNodeStore.setState({ activeNodeId: 5 });
 

@@ -289,6 +289,10 @@ interface AgentNodeState {
   toggleNodePinned: (nodeId: number) => Promise<AgentNode>;
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
+  /** Select the active agent entity. Activity-tab navigation is owned by
+   * `useNodeActivityStore.activateNode`, which coordinates both stores at
+   * the UI boundary without adding transient view state here.
+   */
   setActiveNode: (id: number | null) => void;
   spawnAgent: (
     nodeId: number,
@@ -822,16 +826,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     await persistPositions(set, get, swapped);
   },
 
-  setActiveNode: (id) => {
-    // Explicit navigation changes the entity focus. Utility and member tab
-    // selection are deliberately handled by the activity-card UI.
-    // The entity store owns navigation only; transient activity tab state
-    // lives in the activity store and is updated by UI-level actions.
-    // A plain synchronous state write — the active-node highlight, terminal
-    // focus, and file-watch all key off activeNodeId, so the switch must feel
-    // instant with no backend round-trip in the way.
-    set({ activeNodeId: id });
-  },
+  setActiveNode: (id) => { set({ activeNodeId: id }); },
 
   spawnAgent: async (nodeId, provider, rowsOrOptions, maybeCols) => {
     const options: SpawnAgentOptions =

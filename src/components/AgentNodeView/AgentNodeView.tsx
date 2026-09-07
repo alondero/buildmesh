@@ -88,7 +88,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   };
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
   const isMultiPane = nodes.length > 1;
 
   return (
@@ -108,7 +108,7 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
                 nodeId={node.id}
                 memberIds={activityMembersByRoot[node.id] ?? [node.id]}
                 isActive={node.id === activeNodeId}
-                onActivate={setActiveNode}
+                onActivate={activateNode}
                 draggable={draggable}
               />
             </div>
@@ -299,7 +299,7 @@ export function AgentNodeView() {
       new Set(agentNodes.filter(node => node.status !== 'archived').map(node => node.id)),
     );
   }, [agentNodes]);
-  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const activateNode = useNodeActivityStore(state => state.activateNode);
   const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
   const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
 
@@ -386,9 +386,9 @@ export function AgentNodeView() {
   useEffect(() => {
     if (viewMode === 'single') return;
     if (visibleNodes.length > 0 && activeNode && !visibleNodes.find(s => s.id === activeRootId)) {
-      setActiveNode(visibleNodes[0].id);
+      activateNode(visibleNodes[0].id);
     }
-  }, [viewMode, visibleNodes, activeNode, activeRootId, setActiveNode]);
+  }, [viewMode, visibleNodes, activeNode, activeRootId, activateNode]);
 
   // Fit terminal when active node changes (e.g. container might have resized)
   useEffect(() => {
@@ -548,7 +548,7 @@ export function AgentNodeView() {
                   nodeId={singleNode.id}
                   memberIds={activityMembersByRoot[singleNode.id] ?? [singleNode.id]}
                   isActive={singleNode.id === activeNodeId}
-                  onActivate={setActiveNode}
+                  onActivate={activateNode}
                   draggable={false}
                 />
               </div>

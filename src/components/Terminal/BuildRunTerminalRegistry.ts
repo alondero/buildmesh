@@ -53,6 +53,7 @@ import { setTheme, type ThemeName } from '../../lib/theme';
  * for this fix.
  */
 export type BuildRunMode = 'build' | 'run' | 'terminal';
+export type BuildRunLifecycle = 'idle' | 'spawning' | 'ready' | 'terminating' | 'terminated';
 
 export interface BuildRunInstance {
   sessionId: number;
@@ -63,13 +64,15 @@ export interface BuildRunInstance {
   /** Unlisten for the `build-run-output-{sessionId}` test-injection listener.
    *  Released by `disposeInstance`. Production bytes use the binary Channel. */
   outputUnlisten: UnlistenFn | null;
+  /** Resolves once the backend output channel registration has completed. */
+  outputSubscribe: Promise<void> | null;
   /** Unlisten for the `build-run-exited-{sessionId}` listener. Released by
    *  `disposeInstance`. The listener closure checks the per-instance
    *  generation against the current session generation so stale exit events
    *  from previous PTY lifecycles are filtered out. */
   exitUnlisten: UnlistenFn | null;
   /** Generation token for this PTY lifecycle. Matches the module-level
-   *  `sessionGenerations.get(sessionId)` at attach time. The exit listener
+   *  session state at attach time. The exit listener
    *  no-ops if the generation has been superseded by a subsequent spawn. */
   generation: number;
   /** Per-instance output writer. Same shape as TerminalRegistry's per-instance
@@ -83,6 +86,27 @@ export interface BuildRunInstance {
    *  resolves (NOT before — see attachToDOM), cleared by `dispose` or by the
    *  `build-run-exited-{sessionId}` sentinel when the shell exits naturally. */
   ptyAlive: boolean;
+  /** Set before the instance is removed so an in-flight `buildRun` resolution
+   *  can close the PTY it just created instead of reviving an unreachable
+   *  registry entry. */
+  disposed: boolean;
+  /** Explicit lifecycle state. Async PTY completion may only advance this
+   * state; disposal moves it to terminating before the instance leaves the
+   * registry. */
+  lifecycle: BuildRunLifecycle;
+}
+
+interface PendingCreation {
+  promise: Promise<BuildRunInstance | null>;
+  cancelRequested: boolean;
+}
+
+interface SessionState {
+  /** One queue owns attach, spawn completion, unsubscribe, and PTY close. */
+  queue: Promise<void>;
+  busy: boolean;
+  /** Monotonic tombstone used by exit listeners across reopen cycles. */
+  generation: number;
 }
 
 function instanceKey(sessionId: number, mode: BuildRunMode, useWorktree: boolean): string {
@@ -116,15 +140,10 @@ function measureAndFit(inst: BuildRunInstance): void {
 
 export class BuildRunTerminalRegistry {
   private instances = new Map<string, BuildRunInstance>();
-  private pending = new Map<string, Promise<BuildRunInstance | null>>();
-  /** Per-sessionId Promise chains that serialize `attach`. Each `attach`
-   *  awaits the previous chain entry before doing its own work, so mode-
-   *  conflict cleanup sees the previous attach's fully-settled state. */
-  private sessionLocks = new Map<number, Promise<unknown>>();
-  /** Per-sessionId generation counter. Incremented on each successful
-   *  `doCreate`; exit listeners compare their captured value against the
-   *  current value to drop stale events from previous PTY lifecycles. */
-  private sessionGenerations = new Map<number, number>();
+  private pending = new Map<string, PendingCreation>();
+  /** Per-session lifecycle queue and generation tombstone. Keeping both in
+   *  one record prevents spawn completion from escaping the teardown chain. */
+  private sessions = new Map<number, SessionState>();
   // Issue #734: live-update the xterm.js palette on theme flips. Subscribes
   // to theme.ts's pub/sub at construction; walks `entries` on every flip;
   // releases its listener in destroy(). Separate from TerminalRegistry's
@@ -145,13 +164,28 @@ export class BuildRunTerminalRegistry {
     const key = instanceKey(sessionId, mode, useWorktree);
     const existing = this.instances.get(key);
     if (existing) return existing;
-    if (this.pending.has(key)) return this.pending.get(key)!;
-    const promise = this.doCreate(sessionId, mode, useWorktree);
-    this.pending.set(key, promise);
+    const pending = this.pending.get(key);
+    if (pending) {
+      // An explicit close may race the lazy xterm/listener setup. Let that
+      // creation finish its own cleanup before a new attach starts; otherwise
+      // the new request could coalesce with a creation that is already slated
+      // for disposal.
+      if (pending.cancelRequested) {
+        await pending.promise;
+        return null;
+      }
+      return pending.promise;
+    }
+    const request = {
+      promise: undefined as unknown as Promise<BuildRunInstance | null>,
+      cancelRequested: false,
+    } satisfies PendingCreation;
+    request.promise = this.doCreate(sessionId, mode, useWorktree, request);
+    this.pending.set(key, request);
     try {
-      return await promise;
+      return await request.promise;
     } finally {
-      this.pending.delete(key);
+      if (this.pending.get(key) === request) this.pending.delete(key);
     }
   }
 
@@ -172,44 +206,40 @@ export class BuildRunTerminalRegistry {
     container: HTMLElement,
     signal?: AbortSignal,
   ): Promise<BuildRunInstance | null> {
-    // Serialize per sessionId so concurrent attaches (React 18 StrictMode
-    // double-mount, fast Build→Run clicks) see each other's settled state
-    // before doing mode-conflict cleanup.
-    const previousLock = this.sessionLocks.get(sessionId) ?? Promise.resolve();
-    let release!: () => void;
-    const ourLock = new Promise<void>((resolve) => { release = resolve; });
-    this.sessionLocks.set(sessionId, previousLock.then(() => ourLock));
-    await previousLock;
-    try {
+    // One queue owns the complete session lifecycle. In particular, a
+    // disposal requested while buildRun is pending is ordered after that
+    // spawn's resolution and before the next attach can create a replacement.
+    return this.enqueueSession(sessionId, async () => {
+      if (signal?.aborted) return null;
       // Mode-conflict cleanup: any sibling instance for this sessionId with
       // a different (mode, useWorktree) is disposed BEFORE we spawn a new
-      // PTY. Serialization above guarantees the sibling is fully settled
-      // (post-instances.set) before we run this scan.
+      // PTY. The inline path is safe because this callback already owns the
+      // session queue.
       const targetKey = instanceKey(sessionId, mode, useWorktree);
       for (const [key, inst] of this.instances) {
         if (inst.sessionId === sessionId && key !== targetKey) {
-          this.disposeInstance(key);
+          await this.disposeInstanceInline(key);
         }
       }
 
       const inst = await this.getOrCreate(sessionId, mode, useWorktree);
       if (!inst) return null;
       // If the React effect already aborted during our await, bail out
-      // before opening the xterm into a deleted container or spawning a
-      // PTY that no one will display.
-      if (signal?.aborted) return inst;
-      return this.attachToDOM(inst, container);
-    } finally {
-      release();
-      // Tidy up the lock chain if we're the last one queued. Keeps the
-      // Map from growing for long-lived sessions that touch many nodes.
-      if (this.sessionLocks.get(sessionId) === ourLock) {
-        this.sessionLocks.delete(sessionId);
+      // before opening the xterm into a deleted container or spawning a PTY
+      // that no one will display. The instance must be disposed here because
+      // `dispose()` may have run before lazy creation put it in the map.
+      if (signal?.aborted) {
+        if (this.instances.get(instanceKey(sessionId, mode, useWorktree)) === inst) {
+          await this.disposeInstanceInline(instanceKey(sessionId, mode, useWorktree));
+        }
+        return null;
       }
-    }
+      return this.attachToDOM(inst, container);
+    });
   }
 
-  private attachToDOM(inst: BuildRunInstance, container: HTMLElement): BuildRunInstance {
+  private async attachToDOM(inst: BuildRunInstance, container: HTMLElement): Promise<BuildRunInstance | null> {
+    const key = instanceKey(inst.sessionId, inst.mode, inst.useWorktree);
     const wasFreshOpen = !inst.opened;
     if (!inst.opened) {
       inst.opened = true;
@@ -231,6 +261,7 @@ export class BuildRunTerminalRegistry {
       // (user navigated back) we skip this so the scrollback isn't cluttered
       // with a second banner, and so the existing PTY isn't overwritten.
       inst.term.write(modeBanner(inst.mode, inst.useWorktree));
+      inst.lifecycle = 'spawning';
       // Set ptyAlive=true ONLY after api.buildRun resolves. Setting it
       // synchronously here races with a quick X-click: the user could
       // click X between this line and the IPC returning, and dispose
@@ -238,13 +269,34 @@ export class BuildRunTerminalRegistry {
       // buildRun that's still in flight on Rust. Moving the flag flip
       // into the success path makes the JS-side flag match the Rust-side
       // reality.
-      api.buildRun(inst.sessionId, inst.mode).then(
-        () => { inst.ptyAlive = true; },
-        (err) => {
+      // Keep the per-session attach lock held until the spawn settles. A
+      // mode switch must not start a second PTY while this one is still in
+      // flight: `close_build_run` is keyed only by session id and could close
+      // the replacement process or miss the late-created original.
+      try {
+        await api.buildRun(inst.sessionId, inst.mode);
+        if (inst.disposed || this.instances.get(key) !== inst) {
+          // The session queue owns the subsequent teardown. Mark the PTY
+          // alive here so the queued disposer closes the process after this
+          // spawn resolves; a direct close would race a replacement attach.
+          inst.ptyAlive = true;
+          inst.lifecycle = 'terminating';
+          await this.finishDisposal(inst);
+        } else {
+          inst.ptyAlive = true;
+          inst.lifecycle = 'ready';
+        }
+      } catch (err) {
+        if (!inst.disposed && this.instances.get(key) === inst) {
           inst.term.write(`\r\nError: ${String(err)}\r\n`);
-        },
-      );
+        }
+      }
     }
+
+    // Explicit close may have happened while the first spawn was pending.
+    // Do not schedule repaint/renderer work against the disposed xterm after
+    // the late-resolution cleanup above has finished.
+    if (inst.disposed || this.instances.get(key) !== inst || inst.lifecycle === 'terminating') return null;
 
     requestAnimationFrame(() => {
       if (inst.attachedContainer !== container) return;
@@ -264,7 +316,7 @@ export class BuildRunTerminalRegistry {
       inst.term,
     );
 
-    return inst;
+    return inst.disposed || this.instances.get(key) !== inst ? null : inst;
   }
 
   detach(sessionId: number, mode: BuildRunMode, useWorktree: boolean): void {
@@ -280,50 +332,93 @@ export class BuildRunTerminalRegistry {
 
   /** Full teardown — called from the X button. Kills the Rust PTY,
    *  disposes the xterm, removes from the instances map. */
-  dispose(sessionId: number, mode: BuildRunMode, useWorktree: boolean): void {
-    this.disposeInstance(instanceKey(sessionId, mode, useWorktree));
+  dispose(sessionId: number, mode: BuildRunMode, useWorktree: boolean): Promise<void> {
+    const key = instanceKey(sessionId, mode, useWorktree);
+    if (this.instances.has(key)) {
+      return this.disposeInstance(key);
+    } else {
+      const pending = this.pending.get(key);
+      if (pending) {
+        pending.cancelRequested = true;
+        return this.awaitSessionQueue(sessionId);
+      }
+    }
+    return Promise.resolve();
   }
 
-  private disposeInstance(key: string): void {
-    const inst = this.instances.get(key);
-    if (!inst) return;
+  private awaitSessionQueue(sessionId: number): Promise<void> {
+    return this.sessions.get(sessionId)?.queue ?? Promise.resolve();
+  }
 
+  private enqueueSession<T>(sessionId: number, operation: () => Promise<T>): Promise<T> {
+    const state = this.sessions.get(sessionId) ?? { queue: Promise.resolve(), busy: false, generation: 0 };
+    const run = () => {
+      try { return operation(); }
+      catch (error) { return Promise.reject(error); }
+    };
+    const result = state.busy ? state.queue.catch(() => {}).then(run) : run();
+    state.busy = true;
+    state.queue = result.then(() => { state.busy = false; }, () => { state.busy = false; });
+    this.sessions.set(sessionId, state);
+    return result;
+  }
+
+  /** Remove the instance synchronously and return it for queued teardown. */
+  private beginDisposal(key: string): BuildRunInstance | null {
+    const inst = this.instances.get(key);
+    if (!inst || inst.lifecycle === 'terminating' || inst.lifecycle === 'terminated') return null;
+
+    inst.disposed = true;
+    inst.lifecycle = 'terminating';
+    inst.attachedContainer = null;
     inst.resizeScheduler.dispose();
     terminalWebglPool.release(`buildRun:${key}`);
     if (inst.outputUnlisten) inst.outputUnlisten();
     if (inst.exitUnlisten) inst.exitUnlisten();
-    api.unsubscribeBuildRunOutput(inst.sessionId).catch(() => {});
     inst.writer.unregister(inst.sessionId);
     // Issue #734: symmetric with doCreate's register — same composite key,
     // so a future flip doesn't push a stale palette into a dead xterm.
     this.themeManager.unregister(key);
-    if (inst.ptyAlive) {
-      // Kill the Rust PTY. Only fire this if we believe one is alive —
-      // otherwise a "double X click" or a stale close would be a no-op
-      // on Rust, but skipping the round-trip is cheaper and clearer.
-      api.closeBuildRun(inst.sessionId).catch(() => {});
-      inst.ptyAlive = false;
-    }
     inst.term.dispose(); // allow-dispose — explicit X-button close; the React lifecycle calls `detach`, never this path
     this.instances.delete(key);
+    return inst;
+  }
 
-    // If no other instance for this sessionId exists, clear the
-    // generation counter so a fresh attach later starts at 1.
-    let stillHasSession = false;
-    for (const other of this.instances.values()) {
-      if (other.sessionId === inst.sessionId) { stillHasSession = true; break; }
+  private async finishDisposal(inst: BuildRunInstance): Promise<void> {
+    if (inst.lifecycle === 'terminated') return;
+    // `attachToDOM` is part of the same session queue, so by the time this
+    // runs a late buildRun completion has already marked ptyAlive. This is the
+    // single place that closes the PTY and drops its output channel.
+    const teardownTasks: Promise<unknown>[] = [api.unsubscribeBuildRunOutput(inst.sessionId)];
+    if (inst.ptyAlive) {
+      inst.ptyAlive = false;
+      teardownTasks.push(api.closeBuildRun(inst.sessionId));
     }
-    if (!stillHasSession) {
-      this.sessionGenerations.delete(inst.sessionId);
-    }
+    await Promise.all(teardownTasks.map(task => task.catch(() => {})));
+    inst.lifecycle = 'terminated';
+  }
+
+  private disposeInstanceInline(key: string): Promise<void> {
+    const inst = this.beginDisposal(key);
+    return inst ? this.finishDisposal(inst) : Promise.resolve();
+  }
+
+  private disposeInstance(key: string): Promise<void> {
+    const inst = this.beginDisposal(key);
+    if (!inst) return Promise.resolve();
+
+    return this.enqueueSession(inst.sessionId, () => this.finishDisposal(inst));
   }
 
   destroy(): void {
+    for (const pending of this.pending.values()) {
+      pending.cancelRequested = true;
+    }
     for (const key of [...this.instances.keys()]) {
       this.disposeInstance(key);
     }
-    this.sessionGenerations.clear();
-    this.sessionLocks.clear();
+    // Keep each session's generation tombstone. A delayed exit event from a
+    // disposed PTY must not match a newly reopened PTY that reuses its id.
     // Issue #734: release the theme-listener so a destroyed build-run
     // registry doesn't keep firing flips into a now-empty entry map.
     this.themeManager.destroy();
@@ -349,6 +444,7 @@ export class BuildRunTerminalRegistry {
     sessionId: number,
     mode: BuildRunMode,
     useWorktree: boolean,
+    pending: PendingCreation,
   ): Promise<BuildRunInstance | null> {
     try {
       // Issue #1568 - lazy-load xterm + FitAddon + the unicode-width shim.
@@ -389,8 +485,10 @@ export class BuildRunTerminalRegistry {
       // this value and ignores events whose payload matches an OLDER
       // generation (which would mean the PTY that died is not the one
       // we're currently showing).
-      const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
-      this.sessionGenerations.set(sessionId, generation);
+      const session = this.sessions.get(sessionId) ?? { queue: Promise.resolve(), busy: false, generation: 0 };
+      const generation = session.generation + 1;
+      session.generation = generation;
+      this.sessions.set(sessionId, session);
 
       let inst: BuildRunInstance;
       inst = {
@@ -400,6 +498,7 @@ export class BuildRunTerminalRegistry {
         term,
         fitAddon,
         outputUnlisten: null,
+        outputSubscribe: null,
         exitUnlisten: null,
         generation,
         writer,
@@ -407,6 +506,8 @@ export class BuildRunTerminalRegistry {
         attachedContainer: null,
         resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(inst)),
         ptyAlive: false,
+        disposed: false,
+        lifecycle: 'idle',
       };
 
       // Issue #734: register with ThemeManager so a later theme flip
@@ -448,9 +549,13 @@ export class BuildRunTerminalRegistry {
       });
       inst.outputUnlisten = outputUnlisten;
 
-      api.subscribeBuildRunOutput(sessionId, (bytes) => {
+      inst.outputSubscribe = api.subscribeBuildRunOutput(sessionId, (bytes) => {
         writer.append(sessionId, bytes);
-      }).catch(console.error);
+      }).catch((error) => { console.error(error); });
+      // Do not publish an instance until the backend channel registration has
+      // settled. This lets disposal call unsubscribe in deterministic order
+      // without a second free-floating promise.
+      await inst.outputSubscribe;
 
       // Per-instance exit listener (NOT per-sessionId module-level). Each
       // instance owns its own subscription and unlistens in disposeInstance.
@@ -460,7 +565,8 @@ export class BuildRunTerminalRegistry {
       // reader thread's exit event onto the new instance.
       const exitEventName = `build-run-exited-${sessionId}`;
       const exitUnlisten = await listen<BuildRunExitedPayload>(exitEventName, () => {
-        if ((this.sessionGenerations.get(sessionId) ?? -1) !== generation) return;
+        if (this.instances.get(instanceKey(sessionId, mode, useWorktree)) !== inst) return;
+        if ((this.sessions.get(sessionId)?.generation ?? -1) !== generation) return;
         inst.ptyAlive = false;
         if (inst.attachedContainer) {
           inst.term.write('\r\n[process exited]\r\n');
@@ -468,7 +574,16 @@ export class BuildRunTerminalRegistry {
       });
       inst.exitUnlisten = exitUnlisten;
 
-      this.instances.set(instanceKey(sessionId, mode, useWorktree), inst);
+      const key = instanceKey(sessionId, mode, useWorktree);
+      this.instances.set(key, inst);
+      if (pending.cancelRequested) {
+        // Put it through the same cleanup path as an already-mounted
+        // instance. No PTY has been spawned yet, so this only releases the
+        // terminal/listeners and prevents an unreachable registry entry.
+        const cancelled = this.beginDisposal(key);
+        if (cancelled) void this.enqueueSession(sessionId, () => this.finishDisposal(cancelled));
+        return null;
+      }
 
       return inst;
     } catch (e) {
