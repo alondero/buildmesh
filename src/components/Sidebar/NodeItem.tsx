@@ -17,6 +17,8 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
+import { getAutopilotNodePresentation, hasActiveAutopilotOwnership } from '../../lib/autopilotNodePresentation';
+import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -53,7 +55,10 @@ interface NodeItemProps {
 
 export function NodeItem({ node, meshColor, isActive, providerList, onSelect, onDelete }: NodeItemProps) {
   const config = getStatusConfig(node.status);
-  const isAutopilot = useAgentNodeStore((s) => s.autopilotStates[node.id] != null);
+  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
+  const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);
+  const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
+  const isAutopilot = hasActiveAutopilotOwnership(autopilotState, circuitOwnership);
   const lostConversation = hasLostConversation(node, isAutopilot);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
@@ -383,6 +388,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       >
         {config.dot}
       </span>
+      <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
       {/* Issue #1364 §3 — node-level hook-health warning (see GridNodeHeader). */}
       {node.signal_health === 'unavailable' && (
         <span

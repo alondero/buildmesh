@@ -79,7 +79,7 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
     <button type="button"
       aria-label="Start agent workflow"
       title="Start a review loop or Circuit"
-      disabled={!ownership && !eligible}
+      disabled={!activeOwnership && !eligible}
       onClick={() => setOpen(true)}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
     ><CircuitsIcon className="h-4 w-4" /></button>

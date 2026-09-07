@@ -202,7 +202,11 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     }]).unwrap();
     assert_eq!(cancel_circuit_run(run_id).unwrap(), vec![123456]);
     assert!(get_agent_node_by_id(source.id).is_ok());
-    assert!(!list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id));
+    assert_eq!(
+        list_circuit_agent_ownerships().unwrap().iter().find(|row| row.0 == source.id).map(|row| row.4.as_str()),
+        Some("cancelled"),
+        "terminal source ownership remains durable; the UI mapper intentionally hides cancelled runs"
+    );
     let history = list_circuits_with_recent_runs(mesh.id, 10).unwrap();
     assert_eq!(history.len(), 1, "the preset is history-visible after completion");
     assert!(history[0].0.is_preset);

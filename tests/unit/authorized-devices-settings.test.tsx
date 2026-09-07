@@ -190,11 +190,21 @@ describe('Authorized Devices settings section', () => {
     expect(screen.getByText(/device session not found/i)).toBeTruthy();
   });
 
-  it('leaves the optimistic remove in place when the post-success refresh fails', async () => {
-    // The revoke succeeded on the backend, but the follow-up list-fetch
-    // failed (transient DB hiccup, dropped connection, etc.). Reverting the
-    // row would be a worse lie than briefly stale metadata — the device IS
-    // revoked, so keep it off-screen. The failure is logged, not surfaced.
+  it('leaves the optimistic remove in place AND surfaces the refresh failure banner', async () => {
+    // Issue #1534 (review round 4) — the revoke succeeded on the
+    // backend, but the post-success `list_device_sessions` refresh
+    // failed (transient DB hiccup, dropped connection, etc.).
+    // Two outcomes we must preserve together:
+    //
+    //   1. The optimistic remove stays in place. Reverting the row
+    //      would be a worse lie than briefly stale metadata — the
+    //      device IS revoked, so keep it off-screen.
+    //   2. The refresh failure is now visible via the per-resource
+    //      banner. Round 4 routes `handleRevokeDevice`'s post-revoke
+    //      refresh through `loadDevices()`, which flips
+    //      `devicesState` to `failed` and renders the banner —
+    //      so a stuck-modulo-revoke failure surfaces and Retry can
+    //      re-fetch the (now shorter) device list.
     const calls = mockBackend(
       [device({ id: 14, label: 'Chrome on Android', last_ip: '192.168.1.9' })],
       { rejectListAfterRevoke: new Error('refresh failed') },
@@ -212,7 +222,9 @@ describe('Authorized Devices settings section', () => {
     await waitFor(() => expect(calls['list_device_sessions']?.length).toBeGreaterThanOrEqual(2));
     // Row stays gone — no rollback of a successful revoke.
     await waitFor(() => expect(screen.queryByText('Chrome on Android')).toBeNull());
-    // No user-visible error — the refresh failure is non-fatal by design.
-    expect(screen.queryByText(/refresh failed/i)).toBeNull();
+    // The refresh failure now surfaces in the per-resource banner
+    // with the underlying error message.
+    const banner = await screen.findByTestId('resource-load-devices');
+    expect(banner.textContent).toContain('refresh failed');
   });
 });

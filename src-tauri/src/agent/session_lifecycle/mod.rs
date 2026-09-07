@@ -506,6 +506,9 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
 // guarded the emit).
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+pub mod testing;
+
 pub struct DbOnlySink;
 
 impl SessionLifecycleSink for DbOnlySink {
@@ -853,68 +856,10 @@ pub fn on_exit_sweep() -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-
-    /// Records every status write and emit so a test can assert the
-    /// single transition produced exactly one DB write + exactly one
-    /// event emit (in that order). Pattern mirrors `FakeSink` in
-    /// `commands/attention.rs` (the previous `AttentionSink` test
-    /// fixture).
-    #[derive(Default)]
-    struct FakeSink {
-        writes: RefCell<Vec<(i64, SessionStatus)>>,
-        writes_if: RefCell<Vec<(i64, SessionStatus, SessionStatus)>>,
-        writes_unless: RefCell<Vec<(i64, SessionStatus, Vec<SessionStatus>)>>,
-        attention_needed: RefCell<Vec<i64>>,
-        attention_cleared: RefCell<Vec<i64>>,
-        resume_failed: RefCell<Vec<(i64, String)>>,
-        lifecycle_changed: RefCell<Vec<LifecycleChangedPayload>>,
-    }
-
-    impl SessionLifecycleSink for FakeSink {
-        fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
-            self.writes.borrow_mut().push((node_id, new));
-            Ok(())
-        }
-        fn write_status_if(
-            &self,
-            node_id: i64,
-            new: SessionStatus,
-            expected: SessionStatus,
-        ) -> Result<bool, String> {
-            self.writes_if
-                .borrow_mut()
-                .push((node_id, new, expected));
-            Ok(true)
-        }
-        fn write_status_unless_in(
-            &self,
-            node_id: i64,
-            new: SessionStatus,
-            forbidden: &[SessionStatus],
-        ) -> Result<bool, String> {
-            self.writes_unless.borrow_mut().push((
-                node_id,
-                new,
-                forbidden.to_vec(),
-            ));
-            Ok(true)
-        }
-        fn emit_attention_needed(&self, node_id: i64) {
-            self.attention_needed.borrow_mut().push(node_id);
-        }
-        fn emit_attention_cleared(&self, node_id: i64) {
-            self.attention_cleared.borrow_mut().push(node_id);
-        }
-        fn emit_resume_failed(&self, node_id: i64, reason: &str) {
-            self.resume_failed
-                .borrow_mut()
-                .push((node_id, reason.to_string()));
-        }
-        fn emit_lifecycle_changed(&self, payload: LifecycleChangedPayload) {
-            self.lifecycle_changed.borrow_mut().push(payload);
-        }
-    }
+    // The shared `RecordingSink` fixture lives in `agent::session_lifecycle::
+    // testing` so any test that needs to observe `SessionLifecycleSink`
+    // calls (without touching the global DB) reuses the same struct.
+    use crate::agent::session_lifecycle::testing::RecordingSink;
 
     // -----------------------------------------------------------------------
     // One transition = one write + (optional) one emit.
@@ -924,9 +869,9 @@ mod tests {
 
     #[test]
     fn on_spawn_started_writes_spawning_with_forbidden_set() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_spawn_started(&sink, 7).unwrap();
-        let w = sink.writes_unless.borrow();
+        let w = sink.writes_unless();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, 7);
         assert_eq!(w[0].1, SessionStatus::Spawning);
@@ -939,26 +884,26 @@ mod tests {
 
     #[test]
     fn on_spawn_complete_writes_running_only_if_currently_spawning() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         let promoted = on_spawn_complete(&sink, 7).unwrap();
         assert!(promoted, "on_spawn_complete must report success on a happy path");
-        let w = sink.writes_if.borrow();
+        let w = sink.writes_if();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0], (7, SessionStatus::Running, SessionStatus::Spawning));
     }
 
     #[test]
     fn on_pty_eof_writes_idle_and_emits_session_exited() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_pty_eof(&sink, 7).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::Idle)],
             "PTY EOF is a clean exit → Idle"
         );
-        assert!(sink.attention_needed.borrow().is_empty());
-        assert!(sink.attention_cleared.borrow().is_empty());
-        let events = sink.lifecycle_changed.borrow();
+        assert!(sink.attention_needed().is_empty());
+        assert!(sink.attention_cleared().is_empty());
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1, "clean EOF must emit agent-lifecycle (issue #1364)");
         assert_eq!(events[0].session_id, 7);
         assert_eq!(events[0].kind, LifecycleKind::SessionExited);
@@ -967,26 +912,26 @@ mod tests {
 
     #[test]
     fn on_turn_completed_writes_ready_and_emits_turn_completed() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_turn_completed(&sink, 7, &HookSignalDetail::default()).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::Ready)],
             "a clean turn completion must land in Ready, never Completed (issue #1364)"
         );
-        let events = sink.lifecycle_changed.borrow();
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::TurnCompleted);
         assert_eq!(events[0].status, SessionStatus::Ready);
-        assert!(sink.attention_needed.borrow().is_empty(), "Ready must not emit attention-needed");
+        assert!(sink.attention_needed().is_empty(), "Ready must not emit attention-needed");
     }
 
     #[test]
     fn on_background_running_emits_without_writing_status() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_background_running(&sink, 7, &HookSignalDetail::default()).unwrap();
-        assert!(sink.writes.borrow().is_empty(), "background yield must not change status");
-        let events = sink.lifecycle_changed.borrow();
+        assert!(sink.writes().is_empty(), "background yield must not change status");
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::BackgroundRunning);
         assert_eq!(events[0].status, SessionStatus::Running);
@@ -994,14 +939,14 @@ mod tests {
 
     #[test]
     fn on_attention_with_detail_emits_permission_requested_for_permission_turn() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         let turn = SemanticTurnPayload {
             node_id: 7,
             kind: SemanticTurnKind::PermissionRequest,
             description: "Allow edit: src/lib/auth.ts".into(),
         };
         on_attention_with_detail(&sink, 7, Some(turn)).unwrap();
-        let events = sink.lifecycle_changed.borrow();
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::PermissionRequested);
         assert_eq!(events[0].status, SessionStatus::AwaitingInput);
@@ -1013,19 +958,19 @@ mod tests {
 
     #[test]
     fn on_idle_emits_process_idle() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_idle(&sink, 7).unwrap();
-        assert_eq!(*sink.writes.borrow(), vec![(7, SessionStatus::Idle)]);
-        let events = sink.lifecycle_changed.borrow();
+        assert_eq!(*sink.writes(), vec![(7, SessionStatus::Idle)]);
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::ProcessIdle);
     }
 
     #[test]
     fn on_error_emits_error_lifecycle() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_error(&sink, 7).unwrap();
-        let events = sink.lifecycle_changed.borrow();
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::Error);
         assert_eq!(events[0].status, SessionStatus::Error);
@@ -1033,9 +978,9 @@ mod tests {
 
     #[test]
     fn on_completed_emits_autopilot_completed_with_completed_status() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_completed(&sink, 7).unwrap();
-        let events = sink.lifecycle_changed.borrow();
+        let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         // A distinct kind: "terminal PR-opened" must never be confused with
         // an ordinary TurnCompleted (issue #1364 review).
@@ -1046,9 +991,9 @@ mod tests {
 
     #[test]
     fn on_resume_failed_writes_error_with_forbidden_set_and_emits_resume_failed() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_resume_failed(&sink, 7, "session expired").unwrap();
-        let w = sink.writes_unless.borrow();
+        let w = sink.writes_unless();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, 7);
         assert_eq!(w[0].1, SessionStatus::Error);
@@ -1058,7 +1003,7 @@ mod tests {
             "early-exit must not resurrect Error/Archived (#654)"
         );
         assert_eq!(
-            *sink.resume_failed.borrow(),
+            *sink.resume_failed(),
             vec![(7, "session expired".to_string())],
             "early exit must emit resume-failed exactly once with the given reason"
         );
@@ -1066,69 +1011,69 @@ mod tests {
 
     #[test]
     fn on_attention_writes_awaiting_input_and_emits_attention_needed() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_attention(&sink, 7).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::AwaitingInput)]
         );
-        assert_eq!(*sink.attention_needed.borrow(), vec![7]);
+        assert_eq!(*sink.attention_needed(), vec![7]);
         assert!(
-            sink.attention_cleared.borrow().is_empty(),
+            sink.attention_cleared().is_empty(),
             "attention mark must not also emit attention-cleared"
         );
         assert!(
-            sink.resume_failed.borrow().is_empty(),
+            sink.resume_failed().is_empty(),
             "attention mark must not emit resume-failed"
         );
     }
 
     #[test]
     fn on_attention_cleared_writes_running_and_emits_attention_cleared() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_attention_cleared(&sink, 7).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::Running)]
         );
-        assert_eq!(*sink.attention_cleared.borrow(), vec![7]);
+        assert_eq!(*sink.attention_cleared(), vec![7]);
         assert!(
-            sink.attention_needed.borrow().is_empty(),
+            sink.attention_needed().is_empty(),
             "clearing attention must not emit attention-needed"
         );
     }
 
     #[test]
     fn on_error_writes_error_with_forbidden_set_and_emits_nothing() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_error(&sink, 7).unwrap();
-        let w = sink.writes_unless.borrow();
+        let w = sink.writes_unless();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].1, SessionStatus::Error);
         assert_eq!(w[0].2, vec![SessionStatus::Error, SessionStatus::Archived]);
-        assert!(sink.attention_needed.borrow().is_empty());
-        assert!(sink.attention_cleared.borrow().is_empty());
-        assert!(sink.resume_failed.borrow().is_empty());
+        assert!(sink.attention_needed().is_empty());
+        assert!(sink.attention_cleared().is_empty());
+        assert!(sink.resume_failed().is_empty());
     }
 
     #[test]
     fn on_completed_writes_completed_unconditionally() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_completed(&sink, 7).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::Completed)]
         );
-        assert!(sink.attention_needed.borrow().is_empty());
-        assert!(sink.attention_cleared.borrow().is_empty());
+        assert!(sink.attention_needed().is_empty());
+        assert!(sink.attention_cleared().is_empty());
     }
 
     #[test]
     fn on_created_writes_pending() {
-        let sink = FakeSink::default();
+        let sink = RecordingSink::new();
         on_created(&sink, 7).unwrap();
         assert_eq!(
-            *sink.writes.borrow(),
+            *sink.writes(),
             vec![(7, SessionStatus::Pending)]
         );
     }
