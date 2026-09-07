@@ -87,7 +87,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
-    setActiveNode: vi.fn(),
+    onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
@@ -165,7 +165,7 @@ describe('MeshItem', () => {
   it('renders a NodeItem per mesh node and selects it on click', async () => {
     const { props } = renderMeshItem({ meshNodes: [makeNode()] });
     await userEvent.click(screen.getByText('node-a'));
-    expect(props.setActiveNode).toHaveBeenCalledWith(10);
+    expect(props.onActivateNode).toHaveBeenCalledWith(10);
     expect(props.selectMesh).toHaveBeenCalledWith(3);
   });
 
@@ -788,7 +788,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
                 onOpenSessionHistoryProbe={vi.fn()}
                 meshNodes={[]}
                 activeNodeId={null}
-                setActiveNode={vi.fn()}
+                onActivateNode={vi.fn()}
                 selectMesh={vi.fn()}
                 onDeleteNode={vi.fn()}
                 getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
