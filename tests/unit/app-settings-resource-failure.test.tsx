@@ -338,4 +338,233 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     await openSettingsPane(/^General$/);
     expect(screen.getByTestId('resource-load-preferences')).toBeTruthy();
   });
+
+  it('a list_providers rejection renders a providers banner on the General pane (round-2 review)', async () => {
+    // Issue #1534 review round 2 — without this banner the user
+    // sees the default-provider + auto-naming controls silently
+    // disabled with no explanation. The Providers tab also gets a
+    // banner (tested separately), but the General pane is where most
+    // users land first.
+    mockWithFailure('list_providers', 'providers endpoint 503');
+
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    // The General pane (default tab) must surface the providers
+    // failure — the disabled default-provider select on its own
+    // doesn't tell the user *why* it's disabled. Note that the
+    // providers banner also appears on the hidden Harnesses pane
+    // (mounted but not visible), so we use `getAllByTestId` and
+    // check at least one copy exists with the right text.
+    const banners = await screen.findAllByTestId('resource-load-providers');
+    expect(banners.length).toBeGreaterThanOrEqual(1);
+    expect(banners[0].textContent).toContain('providers endpoint 503');
+    const retryButtons = screen.getAllByTestId('resource-load-providers-retry');
+    expect(retryButtons[0].getAttribute('aria-label')).toMatch(/retry loading providers/i);
+
+    // Default provider select is disabled (it depends on providers
+    // AND preferences; here providers is failed so the dropdown is
+    // not selectable).
+    const defaultProvider = screen.getByLabelText<HTMLSelectElement>('Default provider');
+    expect(defaultProvider.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('a get_coordinator_status rejection renders a coordinator banner on the Remote pane (round-2 review)', async () => {
+    // Round-2 review — coordinator failures used to silently
+    // disable the coordinator toggle on the Remote pane with no
+    // visible explanation. The toggle is still disabled; the banner
+    // now makes the failure visible.
+    mockWithFailure('get_coordinator_status', 'coordinator endpoint down');
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/^Remote Access$/);
+
+    const banner = await screen.findByTestId('resource-load-coordinator');
+    expect(banner.textContent).toContain('coordinator endpoint down');
+
+    // The coordinator toggle is disabled AND the banner is visible
+    // so the user can recover via Retry (not "the toggle is off
+    // and I can't tell why").
+    const coordToggle = screen.getByRole('checkbox', { name: /enable coordinator read api/i });
+    expect(coordToggle.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('switching to the Harnesses pane while pairings is still idle shows the loading state, not an empty HarnessConfigList (round-2 review)', async () => {
+    // Round-2 review showstopper — pairings starts at `idle` until
+    // providers loads. Navigating to the Harnesses pane mid-load
+    // used to fall through the ternary's else branch and mount an
+    // empty HarnessConfigList, flashing "no compatible providers"
+    // — the exact bug #1534 aimed to fix.
+    //
+    // We mock listProviders to hang (never resolves) so the
+    // chain never gets to pairings. Switching to Harnesses must
+    // therefore render the loading banner, NOT HarnessConfigList.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_app_preferences':
+          return Promise.resolve({
+            default_provider: null,
+            naming_provider: null,
+            autopilot_pool_size: null,
+            worktree_directory: '',
+            confirm_before_quit: true,
+            harness_defaults: {},
+            provider_pairings: [],
+          });
+        case 'list_providers':
+          // Never resolve — providers stays in `loading` indefinitely,
+          // so pairings stays in `idle`.
+          return new Promise(() => {});
+        case 'get_provider_accounts':
+          return Promise.resolve([]);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_for_harness':
+          return Promise.resolve([]);
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    // Switch to Harnesses before any load resolves. The testid for
+    // the loading state is `resource-load-pairings-loading`; the
+    // empty-state text is "Spawn menu order" — neither should be
+    // present because HarnessConfigList must not mount.
+    await openSettingsPane('Harnesses');
+    expect(await screen.findByTestId('resource-load-pairings-loading')).toBeTruthy();
+    // The "Spawn menu order" section + HarnessConfigList are gated
+    // on at least two orderable harnesses; with `providers` empty
+    // the section is hidden anyway, but the loading banner is what
+    // we're pinning — it's the visible signal that the data isn't
+    // ready.
+    expect(screen.queryByText(/no compatible providers/i)).toBeNull();
+  });
+
+  it('retrying pairings while providers is empty marks pairings failed (no fabricated clean state)', async () => {
+    // Round-2 review — the previous `retryResource('pairings')`
+    // called `loadPairings(providersRef.current)` which was `[]`
+    // when providers had failed. `loadPairings([])` then queried
+    // zero harnesses, "succeeded" with empty arrays, and the
+    // error banner disappeared — lying to the user.
+    //
+    // Now `loadPairings([])` short-circuits to a `failed` state
+    // with an explicit message. The user must retry providers
+    // before pairings can load.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_app_preferences':
+          return Promise.resolve({
+            default_provider: null,
+            naming_provider: null,
+            autopilot_pool_size: null,
+            worktree_directory: '',
+            confirm_before_quit: true,
+            harness_defaults: {},
+            provider_pairings: [],
+          });
+        case 'list_providers':
+          return Promise.reject(new Error('providers offline'));
+        case 'get_provider_accounts':
+          return Promise.resolve([]);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_for_harness':
+          return Promise.resolve([]);
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Harnesses');
+
+    // With providers failed, the Harnesses pane must show the
+    // providers banner (NOT pairings — pairings never even tried).
+    const providerBanners = await screen.findAllByTestId('resource-load-providers');
+    expect(providerBanners.length).toBeGreaterThanOrEqual(1);
+    expect(providerBanners[0].textContent).toContain('providers offline');
+
+    // Pairings must NOT be in the `loaded` state — without providers,
+    // pairings has no harnesses to query, and the previous code
+    // would have "succeeded" with zero harnesses + zero compatible
+    // providers, lying to the user. Now it stays at `idle` and we
+    // see no "No compatible providers" copy.
+    expect(screen.queryByText(/no compatible providers/i)).toBeNull();
+  });
+
+  it('pairings load decoupled from preferences: a corrupted preferences.json does NOT fail the pairings resource', async () => {
+    // Round-2 review — the previous `loadPairings` called
+    // `getAppPreferences()` for `provider_pairings` (the stored-key
+    // set). A corrupted preferences.json would crash pairings even
+    // when pairings + verifications + compatibility were all fine.
+    //
+    // After the fix: preferences failure inside pairings is
+    // best-effort; pairings loads the core data and falls back to
+    // an empty stored-key set. The pairings resource reaches
+    // `loaded`, NOT `failed`.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_app_preferences':
+          // Reject — a corrupted preferences.json.
+          return Promise.reject(new Error('preferences.json corrupt'));
+        case 'list_providers':
+          return Promise.resolve(REAL_PROVIDERS);
+        case 'get_provider_accounts':
+          return Promise.resolve([]);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_for_harness':
+          return Promise.resolve([]);
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Harnesses');
+
+    // Pairings must reach `loaded` (no banner, no loading) even
+    // though preferences failed. The HarnessConfigList is now
+    // rendered with the best-effort empty stored-key set; rows
+    // show as detachable, which is the documented fallback.
+    await waitFor(() => {
+      expect(screen.queryByTestId('resource-load-pairings')).toBeNull();
+      expect(screen.queryByTestId('resource-load-pairings-loading')).toBeNull();
+    });
+
+    // Meanwhile the preferences banner is on the General pane.
+    await openSettingsPane(/^General$/);
+    expect(screen.getByTestId('resource-load-preferences')).toBeTruthy();
+  });
 });

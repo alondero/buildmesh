@@ -57,28 +57,47 @@ type ResourceKey =
   | 'devices'
   | 'network';
 
-const IDLE_RESOURCE: ResourceState = { status: 'idle', error: null };
-const LOADING_RESOURCE: ResourceState = { status: 'loading', error: null };
+/** Initial state for every resource (issue #1534 review). All
+ *  independent resources start at `loading` because the modal kicks
+ *  them off on mount; `pairings` starts at `idle` because it's a
+ *  dependent resource — it doesn't fire until providers loads. Using
+ *  a single `INITIAL_RESOURCES` keyed object (rather than seven
+ *  `useState<ResourceState>` calls) means adding a new resource is
+ *  type-checked: omitting the key from `INITIAL_RESOURCES` is a
+ *  compile error. */
+const INITIAL_RESOURCES: Record<ResourceKey, ResourceState> = {
+  preferences: { status: 'loading', error: null },
+  providers: { status: 'loading', error: null },
+  accounts: { status: 'loading', error: null },
+  // Pairings derive their `compatibleByHarness` map from `providers`,
+  // so they only start loading once providers loads successfully.
+  // Until then they sit at `idle` — neither "in flight" nor "failed",
+  // just "waiting on an upstream dependency".
+  pairings: { status: 'idle', error: null },
+  coordinator: { status: 'loading', error: null },
+  devices: { status: 'loading', error: null },
+  network: { status: 'loading', error: null },
+};
 
 /** Wrap a single-resource read so it commits its data on success and
  *  marks itself `failed` (without touching siblings) on rejection. The
  *  loader is responsible for its own commits; the helper only owns the
  *  status/error bookkeeping. Returns the data on success, `null` on
  *  failure — callers can use the return value to chain dependent
- *  loads (e.g. `loadPairings(loadedProviders)` after `loadProviders`). */
+ *  loads (e.g. `loadPairings` after `loadProviders`). */
 async function withResourceLoad<T>(
-  setState: React.Dispatch<React.SetStateAction<ResourceState>>,
+  setResource: (next: ResourceState) => void,
   loader: () => Promise<T>,
   onSuccess: (data: T) => void,
 ): Promise<T | null> {
-  setState({ status: 'loading', error: null });
+  setResource({ status: 'loading', error: null });
   try {
     const data = await loader();
     onSuccess(data);
-    setState({ status: 'loaded', error: null });
+    setResource({ status: 'loaded', error: null });
     return data;
   } catch (e) {
-    setState({ status: 'failed', error: formatError(e) });
+    setResource({ status: 'failed', error: formatError(e) });
     return null;
   }
 }
@@ -473,6 +492,15 @@ function ResourceLoadStatus({
       <div
         className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded-md px-3 py-2"
         data-testid={`resource-load-${resource}`}
+        // Issue #1534 (review round 2) — the failure banner is an
+        // alert: screen readers announce it as soon as it appears
+        // (`role="alert"` implicitly maps to `aria-live="assertive"`)
+        // and a descriptive label gives the message a name beyond
+        // "alert". Without these, a user relying on assistive tech
+        // would never learn that the resource failed to load.
+        role="alert"
+        aria-live="assertive"
+        aria-label={`Couldn't load ${humanResourceName(resource)}`}
       >
         <span className="flex-1 text-base text-text-primary">
           <span className="font-medium">Couldn’t load {humanResourceName(resource)}.</span>{' '}
@@ -483,6 +511,12 @@ function ResourceLoadStatus({
           onClick={onRetry}
           className="px-3 py-1 bg-accent-cyan/20 text-accent-cyan text-sm rounded-md hover:bg-accent-cyan/30"
           data-testid={`resource-load-${resource}-retry`}
+          // Scoped aria-label so a screen reader user hears which
+          // resource this Retry button belongs to — multiple banners
+          // on the same pane (e.g. preferences + providers both
+          // failing) would otherwise announce two indistinguishable
+          // "Retry" buttons.
+          aria-label={`Retry loading ${humanResourceName(resource)}`}
         >
           Retry
         </button>
@@ -496,6 +530,12 @@ function ResourceLoadStatus({
     <p
       className="text-base text-text-muted"
       data-testid={`resource-load-${resource}-loading`}
+      // Polite live region so a screen reader announces the
+      // "Loading…" state change without interrupting whatever's
+      // mid-utterance. `role="status"` carries the implicit
+      // `aria-live="polite"`.
+      role="status"
+      aria-live="polite"
     >
       Loading {humanResourceName(resource)}…
     </p>
@@ -540,28 +580,33 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // accessible error + Retry and never claim "zero accounts / no
   // compatible providers / no paired devices" when the real answer is
   // "we couldn't read the answer".
-  const [prefsState, setPrefsState] = useState<ResourceState>(LOADING_RESOURCE);
-  const [providersState, setProvidersState] = useState<ResourceState>(LOADING_RESOURCE);
-  const [accountsState, setAccountsState] = useState<ResourceState>(LOADING_RESOURCE);
-  // Pairings are derived from `providers` — start at `idle` (not yet
-  // attempted) so the user doesn't see a misleading Retry button while
-  // we're still waiting on the upstream providers load.
-  const [pairingsState, setPairingsState] = useState<ResourceState>(IDLE_RESOURCE);
-  const [coordinatorState, setCoordinatorState] = useState<ResourceState>(LOADING_RESOURCE);
-  const [devicesState, setDevicesState] = useState<ResourceState>(LOADING_RESOURCE);
-  const [networkState, setNetworkState] = useState<ResourceState>(LOADING_RESOURCE);
+  //
+  // Review feedback round 2: collapsed seven `useState<ResourceState>`
+  // hooks into one `Record<ResourceKey, ResourceState>` so adding a new
+  // resource is type-checked (omitting the key from `INITIAL_RESOURCES`
+  // is a compile error) and so all the per-resource setters share one
+  // `setResource(key, partial)` updater instead of seven near-identical
+  // `setXState(...)` calls.
+  const [resources, setResources] = useState<Record<ResourceKey, ResourceState>>(
+    INITIAL_RESOURCES,
+  );
+
+  /** Set one resource's status + error atomically. */
+  const setResource = useCallback((key: ResourceKey, next: ResourceState) => {
+    setResources((prev) => ({ ...prev, [key]: next }));
+  }, []);
 
   // Per-resource readiness booleans. Controls that read or write a
   // resource must gate themselves on its `loaded` state — `idle`,
   // `loading`, and `failed` all disable, so a placeholder initial value
   // (`false` / `[]` / `{}`) can never be written to the backend as if
   // it were the real persisted state.
-  const prefsLoaded = prefsState.status === 'loaded';
-  const providersLoaded = providersState.status === 'loaded';
-  const accountsLoaded = accountsState.status === 'loaded';
-  const coordinatorLoaded = coordinatorState.status === 'loaded';
-  const devicesLoaded = devicesState.status === 'loaded';
-  const networkLoaded = networkState.status === 'loaded';
+  const prefsLoaded = resources.preferences.status === 'loaded';
+  const providersLoaded = resources.providers.status === 'loaded';
+  const accountsLoaded = resources.accounts.status === 'loaded';
+  const coordinatorLoaded = resources.coordinator.status === 'loaded';
+  const devicesLoaded = resources.devices.status === 'loaded';
+  const networkLoaded = resources.network.status === 'loaded';
   // Note (issue #601): Usage Meters moved off the Settings modal to the
   // Probe Panel's "Usage" tab. The Settings surface is now credentials +
   // harness config + LAN/Coordinator/Device toggles only. The meters
@@ -732,107 +777,166 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // buttons re-run a single loader; the others stay where they are.
 
   const loadPreferences = useCallback(async () => {
-    await withResourceLoad(setPrefsState, () => api.getAppPreferences(), (prefs) => {
-      const stored = prefs.default_provider;
-      setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
-      // Issue #824: the rename-backend picker reads from the same
-      // `AppPreferences` snapshot. `null` here is intentional — that's
-      // the default (auto-naming off until the user opts in). Empty
-      // strings are normalised to `null` so the UI treats a frontend
-      // "" clear the same as the explicit None the backend accepts.
-      const storedNaming = prefs.naming_provider;
-      setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
-      const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
-      setPoolDraft(storedPool);
-      poolSavedRef.current = storedPool;
-      const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
-      setWorktreeDirDraft(storedWorktreeDir);
-      worktreeDirSavedRef.current = storedWorktreeDir;
-      // Issue #1501: older preferences.json files predate the field —
-      // `?? true` keeps the safe default (prompt) for those installs.
-      useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
-      setHarnessDefaults(prefs.harness_defaults ?? {});
-    });
-  }, []);
+    await withResourceLoad(
+      (next) => setResource('preferences', next),
+      () => api.getAppPreferences(),
+      (prefs) => {
+        const stored = prefs.default_provider;
+        setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+        // Issue #824: the rename-backend picker reads from the same
+        // `AppPreferences` snapshot. `null` here is intentional — that's
+        // the default (auto-naming off until the user opts in). Empty
+        // strings are normalised to `null` so the UI treats a frontend
+        // "" clear the same as the explicit None the backend accepts.
+        const storedNaming = prefs.naming_provider;
+        setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
+        const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
+        setPoolDraft(storedPool);
+        poolSavedRef.current = storedPool;
+        const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
+        setWorktreeDirDraft(storedWorktreeDir);
+        worktreeDirSavedRef.current = storedWorktreeDir;
+        // Issue #1501: older preferences.json files predate the field —
+        // `?? true` keeps the safe default (prompt) for those installs.
+        useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
+        setHarnessDefaults(prefs.harness_defaults ?? {});
+      },
+    );
+  }, [setResource]);
 
   const loadProviders = useCallback(async () => {
-    const result = await withResourceLoad(setProvidersState, () => api.listProviders(), (list) => {
-      setProviders(list);
-    });
+    const result = await withResourceLoad(
+      (next) => setResource('providers', next),
+      () => api.listProviders(),
+      (list) => {
+        setProviders(list);
+      },
+    );
     // Pairings derive their `compatibleByHarness` map from the providers
     // list, so a successful providers load is the trigger for loading
     // pairings — and a failed one means pairings must stay idle until
-    // providers succeeds (via retry).
+    // providers succeeds (via retry). `loadPairings` is also responsible
+    // for refusing to run with empty providers, so we never pass the
+    // empty-array-of-zero-harnesses shortcut.
     if (result) {
       void loadPairings(result);
     }
-  }, []);
+  }, [setResource]);
 
   const loadAccounts = useCallback(async () => {
-    await withResourceLoad(setAccountsState, async () => {
-      const [accountList, catalog] = await Promise.all([
-        api.getProviderAccounts(),
-        api.getKeyedFirstClassCatalog(),
-      ]);
-      return { accountList, catalog } as const;
-    }, ({ accountList, catalog }) => {
-      setAccounts(accountList);
-      setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
-    });
-  }, []);
+    await withResourceLoad(
+      (next) => setResource('accounts', next),
+      async () => {
+        const [accountList, catalog] = await Promise.all([
+          api.getProviderAccounts(),
+          api.getKeyedFirstClassCatalog(),
+        ]);
+        return { accountList, catalog } as const;
+      },
+      ({ accountList, catalog }) => {
+        setAccounts(accountList);
+        setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+      },
+    );
+  }, [setResource]);
 
   const loadCoordinator = useCallback(async () => {
-    await withResourceLoad(setCoordinatorState, () => api.getCoordinatorStatus(), (coord) => {
-      setCoordEnabled(coord.enabled);
-      setCoordHasToken(coord.has_token);
-    });
-  }, []);
+    await withResourceLoad(
+      (next) => setResource('coordinator', next),
+      () => api.getCoordinatorStatus(),
+      (coord) => {
+        setCoordEnabled(coord.enabled);
+        setCoordHasToken(coord.has_token);
+      },
+    );
+  }, [setResource]);
 
   const loadDevices = useCallback(async () => {
-    await withResourceLoad(setDevicesState, () => api.listDeviceSessions(), (list) => {
-      setDevices(list);
-    });
-  }, []);
+    await withResourceLoad(
+      (next) => setResource('devices', next),
+      () => api.listDeviceSessions(),
+      (list) => {
+        setDevices(list);
+      },
+    );
+  }, [setResource]);
 
   const loadNetwork = useCallback(async () => {
-    await withResourceLoad(setNetworkState, () => api.getNetworkStatus(), (network) => {
-      setLanEnabled(network.lan_exposure_enabled);
-      // Realized bind state from the live ServerListeners (issue #586).
-      setTlsActive(network.tls_active);
-      setExposedInterfaces(network.exposed_interfaces);
-    });
-  }, []);
+    await withResourceLoad(
+      (next) => setResource('network', next),
+      () => api.getNetworkStatus(),
+      (network) => {
+        setLanEnabled(network.lan_exposure_enabled);
+        // Realized bind state from the live ServerListeners (issue #586).
+        setTlsActive(network.tls_active);
+        setExposedInterfaces(network.exposed_interfaces);
+      },
+    );
+  }, [setResource]);
 
   const loadPairings = useCallback(async (providerList: ProviderInfo[]) => {
-    await withResourceLoad(setPairingsState, async () => {
-      const [effective, prefs, verifications] = await Promise.all([
-        api.getProviderPairings(),
-        api.getAppPreferences(),
-        getHostPairingVerifications(),
-      ]);
-      const stored = prefs.provider_pairings ?? [];
-      const nativeHarnesses = providerList.filter((p) => !p.is_proxied && p.id !== 'terminal');
-      const entries = await Promise.all(
-        nativeHarnesses.map(async (h) => {
-          const list = await api.compatibleProvidersForHarness(h.id);
-          return [h.id, Array.isArray(list) ? list : []] as const;
-        }),
-      );
-      return {
-        effective: Array.isArray(effective) ? effective : [],
-        verifications: Array.isArray(verifications) ? verifications : [],
-        storedKeys: new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`)),
-        compatible: Object.fromEntries(entries),
-      } as const;
-    }, ({ effective, verifications, storedKeys, compatible }) => {
-      // Defensive: the real backend always returns arrays, but a malformed
-      // response shouldn't crash the settings modal.
-      setPairings(effective);
-      setPairingVerifications(verifications);
-      setStoredPairingKeys(storedKeys);
-      setCompatibleByHarness(compatible);
-    });
-  }, []);
+    // Issue #1534 (review round 2) — pairings need at least one
+    // provider to know which harnesses to query. Retrying with an
+    // empty list used to succeed with zero harnesses + zero compatible
+    // entries, lying to the user that there was nothing to attach.
+    // Now we mark pairings as `failed` with an explicit message so
+    // the user retries providers first.
+    if (providerList.length === 0) {
+      setResource('pairings', {
+        status: 'failed',
+        error: 'Awaiting providers list — retry providers first.',
+      });
+      return;
+    }
+    await withResourceLoad(
+      (next) => setResource('pairings', next),
+      async () => {
+        const [effective, verifications] = await Promise.all([
+          api.getProviderPairings(),
+          getHostPairingVerifications(),
+        ]);
+        // Issue #1534 (review round 2) — stored pairings (which rows
+        // are user-detachable vs derived) live on the preferences
+        // object. Coupling pairings to `getAppPreferences()` was the
+        // failure-isolation bug: a corrupted preferences.json would
+        // crash pairings even when the pairings endpoint was fine.
+        // Now this lookup is best-effort — if preferences fail, we
+        // fall back to an empty stored-keys set and HarnessConfigList
+        // treats every row as detachable. The pairings load still
+        // succeeds because the core data (effective / verifications /
+        // compatible) is independent of preferences.
+        let storedKeys = new Set<string>();
+        try {
+          const prefs = await api.getAppPreferences();
+          const stored = prefs.provider_pairings ?? [];
+          storedKeys = new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`));
+        } catch {
+          // Non-fatal: pairings can render without the stored hint.
+        }
+        const nativeHarnesses = providerList.filter((p) => !p.is_proxied && p.id !== 'terminal');
+        const entries = await Promise.all(
+          nativeHarnesses.map(async (h) => {
+            const list = await api.compatibleProvidersForHarness(h.id);
+            return [h.id, Array.isArray(list) ? list : []] as const;
+          }),
+        );
+        return {
+          effective: Array.isArray(effective) ? effective : [],
+          verifications: Array.isArray(verifications) ? verifications : [],
+          storedKeys,
+          compatible: Object.fromEntries(entries),
+        } as const;
+      },
+      ({ effective, verifications, storedKeys, compatible }) => {
+        // Defensive: the real backend always returns arrays, but a malformed
+        // response shouldn't crash the settings modal.
+        setPairings(effective);
+        setPairingVerifications(verifications);
+        setStoredPairingKeys(storedKeys);
+        setCompatibleByHarness(compatible);
+      },
+    );
+  }, [setResource]);
 
   // Retry a single failed resource (issue #1534). The per-resource
   // status flips to `loading`, then back to `loaded` | `failed` based
@@ -1507,11 +1611,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             loading or have failed. The error banner above them makes
             the failure visible at the top of the pane so the user
             doesn't have to discover the disabled inputs by trial. */}
-        {prefsState.status === 'failed' && (
+        {resources.preferences.status === 'failed' && (
           <ResourceLoadStatus
             resource="preferences"
-            state={prefsState}
+            state={resources.preferences}
             onRetry={() => retryResource('preferences')}
+          />
+        )}
+        {/* Issue #1534 (review round 2) — the General pane also
+            surfaces a providers failure. Without this banner, a
+            `listProviders` rejection silently disables the default
+            provider + auto-naming controls and the user is left
+            wondering why. The Providers tab also gets a banner for
+            the same resource, but the General pane is the one most
+            users see first. */}
+        {resources.providers.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="providers"
+            state={resources.providers}
+            onRetry={() => retryResource('providers')}
           />
         )}
         <div className="space-y-4">
@@ -1773,29 +1891,33 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             Set the provider&apos;s API key on the Providers page; set base URL and
             Claude model names here when attaching.
           </p>
-          {/* Issue #1534 — when pairings couldn't load (transient
-              IPC failure, malformed response) we render the error
-              banner in place of `HarnessConfigList` so the user does
-              NOT see "no compatible providers" (which would be
-              indistinguishable from "no providers actually fit").
-              Pairings are derived from `providers`, so if providers
-              hasn't loaded yet we render the loading state instead. */}
-          {providersState.status === 'failed' ? (
+          {/* Issue #1534 (review round 2) — `idle` is now an explicit
+              branch. Without it, an in-flight tab switch to the
+              Harnesses pane (while `pairings` was still waiting on
+              `providers`) fell through to the empty `HarnessConfigList`
+              and flashed "no compatible providers" — the exact bug
+              #1534 aimed to fix. Order of checks:
+                1. providers failed      → providers error + retry
+                2. pairings failed       → pairings error + retry
+                3. pairings idle/loading → "Loading pairings…" (covers
+                                           the initial-load window)
+                4. otherwise             → HarnessConfigList (real data) */}
+          {resources.providers.status === 'failed' ? (
             <ResourceLoadStatus
               resource="providers"
-              state={providersState}
+              state={resources.providers}
               onRetry={() => retryResource('providers')}
             />
-          ) : pairingsState.status === 'failed' ? (
+          ) : resources.pairings.status === 'failed' ? (
             <ResourceLoadStatus
               resource="pairings"
-              state={pairingsState}
+              state={resources.pairings}
               onRetry={() => retryResource('pairings')}
             />
-          ) : pairingsState.status === 'loading' ? (
+          ) : resources.pairings.status === 'idle' || resources.pairings.status === 'loading' ? (
             <ResourceLoadStatus
               resource="pairings"
-              state={pairingsState}
+              state={resources.pairings}
             />
           ) : (
             <HarnessConfigList
@@ -1845,7 +1967,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           {!accountsLoaded ? (
             <ResourceLoadStatus
               resource="accounts"
-              state={accountsState}
+              state={resources.accounts}
               onRetry={() => retryResource('accounts')}
             />
           ) : (
@@ -1915,7 +2037,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mb-4">
               <ResourceLoadStatus
                 resource="network"
-                state={networkState}
+                state={resources.network}
                 onRetry={() => retryResource('network')}
               />
             </div>
@@ -2002,7 +2124,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mb-4">
               <ResourceLoadStatus
                 resource="coordinator"
-                state={coordinatorState}
+                state={resources.coordinator}
                 onRetry={() => retryResource('coordinator')}
               />
             </div>
@@ -2069,7 +2191,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           {!devicesLoaded ? (
             <ResourceLoadStatus
               resource="devices"
-              state={devicesState}
+              state={resources.devices}
               onRetry={() => retryResource('devices')}
             />
           ) : devices.length === 0 ? (
