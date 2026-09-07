@@ -473,6 +473,45 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, connect_async};
 
+    // `write_mobile_input`'s autoclear side-effects (CR/LF in payload) write
+    // to the global DB via `DbOnlySink::write_status`, which panics on an
+    // uninitialised DB (`DB.get().expect("database not initialized")`). The
+    // `cr_only` test avoids the autoclear path by using bare text, but the
+    // `lf_only` test exercises the predicate that triggers the DB write.
+    // Standard pattern from `commands::agent::tests::ensure_pr_db` /
+    // `db::mesh_tests`: serialise on a module lock, init the global DB via
+    // `std::sync::Once` if no other test in the process already has, and
+    // share the per-process scratch path so the schema is identical
+    // regardless of which test wins the Once.
+    static WS_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static DB_INIT: std::sync::Once = std::sync::Once::new();
+
+    fn ws_test_db_path() -> std::path::PathBuf {
+        use std::sync::OnceLock;
+        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let p = std::env::temp_dir().join(format!(
+                "buildmesh_ws_test_{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&p);
+            p
+        })
+        .clone()
+    }
+
+    fn ensure_ws_db() {
+        let _serial = WS_TESTS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if crate::db::is_initialized() {
+            return;
+        }
+        DB_INIT.call_once(|| {
+            let _ = crate::db::init(&ws_test_db_path());
+        });
+    }
+
     #[test]
     fn revocation_terminates_only_the_matching_device() {
         use broadcast::error::RecvError;
@@ -923,6 +962,7 @@ mod tests {
 
     #[test]
     fn autoclear_predicate_lf_only() {
+        ensure_ws_db();
         let mock = MockRegistry::new();
         write_mobile_input(&mock, 1, "n\n").expect("\\n writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"n\n");
