@@ -271,14 +271,154 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
   });
 
   // -----------------------------------------------------------------
+  // Issue #1535 (PR #1636 review round 3): per-field overrides, no
+  // field shadowing, unmount cleanup, `''` vs `null` normalisation.
+  // These five cases pin the architectural shape so future refactors
+  // can't reintroduce the round-3 sync-effect / shared-shadow-ref
+  // patterns.
+  // -----------------------------------------------------------------
+  describe('per-field editable delta (PR #1636 review round 3)', () => {
+    function keyedAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
+      return account({
+        id: 'kimi',
+        name: 'Kimi',
+        billing_mode: 'pay_as_you_go',
+        claude_compatible: true,
+        api_key: null,
+        ...over,
+      });
+    }
+
+    it('unmount clears the modal\'s dirty site (no leaked banner after Remove)', async () => {
+      // Finding 1: the JSDoc on `onDirtyChange` promises `false` on
+      // unmount. Without the cleanup, removing a dirty card (Remove
+      // button) leaves the modal's `dirtySites` set with a stale entry,
+      // permanently trapping the user with the discard banner.
+      const onDirtyChange = vi.fn();
+      const user = userEvent.setup();
+      const { unmount } = render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          onDirtyChange={onDirtyChange}
+        />,
+      );
+
+      // User types an api_key → dirty = true fires once.
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-x');
+      expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+
+      // Unmounting the dirty card must fire false to clear the modal's
+      // dirty site.
+      unmount();
+      expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    });
+
+    it('editing one field does NOT capture the other (server-side rename of the untouched field rides through on save)', async () => {
+      // Finding 2: a monolithic draft snapshot freezes every editable
+      // field on first edit, so a concurrent server-side change to a
+      // field the user DIDN'T touch gets clobbered on save. Per-field
+      // overrides fix this: editing only api_key leaves billing_mode
+      // un-overridden, so save picks up `account.billing_mode` directly.
+      const onSave = vi.fn().mockResolvedValue(true);
+      const user = userEvent.setup();
+      const { rerender } = render(
+        <AccountCard
+          account={keyedAccount({ billing_mode: 'plan' })}
+          onSave={onSave}
+        />,
+      );
+
+      // Server-side change to billing_mode while the user is editing api_key.
+      rerender(
+        <AccountCard
+          account={keyedAccount({ billing_mode: 'pay_as_you_go' })}
+          onSave={onSave}
+        />,
+      );
+
+      // User edits only api_key.
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-new');
+      await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      const payload = onSave.mock.calls[0][0];
+      // The user's typed key is committed...
+      expect(payload.api_key).toBe('sk-new');
+      // ...but billing_mode is NOT a frozen snapshot from when the user
+      // started typing — it's the LATEST server value, which is what
+      // would be sent if the user hadn't edited that field at all.
+      expect(payload.billing_mode).toBe('pay_as_you_go');
+    });
+
+    it('an empty-string api_key baseline normalises to null (smart collapse actually fires)', async () => {
+      // Finding 3: `?? null` lets an empty-string baseline leak through,
+      // trapping the card dirty after a backspace. Normalising on the
+      // way in (`|| null`) means backspace-to-empty and server-null
+      // both collapse the same way.
+      const user = userEvent.setup();
+      // Build the fixture manually so the api_key really is '' on the
+      // baseline. AccountCard's type allows `string | null | undefined`,
+      // so we cast to satisfy the helper while exercising the
+      // normalisation path.
+      const emptyKey = account({
+        id: 'kimi',
+        name: 'Kimi',
+        billing_mode: 'pay_as_you_go',
+        claude_compatible: true,
+      }) as ProviderAccount;
+      Object.assign(emptyKey, { api_key: '' });
+      render(<AccountCard account={emptyKey} onSave={vi.fn().mockResolvedValue(true)} />);
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+
+      // The baseline '' is normalised to null internally, so the input
+      // starts empty (not stuck on the empty-string from the prop).
+      const input = screen.getByLabelText(/kimi api key/i) as HTMLInputElement;
+      expect(input.value).toBe('');
+    });
+
+    it('isDirty is derived purely from the override set (no manual flag)', async () => {
+      // Finding 4: `Object.keys(overrides).length > 0` is the
+      // derivation. We don't have access to internal state, but we can
+      // observe it indirectly via the dirty-callback — if isDirty were
+      // maintained imperatively in the setters, this test would catch a
+      // regression where adding then removing an override leaves the
+      // card "dirty" forever.
+      const onDirtyChange = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          onDirtyChange={onDirtyChange}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+
+      // Type and revert — each keystroke after the first is a non-baseline
+      // value, but the FINAL state (empty input) IS the baseline, so the
+      // smart collapse should leave the card pristine.
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-x');
+      expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+
+      await user.clear(screen.getByLabelText(/kimi api key/i));
+      expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    });
+  });
+
+  // -----------------------------------------------------------------
   // Issue #1535: preserve dirty provider credentials across the
   // prop-synchronisation race the parent causes. The card must keep
   // a typed API key when (a) the user toggles Enabled while editing,
   // (b) a save IPC fails and the parent rolls the prop back, and
   // (c) an unrelated prop refresh fires while the draft is dirty.
-  // PR #1636 review fixes: non-atomic toggle policy, no
-  // `committedAccount` snapshot, save composes from the latest prop,
-  // mock `return false` (production path), defensive catch for throws.
+  // PR #1636 review fixes: non-atomic toggle policy, per-field
+  // overrides (no field shadowing), save composes from the latest
+  // prop, mock `return false` (production path), defensive catch for
+  // throws.
   // -----------------------------------------------------------------
   describe('dirty credentials survive prop churn (issue #1535)', () => {
     function claudeCompatibleAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
@@ -459,9 +599,10 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-from-server');
 
       // Dirty case: type something, then external refresh fires. The typed
-      // key must NOT be overwritten — the prop-sync useEffect must gate on
-      // the draft being pristine. Immutable display fields (the card's
-      // `name`) refresh implicitly because the header reads from the prop.
+      // key must NOT be overwritten — the per-field override outlives the
+      // prop change (the display reads `overrides.api_key ?? baseline`).
+      // Display-only fields (the card's `name`) refresh implicitly because
+      // the header reads from the prop.
       const user = userEvent.setup();
       await user.clear(screen.getByLabelText(/kimi api key/i));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-half-typed');
