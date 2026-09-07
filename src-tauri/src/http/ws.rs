@@ -246,6 +246,23 @@ pub(crate) async fn handle_ws_connection(
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
+/// Test seam for [`write_mobile_input`]: the production wrapper resolves
+/// the lifecycle sink from the global app handle, but unit tests inject a
+/// mock sink here so the autoclear side-effects can be asserted on without
+/// standing up a real SQLite database. Split out per the review on PR #1643
+/// — the prior `write_mobile_input` hardcoded a `DbOnlySink` fallback in the
+/// transport module, coupling a network test to global DB state.
+pub(crate) fn write_mobile_input_with_sink(
+    registry: &dyn ProcessRegistryApi,
+    lifecycle_sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
+    node_id: i64,
+    text: &str,
+) -> Result<(), String> {
+    registry.write_bytes(node_id, text.as_bytes())?;
+    run_autoclear_side_effects(lifecycle_sink, node_id, text);
+    Ok(())
+}
+
 /// Write a raw keystroke sequence to a node's PTY and run the attention
 /// autoclear side-effect when the payload contains CR/LF (issue #1377).
 ///
@@ -261,30 +278,49 @@ pub(crate) fn write_mobile_input(
     node_id: i64,
     text: &str,
 ) -> Result<(), String> {
-    registry.write_bytes(node_id, text.as_bytes())?;
-    if text.bytes().any(|b| b == b'\n' || b == b'\r') {
-        crate::attention_autoclear::disarm(node_id);
-        // Routes through SessionLifecycle (issue #132) for the DB write +
-        // desktop emit; the mobile broadcast is a separate channel kept
-        // below.
-        if let Some(app) = super::app_handle() {
-            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink {
-                app: &app.clone(),
-            };
-            let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
-        } else {
-            let _ = crate::agent::session_lifecycle::on_attention_cleared(
-                &crate::agent::session_lifecycle::DbOnlySink,
-                node_id,
-            );
-        }
-        // Also fan out to mobile event subscribers — the desktop Tauri
-        // event above only reaches the webview.
-        super::events::emit(super::events::EventMsg::AttentionCleared {
-            session_id: node_id,
-        });
+    let app = super::app_handle();
+    if let Some(app) = app {
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink {
+            app: &app.clone(),
+        };
+        write_mobile_input_with_sink(registry, &sink, node_id, text)
+    } else {
+        // No live app handle (tests, app shutdown): fall back to the DB-only
+        // sink so the autoclear status write still lands. Production callers
+        // always have an app handle set by `lib.rs::setup`, so this branch
+        // is for the unit-test seam and the post-shutdown drain.
+        write_mobile_input_with_sink(
+            registry,
+            &crate::agent::session_lifecycle::DbOnlySink,
+            node_id,
+            text,
+        )
     }
-    Ok(())
+}
+
+/// The autoclear predicate + side-effects, isolated so the test seam
+/// (`write_mobile_input_with_sink`) can drive them with a mock sink.
+///
+/// CR/LF in the payload means "user submitted" — the autoclear hypothesis
+/// fires regardless of whether the submission is meaningful. Bare text stays
+/// in the buffer; the predicate never runs.
+fn run_autoclear_side_effects(
+    sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
+    node_id: i64,
+    text: &str,
+) {
+    if !text.bytes().any(|b| b == b'\n' || b == b'\r') {
+        return;
+    }
+    crate::attention_autoclear::disarm(node_id);
+    // Routes through SessionLifecycle (issue #132) for the DB write +
+    // desktop emit; the mobile broadcast is a separate channel kept below.
+    let _ = crate::agent::session_lifecycle::on_attention_cleared(sink, node_id);
+    // Also fan out to mobile event subscribers — the desktop Tauri event
+    // above only reaches the webview.
+    super::events::emit(super::events::EventMsg::AttentionCleared {
+        session_id: node_id,
+    });
 }
 
 fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, text: &str) {
@@ -472,45 +508,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, connect_async};
-
-    // `write_mobile_input`'s autoclear side-effects (CR/LF in payload) write
-    // to the global DB via `DbOnlySink::write_status`, which panics on an
-    // uninitialised DB (`DB.get().expect("database not initialized")`). The
-    // `cr_only` test avoids the autoclear path by using bare text, but the
-    // `lf_only` test exercises the predicate that triggers the DB write.
-    // Standard pattern from `commands::agent::tests::ensure_pr_db` /
-    // `db::mesh_tests`: serialise on a module lock, init the global DB via
-    // `std::sync::Once` if no other test in the process already has, and
-    // share the per-process scratch path so the schema is identical
-    // regardless of which test wins the Once.
-    static WS_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static DB_INIT: std::sync::Once = std::sync::Once::new();
-
-    fn ws_test_db_path() -> std::path::PathBuf {
-        use std::sync::OnceLock;
-        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let p = std::env::temp_dir().join(format!(
-                "buildmesh_ws_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&p);
-            p
-        })
-        .clone()
-    }
-
-    fn ensure_ws_db() {
-        let _serial = WS_TESTS_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if crate::db::is_initialized() {
-            return;
-        }
-        DB_INIT.call_once(|| {
-            let _ = crate::db::init(&ws_test_db_path());
-        });
-    }
 
     #[test]
     fn revocation_terminates_only_the_matching_device() {
@@ -914,12 +911,85 @@ mod tests {
     // `y\r` would either flip `awaiting_input` on every typed letter
     // (UX catastrophe) or never flip it at all (no triage signal).
     //
-    // The side-effects (disarm + session_lifecycle emit + mobile
-    // broadcast) themselves touch the DB and the broadcast channel;
-    // what we CAN pin at the unit-test layer is the contract that
-    // `write_mobile_input` returns the registry error verbatim so the
-    // HTTP route can map it to a 5xx. The autoclear side-effects are
-    // covered by their own integration tests.
+    // These tests drive `write_mobile_input_with_sink` (the test seam
+    // introduced on PR #1643 review) with a `MockSink` so the autoclear
+    // side-effects are observable without touching the global SQLite
+    // state. The previous tests coupled the transport module to the
+    // `DbOnlySink` fallback, which panicked on an uninitialised DB and
+    // asserted only on the bytes that reached the registry — a paper
+    // tiger that never verified the autoclear side-effect actually ran.
+
+    /// Sink stub that records the lifecycle writes and emits the test
+    /// drives. Implements the full `SessionLifecycleSink` trait so it
+    /// satisfies the `&dyn SessionLifecycleSink` parameter of
+    /// `write_mobile_input_with_sink`, but only the autoclear path's
+    /// counters are asserted on below — every other method is a no-op
+    /// that satisfies the trait contract without coupling to Tauri or
+    /// the global DB.
+    struct MockSink {
+        write_status_calls: std::sync::Mutex<Vec<(i64, crate::models::SessionStatus)>>,
+        attention_cleared_calls: std::sync::Mutex<Vec<i64>>,
+    }
+
+    impl MockSink {
+        fn new() -> Self {
+            Self {
+                write_status_calls: std::sync::Mutex::new(Vec::new()),
+                attention_cleared_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn write_status_count(&self) -> usize {
+            self.write_status_calls.lock().unwrap().len()
+        }
+
+        fn attention_cleared_count(&self) -> usize {
+            self.attention_cleared_calls.lock().unwrap().len()
+        }
+    }
+
+    impl crate::agent::session_lifecycle::SessionLifecycleSink for MockSink {
+        fn write_status(
+            &self,
+            node_id: i64,
+            new: crate::models::SessionStatus,
+        ) -> Result<(), String> {
+            self.write_status_calls.lock().unwrap().push((node_id, new));
+            Ok(())
+        }
+
+        fn write_status_if(
+            &self,
+            _node_id: i64,
+            _new: crate::models::SessionStatus,
+            _expected: crate::models::SessionStatus,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn write_status_unless_in(
+            &self,
+            _node_id: i64,
+            _new: crate::models::SessionStatus,
+            _forbidden: &[crate::models::SessionStatus],
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn emit_attention_needed(&self, _node_id: i64) {}
+
+        fn emit_attention_cleared(&self, node_id: i64) {
+            self.attention_cleared_calls.lock().unwrap().push(node_id);
+        }
+
+        fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
+
+        fn emit_lifecycle_changed(
+            &self,
+            _payload: crate::agent::session_lifecycle::LifecycleChangedPayload,
+        ) {
+        }
+    }
 
     /// `write_mobile_input` is the new HTTP-route entry point (issue
     /// #1377). It must return the registry error verbatim so the route
@@ -929,10 +999,17 @@ mod tests {
     /// the swallow would have the HTTP route always return 200 OK,
     /// silently dropping keystrokes on a killed agent while the SPA
     /// reported success.
+    ///
+    /// Driven through `write_mobile_input_with_sink` so the autoclear
+    /// side-effect runs against a `MockSink` instead of `DbOnlySink` —
+    /// the previous form called `write_mobile_input` directly and
+    /// depended on the test-ordering lottery for `db::init` to win the
+    /// race.
     #[test]
     fn write_mobile_input_propagates_registry_error() {
         let mock = MockRegistry::failing();
-        let err = write_mobile_input(&mock, 1, "y\r")
+        let sink = MockSink::new();
+        let err = write_mobile_input_with_sink(&mock, &sink, 1, "y\r")
             .err()
             .expect("write_mobile_input must surface registry errors");
         assert!(err.contains("mock error"));
@@ -940,32 +1017,70 @@ mod tests {
             !mock.write_called.load(AtomicOrdering::SeqCst),
             "failing registry must not record a successful write"
         );
+        // The write failed, so the autoclear side-effect must not have
+        // run — the sink stays clean. Catches a regression where a
+        // refactor moves the autoclear BEFORE the registry write.
+        assert_eq!(sink.write_status_count(), 0);
+        assert_eq!(sink.attention_cleared_count(), 0);
     }
 
     /// The autoclear predicate: a CR (`\r`) in the payload is what
     /// makes a `y\r` tap answer a permission prompt. Pin the
     /// binary-shape so a refactor that accidentally widens the
     /// predicate (e.g. autoclears on `\n` only) gets caught.
+    ///
+    /// Asserts on the `MockSink` records — the previous version
+    /// asserted only on `mock.last_write_data`, which is set before
+    /// the autoclear predicate is even evaluated.
     #[test]
     fn autoclear_predicate_cr_only() {
-        // Bare "y" — no CR/LF — must NOT run the autoclear path. We
-        // can't observe the autoclear side-effect directly (it touches
-        // the DB), but the binary `write_bytes` call IS observable
-        // through the mock: a successful write means we got past the
-        // predicate, not that we autocleared. The strong guarantee
-        // here is that the helper doesn't panic on bare text and
-        // returns Ok so the route can map it to 200.
         let mock = MockRegistry::new();
-        write_mobile_input(&mock, 1, "y").expect("bare text writes");
-        assert_eq!(*mock.last_write_data.lock().unwrap(), b"y");
+        let sink = MockSink::new();
+        write_mobile_input_with_sink(&mock, &sink, 1, "y\r").expect("\\r writes");
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"y\r");
+        assert_eq!(
+            sink.attention_cleared_count(),
+            1,
+            "CR in payload must trigger exactly one autoclear"
+        );
+        assert_eq!(sink.write_status_count(), 1);
+        let (_, status) = sink.write_status_calls.lock().unwrap()[0];
+        assert_eq!(status, crate::models::SessionStatus::Running);
     }
 
+    /// Symmetric to `autoclear_predicate_cr_only` for LF. A regression
+    /// that filters `\r` but not `\n` (or vice-versa) would be caught
+    /// here — the previous version used "y" with no newline so the
+    /// predicate path was never exercised.
     #[test]
     fn autoclear_predicate_lf_only() {
-        ensure_ws_db();
         let mock = MockRegistry::new();
-        write_mobile_input(&mock, 1, "n\n").expect("\\n writes");
+        let sink = MockSink::new();
+        write_mobile_input_with_sink(&mock, &sink, 1, "n\n").expect("\\n writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"n\n");
+        assert_eq!(
+            sink.attention_cleared_count(),
+            1,
+            "LF in payload must trigger exactly one autoclear"
+        );
+    }
+
+    /// Negative case: bare text (no CR/LF) MUST NOT autoclear. Catches
+    /// the regression class where a refactor widens the predicate to
+    /// fire on any input — every typed letter would then flip
+    /// `awaiting_input`, breaking the triage-deck UX.
+    #[test]
+    fn autoclear_predicate_no_newline_does_not_autoclear() {
+        let mock = MockRegistry::new();
+        let sink = MockSink::new();
+        write_mobile_input_with_sink(&mock, &sink, 1, "y").expect("bare text writes");
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"y");
+        assert_eq!(
+            sink.attention_cleared_count(),
+            0,
+            "bare text must not trigger autoclear"
+        );
+        assert_eq!(sink.write_status_count(), 0);
     }
 
     #[test]

@@ -2285,32 +2285,11 @@ mod tests {
     // uses internally. That's the "real git + real DB" coverage the issue
     // asks for; the orchestration is unit-tested above.
     //
-    // The Once-init'd DB pattern is borrowed from `commands::prune_tests`
+    // DB init routes through `db::test_support::ensure_db_for_tests`
     // — every test in this file (and the rest of the lib test binary)
     // shares one global DB.
-
-    fn maintenance_db_path() -> std::path::PathBuf {
-        use std::sync::OnceLock;
-        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let p = std::env::temp_dir().join(format!(
-                "buildmesh_warm_pool_maintenance_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&p);
-            p
-        })
-        .clone()
-    }
-
-    fn ensure_maintenance_db() {
-        if crate::db::is_initialized() {
-            return;
-        }
-        std::sync::Once::new().call_once(|| {
-            let _ = crate::db::init(&maintenance_db_path());
-        });
-    }
+    // `db::init`'s own `is_initialized` guard to avoid duplicate
+    // schema work).
 
     /// Fresh temp dir with a real git repo: `git init` + an empty initial
     /// commit on `main`. Returns the temp dir + the repo path.
@@ -2422,7 +2401,7 @@ mod tests {
     /// don't collide on a stale directory.
     #[test]
     fn maintenance_drain_then_fill_end_to_end_on_real_repo() {
-        ensure_maintenance_db();
+        crate::db::test_support::ensure_db_for_tests();
 
         let (_tmp, repo_path) = fresh_git_repo();
         let conn = crate::db::write_conn();

@@ -1027,39 +1027,11 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
 
 // ── v22 / issue #611 — `delete_worktrees` rejects pool paths ────────────────
 
-/// Per-process scratch path for the test DB. Mirrors the
-/// `commands::agent::tests::pr_test_db_path` pattern: `db::init` is
-/// one-shot per process, so all tests in this file that touch the
-/// global DB share the same path. The `.db` suffix is required —
-/// `Connection::open(path)` expects a file, not a directory (see
-/// `commands/agent.rs:1598` for the full rationale).
-fn prune_test_db_path() -> std::path::PathBuf {
-    use std::sync::OnceLock;
-    static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let p = std::env::temp_dir().join(format!(
-            "buildmesh_prune_pool_test_{}.db",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&p);
-        p
-    })
-    .clone()
-}
-
-/// `db::init` the global DB if it hasn't been already. Idempotent —
-/// the OnceCell silently keeps whichever DB another test (e.g.
-/// `db::mesh_tests`, `commands::agent::tests`) set up first. Mirrors
-/// `commands::agent::tests::ensure_pr_db` so the two test families
-/// don't trample each other.
-fn ensure_prune_db() {
-    if crate::db::is_initialized() {
-        return;
-    }
-    std::sync::Once::new().call_once(|| {
-        let _ = crate::db::init(&prune_test_db_path());
-    });
-}
+// DB init routes through `db::test_support::ensure_db_for_tests`
+// (raised on PR #1643 review — the previous local copy constructed
+// `std::sync::Once::new()` on every call, only relying on
+// `db::init`'s own `is_initialized` guard to avoid duplicate schema
+// work; same latent bug as `services::warm_pool::ensure_maintenance_db`).
 
 /// Pin the `delete_worktrees` → `remove_worktrees` pool-rejection
 /// contract (issue #611). A pool entry's directory is owned by the
@@ -1074,7 +1046,7 @@ fn ensure_prune_db() {
 /// see exactly which entry was blocked when they bulk-select.
 #[test]
 fn delete_worktrees_rejects_pool_path() {
-    ensure_prune_db();
+    crate::db::test_support::ensure_db_for_tests();
 
     // Set up a mesh + a single `warm_worktrees` row at a fake path.
     // `is_warm_pool_path` only checks the DB row — it doesn't touch
@@ -1130,7 +1102,7 @@ fn delete_worktrees_rejects_pool_path() {
 /// test.
 #[test]
 fn delete_worktrees_does_not_reject_non_pool_path() {
-    ensure_prune_db();
+    crate::db::test_support::ensure_db_for_tests();
 
     // Insert a `warm_worktrees` row that is NOT the path we're
     // asking to delete. `is_warm_pool_path(other_path)` must read

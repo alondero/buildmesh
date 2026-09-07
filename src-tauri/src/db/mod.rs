@@ -20,6 +20,12 @@
 
 pub(crate) mod migrations;
 
+/// Shared test infrastructure for backend tests that need a real
+/// SQLite database — see `db::test_support` module docs for the
+/// pattern consolidation history (raised on PR #1643).
+#[cfg(test)]
+pub mod test_support;
+
 /// Autopilot Circuits ledger accessors (spec #1205). Re-exported flat so
 /// call sites read `db::list_autopilot_circuits(...)` like every other
 /// table's accessors.

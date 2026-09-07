@@ -924,7 +924,7 @@ mod tests {
     //   * Positive (happy-path) tests exercise `create` / `create_pending`
     //     with `source_pr = None` and assert the persisted row reads back
     //     `source_pr = None`. These need a real DB row, so they call
-    //     `ensure_db_init()` which lazily inits the global DB.
+    //     `crate::db::test_support::ensure_db_for_tests()` which lazily inits the global DB.
     //
     //   * Negative `#[should_panic]` tests call the wrappers with
     //     `source_pr = Some(_)`. The assertion fires before any DB call, so
@@ -932,35 +932,16 @@ mod tests {
     //     wrapper boundary with zero infrastructure.
     // -------------------------------------------------------------------
 
-    use std::sync::Once;
-
-    /// Lazily initialise the global DB exactly once per test process. The
-    /// underlying `db::init` uses a process-global `OnceCell`, so calling
-    /// it twice is an error; this guard makes the second-and-later call a
-    /// no-op even if another test in the binary (e.g. `db::mesh_tests`)
-    /// already won the race. The temp path is process-unique so a sibling
-    /// test running with `--test-threads=1` and this one never collide on
-    /// the SQLite file.
-    fn ensure_db_init() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let temp_path = std::env::temp_dir().join(format!(
-                "buildmesh_agent_node_invariant_{}.db",
-                std::process::id()
-            ));
-            // `db::init` returns `Err` if another test already set the
-            // global DB (e.g. `db::mesh_tests` running first). That's fine
-            // for our tests — they only read the global DB and create their
-            // own mesh rows with a unique path.
-            let _ = crate::db::init(&temp_path);
-        });
-    }
+    // DB init routes through `db::test_support::ensure_db_for_tests`
+    // (raised on PR #1643 review — the previous local copy repeated the
+    // per-process scratch path + `Once::call_once` dance that now lives in
+    // `db::test_support`).
 
     /// Create a fresh mesh in the global DB at a unique per-test path and
     /// return its id. Each call uses a monotonic counter so parallel tests
     /// can't collide on the `meshes.path` UNIQUE constraint.
     fn fresh_mesh() -> i64 {
-        ensure_db_init();
+        crate::db::test_support::ensure_db_for_tests();
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let path = format!("/tmp/buildmesh_invariant_test_{}", id);
         crate::db::create_mesh(&format!("invariant-{}", id), &path)
@@ -1075,7 +1056,7 @@ mod tests {
         // `source_pr` on a node that didn't actually come
         // from a PR. The wrapper must refuse at the boundary rather than
         // silently persist it. The assertion fires before any DB call, so
-        // we don't even need `ensure_db_init()` here — a missing DB is the
+        // we don't even need `crate::db::test_support::ensure_db_for_tests()` here — a missing DB is the
         // strongest possible failure signal for this regression.
         let _ = create(
             /* mesh_id */ 0,
