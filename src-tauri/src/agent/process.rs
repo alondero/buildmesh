@@ -348,9 +348,12 @@ static NEXT_PROCESS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic
 
 /// Whether teardown should join the reader/writer threads. `WriterOnly` is
 /// the natural-exit reaping path (runs on the reader, must not join itself);
-/// `Both` is `kill_session`. Reuses [`crate::pty::lifecycle::JoinPolicy`] —
-/// this module adds a third variant because agent has separate reader and
-/// writer workers, but the reader-handle half maps directly.
+/// `Both` is `kill_session`. Module-local on purpose (round-3 review
+/// finding #5): agent has separate reader and writer workers, so it
+/// needs an extra `Both` / `WriterOnly` distinction that build_run doesn't
+/// carry. Each module owns its enum; [`crate::pty::lifecycle`] exports only
+/// the shared bounded-join helper [`crate::pty::lifecycle::join_with_timeout`]
+/// (no enum).
 enum JoinPolicy {
     Both,
     WriterOnly,
