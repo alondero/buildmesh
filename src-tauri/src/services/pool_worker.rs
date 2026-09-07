@@ -427,11 +427,7 @@ pub fn start_background_worker(app: tauri::AppHandle) {
 /// * No work + counter at/above threshold → switch to [`TICK_SLOW`],
 ///   keep incrementing so a long idle period doesn't lose the "we're in
 ///   the slow lane" signal.
-fn next_tick(
-    current_tick: Duration,
-    did_work: bool,
-    consecutive_noops: u32,
-) -> (Duration, u32) {
+fn next_tick(current_tick: Duration, did_work: bool, consecutive_noops: u32) -> (Duration, u32) {
     if did_work {
         return (TICK_FAST, 0);
     }
@@ -654,15 +650,13 @@ mod tests {
         // First note: stored instant = `base`.
         note_activity_for_mesh_at(MESH_D, base);
         // 20 ms later, read — stored instant is `base`, so idle is 20 ms.
-        let first_idle =
-            idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(20));
+        let first_idle = idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(20));
         // 50 ms later (total +70 ms from `base`), note again — stored
         // instant MUST be overwritten (pre-#634 bug used
         // `entry().or_insert(now)` which silently no-op'd here).
         note_activity_for_mesh_at(MESH_D, base + Duration::from_millis(70));
         // Immediate read — stored instant is `base + 70 ms`, so idle is 0 ms.
-        let second_idle =
-            idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(70));
+        let second_idle = idle_duration_for_mesh_since(MESH_D, base + Duration::from_millis(70));
         assert_eq!(
             first_idle,
             Duration::from_millis(20),
@@ -699,12 +693,16 @@ mod tests {
         // didn't pollute the map with phantom entries.
         let post_invalid = idle_duration_for_mesh(700_001);
         assert_eq!(
-            post_invalid, Duration::MAX,
+            post_invalid,
+            Duration::MAX,
             "invalid mesh_id sentinels must not write to the activity map"
         );
         // And a real mesh_id after a sentinel still works as expected.
         note_activity_for_mesh(700_001);
-        assert!(!is_idle_enough(idle_duration_for_mesh(700_001), IDLE_SILENCE));
+        assert!(!is_idle_enough(
+            idle_duration_for_mesh(700_001),
+            IDLE_SILENCE
+        ));
     }
 
     // ---- should_background_sync (ADR 0020 background mesh sync cadence) ----
@@ -782,8 +780,7 @@ mod tests {
         // The 3rd no-op triggers the switch.
         let (tick, noops) = next_tick(TICK_FAST, false, 2);
         assert_eq!(
-            tick,
-            TICK_SLOW,
+            tick, TICK_SLOW,
             "the 3rd consecutive no-op pass (counter 2 → 3) must switch to TICK_SLOW"
         );
         assert_eq!(

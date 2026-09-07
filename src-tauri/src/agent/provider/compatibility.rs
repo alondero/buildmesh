@@ -152,11 +152,13 @@ pub fn match_descriptor(
     if descriptor.wire_api != requirements.wire_api {
         return CompatibilityDecision {
             compatible: false,
-            reason: Some(format!(
-                "{} requires the {:?} wire API; this endpoint declares {:?}",
-                requirements.harness_id, requirements.wire_api, descriptor.wire_api
-            )
-            .to_lowercase()),
+            reason: Some(
+                format!(
+                    "{} requires the {:?} wire API; this endpoint declares {:?}",
+                    requirements.harness_id, requirements.wire_api, descriptor.wire_api
+                )
+                .to_lowercase(),
+            ),
         };
     }
     if !descriptor
@@ -178,7 +180,10 @@ pub fn match_descriptor(
             required.text_reasoning && !actual.text_reasoning,
             "text/reasoning completion",
         ),
-        (required.tool_calls && !actual.tool_calls, "tool-call arguments"),
+        (
+            required.tool_calls && !actual.tool_calls,
+            "tool-call arguments",
+        ),
         (
             required.tool_results && !actual.tool_results,
             "tool-result round trip",
@@ -195,7 +200,10 @@ pub fn match_descriptor(
     if !missing.is_empty() {
         return CompatibilityDecision {
             compatible: false,
-            reason: Some(format!("missing required capabilities: {}", missing.join(", "))),
+            reason: Some(format!(
+                "missing required capabilities: {}",
+                missing.join(", ")
+            )),
         };
     }
 
@@ -234,15 +242,15 @@ mod tests {
 
     #[test]
     fn codex_accepts_complete_responses_contract() {
-        assert!(match_descriptor(&descriptor(WireApi::Responses), &codex_requirements()).compatible);
+        assert!(
+            match_descriptor(&descriptor(WireApi::Responses), &codex_requirements()).compatible
+        );
     }
 
     #[test]
     fn codex_rejects_chat_completions_contract() {
-        let decision = match_descriptor(
-            &descriptor(WireApi::ChatCompletions),
-            &codex_requirements(),
-        );
+        let decision =
+            match_descriptor(&descriptor(WireApi::ChatCompletions), &codex_requirements());
         assert!(!decision.compatible);
         assert!(decision.reason.unwrap().contains("responses"));
     }
@@ -293,7 +301,11 @@ mod tests {
         for index in 0..baseline.len() {
             let mut changed = baseline;
             changed[index] = "changed";
-            assert_ne!(original, signature(&changed), "input {index} must invalidate");
+            assert_ne!(
+                original,
+                signature(&changed),
+                "input {index} must invalidate"
+            );
         }
     }
 }

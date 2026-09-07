@@ -4,7 +4,7 @@ use crate::commands::git::{GitStatus, GitSummary};
 use crate::db;
 use crate::env::to_host_path;
 use crate::git::primitives;
-use crate::models::{DiffHunk, DiffLine, FileDiff, DiffResult};
+use crate::models::{DiffHunk, DiffLine, DiffResult, FileDiff};
 use difference_rs::{Changeset, Difference};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -65,7 +65,9 @@ fn acquire_diff_cancel(node_id: i64) -> Arc<AtomicBool> {
 /// anyway, and the next `acquire_diff_cancel` for this `node_id` will
 /// overwrite whatever stale entry we leave behind).
 fn release_diff_cancel(node_id: i64, token: &Arc<AtomicBool>) {
-    let Ok(mut map) = DIFF_NODE_CANCEL.lock() else { return };
+    let Ok(mut map) = DIFF_NODE_CANCEL.lock() else {
+        return;
+    };
     // Only clear if our token is still the current one — a fresh
     // arrival will already have replaced us, and we mustn't stomp
     // their flag.
@@ -135,8 +137,7 @@ fn highlight_group_lines(group: &[DiffLine], path: &str) -> Vec<String> {
     let mut old_h = HighlightLines::new(syntax, theme);
     let mut new_h = HighlightLines::new(syntax, theme);
 
-    let render = |line: &DiffLine,
-                  ranges: Result<Vec<(syntect::highlighting::Style, &str)>, _>| {
+    let render = |line: &DiffLine, ranges: Result<Vec<(syntect::highlighting::Style, &str)>, _>| {
         ranges
             .ok()
             .and_then(|r| styled_line_to_highlighted_html(&r, IncludeBackground::No).ok())
@@ -330,19 +331,13 @@ fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
 // line diff + three syntect highlight passes per hunk are CPU/IO work that
 // would otherwise park a Tauri async worker.
 #[command]
-pub async fn diff_files(
-    old_path: String,
-    new_path: String,
-) -> Result<DiffResult, String> {
+pub async fn diff_files(old_path: String, new_path: String) -> Result<DiffResult, String> {
     crate::commands::run_blocking("diff_files", move || {
         let old_content = fs::read_to_string(&old_path).unwrap_or_default();
         let new_content = fs::read_to_string(&new_path).unwrap_or_default();
         let lines = compute_file_diff(&old_content, &new_content);
         let groups = group_into_hunks(&lines, CONTEXT_LINES);
-        let hunks = groups
-            .iter()
-            .map(|g| build_hunk(g, &new_path))
-            .collect();
+        let hunks = groups.iter().map(|g| build_hunk(g, &new_path)).collect();
 
         Ok(DiffResult {
             files: vec![FileDiff {
@@ -373,34 +368,33 @@ fn diff_file_against_head_blocking(
     session_path: String,
     file_path: String,
 ) -> Result<DiffResult, String> {
-    let repo = git2::Repository::open(&session_path)
-        .map_err(|e| e.to_string())?;
+    let repo = git2::Repository::open(&session_path).map_err(|e| e.to_string())?;
 
     let head = repo.head().ok();
     let head_content = if let Some(reference) = &head {
         reference.peel_to_commit().ok().and_then(|commit| {
             commit.tree().ok().and_then(|tree| {
-                tree.get_path(std::path::Path::new(&file_path)).ok().and_then(|entry| {
-                    entry.to_object(&repo).ok().and_then(|obj| {
-                        obj.as_blob().map(|b| String::from_utf8_lossy(b.content()).to_string())
+                tree.get_path(std::path::Path::new(&file_path))
+                    .ok()
+                    .and_then(|entry| {
+                        entry.to_object(&repo).ok().and_then(|obj| {
+                            obj.as_blob()
+                                .map(|b| String::from_utf8_lossy(b.content()).to_string())
+                        })
                     })
-                })
             })
         })
     } else {
         None
     };
 
-    let current_content = fs::read_to_string(format!("{}/{}", session_path, file_path))
-        .unwrap_or_default();
+    let current_content =
+        fs::read_to_string(format!("{}/{}", session_path, file_path)).unwrap_or_default();
 
     let old_content = head_content.as_deref().unwrap_or("");
     let lines = compute_file_diff(old_content, &current_content);
     let groups = group_into_hunks(&lines, CONTEXT_LINES);
-    let hunks = groups
-        .iter()
-        .map(|g| build_hunk(g, &file_path))
-        .collect();
+    let hunks = groups.iter().map(|g| build_hunk(g, &file_path)).collect();
 
     Ok(DiffResult {
         files: vec![FileDiff {
@@ -432,7 +426,10 @@ fn delta_status_str(status: git2::Delta) -> &'static str {
 fn tree_blob_string(repo: &git2::Repository, tree: Option<&git2::Tree>, path: &str) -> String {
     tree.and_then(|t| t.get_path(std::path::Path::new(path)).ok())
         .and_then(|e| e.to_object(repo).ok())
-        .and_then(|o| o.as_blob().map(|b| String::from_utf8_lossy(b.content()).to_string()))
+        .and_then(|o| {
+            o.as_blob()
+                .map(|b| String::from_utf8_lossy(b.content()).to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -500,7 +497,9 @@ fn diff_against_base(
         // desktop IPC path and the mobile /diff route both land here. The HTTP
         // route keeps its own check to answer with a 400 before we ever open
         // the repo.
-        if p.split(['/', '\\']).any(|seg| seg == ".." || seg.is_empty()) {
+        if p.split(['/', '\\'])
+            .any(|seg| seg == ".." || seg.is_empty())
+        {
             return Err("invalid path".to_string());
         }
         opts.pathspec(p);
@@ -534,15 +533,26 @@ fn diff_against_base(
         let rel = path.to_string_lossy().to_string();
         let status = delta_status_str(delta.status());
 
-        let old_rel = delta.old_file().path().map(|p| p.to_string_lossy().to_string());
-        let old_path = if status == "renamed" { old_rel.clone() } else { None };
+        let old_rel = delta
+            .old_file()
+            .path()
+            .map(|p| p.to_string_lossy().to_string());
+        let old_path = if status == "renamed" {
+            old_rel.clone()
+        } else {
+            None
+        };
 
         // Old side comes from the base tree (under the pre-rename path); a brand
         // new file has no old side.
         let old_content = if matches!(status, "added" | "untracked") {
             String::new()
         } else {
-            tree_blob_string(&repo, base_tree.as_ref(), old_rel.as_deref().unwrap_or(&rel))
+            tree_blob_string(
+                &repo,
+                base_tree.as_ref(),
+                old_rel.as_deref().unwrap_or(&rel),
+            )
         };
 
         // New side is the current bytes on disk (absent for deletions).
@@ -802,7 +812,9 @@ pub async fn node_changed_summary(node_id: i64) -> Result<GitSummary, String> {
 }
 
 pub(crate) fn node_changed_summary_blocking(node_id: i64) -> Result<GitSummary, String> {
-    Ok(summarize_changed_files(&node_changed_files_blocking(node_id)?))
+    Ok(summarize_changed_files(&node_changed_files_blocking(
+        node_id,
+    )?))
 }
 
 #[cfg(test)]
@@ -831,7 +843,9 @@ mod tests {
 
         let files = changed_files_against_base(&repo, "origin/main").unwrap();
         assert!(
-            files.iter().any(|f| f.path == "foo.rs" && f.status == "added"),
+            files
+                .iter()
+                .any(|f| f.path == "foo.rs" && f.status == "added"),
             "a file committed since base must appear in the since-branch list; got {:?}",
             files
         );
@@ -851,7 +865,9 @@ mod tests {
 
         let files = changed_files_against_base(&repo, "origin/main").unwrap();
         assert!(
-            files.iter().any(|f| f.path == "base.txt" && f.status == "modified"),
+            files
+                .iter()
+                .any(|f| f.path == "base.txt" && f.status == "modified"),
             "an uncommitted edit since base must appear in the list; got {:?}",
             files
         );
@@ -874,22 +890,19 @@ mod tests {
         // `show_untracked_content`; must appear in both readers.
         std::fs::write(dir.path().join("empty.rs"), b"").unwrap();
 
-        let list_paths: std::collections::HashSet<String> = changed_files_against_base(&repo, "origin/main")
-            .unwrap()
-            .into_iter()
-            .map(|f| f.path)
-            .collect();
-        let diff_paths: std::collections::HashSet<String> = diff_against_base(
-            dir.path().to_str().unwrap(),
-            "origin/main",
-            None,
-            None,
-        )
-        .unwrap()
-        .files
-        .into_iter()
-        .map(|f| f.path)
-        .collect();
+        let list_paths: std::collections::HashSet<String> =
+            changed_files_against_base(&repo, "origin/main")
+                .unwrap()
+                .into_iter()
+                .map(|f| f.path)
+                .collect();
+        let diff_paths: std::collections::HashSet<String> =
+            diff_against_base(dir.path().to_str().unwrap(), "origin/main", None, None)
+                .unwrap()
+                .files
+                .into_iter()
+                .map(|f| f.path)
+                .collect();
         assert!(
             list_paths.contains("empty.rs"),
             "empty untracked file must appear in the since-branch list; got {:?}",
@@ -907,10 +920,30 @@ mod tests {
     #[test]
     fn summary_folds_the_changed_files_list() {
         let files = vec![
-            GitStatus { path: "a.rs".into(), status: "added".into(), additions: 3, deletions: 0 },
-            GitStatus { path: "b.rs".into(), status: "modified".into(), additions: 1, deletions: 1 },
-            GitStatus { path: "c.rs".into(), status: "deleted".into(), additions: 0, deletions: 5 },
-            GitStatus { path: "d.rs".into(), status: "untracked".into(), additions: 2, deletions: 0 },
+            GitStatus {
+                path: "a.rs".into(),
+                status: "added".into(),
+                additions: 3,
+                deletions: 0,
+            },
+            GitStatus {
+                path: "b.rs".into(),
+                status: "modified".into(),
+                additions: 1,
+                deletions: 1,
+            },
+            GitStatus {
+                path: "c.rs".into(),
+                status: "deleted".into(),
+                additions: 0,
+                deletions: 5,
+            },
+            GitStatus {
+                path: "d.rs".into(),
+                status: "untracked".into(),
+                additions: 2,
+                deletions: 0,
+            },
         ];
         let summary = summarize_changed_files(&files);
         assert_eq!(summary.total, 4);
@@ -990,9 +1023,24 @@ mod tests {
     #[test]
     fn build_sides_separates_old_and_new() {
         let lines = vec![
-            DiffLine { line_type: "context".to_string(), content: "same".to_string(), old_num: Some(1), new_num: Some(1) },
-            DiffLine { line_type: "remove".to_string(), content: "old".to_string(), old_num: Some(2), new_num: None },
-            DiffLine { line_type: "add".to_string(), content: "new".to_string(), old_num: None, new_num: Some(2) },
+            DiffLine {
+                line_type: "context".to_string(),
+                content: "same".to_string(),
+                old_num: Some(1),
+                new_num: Some(1),
+            },
+            DiffLine {
+                line_type: "remove".to_string(),
+                content: "old".to_string(),
+                old_num: Some(2),
+                new_num: None,
+            },
+            DiffLine {
+                line_type: "add".to_string(),
+                content: "new".to_string(),
+                old_num: None,
+                new_num: Some(2),
+            },
         ];
         let (old, new) = build_sides(&lines);
         assert!(old.contains("same"));
@@ -1047,8 +1095,18 @@ mod tests {
     #[test]
     fn group_into_hunks_empty_when_no_changes() {
         let lines = vec![
-            DiffLine { line_type: "context".into(), content: "a".into(), old_num: Some(1), new_num: Some(1) },
-            DiffLine { line_type: "context".into(), content: "b".into(), old_num: Some(2), new_num: Some(2) },
+            DiffLine {
+                line_type: "context".into(),
+                content: "a".into(),
+                old_num: Some(1),
+                new_num: Some(1),
+            },
+            DiffLine {
+                line_type: "context".into(),
+                content: "b".into(),
+                old_num: Some(2),
+                new_num: Some(2),
+            },
         ];
         assert!(group_into_hunks(&lines, 3).is_empty());
     }
@@ -1062,16 +1120,35 @@ mod tests {
         // lines are in the file.
         let mut lines = Vec::new();
         for i in 0..20 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
-        lines.push(DiffLine { line_type: "add".into(), content: "NEW".into(), old_num: None, new_num: Some(21) });
+        lines.push(DiffLine {
+            line_type: "add".into(),
+            content: "NEW".into(),
+            old_num: None,
+            new_num: Some(21),
+        });
         for i in 21..40 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
 
         let hunks = group_into_hunks(&lines, 3);
         assert_eq!(hunks.len(), 1);
-        assert_eq!(hunks[0].len(), 7, "expected 3 context + 1 add + 3 context = 7");
+        assert_eq!(
+            hunks[0].len(),
+            7,
+            "expected 3 context + 1 add + 3 context = 7"
+        );
         // First 3 are context, then the add, then 3 more context.
         for line in &hunks[0][..3] {
             assert_eq!(line.line_type, "context");
@@ -1089,19 +1166,50 @@ mod tests {
         // trying to avoid).
         let mut lines = Vec::new();
         for i in 0..10 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
-        lines.push(DiffLine { line_type: "add".into(), content: "FIRST".into(), old_num: None, new_num: Some(11) });
+        lines.push(DiffLine {
+            line_type: "add".into(),
+            content: "FIRST".into(),
+            old_num: None,
+            new_num: Some(11),
+        });
         for i in 11..61 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
-        lines.push(DiffLine { line_type: "add".into(), content: "SECOND".into(), old_num: None, new_num: Some(62) });
+        lines.push(DiffLine {
+            line_type: "add".into(),
+            content: "SECOND".into(),
+            old_num: None,
+            new_num: Some(62),
+        });
         for i in 62..70 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
 
         let hunks = group_into_hunks(&lines, 3);
-        assert_eq!(hunks.len(), 2, "expected two hunks, got {}: {:#?}", hunks.len(), hunks);
+        assert_eq!(
+            hunks.len(),
+            2,
+            "expected two hunks, got {}: {:#?}",
+            hunks.len(),
+            hunks
+        );
         assert!(hunks[0].iter().any(|l| l.content == "FIRST"));
         assert!(hunks[1].iter().any(|l| l.content == "SECOND"));
         // Neither hunk should contain the full file (50 context lines
@@ -1116,15 +1224,40 @@ mod tests {
         // into a single hunk with a shared context window in the middle.
         let mut lines = Vec::new();
         for i in 0..5 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
-        lines.push(DiffLine { line_type: "add".into(), content: "FIRST".into(), old_num: None, new_num: Some(6) });
+        lines.push(DiffLine {
+            line_type: "add".into(),
+            content: "FIRST".into(),
+            old_num: None,
+            new_num: Some(6),
+        });
         for i in 6..10 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
-        lines.push(DiffLine { line_type: "add".into(), content: "SECOND".into(), old_num: None, new_num: Some(11) });
+        lines.push(DiffLine {
+            line_type: "add".into(),
+            content: "SECOND".into(),
+            old_num: None,
+            new_num: Some(11),
+        });
         for i in 11..15 {
-            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+            lines.push(DiffLine {
+                line_type: "context".into(),
+                content: format!("a{}", i),
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+            });
         }
 
         let hunks = group_into_hunks(&lines, 3);
@@ -1208,7 +1341,9 @@ mod tests {
             index.add_path(std::path::Path::new("base.txt")).unwrap();
             index.write().unwrap();
             let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-            let oid = repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[]).unwrap();
+            let oid = repo
+                .commit(Some("HEAD"), &sig, &sig, "base", &tree, &[])
+                .unwrap();
             let base_commit = repo.find_commit(oid).unwrap();
             repo.branch("base", &base_commit, true).unwrap();
         }
@@ -1226,7 +1361,8 @@ mod tests {
         index.write().unwrap();
         let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
         let parent = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent])
+            .unwrap();
     }
 
     #[test]
@@ -1242,10 +1378,22 @@ mod tests {
 
         let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
-        assert!(paths.contains(&"committed.txt"), "committed file missing: {:?}", paths);
-        assert!(paths.contains(&"base.txt"), "uncommitted edit missing: {:?}", paths);
+        assert!(
+            paths.contains(&"committed.txt"),
+            "committed file missing: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"base.txt"),
+            "uncommitted edit missing: {:?}",
+            paths
+        );
 
-        let committed = result.files.iter().find(|f| f.path == "committed.txt").unwrap();
+        let committed = result
+            .files
+            .iter()
+            .find(|f| f.path == "committed.txt")
+            .unwrap();
         assert_eq!(committed.status, "added");
         assert_eq!(committed.additions, 2);
         assert_eq!(committed.deletions, 0);
@@ -1271,8 +1419,16 @@ mod tests {
             .files
             .iter()
             .find(|f| f.path == "renamed.txt")
-            .unwrap_or_else(|| panic!("renamed file missing: {:?}",
-                result.files.iter().map(|f| (&f.path, &f.status)).collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "renamed file missing: {:?}",
+                    result
+                        .files
+                        .iter()
+                        .map(|f| (&f.path, &f.status))
+                        .collect::<Vec<_>>()
+                )
+            });
         assert_eq!(renamed.status, "renamed");
         assert_eq!(renamed.old_path.as_deref(), Some("base.txt"));
     }
@@ -1325,7 +1481,10 @@ mod tests {
 
     #[test]
     fn html_escape_neutralises_markup() {
-        assert_eq!(html_escape("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
+        assert_eq!(
+            html_escape("a < b && c > d"),
+            "a &lt; b &amp;&amp; c &gt; d"
+        );
     }
 
     #[test]
@@ -1344,7 +1503,11 @@ mod tests {
 
     // ----- node → directory resolution (worktree vs root) ----------------
 
-    fn make_node(path: &str, use_worktree: bool, worktree_name: Option<&str>) -> crate::models::AgentNode {
+    fn make_node(
+        path: &str,
+        use_worktree: bool,
+        worktree_name: Option<&str>,
+    ) -> crate::models::AgentNode {
         // Only `path` / `use_worktree` / `worktree_name` drive the diff
         // resolution under test (via `env::node_working_path`); the rest
         // spread through `..Default::default()` so future optional columns
@@ -1373,7 +1536,9 @@ mod tests {
         let node = make_node(root.to_str().unwrap(), true, Some("wt"));
         let wt_path = crate::env::node_working_path(&node).host_path;
         assert!(
-            wt_path.replace('\\', "/").ends_with("/.claude/worktrees/wt"),
+            wt_path
+                .replace('\\', "/")
+                .ends_with("/.claude/worktrees/wt"),
             "expected the worktree path, got {wt_path}"
         );
 
@@ -1388,7 +1553,11 @@ mod tests {
         assert!(
             via_worktree.files.iter().any(|f| f.path == "base.txt"),
             "worktree edit missing: {:?}",
-            via_worktree.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+            via_worktree
+                .files
+                .iter()
+                .map(|f| &f.path)
+                .collect::<Vec<_>>()
         );
 
         // ...while the old behaviour — diffing the project root — never surfaces

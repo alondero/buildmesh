@@ -4,10 +4,7 @@ use crate::http::MaybeTls;
 
 use crate::http::request;
 
-pub async fn list(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-) {
+pub async fn list(lines: &mut tokio::io::BufStream<MaybeTls>, mesh_id: i64) {
     // Await the async command wrapper (not the `*_blocking` core): this route
     // runs inside `tauri::async_runtime::spawn` (http/mod.rs), so calling the
     // blocking core directly would park a Tauri worker. The wrapper offloads to

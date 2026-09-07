@@ -31,7 +31,6 @@ pub(crate) struct IssueContext {
     pub(crate) title: String,
 }
 
-
 /// Context required to spawn an agent on a GitHub pull request.
 /// Does not carry `title` because the PR prefill is persona-driven and
 /// intentionally independent of the PR title. The PR title is used
@@ -289,11 +288,7 @@ const PR_REVIEW_PERSONA: &str =
 
 /// Format the GitHub-PR prefill. Single source of truth (issue #1180, #1561);
 /// see [`format_issue_prefill`] for the parallel doc.
-pub(crate) fn format_pull_request_prefill(
-    owner: &str,
-    repo: &str,
-    number: i64,
-) -> String {
+pub(crate) fn format_pull_request_prefill(owner: &str, repo: &str, number: i64) -> String {
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
     format!("Review PR #{number} {PR_REVIEW_PERSONA}\n{url}")
 }

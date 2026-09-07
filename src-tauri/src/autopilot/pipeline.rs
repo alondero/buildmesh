@@ -246,7 +246,9 @@ pub(crate) fn wrapup_reasons(state: &WrapupState) -> Vec<String> {
             reasons.push("the worktree still has uncommitted changes".to_string());
         }
         if !state.pushed {
-            reasons.push("the branch has not been pushed to origin (or has unpushed commits)".to_string());
+            reasons.push(
+                "the branch has not been pushed to origin (or has unpushed commits)".to_string(),
+            );
         }
         if state.pr_required && state.pr_url.is_none() {
             reasons.push("no open pull request exists for the branch".to_string());
@@ -374,13 +376,25 @@ pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> 
     write_prompt_to_pty_guarded(node_id, text, app, None).map(|_| ())
 }
 
-pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHandle, expected_input: Option<&str>) -> Result<bool, String> {
+pub(crate) fn write_prompt_to_pty_guarded(
+    node_id: i64,
+    text: &str,
+    app: &AppHandle,
+    expected_input: Option<&str>,
+) -> Result<bool, String> {
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
         return Err(format!("node {} has no live agent process", node_id));
     }
     let registry = &crate::agent::process::PROCESS_REGISTRY;
     let guarded = if let Some(expected) = expected_input {
-        let Some(next) = registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)? else { return Ok(false); };
+        let Some(next) = registry.write_bytes_if_current(
+            node_id,
+            injection_payload(text).as_bytes(),
+            expected,
+        )?
+        else {
+            return Ok(false);
+        };
         Some(next)
     } else {
         registry.write_bytes(node_id, injection_payload(text).as_bytes())?;
@@ -428,7 +442,7 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
             node_id,
             attempt
         ),
-        Ok(None) => {}, // New input owns the draft; never submit it automatically.
+        Ok(None) => {} // New input owns the draft; never submit it automatically.
         Err(e) => {
             // Loud degrade: a staged-but-unsubmitted prompt is exactly the
             // silent stall of #874 — surface the node instead.
@@ -446,7 +460,10 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
 fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
     let wrote_at = Instant::now();
     while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
-        if output_seen_within(evaluator::millis_since_last_output(node_id), wrote_at.elapsed().as_millis()) {
+        if output_seen_within(
+            evaluator::millis_since_last_output(node_id),
+            wrote_at.elapsed().as_millis(),
+        ) {
             break;
         }
         std::thread::sleep(SUBMIT_POLL);
@@ -466,13 +483,21 @@ fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Op
 /// Shared with the launch watcher — a swallowed Enter stalls a prefilled
 /// launch the same way it stalls an injection.
 pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
-    press_enter_until_output_guarded(node_id, None)?.ok_or_else(|| "Input changed before submission".into())
+    press_enter_until_output_guarded(node_id, None)?
+        .ok_or_else(|| "Input changed before submission".into())
 }
 
-fn press_enter_until_output_guarded(node_id: i64, mut guard: Option<String>) -> Result<Option<u32>, String> {
+fn press_enter_until_output_guarded(
+    node_id: i64,
+    mut guard: Option<String>,
+) -> Result<Option<u32>, String> {
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
         if let Some(expected) = guard.as_deref() {
-            let Some(next) = crate::agent::process::PROCESS_REGISTRY.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
+            let Some(next) = crate::agent::process::PROCESS_REGISTRY
+                .write_bytes_if_current(node_id, b"\r", expected)?
+            else {
+                return Ok(None);
+            };
             guard = Some(next);
         } else {
             crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
@@ -526,23 +551,18 @@ pub(crate) fn observe_wrapup_state(
     pr_required: bool,
 ) -> Result<WrapupState, String> {
     let mesh_id = node.mesh_id;
-    observe_wrapup_state_with(
-        node,
-        pr_required,
-        observe_wrapup_git_state,
-        move |branch| {
-            let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-            let (owner, repo_name) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
-            let client = crate::services::github::GitHubClient::new().map_err(|e| e.to_string())?;
-            client
+    observe_wrapup_state_with(node, pr_required, observe_wrapup_git_state, move |branch| {
+        let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let (owner, repo_name) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
+        let client = crate::services::github::GitHubClient::new().map_err(|e| e.to_string())?;
+        client
                 .find_open_pr_for_branch(&owner, &repo_name, branch)
                 .map_err(|e| {
                     format!(
                         "could not verify the pull request for {owner}/{repo_name} branch {branch}: {e}"
                     )
                 })
-        },
-    )
+    })
 }
 
 /// Combine local wrap-up observation with an optional, fallible PR lookup.
@@ -575,9 +595,7 @@ fn observe_wrapup_state_with(
 
 /// Observe local wrap-up prerequisites and the actual checked-out branch.
 /// Worktree directory names may outlive a branch rename by the agent.
-pub(crate) fn observe_wrapup_git_state(
-    node: &crate::models::AgentNode,
-) -> WrapupState {
+pub(crate) fn observe_wrapup_git_state(node: &crate::models::AgentNode) -> WrapupState {
     // `node_working_path` resolves Worktree and Root Nodes alike (host path +
     // env), so the self-heal below covers both; on a Root Node the sanitize
     // is a no-op (`.git` is a directory, not a gitlink).
@@ -596,8 +614,7 @@ pub(crate) fn observe_wrapup_git_state(
             node.id,
             first_err
         );
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
-        {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type) {
             tracing::warn!("autopilot pipeline({}): sanitize failed: {}", node.id, e);
         }
         git2::Repository::open(&host_path)
@@ -641,7 +658,13 @@ pub(crate) fn observe_wrapup_git_state(
     };
 
     WrapupState {
-        dirty, pushed, branch, pr_url: None, pr_number: None, pr_required: false, repo_error,
+        dirty,
+        pushed,
+        branch,
+        pr_url: None,
+        pr_number: None,
+        pr_required: false,
+        repo_error,
     }
 }
 
@@ -722,8 +745,10 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
             let classification = evaluator::classify(node_id, &backend_env);
             match decide_implementing(classification) {
                 TurnAction::InjectFinish => {
-                    let prompt =
-                        finish::finish_prompt(Some(issue_number).filter(|n| *n > 0), Some(&action_on_success));
+                    let prompt = finish::finish_prompt(
+                        Some(issue_number).filter(|n| *n > 0),
+                        Some(&action_on_success),
+                    );
                     match write_prompt_to_pty(node_id, &prompt, app) {
                         Ok(()) => {
                             let _ = db::set_autopilot_run_state(node_id, Finishing, Some(1));
@@ -773,7 +798,11 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     // A GitHub outage is infrastructure state, not a fact
                     // the coding agent can repair. Leave the finishing
                     // attempt untouched and let a later redrive retry it.
-                    tracing::warn!("autopilot pipeline({}): wrap-up observation deferred: {}", node_id, error);
+                    tracing::warn!(
+                        "autopilot pipeline({}): wrap-up observation deferred: {}",
+                        node_id,
+                        error
+                    );
                     return;
                 }
             };
@@ -791,11 +820,8 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     let prompt = correction_prompt(&reasons, &evaluator::cleaned_tail(node_id));
                     match write_prompt_to_pty(node_id, &prompt, app) {
                         Ok(()) => {
-                            let _ = db::set_autopilot_run_state(
-                                node_id,
-                                Finishing,
-                                Some(attempts + 1),
-                            );
+                            let _ =
+                                db::set_autopilot_run_state(node_id, Finishing, Some(attempts + 1));
                             clear_attention_after_injection(node_id, app);
                             tracing::info!(
                                 "autopilot pipeline({}): verification red ({}) — correction attempt {}/{}",
@@ -905,8 +931,7 @@ fn start_suffix_turn(
 ) -> Result<(), String> {
     db::set_autopilot_run_state(node_id, SuffixPending, None).map_err(|e| e.to_string())?;
     if let Err(write_error) = write_prompt_to_pty(node_id, prompt, app) {
-        if let Err(rollback_error) =
-            db::set_autopilot_run_state(node_id, Finishing, Some(attempts))
+        if let Err(rollback_error) = db::set_autopilot_run_state(node_id, Finishing, Some(attempts))
         {
             tracing::warn!(
                 "autopilot pipeline({}): suffix state rollback failed after PTY error: {}",
@@ -1075,7 +1100,11 @@ fn redrive_one(node_id: i64, app: &AppHandle) {
     let observed = match observe_wrapup_state(&node, action_on_success != "none") {
         Ok(state) => state,
         Err(error) => {
-            tracing::warn!("autopilot redrive({}): wrap-up observation deferred: {}", node_id, error);
+            tracing::warn!(
+                "autopilot redrive({}): wrap-up observation deferred: {}",
+                node_id,
+                error
+            );
             return;
         }
     };
@@ -1148,7 +1177,10 @@ mod tests {
     fn working_and_failed_classification_do_nothing() {
         // `None` is the evaluator's safe-degradation path (#483 AC): a
         // broken/timed-out classifier must never drive the pipeline.
-        assert_eq!(decide_implementing(Some(Classification::Working)), TurnAction::Nothing);
+        assert_eq!(
+            decide_implementing(Some(Classification::Working)),
+            TurnAction::Nothing
+        );
         assert_eq!(decide_implementing(None), TurnAction::Nothing);
     }
 
@@ -1198,9 +1230,8 @@ mod tests {
     #[test]
     fn unopenable_repo_reports_the_real_error_not_fabricated_reasons() {
         let mut s = wrapup(true, false, None, true);
-        s.repo_error = Some(
-            "the verification could not open the node's worktree at X ( ... )".to_string(),
-        );
+        s.repo_error =
+            Some("the verification could not open the node's worktree at X ( ... )".to_string());
         match decide_finishing(&s, 1) {
             FinishOutcome::Retry(reasons) => {
                 assert_eq!(reasons.len(), 1, "one honest reason, no fabrications");
@@ -1251,20 +1282,39 @@ mod tests {
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let signature = git2::Signature::now("test", "test@example.com").unwrap();
-        let commit = repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[]).unwrap();
-        repo.branch("renamed-implementation", &repo.find_commit(commit).unwrap(), false).unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        repo.branch(
+            "renamed-implementation",
+            &repo.find_commit(commit).unwrap(),
+            false,
+        )
+        .unwrap();
         repo.set_head("refs/heads/renamed-implementation").unwrap();
-        repo.remote("origin", "https://github.com/example/repo.git").unwrap();
-        repo.reference("refs/remotes/origin/renamed-implementation", commit, true, "test").unwrap();
-        repo.find_branch("renamed-implementation", git2::BranchType::Local).unwrap()
-            .set_upstream(Some("origin/renamed-implementation")).unwrap();
+        repo.remote("origin", "https://github.com/example/repo.git")
+            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/renamed-implementation",
+            commit,
+            true,
+            "test",
+        )
+        .unwrap();
+        repo.find_branch("renamed-implementation", git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some("origin/renamed-implementation"))
+            .unwrap();
         let worktree_path = dir.path().join("original-worktree-name");
-        let branch_ref = repo.find_reference("refs/heads/renamed-implementation").unwrap();
+        let branch_ref = repo
+            .find_reference("refs/heads/renamed-implementation")
+            .unwrap();
         let mut options = git2::WorktreeAddOptions::new();
         options.reference(Some(&branch_ref));
         // Release the branch from the main checkout before attaching it.
         repo.set_head_detached(commit).unwrap();
-        repo.worktree("original-worktree-name", &worktree_path, Some(&options)).unwrap();
+        repo.worktree("original-worktree-name", &worktree_path, Some(&options))
+            .unwrap();
         let mut node = wrapup_test_node();
         node.path = dir.path().to_string_lossy().into_owned();
         node.worktree_name = Some("original-worktree-name".into());
@@ -1283,7 +1333,9 @@ mod tests {
         // The worktree path doesn't exist, so the repo open must fail and the
         // pushed=false short-circuit keeps GitHub out of the picture.
         let state = observe_wrapup_state(&node, true).unwrap();
-        let err = state.repo_error.expect("unopenable worktree must set repo_error");
+        let err = state
+            .repo_error
+            .expect("unopenable worktree must set repo_error");
         assert!(
             err.contains("gh1-missing"),
             "reason must name the inspected path, got: {}",
@@ -1383,7 +1435,10 @@ mod tests {
         // The cap gates *re-injection*, not success: a wrap-up that turns
         // green on the final attempt completes normally.
         let s = wrapup(false, true, Some("url"), true);
-        assert_eq!(decide_finishing(&s, MAX_FINISH_ATTEMPTS), FinishOutcome::Complete);
+        assert_eq!(
+            decide_finishing(&s, MAX_FINISH_ATTEMPTS),
+            FinishOutcome::Complete
+        );
     }
 
     // ── verified loop wrap-up decisions (#993) ───────────────────────────────
@@ -1469,7 +1524,10 @@ mod tests {
     fn a_turn_arriving_mid_evaluation_is_queued_not_dropped() {
         let id = 920_001;
         assert!(try_begin_evaluation(id), "first claim wins the slot");
-        assert!(!try_begin_evaluation(id), "second turn can't claim mid-flight");
+        assert!(
+            !try_begin_evaluation(id),
+            "second turn can't claim mid-flight"
+        );
         assert!(
             end_evaluation_and_check_rerun(id),
             "the queued turn demands a re-run"

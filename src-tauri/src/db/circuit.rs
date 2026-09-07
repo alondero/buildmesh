@@ -13,9 +13,7 @@
 //! never leave a half-applied decision.
 
 use super::{params, SqlResult};
-use crate::models::{
-    AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep,
-};
+use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 use rusqlite::{Connection, OptionalExtension};
 
 // ---------------------------------------------------------------------------
@@ -25,27 +23,48 @@ use rusqlite::{Connection, OptionalExtension};
 /// Atomically claim a source agent and create its review run. The source id is
 /// stored relationally on the run; the context copy remains for graph
 /// template expansion and backwards-compatible diagnostics.
-pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+pub fn create_node_circuit_run(
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+) -> Result<i64, String> {
     let mut db = super::write_conn();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = super::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
-    let existing: Option<i64> = tx.query_row(
-        "SELECT id FROM autopilot_circuit_runs
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM autopilot_circuit_runs
          WHERE source_agent_node_id = ?1 AND state IN ('pending','running','paused')
          LIMIT 1",
-        params![node_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if let Some(id) = existing { return Ok(id); }
-    let owned: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
+            params![node_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let owned: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
          WHERE s.agent_node_id = ?1 AND r.state IN ('pending','running','paused')) \
          OR EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id = ?1 \
          AND state IN ('implementing','finishing','suffix_pending'))",
-        params![node_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if owned { return Err("This agent is already controlled by an active Autopilot run.".into()); }
-    if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
+            params![node_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if owned {
+        return Err("This agent is already controlled by an active Autopilot run.".into());
+    }
+    if !matches!(
+        node.status,
+        crate::models::SessionStatus::Running
+            | crate::models::SessionStatus::AwaitingInput
+            | crate::models::SessionStatus::Completed
+            | crate::models::SessionStatus::Ready
+    ) {
         return Err("Resume the agent before starting a review.".into());
     }
     let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
@@ -58,12 +77,20 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
         None
     };
     let (circuit_id, name) = if let Some(id) = selected_circuit_id {
-        let circuit = get_autopilot_circuit_inner(&tx, id).map_err(|e| e.to_string())?
+        let circuit = get_autopilot_circuit_inner(&tx, id)
+            .map_err(|e| e.to_string())?
             .ok_or("Circuit no longer exists")?;
         let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
         graph.validate()?;
-        if circuit.mesh_id != node.mesh_id || graph.roots().is_empty()
-            || graph.roots().iter().any(|n| !matches!(n.kind, crate::autopilot::circuit::model::CircuitNodeKind::Manual)) {
+        if circuit.mesh_id != node.mesh_id
+            || graph.roots().is_empty()
+            || graph.roots().iter().any(|n| {
+                !matches!(
+                    n.kind,
+                    crate::autopilot::circuit::model::CircuitNodeKind::Manual
+                )
+            })
+        {
             return Err("Select a manual Circuit from this agent's Mesh.".into());
         }
         (id, circuit.name)
@@ -78,13 +105,16 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
         graph.validate()?;
         let name = format!("Review agent {}", node_id);
         let description = "Review an existing agent and return findings until approved";
-        let existing: Option<(i64, String)> = tx.query_row(
-            "SELECT id, name FROM autopilot_circuits
+        let existing: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, name FROM autopilot_circuits
              WHERE mesh_id = ?1 AND is_preset = 1
              ORDER BY id LIMIT 1",
-            params![node.mesh_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional().map_err(|e| e.to_string())?;
+                params![node.mesh_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         if let Some((id, existing_name)) = existing {
             (id, existing_name)
         } else {
@@ -93,7 +123,8 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
                  (mesh_id, name, description, enabled, concurrency_limit, graph_json, is_preset)
                  VALUES (?1, ?2, ?3, 0, 2, ?4, 1)",
                 params![node.mesh_id, name, description, graph.to_json()?],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             (tx.last_insert_rowid(), name)
         }
     };
@@ -101,8 +132,16 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     context.with_circuit(circuit_id, &name, node.mesh_id);
     context.set("source.agent_id", node_id.to_string());
     context.set("source.name", &node.name);
-    context.set("source.path", crate::env::node_working_path(&node).spawn_path);
-    let base_ref: String = tx.query_row("SELECT base_ref FROM meshes WHERE id = ?1", params![node.mesh_id], |r| r.get(0))
+    context.set(
+        "source.path",
+        crate::env::node_working_path(&node).spawn_path,
+    );
+    let base_ref: String = tx
+        .query_row(
+            "SELECT base_ref FROM meshes WHERE id = ?1",
+            params![node.mesh_id],
+            |r| r.get(0),
+        )
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() {
@@ -161,10 +200,7 @@ pub fn create_autopilot_circuit(
         .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
 }
 
-fn get_autopilot_circuit_inner(
-    conn: &Connection,
-    id: i64,
-) -> SqlResult<Option<AutopilotCircuit>> {
+fn get_autopilot_circuit_inner(conn: &Connection, id: i64) -> SqlResult<Option<AutopilotCircuit>> {
     let mut stmt = conn.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at, is_preset \
@@ -240,9 +276,8 @@ pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String
 /// from rewriting identical rows every cycle.
 pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
     let db = super::read_conn();
-    let mut stmt = db.prepare(
-        "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
-    )?;
+    let mut stmt =
+        db.prepare("SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1")?;
     let rows = stmt.query_map(params![circuit_id], |row| row.get(0))?;
     rows.collect()
 }
@@ -285,8 +320,9 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
            ))
          ORDER BY id",
     )?;
-    let circuits: Vec<AutopilotCircuit> =
-        stmt.query_map(params![mesh_id], map_circuit_row)?.collect::<SqlResult<_>>()?;
+    let circuits: Vec<AutopilotCircuit> = stmt
+        .query_map(params![mesh_id], map_circuit_row)?
+        .collect::<SqlResult<_>>()?;
     if circuits.is_empty() {
         return Ok(vec![]);
     }
@@ -406,7 +442,10 @@ pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
              (SELECT id FROM autopilot_circuit_runs WHERE circuit_id = ?1)",
         params![id],
     )?;
-    tx.execute("DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+        params![id],
+    )?;
     tx.execute("DELETE FROM autopilot_circuits WHERE id = ?1", params![id])?;
     tx.commit()
 }
@@ -425,8 +464,14 @@ pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) ->
              (SELECT id FROM autopilot_circuit_runs WHERE mesh_id = ?1)",
         params![mesh_id],
     )?;
-    conn.execute("DELETE FROM autopilot_circuit_runs WHERE mesh_id = ?1", params![mesh_id])?;
-    conn.execute("DELETE FROM autopilot_circuits WHERE mesh_id = ?1", params![mesh_id])?;
+    conn.execute(
+        "DELETE FROM autopilot_circuit_runs WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
+    conn.execute(
+        "DELETE FROM autopilot_circuits WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
     Ok(())
 }
 
@@ -461,7 +506,13 @@ pub fn create_circuit_run(
         "INSERT OR IGNORE INTO autopilot_circuit_runs \
              (circuit_id, mesh_id, trigger_identity, context_json, queue_position) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![circuit_id, mesh_id, trigger_identity, context_json, next_position],
+        params![
+            circuit_id,
+            mesh_id,
+            trigger_identity,
+            context_json,
+            next_position
+        ],
     )?;
     let id = tx.query_row(
         "SELECT id FROM autopilot_circuit_runs \
@@ -475,9 +526,7 @@ pub fn create_circuit_run(
 
 /// Pending Circuit Runs on one mesh in worker-admission order. The circuit
 /// name rides beside the canonical run row for the Probe's global queue.
-pub fn list_queued_circuit_runs(
-    mesh_id: i64,
-) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
+pub fn list_queued_circuit_runs(mesh_id: i64) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
     let db = super::read_conn();
     list_queued_circuit_runs_inner(&db, mesh_id)
 }
@@ -533,12 +582,15 @@ pub fn list_circuit_probe(
 pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<bool> {
     let mut db = super::write_conn();
     let tx = db.transaction()?;
-    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
-        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
          WHERE id = ?1 AND state = 'pending'",
-        params![run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()? else {
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    else {
         // The worker may promote or cancel the row between the UI render and
         // this command. A stale reorder is a harmless no-op, not a raw
         // QueryReturnedNoRows error at the IPC boundary.
@@ -1103,7 +1155,14 @@ fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOw
          ORDER BY s.agent_node_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
     })?;
     let mut ownerships: Vec<AgentOwnershipRow> = rows.collect::<SqlResult<_>>()?;
     let mut sources = db.prepare(
@@ -1115,7 +1174,15 @@ fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOw
          WHERE a.status != 'archived' AND r.state IN ('pending','running','paused') \
          ORDER BY a.id, r.id",
     )?;
-    for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
+    for row in sources.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })? {
         let (node, run, circuit, name, state) = row?;
         let source = (node, run, circuit, name, state, None);
         ownerships.retain(|owned| owned.0 != source.0);
@@ -1147,22 +1214,56 @@ mod activity_ownership_tests {
                    (1, 'verdict', 'running', 2, 1), (1, 'other', 'running', 3, NULL);").unwrap();
         let read_parent = || {
             let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
-            assert_eq!(rows.len(), 3, "multiple steps referring to a reviewer must not duplicate it");
+            assert_eq!(
+                rows.len(),
+                3,
+                "multiple steps referring to a reviewer must not duplicate it"
+            );
             assert_eq!(rows.iter().find(|r| r.0 == 3).unwrap().5, None);
             rows.iter().find(|r| r.0 == 2).unwrap().5
         };
         assert_eq!(read_parent(), Some(1));
-        assert_eq!(read_parent(), Some(1), "all grouping information is in the ledger");
-        db.execute("UPDATE autopilot_circuits SET graph_json = '{}'", []).unwrap();
-        assert_eq!(read_parent(), Some(1), "presentation parentage survives without blueprint parsing");
-        db.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1", []).unwrap();
-        assert_eq!(read_parent(), Some(1), "run source does not overwrite explicit step parentage");
-        db.execute("UPDATE autopilot_circuit_runs SET state = 'paused'", []).unwrap();
+        assert_eq!(
+            read_parent(),
+            Some(1),
+            "all grouping information is in the ledger"
+        );
+        db.execute("UPDATE autopilot_circuits SET graph_json = '{}'", [])
+            .unwrap();
+        assert_eq!(
+            read_parent(),
+            Some(1),
+            "presentation parentage survives without blueprint parsing"
+        );
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET source_agent_node_id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            read_parent(),
+            Some(1),
+            "run source does not overwrite explicit step parentage"
+        );
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'paused'", [])
+            .unwrap();
         assert_eq!(read_parent(), Some(1));
-        db.execute("UPDATE autopilot_circuit_runs SET state = 'completed'", []).unwrap();
-        assert_eq!(read_parent(), Some(1), "a retained reviewer remains inspectable");
-        db.execute("UPDATE agent_nodes SET status = 'archived' WHERE id = 2", []).unwrap();
-        assert!(list_circuit_agent_ownerships_inner(&db).unwrap().iter().all(|r| r.0 != 2));
+        db.execute("UPDATE autopilot_circuit_runs SET state = 'completed'", [])
+            .unwrap();
+        assert_eq!(
+            read_parent(),
+            Some(1),
+            "a retained reviewer remains inspectable"
+        );
+        db.execute(
+            "UPDATE agent_nodes SET status = 'archived' WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        assert!(list_circuit_agent_ownerships_inner(&db)
+            .unwrap()
+            .iter()
+            .all(|r| r.0 != 2));
     }
 }
 
@@ -1230,7 +1331,9 @@ pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
     Ok(())
 }
 
-pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connection) -> SqlResult<Vec<i64>> {
+pub(crate) fn failed_circuit_agents_for_cleanup_inner(
+    conn: &rusqlite::Connection,
+) -> SqlResult<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.id FROM autopilot_circuit_runs r
          JOIN autopilot_circuit_run_steps s ON s.run_id = r.id

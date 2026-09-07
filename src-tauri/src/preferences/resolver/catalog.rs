@@ -24,19 +24,47 @@ pub(crate) struct BuiltInProviderAccount {
 }
 
 pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
-    BuiltInProviderAccount { id: "anthropic", name: "Anthropic / Claude",   self_auth: true  },
-    BuiltInProviderAccount { id: "codex",     name: "OpenAI / Codex",        self_auth: true  },
-    BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
-    BuiltInProviderAccount { id: "grok",      name: "xAI / Grok",           self_auth: true  },
+    BuiltInProviderAccount {
+        id: "anthropic",
+        name: "Anthropic / Claude",
+        self_auth: true,
+    },
+    BuiltInProviderAccount {
+        id: "codex",
+        name: "OpenAI / Codex",
+        self_auth: true,
+    },
+    BuiltInProviderAccount {
+        id: "agy",
+        name: "Google / Antigravity",
+        self_auth: true,
+    },
+    BuiltInProviderAccount {
+        id: "grok",
+        name: "xAI / Grok",
+        self_auth: true,
+    },
     // Kimi (Moonshot) — keyed via the user's Moonshot API key. The string
     // `kimi` also names the Kimi Code CLI Agent Harness in a different
     // namespace (`HarnessProfile.harness`); see CONTEXT.md "First-class
     // Model Provider" + "Usage follows the credential, not the pairing".
-    BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi",       self_auth: false },
-    BuiltInProviderAccount { id: "opencode",  name: "OpenCode",             self_auth: true  },
+    BuiltInProviderAccount {
+        id: "kimi",
+        name: "Moonshot / Kimi",
+        self_auth: false,
+    },
+    BuiltInProviderAccount {
+        id: "opencode",
+        name: "OpenCode",
+        self_auth: true,
+    },
     // Command Code owns its `~/.commandcode/auth.json` credential. The same
     // id names its native Agent Harness in the separate harness namespace.
-    BuiltInProviderAccount { id: "commandcode", name: "Command Code",         self_auth: true  },
+    BuiltInProviderAccount {
+        id: "commandcode",
+        name: "Command Code",
+        self_auth: true,
+    },
     // Freebuff is an AI-coding CLI built on Codebuff (issue #1437). Its
     // CLI-managed credential lives at `~/.config/manicode/credentials.json`
     // (XDG-style, used on every platform), so the provider self-authenticates
@@ -45,23 +73,47 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     // the `Usage follows the credential, not the pairing` invariant from
     // CONTEXT.md keeps the two registrations aligned. See issue #1438 for
     // the credential-parser + quota-fetcher wiring.
-    BuiltInProviderAccount { id: "freebuff",   name: "Freebuff",              self_auth: true  },
-    BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
-    BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
-    BuiltInProviderAccount { id: "cursor",    name: "Cursor",               self_auth: true  },
+    BuiltInProviderAccount {
+        id: "freebuff",
+        name: "Freebuff",
+        self_auth: true,
+    },
+    BuiltInProviderAccount {
+        id: "minimax",
+        name: "MiniMax",
+        self_auth: false,
+    },
+    BuiltInProviderAccount {
+        id: "openrouter",
+        name: "OpenRouter",
+        self_auth: false,
+    },
+    BuiltInProviderAccount {
+        id: "cursor",
+        name: "Cursor",
+        self_auth: true,
+    },
     // DeepSeek Platform API — keyed by the user's DeepSeek API key.
     // Publishes both Anthropic- and OpenAI-compatible surfaces (DeepSeek
     // runs an OpenAI-compatible endpoint at https://api.deepseek.com/v1
     // and an Anthropic-compatible Claude Code surface). Models: `deepseek-chat`
     // (V3.x — fast chat / mid-tier code) and `deepseek-reasoner` (R1 — the
     // strongest reasoning tier). See issue #1127.
-    BuiltInProviderAccount { id: "deepseek",  name: "DeepSeek",              self_auth: false },
+    BuiltInProviderAccount {
+        id: "deepseek",
+        name: "DeepSeek",
+        self_auth: false,
+    },
     // OpenAI Platform API — keyed by an `sk-admin-…` (org spend) or
     // `sk-proj-…` (graceful degradation: org costs 401, project keys still
     // work for inference). See ADR-0026 / issue #1109. No first-class
     // inference surface here — the row exists for the Usage Meter only;
     // OpenAI inference goes through the Codex harness.
-    BuiltInProviderAccount { id: "openai",    name: "OpenAI Platform",       self_auth: false },
+    BuiltInProviderAccount {
+        id: "openai",
+        name: "OpenAI Platform",
+        self_auth: false,
+    },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu
@@ -120,13 +172,11 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
         ],
         // Direct Kimi Open Platform is Chat Completions-only, so only its
         // Anthropic-compatible Claude Code surface is offered.
-        "kimi" => vec![
-            SurfaceEndpoint {
-                surface: ApiSurface::Anthropic,
-                base_url: "https://api.moonshot.ai/anthropic".to_string(),
-                model_tiers: kimi_default_tiers(),
-            },
-        ],
+        "kimi" => vec![SurfaceEndpoint {
+            surface: ApiSurface::Anthropic,
+            base_url: "https://api.moonshot.ai/anthropic".to_string(),
+            model_tiers: kimi_default_tiers(),
+        }],
         // OpenRouter Anthropic Skin — Anthropic-only by scope decision (empty
         // model_tiers; user picks provider/model slugs per tier on attach).
         "openrouter" => vec![SurfaceEndpoint {
@@ -243,9 +293,7 @@ pub fn keyed_first_class_catalog() -> Vec<ProviderAccount> {
 
 /// Template for a single keyed first-class id, if it exists in the catalog.
 pub(crate) fn keyed_first_class_template(id: &str) -> Option<ProviderAccount> {
-    keyed_first_class_catalog()
-        .into_iter()
-        .find(|a| a.id == id)
+    keyed_first_class_catalog().into_iter().find(|a| a.id == id)
 }
 
 /// MiniMax's Claude-Code-parity default tier map. **Single source** consumed by

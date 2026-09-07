@@ -77,7 +77,12 @@ static NODES: Lazy<Mutex<HashMap<i64, NodeEvaluatorState>>> =
 
 /// Start buffering PTY output for a node. Idempotent.
 pub fn register(node_id: i64) {
-    NODES.lock().unwrap().entry(node_id).or_default().legacy_owned = true;
+    NODES
+        .lock()
+        .unwrap()
+        .entry(node_id)
+        .or_default()
+        .legacy_owned = true;
 }
 
 /// Start buffering PTY output for a circuit-owned node. Circuit nodes share
@@ -184,11 +189,7 @@ pub fn millis_since_last_evaluation(node_id: i64) -> Option<u128> {
 /// transcript-publication retry, or an explicitly due classifier retry can
 /// wake the transcript reader. Probe keys include the gate attempt so another
 /// gate targeting the same agent is not suppressed by this gate's read.
-pub(crate) fn begin_circuit_probe(
-    node_id: i64,
-    probe_key: &str,
-    retry_due: bool,
-) -> Option<u64> {
+pub(crate) fn begin_circuit_probe(node_id: i64, probe_key: &str, retry_due: bool) -> Option<u64> {
     let nodes = NODES.lock().unwrap();
     let state = nodes.get(&node_id)?;
     if retry_due {
@@ -211,7 +212,11 @@ pub(crate) fn begin_circuit_probe(
 pub(crate) fn begin_circuit_wait_probe(node_id: i64, probe_key: &str) -> Option<u64> {
     let nodes = NODES.lock().unwrap();
     let state = nodes.get(&node_id)?;
-    if state.circuit_probes.get(probe_key).is_some_and(|p| p.checked_at.elapsed() < CIRCUIT_PROBE_RETRY) {
+    if state
+        .circuit_probes
+        .get(probe_key)
+        .is_some_and(|p| p.checked_at.elapsed() < CIRCUIT_PROBE_RETRY)
+    {
         return None;
     }
     Some(state.output_generation)
@@ -326,9 +331,7 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
         .collect();
         let continue_hit = tokens.contains(&"CONTINUE");
         let negated_continue = continue_hit
-            && (tokens.contains(&"NOT")
-                || tokens.contains(&"NEVER")
-                || upper.contains("DON'T"));
+            && (tokens.contains(&"NOT") || tokens.contains(&"NEVER") || upper.contains("DON'T"));
         if negated_continue {
             continue;
         }
@@ -395,7 +398,11 @@ pub fn classify(node_id: i64, backend_env: &[(String, String)]) -> Option<Classi
 /// Review completion alone is not approval. Unclear reports and backend
 /// failures need attention rather than silently authorizing more work.
 pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option<Classification> {
-    classify_with_prompt(node_id, backend_env, &review_prompt(&cleaned_turn_tail(node_id)))
+    classify_with_prompt(
+        node_id,
+        backend_env,
+        &review_prompt(&cleaned_turn_tail(node_id)),
+    )
 }
 
 pub(crate) fn review_prompt(output: &str) -> String {
@@ -408,8 +415,11 @@ pub(crate) fn review_prompt(output: &str) -> String {
     )
 }
 
-pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)], prompt: &str) -> Option<Classification> {
-
+pub(crate) fn classify_with_prompt(
+    node_id: i64,
+    backend_env: &[(String, String)],
+    prompt: &str,
+) -> Option<Classification> {
     let mut cmd = crate::process_util::command_no_window("claude");
     cmd.arg("--print");
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
@@ -435,7 +445,11 @@ pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)
     parsed
 }
 
-fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout: std::time::Duration) -> Result<String, String> {
+fn run_classifier_command(
+    mut cmd: std::process::Command,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     use std::io::{Read, Write};
     let io_error = |error: std::io::Error| error.to_string();
     const MAX_OUTPUT: usize = 64 * 1024;
@@ -454,20 +468,34 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(io_error)?;
-    let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
-    let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| "classifier stdin was not piped".to_string())?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| "classifier stdout was not piped".to_string())?;
     let prompt_bytes = prompt.as_bytes().to_vec();
     let (input_tx, input_rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || { let _ = input_tx.send(input.write_all(&prompt_bytes)); });
+    std::thread::spawn(move || {
+        let _ = input_tx.send(input.write_all(&prompt_bytes));
+    });
     let output_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output_oversized_reader = output_oversized.clone();
     let (output_tx, output_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut bytes = Vec::with_capacity(MAX_OUTPUT.min(8 * 1024));
-        let result = output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
-            output_oversized_reader.store(bytes.len() > MAX_OUTPUT, std::sync::atomic::Ordering::Release);
-            bytes
-        });
+        let result = output
+            .take((MAX_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| {
+                output_oversized_reader.store(
+                    bytes.len() > MAX_OUTPUT,
+                    std::sync::atomic::Ordering::Release,
+                );
+                bytes
+            });
         let _ = output_tx.send(result);
     });
     let job = crate::process_util::JobHandle::contain(child.id());
@@ -478,10 +506,15 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() { status_error = Some(format!("classifier exited with {status}")); }
+                if !status.success() {
+                    status_error = Some(format!("classifier exited with {status}"));
+                }
                 break;
             }
-            Ok(None) if std::time::Instant::now() < deadline && !output_oversized.load(std::sync::atomic::Ordering::Acquire) => {
+            Ok(None)
+                if std::time::Instant::now() < deadline
+                    && !output_oversized.load(std::sync::atomic::Ordering::Acquire) =>
+            {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Ok(None) => {
@@ -501,7 +534,10 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             }
         }
     }
-    if input_rx.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
+    if input_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_err()
+    {
         terminate_classifier_tree(child.id(), job.as_ref());
         let _ = child.kill();
         let _ = child.wait();
@@ -515,15 +551,22 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             terminate_classifier_tree(child.id(), job.as_ref());
             let _ = child.kill();
             let _ = child.wait();
-            output_rx.recv_timeout(std::time::Duration::from_secs(1))
+            output_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
                 .map_err(|_| "classifier output reader did not finish".to_string())?
                 .map_err(io_error)?
         }
     };
     drop(job);
-    if let Some(error) = status_error { return Err(error); }
-    if timed_out { return Err("classifier exceeded its time budget".into()); }
-    if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
+    if let Some(error) = status_error {
+        return Err(error);
+    }
+    if timed_out {
+        return Err("classifier exceeded its time budget".into());
+    }
+    if over_budget || bytes.len() > MAX_OUTPUT {
+        return Err("classifier output exceeded 64 KiB".into());
+    }
     String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
 }
 
@@ -547,25 +590,55 @@ mod tests {
 
     #[test]
     fn circuit_classifier_drains_output_larger_than_a_pipe_buffer() {
-        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") } else { crate::process_util::command_no_window("sh") };
+        let mut cmd = if cfg!(windows) {
+            crate::process_util::command_no_window("powershell.exe")
+        } else {
+            crate::process_util::command_no_window("sh")
+        };
         if cfg!(windows) {
             cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 32000; [Console]::In.ReadToEnd() | Out-Null; [Console]::OpenStandardOutput().Write($b,0,$b.Length); [Console]::WriteLine('COMPLETED')"]);
         } else {
-            cmd.args(["-c", "cat >/dev/null; head -c 32000 /dev/zero | tr '\\0' x; printf '\\nCOMPLETED\\n'"]);
+            cmd.args([
+                "-c",
+                "cat >/dev/null; head -c 32000 /dev/zero | tr '\\0' x; printf '\\nCOMPLETED\\n'",
+            ]);
         }
-        let output = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_secs(10)).unwrap();
+        let output = run_classifier_command(
+            cmd,
+            &"prompt".repeat(10_000),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         assert!(output.len() > 32_000);
-        assert_eq!(parse_classification(&output), Some(Classification::Completed));
+        assert_eq!(
+            parse_classification(&output),
+            Some(Classification::Completed)
+        );
     }
 
     #[test]
     fn circuit_classifier_timeout_does_not_wait_for_stdin_consumption() {
-        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") } else { crate::process_util::command_no_window("sh") };
+        let mut cmd = if cfg!(windows) {
+            crate::process_util::command_no_window("powershell.exe")
+        } else {
+            crate::process_util::command_no_window("sh")
+        };
         if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 10"]);
-        } else { cmd.args(["-c", "sleep 1"]); }
+            cmd.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 10",
+            ]);
+        } else {
+            cmd.args(["-c", "sleep 1"]);
+        }
         let started = std::time::Instant::now();
-        let result = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_millis(200));
+        let result = run_classifier_command(
+            cmd,
+            &"prompt".repeat(10_000),
+            std::time::Duration::from_millis(200),
+        );
         assert!(result.is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
@@ -577,7 +650,10 @@ mod tests {
         cmd.args(["-c", "sleep 60 & printf 'COMPLETED\\n'"]);
         let started = std::time::Instant::now();
         let result = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(2));
-        assert_eq!(parse_classification(&result.unwrap()), Some(Classification::Completed));
+        assert_eq!(
+            parse_classification(&result.unwrap()),
+            Some(Classification::Completed)
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
@@ -595,8 +671,14 @@ mod tests {
 
     #[test]
     fn circuit_continuation_requires_an_explicit_classification() {
-        assert_eq!(parse_classification("CONTINUE"), Some(Classification::Continue));
-        assert_eq!(parse_classification("Verdict: CONTINUE."), Some(Classification::Continue));
+        assert_eq!(
+            parse_classification("CONTINUE"),
+            Some(Classification::Continue)
+        );
+        assert_eq!(
+            parse_classification("Verdict: CONTINUE."),
+            Some(Classification::Continue)
+        );
         assert_eq!(parse_classification("DISCONTINUE"), None);
         assert_eq!(parse_classification("Do not CONTINUE"), None);
         assert_eq!(parse_classification("NOT CONTINUE"), None);
@@ -608,9 +690,18 @@ mod tests {
 
     #[test]
     fn parses_bare_single_word_answers() {
-        assert_eq!(parse_classification("COMPLETED"), Some(Classification::Completed));
-        assert_eq!(parse_classification("BLOCKED\n"), Some(Classification::Blocked));
-        assert_eq!(parse_classification("  working  "), Some(Classification::Working));
+        assert_eq!(
+            parse_classification("COMPLETED"),
+            Some(Classification::Completed)
+        );
+        assert_eq!(
+            parse_classification("BLOCKED\n"),
+            Some(Classification::Blocked)
+        );
+        assert_eq!(
+            parse_classification("  working  "),
+            Some(Classification::Working)
+        );
     }
 
     #[test]
@@ -632,7 +723,10 @@ mod tests {
     #[test]
     fn tokenless_or_empty_output_degrades_to_none() {
         assert_eq!(parse_classification(""), None);
-        assert_eq!(parse_classification("I am not sure what state this is."), None);
+        assert_eq!(
+            parse_classification("I am not sure what state this is."),
+            None
+        );
     }
 
     // ── buffering ───────────────────────────────────────────────────────────
@@ -678,7 +772,10 @@ mod tests {
         on_output(id, &"x".repeat(MAX_TAIL_CHARS - 10));
         note_turn_start(id);
         on_output(id, "Review complete: no remaining findings. Approved.");
-        assert_eq!(cleaned_turn_tail(id), "Review complete: no remaining findings. Approved.");
+        assert_eq!(
+            cleaned_turn_tail(id),
+            "Review complete: no remaining findings. Approved."
+        );
         unregister(id);
     }
 
@@ -733,8 +830,8 @@ mod tests {
         let id = 910_006;
         register_circuit(id);
         let key = "run:gate:1";
-        let generation = begin_circuit_probe(id, key, false)
-            .expect("registration permits one recovery probe");
+        let generation =
+            begin_circuit_probe(id, key, false).expect("registration permits one recovery probe");
         note_circuit_probe(id, key, generation);
         assert!(
             begin_circuit_probe(id, key, false).is_none(),
@@ -749,8 +846,8 @@ mod tests {
             "one gate cannot suppress a sibling gate"
         );
         on_output(id, "new turn");
-        let generation = begin_circuit_probe(id, key, false)
-            .expect("PTY output invalidates the probe clock");
+        let generation =
+            begin_circuit_probe(id, key, false).expect("PTY output invalidates the probe clock");
         note_circuit_probe(id, key, generation);
         assert!(begin_circuit_probe(id, key, false).is_none());
         unregister(id);
@@ -773,7 +870,10 @@ mod tests {
             .unwrap()
             .get(&id)
             .and_then(|state| state.last_evaluation);
-        assert_eq!(after, before, "transcript probes must not postpone backend retry");
+        assert_eq!(
+            after, before,
+            "transcript probes must not postpone backend retry"
+        );
         unregister(id);
     }
 

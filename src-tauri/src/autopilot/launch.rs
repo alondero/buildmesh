@@ -21,8 +21,8 @@
 //! watcher gives up after [`WATCH_TIMEOUT`] with a warning — the node is
 //! left for the human, never blind-driven.
 
-use std::time::{Duration, Instant};
 use serde::Serialize;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
@@ -55,10 +55,7 @@ pub(crate) enum InitialPromptDelivery {
     InjectAfterSpawn,
 }
 
-pub(crate) fn initial_prompt_delivery(
-    spawn_option: &str,
-    prompt: &str,
-) -> InitialPromptDelivery {
+pub(crate) fn initial_prompt_delivery(spawn_option: &str, prompt: &str) -> InitialPromptDelivery {
     if prompt.trim().is_empty() {
         return InitialPromptDelivery::Fresh;
     }
@@ -184,12 +181,7 @@ pub(crate) fn ready_to_submit(
 /// `issue_number` is preserved for the `autopilot-submitted` toast payload
 /// so the existing wire shape stays intact; it is NOT used for the marker
 /// (wayfinder #1027: that's what broke loop-mode prefills).
-pub fn watch_and_submit(
-    app: AppHandle,
-    node_id: i64,
-    issue_number: i64,
-    prefill: &str,
-) {
+pub fn watch_and_submit(app: AppHandle, node_id: i64, issue_number: i64, prefill: &str) {
     watch_and_submit_inner(app, node_id, Some(issue_number), prefill);
 }
 
@@ -200,12 +192,7 @@ pub(crate) fn watch_and_submit_for_circuit(app: AppHandle, node_id: i64, prefill
     watch_and_submit_inner(app, node_id, None, prefill);
 }
 
-fn watch_and_submit_inner(
-    app: AppHandle,
-    node_id: i64,
-    issue_number: Option<i64>,
-    prefill: &str,
-) {
+fn watch_and_submit_inner(app: AppHandle, node_id: i64, issue_number: Option<i64>, prefill: &str) {
     // Owned copy for the spawned thread (`'static`); the prefill is a
     // small string (<= a few KB even for verbose loop prompts) but the
     // thread must outlive any stack frame, so a borrow is not enough.
@@ -326,17 +313,16 @@ mod tests {
         // `initial_prompt()`); the loop prefill is taken verbatim, just
         // like `SpawnIntent::Loop`. Routing through the source of truth
         // keeps the marker test honest if anyone changes the wording.
-        let issue_prefill = crate::agent::spawn::SpawnIntent::Issue(
-            crate::agent::spawn::IssueContext {
+        let issue_prefill =
+            crate::agent::spawn::SpawnIntent::Issue(crate::agent::spawn::IssueContext {
                 owner: "alondero".into(),
                 repo: "buildmesh".into(),
                 number: 358,
                 title: "Fix the login flow".into(),
-            },
-        )
-        .initial_prompt()
-        .expect("issue intent always has a prompt")
-        .into_string();
+            })
+            .initial_prompt()
+            .expect("issue intent always has a prompt")
+            .into_string();
         for prefill in [
             issue_prefill,
             "Iterate on the failing test cases".to_string(),
@@ -366,7 +352,9 @@ mod tests {
         let long = "word ".repeat(100);
         let marker = marker_hint_for_prefill(&long);
         assert_eq!(marker.chars().count(), MAX_MARKER_CHARS_NORMALIZED);
-        assert!(marker.chars().all(|c| c == 'w' || c == 'o' || c == 'r' || c == 'd'));
+        assert!(marker
+            .chars()
+            .all(|c| c == 'w' || c == 'o' || c == 'r' || c == 'd'));
     }
 
     // Short prompts like `"claude"`, `"grok"`, or `"minimax"` survive

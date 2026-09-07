@@ -398,7 +398,10 @@ mod tests {
             .iter()
             .filter(|s| matches!(s, SanType::IpAddress(ip) if *ip == link_local))
             .count();
-        assert_eq!(lan_count, 1, "duplicate LAN IP must collapse to a single SAN");
+        assert_eq!(
+            lan_count, 1,
+            "duplicate LAN IP must collapse to a single SAN"
+        );
         assert_eq!(
             link_local_count, 0,
             "link-local IPs are never bound (see http::bind_specs) and are the most \
@@ -525,12 +528,18 @@ mod tests {
     #[test]
     fn generate_produces_non_empty_der() {
         let chain = generate(&[]).unwrap();
-        assert!(!chain.root_cert_der.is_empty(), "root cert must be non-empty");
+        assert!(
+            !chain.root_cert_der.is_empty(),
+            "root cert must be non-empty"
+        );
         // Issue #713: root key is now part of CertChain — sign the iOS
         // .mobileconfig with it. An empty key would fail the CMS sign
         // handshake with `KeyParseError`, so we pin non-empty here.
         assert!(!chain.root_key_der.is_empty(), "root key must be non-empty");
-        assert!(!chain.leaf.cert_der.is_empty(), "leaf cert must be non-empty");
+        assert!(
+            !chain.leaf.cert_der.is_empty(),
+            "leaf cert must be non-empty"
+        );
         assert!(!chain.leaf.key_der.is_empty(), "leaf key must be non-empty");
     }
 
@@ -606,14 +615,23 @@ mod tests {
         let first = load_or_generate(dir.path(), &[ip_a]).unwrap();
         // Same interface set → reuse the persisted cert.
         let same = load_or_generate(dir.path(), &[ip_a]).unwrap();
-        assert_eq!(first.leaf.cert_der, same.leaf.cert_der, "unchanged interface set reuses the cert");
+        assert_eq!(
+            first.leaf.cert_der, same.leaf.cert_der,
+            "unchanged interface set reuses the cert"
+        );
         // A shrunk set (only loopback now) still passes — an extra stale SAN is harmless.
         let shrunk = load_or_generate(dir.path(), &[]).unwrap();
-        assert_eq!(first.leaf.cert_der, shrunk.leaf.cert_der, "a covered (subset) request reuses the cert");
+        assert_eq!(
+            first.leaf.cert_der, shrunk.leaf.cert_der,
+            "a covered (subset) request reuses the cert"
+        );
         // A new interface IP the persisted cert doesn't cover → regenerate, or a
         // phone connecting to the new IP would hit a SAN/name mismatch.
         let changed = load_or_generate(dir.path(), &[ip_b]).unwrap();
-        assert_ne!(first.leaf.cert_der, changed.leaf.cert_der, "a new interface IP forces regeneration");
+        assert_ne!(
+            first.leaf.cert_der, changed.leaf.cert_der,
+            "a new interface IP forces regeneration"
+        );
     }
 
     /// Regression pin for the root+leaf PKI: the root cert MUST declare
@@ -628,11 +646,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("root.der"), &chain.root_cert_der).unwrap();
         let output = std::process::Command::new("openssl")
-            .args(["x509", "-inform", "DER", "-in", dir.path().join("root.der").to_str().unwrap(),
-                   "-noout", "-ext", "basicConstraints"])
+            .args([
+                "x509",
+                "-inform",
+                "DER",
+                "-in",
+                dir.path().join("root.der").to_str().unwrap(),
+                "-noout",
+                "-ext",
+                "basicConstraints",
+            ])
             .output()
             .expect("openssl must be on PATH");
-        assert!(output.status.success(), "openssl failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "openssl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("CA:TRUE"),
@@ -833,7 +863,11 @@ mod tests {
             "cert_fingerprint output must match openssl's colon-separated uppercase hex"
         );
         // 32 bytes × 2 hex chars + 31 colons = 95 chars.
-        assert_eq!(got.len(), 95, "SHA-256 fingerprint must be 95 chars (32 bytes colon-separated)");
+        assert_eq!(
+            got.len(),
+            95,
+            "SHA-256 fingerprint must be 95 chars (32 bytes colon-separated)"
+        );
     }
 
     /// `cert_status` on a freshly generated chain populates all four fields.
@@ -938,9 +972,12 @@ mod tests {
         let issuer_out = std::process::Command::new("openssl")
             .args([
                 "x509",
-                "-inform", "DER",
-                "-in", dir.path().join("cert.der").to_str().unwrap(),
-                "-noout", "-issuer",
+                "-inform",
+                "DER",
+                "-in",
+                dir.path().join("cert.der").to_str().unwrap(),
+                "-noout",
+                "-issuer",
             ])
             .output()
             .expect("openssl must be on PATH");
@@ -959,9 +996,12 @@ mod tests {
         let dates_out = std::process::Command::new("openssl")
             .args([
                 "x509",
-                "-inform", "DER",
-                "-in", dir.path().join("cert.der").to_str().unwrap(),
-                "-noout", "-dates",
+                "-inform",
+                "DER",
+                "-in",
+                dir.path().join("cert.der").to_str().unwrap(),
+                "-noout",
+                "-dates",
             ])
             .output()
             .expect("openssl must be on PATH");

@@ -110,10 +110,7 @@ fn finalize_branch(local: &str) -> Option<String> {
 /// `base_branch_holder` is always `None` from this helper — the Tauri
 /// command fills it in via `find_base_branch_holder` (which needs the
 /// agent-node active-paths list, not available here).
-pub(crate) fn compute_mesh_health(
-    repo: &Repository,
-    base_ref: &str,
-) -> Result<MeshHealth, String> {
+pub(crate) fn compute_mesh_health(repo: &Repository, base_ref: &str) -> Result<MeshHealth, String> {
     let local_base_branch = parse_local_branch(base_ref);
 
     // Read HEAD state. `head()` errors on an unborn HEAD (no commits yet).
@@ -128,15 +125,20 @@ pub(crate) fn compute_mesh_health(
                     .and_then(|h| h.shorthand().map(|s| s.to_string()))
             };
             let oid = repo.head().ok().and_then(|h| h.target());
-            let short_sha = oid.map(|o| primitives::short_sha(repo, o)).unwrap_or_default();
+            let short_sha = oid
+                .map(|o| primitives::short_sha(repo, o))
+                .unwrap_or_default();
             (name, short_sha, detached)
         }
         Err(_) => (None, String::new(), false),
     };
 
     let is_dirty = primitives::is_dirty(repo).unwrap_or(false);
-    let (has_upstream, unpushed_ahead) =
-        compute_unpushed(repo, current_branch.as_deref(), local_base_branch.as_deref());
+    let (has_upstream, unpushed_ahead) = compute_unpushed(
+        repo,
+        current_branch.as_deref(),
+        local_base_branch.as_deref(),
+    );
     let is_drifted = compute_is_drifted(
         repo,
         current_branch.as_deref(),
@@ -189,10 +191,9 @@ fn compute_unpushed(
     if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
         if let Some(upstream_ref) = upstream_buf.as_str() {
             if let Ok(up_ref) = repo.find_reference(upstream_ref) {
-                if let (Some(head_oid), Some(up_oid)) = (
-                    repo.head().ok().and_then(|h| h.target()),
-                    up_ref.target(),
-                ) {
+                if let (Some(head_oid), Some(up_oid)) =
+                    (repo.head().ok().and_then(|h| h.target()), up_ref.target())
+                {
                     if let Ok((ahead, _)) = primitives::ahead_behind(repo, head_oid, up_oid) {
                         return (true, ahead);
                     }
@@ -314,7 +315,8 @@ pub(crate) fn find_base_branch_holder(
             if let Ok(wt) = repo.find_worktree(wt_name) {
                 let path = wt.path();
                 if let Ok(wt_repo) = Repository::open(path) {
-                    if primitives::head_branch_name(&wt_repo).as_deref() == Some(local_base_branch) {
+                    if primitives::head_branch_name(&wt_repo).as_deref() == Some(local_base_branch)
+                    {
                         return Some(make_holder(&path.to_string_lossy(), active_paths));
                     }
                 }
@@ -326,7 +328,9 @@ pub(crate) fn find_base_branch_holder(
 
 fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
     let norm = primitives::normalize_for_compare(path);
-    let is_active = active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm);
+    let is_active = active_paths
+        .iter()
+        .any(|p| primitives::normalize_for_compare(p) == norm);
     let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -364,10 +368,7 @@ fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
 /// guard above is the primary defence; we deliberately do NOT add a
 /// `--` here (it works for `git fetch`, which the issue's provision.rs
 /// reference touches, but not for `git checkout <branch>`).
-pub(crate) fn restore_to_base_impl(
-    repo: &Repository,
-    base_branch: &str,
-) -> Result<bool, String> {
+pub(crate) fn restore_to_base_impl(repo: &Repository, base_branch: &str) -> Result<bool, String> {
     // Guard 0: adversarial-ref check. The Tauri command path also runs
     // `parse_local_branch` up front (which now rejects `-`-prefixed
     // values via `finalize_branch`), but we re-check here so direct
@@ -392,7 +393,11 @@ pub(crate) fn restore_to_base_impl(
     }
     if health.unpushed_ahead > 0 {
         let branch = health.current_branch.as_deref().unwrap_or("HEAD");
-        let hint = if health.has_upstream { "push" } else { "push or branch" };
+        let hint = if health.has_upstream {
+            "push"
+        } else {
+            "push or branch"
+        };
         return Err(format!(
             "{} unpushed commit(s) on {} — {}, branch, or reset first",
             health.unpushed_ahead, branch, hint
@@ -478,7 +483,6 @@ pub(crate) fn free_base_branch_impl(
 
     Ok(primitives::short_sha(&repo, head_oid))
 }
-
 
 #[cfg(test)]
 #[path = "mesh_health_tests.rs"]

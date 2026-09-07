@@ -142,7 +142,10 @@ mod tests {
     fn terminal_spawn_recipe_powershell_direct_on_windows() {
         let recipe = terminal_recipe(Platform::Windows, EnvType::Windows, None);
         assert_eq!(recipe.binary, "powershell.exe");
-        assert!(recipe.base_args.is_empty(), "terminal must spawn PowerShell with no extra args");
+        assert!(
+            recipe.base_args.is_empty(),
+            "terminal must spawn PowerShell with no extra args"
+        );
         assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
     }
 
@@ -231,7 +234,10 @@ mod tests {
     fn terminal_recipe_wsl_zsh_login_shell_uses_zsh() {
         let recipe = terminal_recipe(Platform::Linux, EnvType::Wsl, Some("/usr/bin/zsh"));
         assert_eq!(recipe.binary, "/usr/bin/zsh");
-        assert!(recipe.base_args.is_empty(), "no -i/-l in v1 — see issue #548 for the follow-up");
+        assert!(
+            recipe.base_args.is_empty(),
+            "no -i/-l in v1 — see issue #548 for the follow-up"
+        );
         assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
     }
 

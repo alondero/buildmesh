@@ -8,8 +8,8 @@
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 
-use super::model::AppPreferences;
 use super::migrations::migrate_prefs_json;
+use super::model::AppPreferences;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -148,7 +148,9 @@ pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
 }
 
 pub(crate) fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
-    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _write_guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = preferences_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -255,7 +257,10 @@ pub fn default_provider() -> Option<String> {
     match load() {
         Ok(prefs) => prefs.default_provider.filter(|s| !s.is_empty()),
         Err(e) => {
-            tracing::warn!("preferences::default_provider load failed, falling back: {}", e);
+            tracing::warn!(
+                "preferences::default_provider load failed, falling back: {}",
+                e
+            );
             None
         }
     }

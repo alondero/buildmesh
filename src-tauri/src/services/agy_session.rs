@@ -131,7 +131,9 @@ fn read_conversation_meta(path: &Path) -> Option<(i64, Option<String>)> {
 fn extract_cwd_anchor(val: &serde_json::Value) -> Option<String> {
     let calls = val.get("tool_calls")?.as_array()?;
     for call in calls {
-        let Some(args) = call.get("args") else { continue; };
+        let Some(args) = call.get("args") else {
+            continue;
+        };
         for key in ["Cwd", "cwd"] {
             if let Some(raw) = args.get(key).and_then(|v| v.as_str()) {
                 // Some transcripts JSON-encode the entire argument, including
@@ -183,8 +185,7 @@ fn read_conversation_candidate(
     }
     // Shared with the transcript reader so the layout never drifts between
     // the two (`transcript.jsonl` first, `transcript_full.jsonl` fallback).
-    let transcript =
-        crate::services::transcript_reader::agy_locator_in(brain_dir, conv_id)?;
+    let transcript = crate::services::transcript_reader::agy_locator_in(brain_dir, conv_id)?;
     debug_assert!(
         transcript.starts_with(conv_dir),
         "locator resolved outside the scanned conversation dir"
@@ -284,12 +285,7 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let brain_dir = crate::env::agy_brain_dir_for_env(env_type, spawn_directory)?;
-    find_historic_id_for_directory_in(
-        &brain_dir,
-        spawn_directory,
-        anchor_ms,
-        recorded_start,
-    )
+    find_historic_id_for_directory_in(&brain_dir, spawn_directory, anchor_ms, recorded_start)
 }
 
 pub(crate) fn find_historic_id_for_directory_in(
@@ -349,8 +345,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
                 return;
             }
-            let Some(brain_dir) =
-                crate::env::agy_brain_dir_for_env(env_type, &spawn_directory)
+            let Some(brain_dir) = crate::env::agy_brain_dir_for_env(env_type, &spawn_directory)
             else {
                 tracing::warn!("agy session capture: no brain directory for env {env_type:?}");
                 return;
@@ -362,14 +357,10 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
             // retry needlessly thrashes the blocking pool and widens the race
             // window between finding a conversation and claiming the row.
             let captured = crate::blocking::run_blocking("agy_capture", move || {
-                if crate::db::cli_session_id_present(node_id)
-                    .map_err(|error| error.to_string())?
-                {
+                if crate::db::cli_session_id_present(node_id).map_err(|error| error.to_string())? {
                     return Ok(CaptureAttempt::AlreadyStored);
                 }
-                let Some(id) =
-                    find_fresh_id_for_directory_in(&path, &directory, not_before)
-                else {
+                let Some(id) = find_fresh_id_for_directory_in(&path, &directory, not_before) else {
                     return Ok(CaptureAttempt::NotFound);
                 };
                 match crate::db::set_cli_session_id_if_missing(node_id, &id) {
@@ -455,10 +446,7 @@ mod tests {
     }
 
     fn write_conv(brain: &Path, conv_id: &str, body: &str) -> std::path::PathBuf {
-        let logs = brain
-            .join(conv_id)
-            .join(".system_generated")
-            .join("logs");
+        let logs = brain.join(conv_id).join(".system_generated").join("logs");
         fs::create_dir_all(&logs).unwrap();
         let path = logs.join("transcript.jsonl");
         let mut file = fs::File::create(&path).unwrap();
@@ -481,16 +469,19 @@ mod tests {
         // Step 0 carries no tool_calls on a just-spawned session; timing
         // alone binds it when nothing else is fresh.
         let candidates = vec![cand(UUID_A, 200, None)];
-        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_A));
+        assert_eq!(
+            select_id_for_directory(&candidates, "/tmp/wt"),
+            Some(UUID_A)
+        );
     }
 
     #[test]
     fn anchored_match_wins_over_unknown_candidate() {
-        let candidates = vec![
-            cand(UUID_A, 300, None),
-            cand(UUID_B, 200, Some("/tmp/wt")),
-        ];
-        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_B));
+        let candidates = vec![cand(UUID_A, 300, None), cand(UUID_B, 200, Some("/tmp/wt"))];
+        assert_eq!(
+            select_id_for_directory(&candidates, "/tmp/wt"),
+            Some(UUID_B)
+        );
     }
 
     #[test]
@@ -500,16 +491,16 @@ mod tests {
             cand(UUID_A, 300, Some("/tmp/other")),
             cand(UUID_B, 200, None),
         ];
-        assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), Some(UUID_B));
+        assert_eq!(
+            select_id_for_directory(&candidates, "/tmp/wt"),
+            Some(UUID_B)
+        );
     }
 
     #[test]
     fn two_viable_fresh_candidates_bind_nothing() {
         // Sibling spawn or standalone `agy` run: never cross-wire.
-        let candidates = vec![
-            cand(UUID_A, 200, None),
-            cand(UUID_B, 250, None),
-        ];
+        let candidates = vec![cand(UUID_A, 200, None), cand(UUID_B, 250, None)];
         assert_eq!(select_id_for_directory(&candidates, "/tmp/wt"), None);
     }
 
@@ -536,10 +527,7 @@ mod tests {
             Some(r"F:\src\buildmesh\.claude\worktrees\agy-test"),
         )];
         assert_eq!(
-            select_id_for_directory(
-                &candidates,
-                "f:/src/buildmesh/.claude/worktrees/agy-test"
-            ),
+            select_id_for_directory(&candidates, "f:/src/buildmesh/.claude/worktrees/agy-test"),
             Some(UUID_A)
         );
     }
@@ -548,7 +536,8 @@ mod tests {
     fn finds_single_fresh_session_with_real_shape() {
         let temp = tempfile::TempDir::new().unwrap();
         let now = chrono::Utc::now();
-        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let fresh =
+            (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
         write_conv(
             temp.path(),
@@ -624,7 +613,8 @@ mod tests {
         // however fresh its content claims to be.
         let temp = tempfile::TempDir::new().unwrap();
         let now = chrono::Utc::now();
-        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let fresh =
+            (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         write_conv(temp.path(), UUID_A, &user_step(&fresh, "hi"));
         let future = (now + chrono::Duration::seconds(3600)).timestamp_millis();
         assert_eq!(
@@ -666,7 +656,8 @@ mod tests {
     fn transcript_full_fallback_resolves_when_short_missing() {
         let temp = tempfile::TempDir::new().unwrap();
         let now = chrono::Utc::now();
-        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let fresh =
+            (now - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
         let conv = temp.path().join(UUID_A);
         let logs = conv.join(".system_generated").join("logs");
@@ -684,19 +675,13 @@ mod tests {
         let val = serde_json::json!({
             "tool_calls": [{"name": "run_command", "args": {"Cwd": "\"F:/src/repo\""}}],
         });
-        assert_eq!(
-            extract_cwd_anchor(&val).as_deref(),
-            Some("F:/src/repo")
-        );
+        assert_eq!(extract_cwd_anchor(&val).as_deref(), Some("F:/src/repo"));
     }
 
     #[test]
     fn wsl_brain_dir_derives_from_spawn_path_user() {
-        let dir = crate::env::agy_dir_for_env(
-            crate::models::EnvType::Wsl,
-            "/home/alice/src/repo",
-        )
-        .expect("derivable from /home/ prefix");
+        let dir = crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/home/alice/src/repo")
+            .expect("derivable from /home/ prefix");
         assert_eq!(
             dir.join("brain"),
             std::path::PathBuf::from("/home/alice/.gemini/antigravity-cli/brain")
@@ -708,8 +693,7 @@ mod tests {
         // Never guess a username: an underivable home yields no directory
         // rather than a wrong user's brain.
         assert!(
-            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/mnt/c/src/repo")
-                .is_none()
+            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/mnt/c/src/repo").is_none()
         );
     }
 }

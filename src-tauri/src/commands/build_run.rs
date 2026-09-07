@@ -830,7 +830,10 @@ mod tests {
         let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let agent_node = std::fs::read_to_string(src_root.join("services").join("agent_node.rs"))
             .expect("agent_node.rs");
-        let agent_prod = agent_node.split("#[cfg(test)]").next().unwrap_or(&agent_node);
+        let agent_prod = agent_node
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(&agent_node);
         assert!(
             agent_prod.contains("pty::sink::unregister_node_sinks("),
             "Agent Node deletion must release the Build/Run output subscription via the unified sink helper"

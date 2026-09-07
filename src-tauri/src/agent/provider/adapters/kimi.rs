@@ -186,7 +186,10 @@ mod tests {
     #[test]
     fn session_assign_args_empty() {
         let args = KIMI.session_assign_args("any-id");
-        assert!(args.is_empty(), "Kimi self-assigns; session_assign_args must be empty");
+        assert!(
+            args.is_empty(),
+            "Kimi self-assigns; session_assign_args must be empty"
+        );
     }
 
     #[test]
@@ -222,7 +225,9 @@ mod tests {
     #[test]
     fn kimi_interactive_recipe_carries_short_m_model_arg() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
 
         let config = ResolvedAgentConfig {
             model: Some("kimi-k2".to_string()),
@@ -262,6 +267,9 @@ mod tests {
         assert!(!caps.requires_attention_hook);
         assert!(!caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
-        assert_eq!(caps.effort_control, crate::agent::capabilities::EffortControlKind::None);
+        assert_eq!(
+            caps.effort_control,
+            crate::agent::capabilities::EffortControlKind::None
+        );
     }
 }

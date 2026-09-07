@@ -49,6 +49,32 @@ the debug log.
 > first). Prefer it over running the raw commands — the raw forms false-green
 > in a worktree.
 
+## Rust formatting (issue #1543)
+
+The Rust workspace is formatter-gated. The toolchain version is pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml); the formatting rules live in
+[`rustfmt.toml`](rustfmt.toml); both `scripts\check.ps1` (the `rust` and
+`all` targets) and the GitHub Actions `quality` job run `cargo fmt --all
+--manifest-path src-tauri/Cargo.toml -- --check` before any `cargo test`
+work. A mis-formatted PR is a red build.
+
+Run the formatter before pushing:
+
+```bash
+cargo fmt --all --manifest-path src-tauri/Cargo.toml
+```
+
+The rustfmt config intentionally lists only **stable** knobs (most of which
+match rustfmt defaults). If a default needs to change, flip to a nightly
+toolchain first, then add the option to `rustfmt.toml` — listing nightly-only
+options on stable produces a `can't set, unstable` warning that is silently
+ignored, which would mask the divergence.
+
+A bumplift of the pinned rustfmt version (e.g. 1.95.0 → 1.96.0) is a
+two-step PR: change `rust-toolchain.toml`, then run `cargo fmt --all`
+against the new rustfmt and commit the resulting diff in its own
+formatting-only commit. Do not bundle the version bump with feature work.
+
 ## Commit & PR conventions
 
 - Commit messages use **Conventional Commits** (`feat(scope): …`,

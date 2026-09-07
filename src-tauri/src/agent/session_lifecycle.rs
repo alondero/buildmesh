@@ -221,7 +221,7 @@ pub enum LifecycleKind {
 
 /// Hook delivery health for a node (issue #1364 §3). A layered field on the
 /// node, not a status: `Ok` once provisioning succeeded or the first hook
-/// callback arrived; `Degraded` for an unparseable/unknown payload; 
+/// callback arrived; `Degraded` for an unparseable/unknown payload;
 /// `Unavailable` when provisioning or delivery failed.
 ///
 /// Generated to `src/types/generated/SignalHealth.ts`.
@@ -350,7 +350,10 @@ impl LifecycleChangedPayload {
             provider: detail.provider.clone(),
             kind,
             status,
-            message: detail.message.clone().or_else(|| Some(fallback_message.to_string())),
+            message: detail
+                .message
+                .clone()
+                .or_else(|| Some(fallback_message.to_string())),
             provider_event: detail.provider_event.clone(),
             provider_session_id: detail.provider_session_id.clone(),
             completion_reason: detail.completion_reason.clone(),
@@ -409,7 +412,11 @@ pub trait SessionLifecycleSink {
     ) -> Result<bool, String>;
 
     fn emit_attention_needed(&self, node_id: i64);
-    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
+    fn emit_attention_needed_with_payload(
+        &self,
+        node_id: i64,
+        semantic_turn: Option<SemanticTurnPayload>,
+    ) {
         let _ = semantic_turn;
         self.emit_attention_needed(node_id);
     }
@@ -461,17 +468,28 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
         self.emit_attention_needed_with_payload(node_id, None);
     }
 
-    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
-        let _ = self
-            .app
-            .emit("attention-needed", AttentionNeededPayload { session_id: node_id, semantic_turn });
+    fn emit_attention_needed_with_payload(
+        &self,
+        node_id: i64,
+        semantic_turn: Option<SemanticTurnPayload>,
+    ) {
+        let _ = self.app.emit(
+            "attention-needed",
+            AttentionNeededPayload {
+                session_id: node_id,
+                semantic_turn,
+            },
+        );
     }
 
     fn emit_attention_cleared(&self, node_id: i64) {
         let _ = db::persist_semantic_turn(node_id, None);
-        let _ = self
-            .app
-            .emit("attention-cleared", AttentionClearedPayload { session_id: node_id });
+        let _ = self.app.emit(
+            "attention-cleared",
+            AttentionClearedPayload {
+                session_id: node_id,
+            },
+        );
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {
@@ -532,7 +550,9 @@ impl SessionLifecycleSink for DbOnlySink {
     }
 
     fn emit_attention_needed(&self, _node_id: i64) {}
-    fn emit_attention_cleared(&self, node_id: i64) { let _ = db::persist_semantic_turn(node_id, None); }
+    fn emit_attention_cleared(&self, node_id: i64) {
+        let _ = db::persist_semantic_turn(node_id, None);
+    }
     fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
     fn emit_lifecycle_changed(&self, _payload: LifecycleChangedPayload) {}
 }
@@ -546,10 +566,7 @@ impl SessionLifecycleSink for DbOnlySink {
 /// for its competing `Error` write (issue #654) — both writers share
 /// [`FORBIDDEN_TERMINAL`] so whichever fires first sticks and the other
 /// becomes a no-op.
-pub fn on_spawn_started(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_spawn_started(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     sink.write_status_unless_in(node_id, SessionStatus::Spawning, FORBIDDEN_TERMINAL)
 }
 
@@ -557,11 +574,9 @@ pub fn on_spawn_started(
 /// early-exit `Error` — promote `Spawning → Running`. Conditional so the
 /// reader's `Error` write wins if it already fired (issue #654).
 /// Returns `true` iff the promotion fired (false = reader won the race).
-pub fn on_spawn_complete(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
-    let promoted = sink.write_status_if(node_id, SessionStatus::Running, SessionStatus::Spawning)?;
+pub fn on_spawn_complete(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
+    let promoted =
+        sink.write_status_if(node_id, SessionStatus::Running, SessionStatus::Spawning)?;
     if !promoted {
         tracing::warn!(
             "SessionLifecycle::on_spawn_complete: session {node_id} was no longer Spawning \
@@ -678,10 +693,7 @@ pub fn on_attention_with_signal(
 /// `commands/attention.rs:63-74` plus the matching emits in
 /// `http/ws.rs:215-218`, `coordinator/drive.rs:197-201`,
 /// `autopilot/pipeline.rs:355-357`, `attention_autoclear.rs:104-119`.
-pub fn on_attention_cleared(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<(), String> {
+pub fn on_attention_cleared(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
     sink.write_status(node_id, SessionStatus::Running)?;
     sink.emit_attention_cleared(node_id);
     tracing::info!("Node {node_id} attention cleared");
@@ -882,9 +894,7 @@ mod tests {
             new: SessionStatus,
             expected: SessionStatus,
         ) -> Result<bool, String> {
-            self.writes_if
-                .borrow_mut()
-                .push((node_id, new, expected));
+            self.writes_if.borrow_mut().push((node_id, new, expected));
             Ok(true)
         }
         fn write_status_unless_in(
@@ -893,11 +903,9 @@ mod tests {
             new: SessionStatus,
             forbidden: &[SessionStatus],
         ) -> Result<bool, String> {
-            self.writes_unless.borrow_mut().push((
-                node_id,
-                new,
-                forbidden.to_vec(),
-            ));
+            self.writes_unless
+                .borrow_mut()
+                .push((node_id, new, forbidden.to_vec()));
             Ok(true)
         }
         fn emit_attention_needed(&self, node_id: i64) {
@@ -941,7 +949,10 @@ mod tests {
     fn on_spawn_complete_writes_running_only_if_currently_spawning() {
         let sink = FakeSink::default();
         let promoted = on_spawn_complete(&sink, 7).unwrap();
-        assert!(promoted, "on_spawn_complete must report success on a happy path");
+        assert!(
+            promoted,
+            "on_spawn_complete must report success on a happy path"
+        );
         let w = sink.writes_if.borrow();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0], (7, SessionStatus::Running, SessionStatus::Spawning));
@@ -959,7 +970,11 @@ mod tests {
         assert!(sink.attention_needed.borrow().is_empty());
         assert!(sink.attention_cleared.borrow().is_empty());
         let events = sink.lifecycle_changed.borrow();
-        assert_eq!(events.len(), 1, "clean EOF must emit agent-lifecycle (issue #1364)");
+        assert_eq!(
+            events.len(),
+            1,
+            "clean EOF must emit agent-lifecycle (issue #1364)"
+        );
         assert_eq!(events[0].session_id, 7);
         assert_eq!(events[0].kind, LifecycleKind::SessionExited);
         assert_eq!(events[0].status, SessionStatus::Idle);
@@ -978,14 +993,20 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::TurnCompleted);
         assert_eq!(events[0].status, SessionStatus::Ready);
-        assert!(sink.attention_needed.borrow().is_empty(), "Ready must not emit attention-needed");
+        assert!(
+            sink.attention_needed.borrow().is_empty(),
+            "Ready must not emit attention-needed"
+        );
     }
 
     #[test]
     fn on_background_running_emits_without_writing_status() {
         let sink = FakeSink::default();
         on_background_running(&sink, 7, &HookSignalDetail::default()).unwrap();
-        assert!(sink.writes.borrow().is_empty(), "background yield must not change status");
+        assert!(
+            sink.writes.borrow().is_empty(),
+            "background yield must not change status"
+        );
         let events = sink.lifecycle_changed.borrow();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::BackgroundRunning);
@@ -1087,10 +1108,7 @@ mod tests {
     fn on_attention_cleared_writes_running_and_emits_attention_cleared() {
         let sink = FakeSink::default();
         on_attention_cleared(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes.borrow(),
-            vec![(7, SessionStatus::Running)]
-        );
+        assert_eq!(*sink.writes.borrow(), vec![(7, SessionStatus::Running)]);
         assert_eq!(*sink.attention_cleared.borrow(), vec![7]);
         assert!(
             sink.attention_needed.borrow().is_empty(),
@@ -1115,10 +1133,7 @@ mod tests {
     fn on_completed_writes_completed_unconditionally() {
         let sink = FakeSink::default();
         on_completed(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes.borrow(),
-            vec![(7, SessionStatus::Completed)]
-        );
+        assert_eq!(*sink.writes.borrow(), vec![(7, SessionStatus::Completed)]);
         assert!(sink.attention_needed.borrow().is_empty());
         assert!(sink.attention_cleared.borrow().is_empty());
     }
@@ -1127,10 +1142,7 @@ mod tests {
     fn on_created_writes_pending() {
         let sink = FakeSink::default();
         on_created(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes.borrow(),
-            vec![(7, SessionStatus::Pending)]
-        );
+        assert_eq!(*sink.writes.borrow(), vec![(7, SessionStatus::Pending)]);
     }
 
     // -----------------------------------------------------------------------

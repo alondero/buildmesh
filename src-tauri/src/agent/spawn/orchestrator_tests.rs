@@ -3,8 +3,8 @@ use super::orchestrator::{
     decide_startup_resume, intent_replaces_conversation, ResumeSkipDecision,
 };
 use super::{
-    ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest,
-    TerminalSize, WorktreePolicy,
+    ExplicitSpawnOverrides, IssueContext, ResumeCause, SpawnIntent, SpawnRequest, TerminalSize,
+    WorktreePolicy,
 };
 
 /// `SpawnRequest` must carry an `explicit` field (issue #1155 AC #1).
@@ -178,8 +178,10 @@ fn spawn_intent_holds_named_claim_before_identity_mutation_and_across_phases() {
         src.contains("drop(claim)"),
         "claim must stay live until after the last phase (explicit drop is the use)"
     );
-    assert!(src.find("SpawnInFlightClaim::try_claim(node_id)").unwrap()
-        < src.find("db::clear_cli_session_id(node_id)").unwrap());
+    assert!(
+        src.find("SpawnInFlightClaim::try_claim(node_id)").unwrap()
+            < src.find("db::clear_cli_session_id(node_id)").unwrap()
+    );
 }
 
 /// spawn_with_intent is the sole owner of terminal spawn-failure reporting.

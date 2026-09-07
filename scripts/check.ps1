@@ -169,6 +169,26 @@ function Invoke-BundleBudget {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'bundle-budget' }
 }
 
+function Invoke-RustFmt {
+  # Issue #1543 — `cargo fmt --all -- --check` is the first thing the rust
+  # target runs. A drift here means a PR landed that didn't run `cargo fmt`;
+  # we want that to be a red bar before we spend ~2 minutes compiling the
+  # workspace only to discover the same thing in CI. The pin lives in
+  # `rust-toolchain.toml` so this command uses the same rustfmt as CI.
+  Write-Host '== rust fmt --check (issue #1543) ==' -ForegroundColor Cyan
+  $manifest = Join-Path $repo 'src-tauri\Cargo.toml'
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & cargo fmt --all --manifest-path $manifest -- --check
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'rust-fmt' }
+}
+
 function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
   # Clear the leaked env var for this process only.
@@ -213,6 +233,9 @@ if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
 # as well as `integration` and `all-ts`, otherwise a developer who only
 # runs `scripts\check.ps1` locally gets a green bar that CI will reject.
 if ($Target -in @('integration', 'all', 'all-ts')) { Invoke-Integration }
+# Issue #1543 — rustfmt check runs before `cargo test` so a drift fails fast
+# (sub-second) instead of after a 2-minute compile.
+if ($Target -in @('rust', 'all')) { Invoke-RustFmt }
 if ($Target -in @('rust', 'all')) { Invoke-Rust }
 # Issue #1568 — bundle size budget runs after the build. `all-ts` includes
 # the budget check because the TS green bar is what we run on every PR;

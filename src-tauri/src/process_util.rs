@@ -135,10 +135,7 @@ pub fn run_command_with_timeout(
                     // count is the signature of a stalling network path leaking
                     // (then killing) subprocesses.
                     crate::diagnostics::record_git_subprocess_timeout();
-                    return Err(format!(
-                        "{op_name} timed out after {}s",
-                        timeout.as_secs()
-                    ));
+                    return Err(format!("{op_name} timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -306,7 +303,9 @@ impl JobHandle {
                 return None;
             }
 
-            Some(JobHandle { handle: job as isize })
+            Some(JobHandle {
+                handle: job as isize,
+            })
         }
     }
 
@@ -545,7 +544,10 @@ mod tests {
         let result = run_command_with_timeout(cmd, "spawn-fail test", Duration::from_secs(5));
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "missing binary should be Err, got {result:?}");
+        assert!(
+            result.is_err(),
+            "missing binary should be Err, got {result:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(1),
             "spawn failure must short-circuit, took {elapsed:?}"

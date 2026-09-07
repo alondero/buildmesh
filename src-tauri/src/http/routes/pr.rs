@@ -16,11 +16,7 @@ use crate::http::request;
 /// `commands::pr::get_repo_pulls`, which normalises any non-`"closed"`
 /// value (including empty/absent) to `"open"` — so this handler does
 /// no pre-processing of its own.
-pub async fn list_pulls(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-    state: &str,
-) {
+pub async fn list_pulls(lines: &mut tokio::io::BufStream<MaybeTls>, mesh_id: i64, state: &str) {
     // Await the async wrapper so the blocking GitHub call runs on the blocking
     // pool, not this route's Tauri async-runtime worker (http/mod.rs spawns
     // each connection on the runtime).
@@ -78,8 +74,7 @@ pub async fn merge(
     pr_number: i64,
     content_length: usize,
 ) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 8 * 1024).await
+    let Some(body_bytes) = request::read_body_or_send_error(lines, content_length, 8 * 1024).await
     else {
         return;
     };
@@ -87,12 +82,8 @@ pub async fn merge(
     let req: MergeRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => {
-            request::send_json_error(
-                lines,
-                "400 Bad Request",
-                &format!("Invalid JSON: {}", e),
-            )
-            .await;
+            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
+                .await;
             return;
         }
     };
@@ -126,8 +117,7 @@ pub async fn create(
     mesh_id: i64,
     content_length: usize,
 ) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
+    let Some(body_bytes) = request::read_body_or_send_error(lines, content_length, 64 * 1024).await
     else {
         return;
     };
@@ -149,13 +139,8 @@ pub async fn create(
         }
     };
 
-    match crate::commands::pr::create_pr_for_mesh(
-        mesh.path,
-        req.title,
-        req.body,
-        req.base_branch,
-    )
-    .await
+    match crate::commands::pr::create_pr_for_mesh(mesh.path, req.title, req.body, req.base_branch)
+        .await
     {
         Ok(url) => {
             let body = serde_json::to_string(&serde_json::json!({ "url": url }))

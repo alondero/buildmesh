@@ -8,16 +8,19 @@
 //! `crate::commands::run_blocking` so we don't hand-write the
 //! offload boilerplate.
 
-use buildmesh_macros::blocking_command;
 use crate::db;
 use crate::env;
 use crate::models::AgentNode;
 use crate::services::agent_node_discovery::{self, ArchivedAgentNode};
+use buildmesh_macros::blocking_command;
 use tauri::command;
 
 #[command]
 #[blocking_command]
-pub async fn discover_agent_nodes(mesh_id: i64, mesh_path: String) -> Result<Vec<ArchivedAgentNode>, String> {
+pub async fn discover_agent_nodes(
+    mesh_id: i64,
+    mesh_path: String,
+) -> Result<Vec<ArchivedAgentNode>, String> {
     // Offload: discovery walks every `~/.claude/projects/<mesh>*` directory
     // and opens each session's JSONL transcript looking for the first real
     // user message — unbounded filesystem I/O (slow on WSL UNC paths) that
@@ -42,8 +45,11 @@ pub async fn import_discovered_agent_node(
         // persists the same `worktree_path` a fresh spawn would.
         let mesh_row = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
         let app_dir = crate::preferences::worktree_directory();
-        let effective_dir =
-            env::effective_worktree_dir_raw(&mesh_path, mesh_row.worktree_directory.as_deref(), app_dir.as_deref());
+        let effective_dir = env::effective_worktree_dir_raw(
+            &mesh_path,
+            mesh_row.worktree_directory.as_deref(),
+            app_dir.as_deref(),
+        );
         let use_worktree = worktree_name.is_some();
         // Imported nodes keep the discovered `worktree_name` when set;
         // otherwise they are Root Nodes. Persist the effective path for
@@ -53,11 +59,8 @@ pub async fn import_discovered_agent_node(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
-        let resolved = env::resolve_agent_path_in_dir(
-            &mesh_path,
-            &effective_dir,
-            worktree_name.as_deref(),
-        );
+        let resolved =
+            env::resolve_agent_path_in_dir(&mesh_path, &effective_dir, worktree_name.as_deref());
         let env_type = resolved.env_type;
         // Store the harness/profile id verbatim (issue #535); resolution to a
         // concrete executor happens at the spawn seam. Absent → "anthropic".
@@ -81,8 +84,7 @@ pub async fn import_discovered_agent_node(
         )
         .map_err(|e| e.to_string())?;
 
-        db::update_cli_session_id(node.id, &cli_session_id)
-            .map_err(|e| e.to_string())?;
+        db::update_cli_session_id(node.id, &cli_session_id).map_err(|e| e.to_string())?;
 
         db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())
     })

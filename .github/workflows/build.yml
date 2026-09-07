@@ -103,6 +103,17 @@ jobs:
       - name: Run vitest test suite (unit + integration)
         run: npx vitest run --pool=threads tests/unit tests/integration
 
+      # Issue #1543 — formatting gate runs BEFORE the ~2-minute Rust
+      # compile so a drift fails in <5s with a precise file:line
+      # instead of hiding until after cargo test (and burning ~30s of
+      # test time). `--manifest-path` is required because `cargo fmt`
+      # walks up from CWD and the Rust crate lives in src-tauri/. The
+      # toolchain version is pinned by `rust-toolchain.toml` at the
+      # repo root — the dtolnay/rust-toolchain@stable step above
+      # honours that file.
+      - name: Check Rust formatting (issue #1543)
+        run: cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
+
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
       - name: Rust tests + regenerate TS bindings

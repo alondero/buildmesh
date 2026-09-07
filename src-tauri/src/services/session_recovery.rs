@@ -36,8 +36,7 @@ pub(crate) fn select_recovery_identity(
     let mut ids = candidates
         .into_iter()
         .filter(|(_, time)| {
-            *time >= cutoff
-                && *time <= anchor_ms.saturating_add(INITIAL_SPAWN_WINDOW_MS)
+            *time >= cutoff && *time <= anchor_ms.saturating_add(INITIAL_SPAWN_WINDOW_MS)
         })
         .map(|(id, _)| id)
         .collect::<Vec<_>>();
@@ -61,8 +60,12 @@ pub(crate) fn recover_live_node(node_id: i64) -> Result<Option<String>, String> 
         return Ok(Some(id.clone()));
     }
     // Old rows without a launch generation cannot safely bind a live process.
-    let Some(generation) = generation else { return Ok(None); };
-    let Some(id) = find_identity(&node, generation, true) else { return Ok(None); };
+    let Some(generation) = generation else {
+        return Ok(None);
+    };
+    let Some(id) = find_identity(&node, generation, true) else {
+        return Ok(None);
+    };
     if crate::db::recover_live_cli_session_id(&node, &id, generation).map_err(|e| e.to_string())? {
         tracing::info!("session recovery: captured delayed identity for node {node_id}");
         Ok(Some(id))

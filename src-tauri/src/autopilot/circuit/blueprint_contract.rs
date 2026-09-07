@@ -127,7 +127,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
         required_edges: &[
             ("trigger", "collaborator_gate", EdgeCondition::Always),
             ("collaborator_gate", "implementer", EdgeCondition::Always),
-            ("implementer", "implementation_classifier", EdgeCondition::Always),
+            (
+                "implementer",
+                "implementation_classifier",
+                EdgeCondition::Always,
+            ),
             // LLM classifier routes Completed → finish prompt.
             (
                 "implementation_classifier",
@@ -163,7 +167,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             ("follow_feedback", "close_reviewer", EdgeCondition::Always),
-            ("close_reviewer", "feedback_classifier", EdgeCondition::Always),
+            (
+                "close_reviewer",
+                "feedback_classifier",
+                EdgeCondition::Always,
+            ),
             (
                 "feedback_classifier",
                 "review_retry",
@@ -219,7 +227,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
 /// `prompt` argument as the inject target; the review blueprint pins
 /// the trigger label that the implementation agent will read from
 /// `{{issue.*}}`.
-pub fn build_graph(blueprint: CircuitBlueprintKind, prompt: &str, trigger_label: &str) -> CircuitGraph {
+pub fn build_graph(
+    blueprint: CircuitBlueprintKind,
+    prompt: &str,
+    trigger_label: &str,
+) -> CircuitGraph {
     match blueprint {
         CircuitBlueprintKind::WalkingSkeleton => CircuitGraph::walking_skeleton(prompt),
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
@@ -378,15 +390,21 @@ mod tests {
         // GitHub-issue-label, and GitHub-PR-label without re-validation.
         let triggers = [
             CircuitNodeKind::Manual,
-            CircuitNodeKind::Interval { interval_seconds: 60 },
-            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
-            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
+            CircuitNodeKind::Interval {
+                interval_seconds: 60,
+            },
+            CircuitNodeKind::GithubIssueLabel {
+                label: "buildmesh:run".into(),
+            },
+            CircuitNodeKind::GithubPullRequestLabel {
+                label: "review-me".into(),
+            },
         ];
         for trigger in triggers {
             let graph = CircuitGraph::triggered_skeleton("p", trigger.clone());
-            graph
-                .validate()
-                .unwrap_or_else(|err| panic!("walking_skeleton rejected trigger {trigger:?}: {err}"));
+            graph.validate().unwrap_or_else(|err| {
+                panic!("walking_skeleton rejected trigger {trigger:?}: {err}")
+            });
         }
     }
 
@@ -453,7 +471,9 @@ mod tests {
     #[test]
     fn review_blueprint_implementation_agent_receives_issue_body_as_first_turn() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let implementer = graph.node("implementer").expect("implementer node required");
+        let implementer = graph
+            .node("implementer")
+            .expect("implementer node required");
         match &implementer.kind {
             CircuitNodeKind::SpawnAgentNode { prompt, .. } => {
                 assert!(
@@ -481,8 +501,10 @@ mod tests {
         let open_pr_failed: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
-            .filter(|e| e.from == "open_pr"
-                && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed)))
+            .filter(|e| {
+                e.from == "open_pr"
+                    && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed))
+            })
             .collect();
         assert_eq!(open_pr_failed.len(), 1);
         assert_eq!(open_pr_failed[0].to, "wrapup_retry");
@@ -538,7 +560,10 @@ mod tests {
             .expect("collaborator_gate required by contract");
         match &gate.kind {
             CircuitNodeKind::CollaboratorCheck { require_approval } => {
-                assert!(*require_approval, "collaborator_gate must require human approval");
+                assert!(
+                    *require_approval,
+                    "collaborator_gate must require human approval"
+                );
             }
             other => panic!("collaborator_gate must be CollaboratorCheck, got {other:?}"),
         }
@@ -558,16 +583,30 @@ mod tests {
         for node in &graph.nodes {
             match node.kind {
                 CircuitNodeKind::RetryLimit { .. } => saw_retry = true,
-                CircuitNodeKind::CollaboratorCheck { require_approval: true } => saw_collab = true,
+                CircuitNodeKind::CollaboratorCheck {
+                    require_approval: true,
+                } => saw_collab = true,
                 CircuitNodeKind::LlmTurnClassifier { .. } => saw_classifier += 1,
                 CircuitNodeKind::AnyCompleted | CircuitNodeKind::AllCompleted => saw_join += 1,
                 _ => {}
             }
         }
-        assert!(saw_retry, "review blueprint must bound its loops with a RetryLimit");
-        assert!(saw_collab, "review blueprint must gate the implementation on human approval");
-        assert!(saw_classifier >= 2, "review blueprint needs at least 2 LLM classifiers");
-        assert!(saw_join >= 1, "review blueprint needs at least one join (finish_round)");
+        assert!(
+            saw_retry,
+            "review blueprint must bound its loops with a RetryLimit"
+        );
+        assert!(
+            saw_collab,
+            "review blueprint must gate the implementation on human approval"
+        );
+        assert!(
+            saw_classifier >= 2,
+            "review blueprint needs at least 2 LLM classifiers"
+        );
+        assert!(
+            saw_join >= 1,
+            "review blueprint needs at least one join (finish_round)"
+        );
     }
 
     #[test]
@@ -615,14 +654,22 @@ mod tests {
         for contract in BUILT_IN_CATALOG {
             for assertion in contract.prompt_assertions {
                 let graph = build_graph(contract.marker, "p", "buildmesh:run");
-                let node = graph
-                    .node(assertion.node_id)
-                    .unwrap_or_else(|| panic!("{:?}: prompt assertion targets missing node '{}'", contract.marker, assertion.node_id));
+                let node = graph.node(assertion.node_id).unwrap_or_else(|| {
+                    panic!(
+                        "{:?}: prompt assertion targets missing node '{}'",
+                        contract.marker, assertion.node_id
+                    )
+                });
                 let prompt = match &node.kind {
                     CircuitNodeKind::SpawnAgentNode { prompt, .. }
                     | CircuitNodeKind::InjectPty { prompt, .. }
-                    | CircuitNodeKind::Notify { message: prompt, .. } => prompt.as_str(),
-                    CircuitNodeKind::GithubAction { comment: Some(comment), .. } => comment.as_str(),
+                    | CircuitNodeKind::Notify {
+                        message: prompt, ..
+                    } => prompt.as_str(),
+                    CircuitNodeKind::GithubAction {
+                        comment: Some(comment),
+                        ..
+                    } => comment.as_str(),
                     other => panic!(
                         "{:?}: prompt assertion on '{}' targets a non-prompt node kind: {other:?}",
                         contract.marker, assertion.node_id

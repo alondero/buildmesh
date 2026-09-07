@@ -9,10 +9,10 @@
 
 use tauri::{command, AppHandle, Emitter};
 
+pub use crate::autopilot::circuit::model::CircuitBlueprintKind;
 use crate::autopilot::circuit::model::{
     trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
 };
-pub use crate::autopilot::circuit::model::CircuitBlueprintKind;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 /// The trigger vocabulary of [`create_circuit`] (issue #1208). Generated
@@ -85,14 +85,18 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
-                .map(|(node_id, run_id, circuit_id, circuit_name, state, parent_node_id)| CircuitAgentOwnership {
-                    node_id,
-                    run_id,
-                    circuit_id,
-                    circuit_name,
-                    state,
-                    parent_node_id,
-                })
+                .map(
+                    |(node_id, run_id, circuit_id, circuit_name, state, parent_node_id)| {
+                        CircuitAgentOwnership {
+                            node_id,
+                            run_id,
+                            circuit_id,
+                            circuit_name,
+                            state,
+                            parent_node_id,
+                        }
+                    },
+                )
                 .collect()
         })
         .map_err(|error| error.to_string())
@@ -130,14 +134,20 @@ pub struct CircuitProbeSnapshot {
 }
 
 fn map_circuit_rows(
-    rows: Vec<(crate::models::AutopilotCircuit, Vec<crate::db::CircuitRunLedger>)>,
+    rows: Vec<(
+        crate::models::AutopilotCircuit,
+        Vec<crate::db::CircuitRunLedger>,
+    )>,
 ) -> Vec<CircuitWithRuns> {
     rows.into_iter()
         .map(|(circuit, ledgers)| CircuitWithRuns {
             circuit,
             runs: ledgers
                 .into_iter()
-                .map(|ledger| CircuitRunDetail { run: ledger.run, steps: ledger.steps })
+                .map(|ledger| CircuitRunDetail {
+                    run: ledger.run,
+                    steps: ledger.steps,
+                })
                 .collect(),
         })
         .collect()
@@ -185,8 +195,8 @@ pub fn list_circuit_probe(
     limit: Option<i64>,
 ) -> Result<CircuitProbeSnapshot, String> {
     let limit = limit.unwrap_or(10).clamp(1, 100);
-    let (circuits, queue) = crate::db::list_circuit_probe(mesh_id, limit)
-        .map_err(|e| e.to_string())?;
+    let (circuits, queue) =
+        crate::db::list_circuit_probe(mesh_id, limit).map_err(|e| e.to_string())?;
     let circuits = map_circuit_rows(circuits);
     let queue = map_queue_rows(queue);
     Ok(CircuitProbeSnapshot { circuits, queue })
@@ -251,9 +261,8 @@ pub fn create_circuit(
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
             // Guarded above: the model rejected every other trigger;
             // we still defensively unwrap the label here.
-            let crate::autopilot::circuit::model::CircuitNodeKind::GithubIssueLabel {
-                label,
-            } = &kind
+            let crate::autopilot::circuit::model::CircuitNodeKind::GithubIssueLabel { label } =
+                &kind
             else {
                 return Err(
                     "the issue-driven Autopilot review blueprint requires an issue-label trigger"
@@ -329,24 +338,31 @@ fn retire_cancelled_agents_with(
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!("run was cancelled, but cleanup failed for {}", failures.join("; ")))
+        Err(format!(
+            "run was cancelled, but cleanup failed for {}",
+            failures.join("; ")
+        ))
     }
 }
 
 fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
-    retire_cancelled_agents_with(agent_ids, |agent_id| {
-        match crate::db::get_agent_node_by_id(agent_id) {
-            Ok(_) => crate::services::agent_node::delete(agent_id, true)
-                .map_err(|error| error.to_string()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
-            Err(error) => Err(format!("lookup failed: {}", error)),
+    retire_cancelled_agents_with(agent_ids, |agent_id| match crate::db::get_agent_node_by_id(
+        agent_id,
+    ) {
+        Ok(_) => {
+            crate::services::agent_node::delete(agent_id, true).map_err(|error| error.to_string())
         }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(error) => Err(format!("lookup failed: {}", error)),
     })
 }
 
 fn release_circuit_source(run_id: i64) {
-    if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
-        .and_then(|run| run.source_agent_node_id) {
+    if let Some(source) = crate::db::get_circuit_run(run_id)
+        .ok()
+        .flatten()
+        .and_then(|run| run.source_agent_node_id)
+    {
         crate::autopilot::evaluator::unregister(source);
     }
 }
@@ -404,8 +420,7 @@ pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result
         CircuitQueueDirection::Up => true,
         CircuitQueueDirection::Down => false,
     };
-    crate::db::move_queued_circuit_run(run_id, toward_front)
-        .map_err(|error| error.to_string())?;
+    crate::db::move_queued_circuit_run(run_id, toward_front).map_err(|error| error.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
 }
@@ -517,20 +532,25 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
     context.with_autopilot_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::create_circuit_run(
-        circuit.id,
-        circuit.mesh_id,
-        &identity,
-        &context.to_json()?,
-    )
-    .map_err(|e| e.to_string())?;
+    let run_id =
+        crate::db::create_circuit_run(circuit.id, circuit.mesh_id, &identity, &context.to_json()?)
+            .map_err(|e| e.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
-    tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
+    tracing::info!(
+        "circuits: manual trigger for circuit {} → run {}",
+        circuit_id,
+        run_id
+    );
     Ok(run_id)
 }
 
 #[command]
-pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+pub fn trigger_circuit_from_node(
+    app: AppHandle,
+    node_id: i64,
+    circuit_id: Option<i64>,
+    max_rounds: i32,
+) -> Result<i64, String> {
     if !(1..=10).contains(&max_rounds) {
         return Err("Review rounds must be between 1 and 10.".into());
     }
@@ -547,9 +567,10 @@ pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Optio
         .map_err(|e| e.to_string())?
         .map(|run| run.state)
         .unwrap_or_else(|| "pending".into());
-    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
-        run_id, state,
-    });
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
+    );
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)
 }
@@ -583,12 +604,18 @@ pub fn pause_circuit_run(run_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("run {} does not exist", run_id))?;
     if run.state != "running" {
-        return Err(format!("only running runs can be paused (run {} is {})", run_id, run.state));
+        return Err(format!(
+            "only running runs can be paused (run {} is {})",
+            run_id, run.state
+        ));
     }
     if !crate::db::transition_circuit_run_state(run_id, "running", "paused")
         .map_err(|e| e.to_string())?
     {
-        return Err(format!("run {} changed state before it could be paused", run_id));
+        return Err(format!(
+            "run {} changed state before it could be paused",
+            run_id
+        ));
     }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} paused", run_id);
@@ -602,12 +629,18 @@ pub fn resume_circuit_run(run_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("run {} does not exist", run_id))?;
     if run.state != "paused" {
-        return Err(format!("only paused runs can be resumed (run {} is {})", run_id, run.state));
+        return Err(format!(
+            "only paused runs can be resumed (run {} is {})",
+            run_id, run.state
+        ));
     }
     if !crate::db::transition_circuit_run_state(run_id, "paused", "running")
         .map_err(|e| e.to_string())?
     {
-        return Err(format!("run {} changed state before it could be resumed", run_id));
+        return Err(format!(
+            "run {} changed state before it could be resumed",
+            run_id
+        ));
     }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} resumed", run_id);

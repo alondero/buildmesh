@@ -38,8 +38,8 @@
 mod engine;
 mod repository;
 mod slug;
-mod words;
 mod wire;
+mod words;
 
 pub use engine::{buffers_size_bytes, cleanup, on_output, on_turn, reset_buffers};
 pub(crate) use engine::{naming_backend_env, ANSI_ESCAPE};

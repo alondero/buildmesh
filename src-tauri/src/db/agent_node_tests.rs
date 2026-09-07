@@ -84,10 +84,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_id, None);
-        let started: i64 = conn.query_row(
-            "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
-            params![id], |row| row.get(0),
-        ).unwrap();
+        let started: i64 = conn
+            .query_row(
+                "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(started > 0);
     }
 
@@ -95,11 +98,19 @@ mod tests {
     fn fresh_identity_and_recovery_timestamp_are_written_together() {
         let conn = conn_with_agent_nodes();
         let id = insert_node(&conn, "suspended");
-        conn.execute("UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1", [id]).unwrap();
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
         clear_cli_session_id_inner(&conn, id).unwrap();
-        let (identity, started): (Option<String>, Option<i64>) = conn.query_row(
-            "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
-            [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (identity, started): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(identity, None);
         assert!(started.is_some());
     }
@@ -175,7 +186,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!applied, "the update must be a no-op when expected mismatches");
+        assert!(
+            !applied,
+            "the update must be a no-op when expected mismatches"
+        );
         assert_eq!(current_status(&conn, id), "error");
         // A no-op UPDATE must not bump status_changed_at — the coordinator's
         // last_activity keeps reporting the real event (the reader's Error).
@@ -321,12 +335,8 @@ mod tests {
         let conn = conn_with_agent_nodes();
         let id = insert_node(&conn, "idle");
 
-        let result = update_agent_node_status_unless_in_inner(
-            &conn,
-            id,
-            SessionStatus::Spawning,
-            &[],
-        );
+        let result =
+            update_agent_node_status_unless_in_inner(&conn, id, SessionStatus::Spawning, &[]);
 
         assert!(
             result.is_err(),

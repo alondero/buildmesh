@@ -37,23 +37,28 @@ mod tests;
 #[allow(unused_imports)]
 pub use model::{
     ApiSurface, AppPreferences, BillingMode, HarnessConfigValue, HarnessProfile, ModelTiers,
-    PairingVerification, PairingVerificationStatus, ProxiedProviderOrder, ProviderAccount,
-    ProviderPairing, SurfaceEndpoint,
+    PairingVerification, PairingVerificationStatus, ProviderAccount, ProviderPairing,
+    ProxiedProviderOrder, SurfaceEndpoint,
 };
 
 // ----- Re-exports: storage ----------------------------------------------
 
+#[allow(unused_imports)]
+pub(crate) use storage::ensure_default_provider_normalized;
 pub use storage::{
-    app_data_dir, autopilot_pool_size, default_provider, init, load, naming_provider, save,
-    update, worktree_directory,
+    app_data_dir, autopilot_pool_size, default_provider, init, load, naming_provider, save, update,
+    worktree_directory,
 };
 #[cfg(test)]
 pub(crate) use storage::{init_for_tests, reset_for_tests};
-#[allow(unused_imports)]
-pub(crate) use storage::ensure_default_provider_normalized;
 
 // ----- Re-exports: resolver ---------------------------------------------
 
+#[allow(unused_imports)]
+pub(crate) use resolver::{
+    claude_harness_id_from, deepseek_default_tiers, keyed_first_class_template, kimi_default_tiers,
+    minimax_default_tiers, BUILTIN_PROVIDER_ACCOUNTS,
+};
 #[allow(unused_imports)]
 pub use resolver::{
     compatible_providers_for_harness, default_harness_profiles, default_provider_accounts,
@@ -68,20 +73,12 @@ pub use resolver::{
     upsert_provider_account, upsert_provider_pairing,
 };
 #[allow(unused_imports)]
-pub(crate) use resolver::{
-    effective_pairings, pairing_can_potentially_match,
-};
-#[allow(unused_imports)]
-pub(crate) use resolver::{
-    BUILTIN_PROVIDER_ACCOUNTS, claude_harness_id_from, deepseek_default_tiers,
-    kimi_default_tiers, keyed_first_class_template, minimax_default_tiers,
-};
+pub(crate) use resolver::{effective_pairings, pairing_can_potentially_match};
 
 // ----- Re-exports: compatibility ----------------------------------------
 
 #[allow(unused_imports)]
 pub use compatibility::{
     harness_default_for, normalize_harness_default, preflight_resolve_provider_env,
-    resolve_provider_env, remove_harness_default, upsert_harness_default,
-    validate_harness_default,
+    remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
 };

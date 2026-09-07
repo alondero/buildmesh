@@ -33,12 +33,7 @@ struct CredentialW {
 
 #[link(name = "advapi32")]
 extern "system" {
-    fn CredReadW(
-        target: *const u16,
-        typ: u32,
-        flags: u32,
-        cred: *mut *mut CredentialW,
-    ) -> i32;
+    fn CredReadW(target: *const u16, typ: u32, flags: u32, cred: *mut *mut CredentialW) -> i32;
     fn CredWriteW(cred: *const CredentialW, flags: u32) -> i32;
     fn CredDeleteW(target: *const u16, typ: u32, flags: u32) -> i32;
     fn CredFree(buf: *mut core::ffi::c_void);
@@ -231,10 +226,7 @@ mod tests {
     /// `docs/knowledge-primer.md` so a future operator clearing test
     /// credentials can run `cmdkey /list:buildmesh-test-*` to find leftovers.
     fn unique_target(label: &str) -> String {
-        format!(
-            "buildmesh-test-{label}-{}",
-            Uuid::new_v4().simple()
-        )
+        format!("buildmesh-test-{label}-{}", Uuid::new_v4().simple())
     }
 
     /// Drops the credential on scope exit. Test bodies must hold this as a

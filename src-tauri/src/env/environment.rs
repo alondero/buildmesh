@@ -16,13 +16,13 @@
 //! CLAUDE.md hard rule is *structurally* enforced by this module's surface:
 //! there are no `to_host_path`-shaped functions here, only detection results.
 
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
 
-use crate::process_util::command_no_window;
 use crate::models::EnvType;
+use crate::process_util::command_no_window;
 
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
@@ -36,7 +36,13 @@ pub(crate) fn detect_default_wsl_distro() -> Option<String> {
         .args(["-l", "-v"])
         .output()
         .ok()?;
-    let stdout = if output.stdout.iter().skip(1).step_by(2).any(|byte| *byte == 0) {
+    let stdout = if output
+        .stdout
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .any(|byte| *byte == 0)
+    {
         let units = output
             .stdout
             .chunks_exact(2)
@@ -308,7 +314,10 @@ pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<P
                     return Some(PathBuf::from(home));
                 }
             }
-            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
+            if let Some(user) = spawn_path
+                .strip_prefix("/home/")
+                .and_then(|path| path.split('/').next())
+            {
                 return Some(PathBuf::from(format!("/home/{user}/.codex")));
             }
             let user = env::var("USERNAME")
@@ -344,22 +353,16 @@ pub fn agy_dir() -> PathBuf {
     match current_env() {
         Environment::Wsl => {
             if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else {
                 PathBuf::from("/root/.gemini/antigravity-cli")
             }
         }
         Environment::Windows => {
             if let Ok(home) = env::var("USERPROFILE") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else {
                 let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
                 PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
@@ -402,9 +405,9 @@ pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<Pat
                 .and_then(|path| path.split('/').next())
             {
                 if !user.is_empty() {
-                    return Some(
-                        PathBuf::from(format!("/home/{user}/.gemini/antigravity-cli")),
-                    );
+                    return Some(PathBuf::from(format!(
+                        "/home/{user}/.gemini/antigravity-cli"
+                    )));
                 }
             }
             // No `USERNAME`/`USER` fallback: on a Windows host `USERNAME` is
@@ -463,7 +466,10 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
     match env_type {
         EnvType::Windows => Some(commandcode_dir()),
         EnvType::Wsl => {
-            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
+            if let Some(user) = spawn_path
+                .strip_prefix("/home/")
+                .and_then(|path| path.split('/').next())
+            {
                 return Some(PathBuf::from(format!("/home/{user}/.commandcode")));
             }
             let user = env::var("USERNAME")

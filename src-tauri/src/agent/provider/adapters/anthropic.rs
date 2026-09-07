@@ -107,7 +107,10 @@ impl AgentProvider for AnthropicAdapter {
     /// and is consumed by both this method and the resolver.
     fn effort_control(&self) -> EffortControlKind {
         EffortControlKind::Closed {
-            allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            allowed: CLAUDE_EFFORT_ALLOWED
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }

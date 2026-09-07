@@ -162,7 +162,9 @@ fn normalize_path(p: &str) -> String {
 /// the user wrote it — matching what Claude Code itself does on those
 /// platforms.)
 fn matches_existing(existing: &serde_json::Value, candidate: &str) -> bool {
-    let Some(s) = existing.as_str() else { return false };
+    let Some(s) = existing.as_str() else {
+        return false;
+    };
     if cfg!(target_os = "windows") {
         s.eq_ignore_ascii_case(candidate)
     } else {
@@ -336,10 +338,7 @@ mod tests {
             &fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            v["trustedWorkspaces"].as_str().unwrap(),
-            "some-user-string"
-        );
+        assert_eq!(v["trustedWorkspaces"].as_str().unwrap(), "some-user-string");
     }
 
     #[test]
