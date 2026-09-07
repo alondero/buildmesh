@@ -4,11 +4,19 @@ import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
 import { useMeshStore } from '../../stores/meshStore';
 import { pickMeshFolder } from '../../lib/tauri';
+import { defaultMeshColor } from '../../lib/meshColors';
 
 interface MeshCreateModalProps {
   onClose: () => void;
-  /** Palette hex the colour picker starts on (varies by mesh count). */
-  defaultColor: string;
+  /**
+   * Palette hex the colour picker starts on. Optional — when omitted
+   * the modal derives its own default from the current mesh count
+   * (`defaultMeshColor(meshes.length)`). The owning UI should pass an
+   * explicit value only when the colour picker must mirror a
+   * non-default palette seed (e.g. a programmatic open that pre-seeds
+   * a specific colour for the next mesh).
+   */
+  defaultColor?: string;
 }
 
 /**
@@ -20,9 +28,17 @@ interface MeshCreateModalProps {
 export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps) {
   const createMesh = useMeshStore((s) => s.createMesh);
   const selectMesh = useMeshStore((s) => s.selectMesh);
+  // The modal owns its own default-colour derivation (rather than the
+  // parent reaching into `useMeshStore.getState().meshes.length`
+  // inside the JSX render) so the abstraction boundary is correct —
+  // App.tsx has no business calculating palette offsets. Senior-
+  // review round 4: reading store state in JSX render was a known
+  // anti-pattern (concurrent-render tear safety).
+  const meshCount = useMeshStore((s) => s.meshes.length);
+  const initialColor = defaultColor ?? defaultMeshColor(meshCount);
 
   const [folder, setFolder] = useState<{ path: string; name: string } | null>(null);
-  const [color, setColor] = useState(defaultColor);
+  const [color, setColor] = useState(initialColor);
   const [picking, setPicking] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);

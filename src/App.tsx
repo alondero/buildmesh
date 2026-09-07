@@ -16,6 +16,8 @@ import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
+import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
+import { MeshCreateModal } from './components/Mesh/MeshCreateModal';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -99,6 +101,14 @@ function App() {
   // Omnibar's "Show Cheatsheet" command opens the same modal without a
   // window-event side channel.
   const cheatsheetOpen = useUIStore((s) => s.cheatsheetOpen);
+  // Issue #1536 — the App-level mounts for the canvas empty state's
+  // Mesh Create modal and Spawn Menu dialog. Subscribing (NOT calling
+  // `useUIStore.getState()` inside the render body) keeps the mounts
+  // reactive to external opens from the canvas empty state without a
+  // round-trip through the Sidebar.
+  const createMeshOpen = useUIStore((s) => s.createMeshOpen);
+  const closeCreateMesh = useUIStore((s) => s.closeCreateMesh);
+  const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
 
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
@@ -708,6 +718,33 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
+      {/* Issue #1536 — the canvas empty state needs to summon this
+          modal from outside the Sidebar's render tree. Both call sites
+          (Sidebar's "+ New mesh" buttons + the canvas empty state's
+          "New mesh" CTA) hit `useUIStore.openCreateMesh`. The
+          modal mounts only when explicitly opened — the flag stays
+          false on startup so a fresh app boot never flashes the
+          dialog. */}
+      {createMeshOpen && (
+        // `MeshCreateModal` owns its own `defaultColor` derivation
+        // (subscribes to `meshes.length` inside the modal, where the
+        // subscription is conditional on the modal being mounted).
+        // App.tsx used to read `useMeshStore.getState().meshes.length`
+        // inside the JSX render — a concurrent-render tear-safety
+        // anti-pattern. Senior-review round 4 fixed.
+        <MeshCreateModal onClose={closeCreateMesh} />
+      )}
+      {/* `canvasSpawnMenuMeshId !== null` is the ONLY mount trigger.
+          The modal's internal fallback-to-first-mesh logic (an earlier
+          iteration) was the UI lockout trap the senior review caught:
+          closing the modal would set the id back to null, the
+          fallback would re-resolve to a real mesh, modal would
+          re-render, modal would be inescapable. Now the call site
+          always sets a specific mesh id (resolved in AgentNodeView's
+          onOpenSpawnMenu callback) and `null` strictly means "closed". */}
+      {canvasSpawnMenuMeshId !== null && (
+        <CanvasSpawnMenu meshId={canvasSpawnMenuMeshId} />
+      )}
       <WindowCloseGuard />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => useUIStore.getState().closeCheatsheet()} />
       {/* Universal Command Omnibar (issue #1411). Same mount/unmount
