@@ -8,7 +8,7 @@
  * user's back in Mesh/Pinned/All).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
@@ -368,6 +368,14 @@ describe('AgentNodeView grid controls', () => {
     expect(screen.queryByTestId('grid-output')).toBeNull();
     expect(screen.getByText('No agents in this mesh')).toBeTruthy();
     expect(screen.getByTestId('canvas-empty-spawn-agent')).toBeTruthy();
+
+    // Issue #1536 production-boundary check: clicking Spawn must open
+    // the canvas Spawn Menu for the SELECTED mesh (the modal reads
+    // `canvasSpawnMenuMeshId`). Without this assertion a regression
+    // could re-introduce the `selectedMeshId as number` cast and
+    // target mesh id 0 instead.
+    fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(1);
   });
 
   it('disables manual drag-and-drop while a non-custom sort is active', () => {

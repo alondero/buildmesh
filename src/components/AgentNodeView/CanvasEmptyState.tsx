@@ -27,7 +27,7 @@ import type { NonSingleViewMode } from '../../stores/uiStore';
 
 /** The shape the empty state needs to pick a branch. Each field is
  *  computed by the owning UI from the live stores — `CanvasEmptyState`
- *  itself subscribes to nothing. The five counts/booleans mirror the
+ *  itself subscribes to nothing. The counts/booleans mirror the
  *  issue spec (wayfinder #982 / ticket #986 + issue #1536):
  *  scoped count = nodes the active view-mode scope holds BEFORE the
  *  grid controls narrow it; filtered count = what survived. The
@@ -51,6 +51,15 @@ export interface CanvasEmptyStateInput {
   /** The active non-single view mode. Pinned keeps its own dedicated
    *  empty state; the other three feed the four main branches. */
   viewMode: NonSingleViewMode;
+  /** The sidebar's selected mesh id, or `null` when none is selected.
+   *  Required (not assumed!) for the `selected-empty` branch — a
+   *  previous iteration cast a nullable prop to `number` via `as`
+   *  and lied in the comment that the classifier "guaranteed" a
+   *  mesh was selected. The classifier now reads this field
+   *  explicitly and re-routes to `all-empty` when viewMode is
+   *  `mesh` but no mesh is actually selected (e.g. the active
+   *  node's mesh fallback wasn't enough). */
+  selectedMeshId: number | null;
   /** Whether ANY non-terminal harness is reachable (issue #822).
    *  Drives the "Setup" routing when the user has no usable agent. */
   harnessReady: boolean;
@@ -77,10 +86,6 @@ export interface CanvasEmptyStateCallbacks {
 interface CanvasEmptyStateProps {
   input: CanvasEmptyStateInput;
   callbacks: CanvasEmptyStateCallbacks;
-  /** The mesh id the selected-mesh branch should target when opening
-   *  the Spawn Menu. `null` for the "all meshes empty" branch — there
-   *  is no mesh to spawn into until one is created. */
-  selectedMeshId: number | null;
 }
 
 /** Pick the right branch from the input. Centralised so the test surface
@@ -115,7 +120,17 @@ export type CanvasEmptyBranch =
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyBranch {
   if (input.viewMode === 'pinned') return 'pinned-empty';
   if (input.meshCount === 0) return 'no-meshes';
-  if (input.viewMode === 'mesh' && input.scopedCount === 0) return 'selected-empty';
+  // Mesh view with `scopedCount === 0` and an explicit sidebar
+  // selection is the canonical "selected empty mesh" — the user
+  // picked a mesh and it has no agents. When the selection is null
+  // (scope fell back to the active node's mesh / first mesh), the
+  // "no agents in this mesh" CTA is misleading (the user never
+  // picked a mesh in the sidebar). Re-route to `all-empty` so the
+  // SPAWN CTA opens the global Spawn Menu — the caller resolves the
+  // target mesh id, same fallback the sidebar's `+ ▾` uses.
+  if (input.viewMode === 'mesh' && input.scopedCount === 0) {
+    return input.selectedMeshId !== null ? 'selected-empty' : 'all-empty';
+  }
   if (input.totalNodeCount === 0) return 'all-empty';
   if (input.filteredCount === 0) return 'filters-exclude-all';
   // Defensive — caller should not render the empty state when both
@@ -399,20 +414,20 @@ function PinnedEmptyBranch({ onViewAll }: { onViewAll: () => void }) {
 export function CanvasEmptyState({
   input,
   callbacks,
-  selectedMeshId,
 }: CanvasEmptyStateProps) {
   const branch = classifyCanvasEmpty(input);
   switch (branch) {
     case 'no-meshes':
       return <NoMeshesBranch onCreateMesh={callbacks.onCreateMesh} />;
     case 'selected-empty':
-      // The branch classifier guarantees this only fires with a mesh
-      // selected — render-time narrowing is therefore safe.
+      // Classifier guarantees `input.selectedMeshId !== null` for
+      // this branch (re-routes to `all-empty` otherwise). The
+      // non-null assertion is type-safe without an `as` cast.
       return (
         <SelectedEmptyBranch
           harnessReady={input.harnessReady}
           callbacks={callbacks}
-          selectedMeshId={selectedMeshId as number}
+          selectedMeshId={input.selectedMeshId as number}
         />
       );
     case 'all-empty':

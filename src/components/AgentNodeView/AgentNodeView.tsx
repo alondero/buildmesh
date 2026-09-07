@@ -127,67 +127,14 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   );
 }
 
-// The legacy `NoNodesSplash` ("Add Mesh" splash) was removed in #1536
-// and replaced by the `no-meshes` branch of `CanvasEmptyState` — same
-// catalogue rows, context-aware CTA wiring. The dedicated
-// `PinnedEmptyState` (below) stays exported because the standalone
-// `pinned-empty-state.test.tsx` pins its contract.
+// The legacy `NoNodesSplash` ("Add Mesh" splash), `gridEmptyState` mode
+// dispatcher (issues #986 / #1609), `FilteredEmptyState` (#1609), and
+// standalone `PinnedEmptyState` (wayfinder #982) were all removed in
+// issue #1536 and replaced by the context-aware `CanvasEmptyState`'s
+// five branches. The dedicated `tests/unit/pinned-empty-state.test.tsx`
+// was deleted alongside — `CanvasEmptyState`'s pinned-empty branch is
+// covered by `tests/unit/canvas-empty-state.test.tsx`.
 
-
-/// Empty state for Pinned Grid mode with 0 pinned nodes (wayfinder #982 /
-/// ticket #986). Mirrors the splash's structure (centered, max-w-sm,
-/// heading + body + accent-cyan CTA) but the call to action is "View All
-/// Nodes" — the natural next step when nothing is pinned yet. Pin afford-
-/// ances live in the node header and the sidebar node context menu (#985).
-//
-// The dedicated `FilteredEmptyState` (#1609) was folded into the
-// `filters-exclude-all` branch of `CanvasEmptyState` (issue #1536) and
-// removed; the legacy `PinnedEmptyState` stays exported because the
-// standalone `pinned-empty-state.test.tsx` pins its contract.
-//
-// The legacy `gridEmptyState` mode dispatcher (issues #986 / #1609) was
-// also replaced by the context-aware `CanvasEmptyState` (#1536); the
-// dispatcher is gone but the underlying components above are preserved
-// for the standalone tests.
-
-export function PinnedEmptyState() {
-  const setViewMode = useUIStore(state => state.setViewMode);
-  return (
-    <div className="flex-1 flex items-center justify-center text-text-muted">
-      <div className="text-center max-w-sm">
-        <svg
-          className="mx-auto mb-4 w-8 h-8 text-text-muted"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <path d="M12 17v5" />
-          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-        </svg>
-        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No pinned nodes</p>
-        <p className="text-sm text-text-secondary mb-6 font-sans">
-          Pin agents from any mesh to keep them in reach here. Use the pin button in a node's header, or right-click a node in the sidebar.
-        </p>
-        <button
-          onClick={() => setViewMode('all')}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect width="7" height="9" x="3" y="3" rx="1" />
-            <rect width="7" height="5" x="14" y="3" rx="1" />
-            <rect width="7" height="9" x="14" y="12" rx="1" />
-            <rect width="7" height="5" x="3" y="16" rx="1" />
-          </svg>
-          View All Nodes
-        </button>
-      </div>
-    </div>
-  );
-}
 
 export function AgentNodeView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
@@ -446,31 +393,51 @@ export function AgentNodeView() {
   // controls exported from viewModes.ts). That gives us the right
   // "what's in this view's scope, ignoring search" answer for every
   // non-Single mode.
+  //
+  // Single mode is special: `visibleNodes` is `[]` because the grid
+  // helpers don't list single-mode candidates. The empty state
+  // rendered in Single mode (when `singleNode === null`) describes
+  // the SCOPE the user fell back from — `lastNonSingleMode` (the
+  // grid mode that Esc will return to). Computing `scopedCount`
+  // against that scope (rather than hardcoded 0) means the empty
+  // CTA reads "No agents in this mesh" instead of "No nodes match"
+  // when the user Soloed a Mesh that's empty.
   const meshesCount = useMeshStore((s) => s.meshes.length);
+  const firstMeshId = useMeshStore((s) => s.meshes[0]?.id ?? null);
+  const sidebarSelectedMeshId = useMeshStore((s) => s.selectedMeshId);
   const providerList = useProviderList();
   const harnessReady = useMemo(() => hasSpawnableAgent(providerList), [providerList]);
-  const scopedCount = useMemo(() => {
-    if (viewMode === 'single') return 0;
-    return scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId).length;
-  }, [viewMode, agentNodes, selectedMeshId, activeNodeId]);
+  const effectiveViewMode: NonSingleViewMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
+  const scopedCount = useMemo(
+    () => scopeNodesForMode(effectiveViewMode, agentNodes, selectedMeshId, activeNodeId).length,
+    [effectiveViewMode, agentNodes, selectedMeshId, activeNodeId],
+  );
 
   // Issue #1536 — the canvas empty-state callbacks. Each one is a
   // thin store-action shim so the empty-state component stays pure
   // (no direct store access, easy to unit-test). `onOpenSpawnMenu`
   // carries the selected mesh id when known — the App-scope
-  // `CanvasSpawnMenu` modal resolves `null` to the sidebar's current
-  // selection, falling back to the first mesh (matches the sidebar's
-  // `+ ▾` default).
+  // `CanvasSpawnMenu` modal needs a CONCRETE id (senior-review fix:
+  // its internal fallback logic was the UI lockout trap).
   const emptyStateInput = useMemo(
     () => ({
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount,
       filteredCount: visibleNodes.length,
-      viewMode: (viewMode === 'single' ? lastNonSingleMode : viewMode) as NonSingleViewMode,
+      viewMode: effectiveViewMode,
+      selectedMeshId,
       harnessReady,
     }),
-    [meshesCount, agentNodes.length, scopedCount, visibleNodes.length, viewMode, lastNonSingleMode, harnessReady],
+    [
+      meshesCount,
+      agentNodes.length,
+      scopedCount,
+      visibleNodes.length,
+      effectiveViewMode,
+      selectedMeshId,
+      harnessReady,
+    ],
   );
   const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
   const openCanvasSpawnMenu = useUIStore((s) => s.openCanvasSpawnMenu);
@@ -481,18 +448,27 @@ export function AgentNodeView() {
     () => ({
       onCreateMesh: openCanvasCreateMesh,
       onOpenSpawnMenu: (meshId: number | null) => {
-        // Fall back to the sidebar's selection when the empty state
-        // didn't pass a mesh id — that's the 'all-empty' case where
-        // no specific mesh was selected in the canvas but the user
-        // IS scoped to one in the sidebar.
-        const target = meshId ?? useMeshStore.getState().selectedMeshId ?? useMeshStore.getState().meshes[0]?.id ?? null;
+        // Resolve the target mesh HERE so the modal never has to
+        // fall back to "any mesh" — that fallback was the UI lockout
+        // trap an earlier iteration of `CanvasSpawnMenu` hit. The
+        // order matches the sidebar's `+ ▾` default: the caller-
+        // supplied id wins, else the sidebar's selection, else the
+        // active node's mesh (via `selectedMeshId` in single mode
+        // falling back to the active node's mesh is already covered
+        // by `selectedMeshId` because `useMeshStore.selectedMeshId`
+        // and the canvas are kept in sync via the existing
+        // `useUIStore` subscription), else the first mesh.
+        const target =
+          meshId
+          ?? sidebarSelectedMeshId
+          ?? firstMeshId;
         if (target !== null) openCanvasSpawnMenu(target);
       },
       onClearFilters: resetGridControls,
       onOpenSetup: openAppSettings,
       onViewAll: () => setViewMode('all'),
     }),
-    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode],
+    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, sidebarSelectedMeshId, firstMeshId],
   );
 
   return (
@@ -535,7 +511,6 @@ export function AgentNodeView() {
               <CanvasEmptyState
                 input={emptyStateInput}
                 callbacks={emptyStateCallbacks}
-                selectedMeshId={selectedMeshId}
               />
             )
           ) : visibleNodes.length === 0 ? (
@@ -546,7 +521,6 @@ export function AgentNodeView() {
             <CanvasEmptyState
               input={emptyStateInput}
               callbacks={emptyStateCallbacks}
-              selectedMeshId={selectedMeshId}
             />
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes

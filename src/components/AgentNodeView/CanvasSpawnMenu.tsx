@@ -4,13 +4,28 @@
  * The Sidebar's per-mesh `+ ▾` cluster already opens a Spawn Menu for
  * the mesh it's anchored to. The canvas empty state isn't in that
  * tree, so it needs a sibling dialog at App scope. This component
- * owns the spawn dialog mount and reads the requested mesh id from
- * `uiStore.canvasSpawnMenuMeshId`.
+ * owns the spawn dialog mount.
  *
- * `meshId === null` means "any mesh" — the canvas "All Nodes empty"
- * branch fires this when no specific mesh is selected; we resolve to
- * the most recently selected mesh, falling back to the first mesh in
- * the list (matches the sidebar's "default" target behaviour).
+ * Two critical contracts (caught in senior review):
+ *
+ *   1. **Modal only mounts when explicitly opened.** The mesh id
+ *      resolved against the store (`canvasSpawnMenuMeshId`) drives
+ *      the conditional mount at the call site (App.tsx). The modal
+ *      itself is a pure renderer; an internal "fall back to
+ *      sidebar selection / first mesh" resolution would mount the
+ *      modal on every app startup with meshes present — the review
+ *      caught this as a UI lockout trap (closing the modal via
+ *      Escape or backdrop sets the id back to null, which the
+ *      fallback would re-resolve to a real mesh, re-opening the
+ *      modal in an inescapable cycle).
+ *
+ *   2. **The mesh is resolved by the CALLER, not here.** When the
+ *      canvas empty state's `onOpenSpawnMenu` callback fires, it
+ *      has already picked a concrete mesh id (sidebar selection,
+ *      active-node mesh, or first mesh in the list). The id is
+ *      stale the moment it lands in the store if the user deletes
+ *      the mesh mid-render, so the modal renders `null` and closes
+ *      the store signal if the lookup misses.
  *
  * The actual create→activate→select-mesh invariant (issue #283) lives
  * in `agentNodeStore.selectProviderForMesh`; this dialog is a thin
@@ -20,7 +35,6 @@
  * surfaces can be open independently and the panel needs its own
  * click-outside scope.
  */
-import { useMemo } from 'react';
 import { Modal } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
@@ -34,31 +48,30 @@ import { hasSpawnableAgent } from '../../lib/groups';
  *  spawn dropdown's onboarding panel (issue #822). */
 const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
 
-export function CanvasSpawnMenu() {
-  const meshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
+interface CanvasSpawnMenuProps {
+  /** The mesh id the canvas empty state requested the spawn menu
+   *  for. The component renders nothing when this resolves to a
+   *  mesh that's no longer in the store (e.g. deleted between the
+   *  open request and the render) — the close action resets the
+   *  store flag in that case so a retry isn't a silent no-op. */
+  meshId: number;
+}
+
+export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   const close = useUIStore((s) => s.closeCanvasSpawnMenu);
-  const meshes = useMeshStore((s) => s.meshes);
-  const meshesById = useMeshStore((s) => s.meshesById);
+  // Hook selector, NOT `useMeshStore.getState()` inside the body —
+  // a `getState()` read here wouldn't re-subscribe when the mesh
+  // row mutates between open and render (senior-review finding).
+  const targetMesh = useMeshStore((s) => s.meshesById.get(meshId) ?? null);
   const selectProviderForMesh = useAgentNodeStore((s) => s.selectProviderForMesh);
   const selectMesh = useMeshStore((s) => s.selectMesh);
   const providerList = useProviderList();
 
-  // Resolve the requested mesh id: explicit id wins, else fall back to
-  // the sidebar's `selectedMeshId`, else to the first mesh in the
-  // list. The last two cases preserve the user's "I'm in a mesh"
-  // context when the canvas branch fires without an id (the "All
-  // Nodes empty" branch).
-  const targetMesh = useMemo(() => {
-    if (meshId !== null && meshesById.has(meshId)) return meshesById.get(meshId) ?? null;
-    const selected = useMeshStore.getState().selectedMeshId;
-    if (selected !== null && meshesById.has(selected)) return meshesById.get(selected) ?? null;
-    return meshes[0] ?? null;
-  }, [meshId, meshes, meshesById]);
-
-  // Wait for the next render after closing — closing the modal via the
-  // backdrop / Escape / × unmounts us, so no need to clear here.
+  // The mesh disappeared between open request and render (delete /
+  // refetch race). Reset the store flag and bail — the next open
+  // call from the canvas empty state will re-resolve the mesh.
   if (targetMesh === null) {
-    if (meshId !== null) close();
+    close();
     return null;
   }
 

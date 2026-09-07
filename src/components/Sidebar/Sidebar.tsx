@@ -1,11 +1,9 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { useProviderList } from '../../hooks/useProviderList';
-import { MeshCreateModal } from '../Mesh/MeshCreateModal';
-import { defaultMeshColor } from '../../lib/meshColors';
 import {
   DndContext,
   KeyboardSensor,
@@ -62,22 +60,15 @@ export function Sidebar() {
   // for the open/close state but stores the prefixed value as the
   // single source of truth.
   const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
-  const [createMeshOpen, setCreateMeshOpen] = useState(false);
-  // Issue #1536 — the canvas empty state needs to summon this same
-  // modal but lives outside the Sidebar's render tree. The store flag
-  // is the shared signal; when it flips true (from the canvas), we
-  // mirror it into the local open-state the modal mount already keys
-  // on. When the modal closes, the owner-side signal has to be cleared
-  // too so a re-open isn't a silent no-op.
-  const canvasCreateMeshOpen = useUIStore((s) => s.canvasCreateMeshOpen);
-  const closeCanvasCreateMesh = useUIStore((s) => s.closeCanvasCreateMesh);
-  useEffect(() => {
-    if (!canvasCreateMeshOpen) return;
-    setCreateMeshOpen(true);
-    closeCanvasCreateMesh();
-    // Only react to flag edges; the close-callback is stable.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canvasCreateMeshOpen]);
+  // Issue #1536 — the Mesh Create modal is mounted at App.tsx scope
+  // (driven by `uiStore.canvasCreateMeshOpen`) so the canvas empty
+  // state and the Sidebar's "+ New mesh" buttons summon the same
+  // dialog. Sidebar's local `createMeshOpen` state and mirror
+  // `useEffect` (senior-review finding: Zustand abused as an
+  // imperative event bus with a self-clearing flag) are gone —
+  // both call sites now hit the shared `openCanvasCreateMesh`
+  // action directly.
+  const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).
@@ -202,14 +193,10 @@ export function Sidebar() {
       />
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
-        {createMeshOpen && (
-          <MeshCreateModal
-            onClose={() => setCreateMeshOpen(false)}
-            defaultColor={defaultMeshColor(meshes.length)}
-          />
-        )}
-
-        {/* Meshes list */}
+        {/* Meshes list — the Mesh Create modal itself is mounted at App.tsx
+            scope (driven by `uiStore.canvasCreateMeshOpen`); both Sidebar
+            buttons and the canvas empty state's "New mesh" CTA hit the
+            same `openCanvasCreateMesh` action. */}
         <div className="flex-1 overflow-y-auto">
           <div className="p-2">
             {meshes.length === 0 ? (
@@ -219,7 +206,7 @@ export function Sidebar() {
                 </p>
                 <button
                   type="button"
-                  onClick={() => setCreateMeshOpen(true)}
+                  onClick={openCanvasCreateMesh}
                   className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors"
                 >
                   + New mesh
@@ -263,7 +250,7 @@ export function Sidebar() {
 
         {/* Add mesh */}
         <button
-          onClick={() => setCreateMeshOpen(true)}
+          onClick={openCanvasCreateMesh}
           className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

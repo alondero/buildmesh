@@ -2,7 +2,7 @@
  * Issue #1536 — CanvasEmptyState unit tests.
  *
  * The component is a pure renderer over a discriminated input shape and
- * four callbacks, so the tests can assert each branch's copy and CTA
+ * five callbacks, so the tests can assert each branch's copy and CTA
  * target without mounting AgentNodeView or any store. The classifier
  * (`classifyCanvasEmpty`) is also tested directly so the decision
  * order is locked in independent of the render output — that catches
@@ -14,6 +14,11 @@
  * MeshCreateModal" / "Spawn opens the Spawn Menu" — those side-effects
  * live above the component and are wired by AgentNodeView (covered by
  * the integration tests in agent-node-view-grid-controls.test.tsx).
+ *
+ * The Pinned-empty branch's contract (which previously lived in a
+ * standalone `pinned-empty-state.test.tsx` against a now-removed
+ * `PinnedEmptyState` component) is covered here against the canonical
+ * `CanvasEmptyState` implementation.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -43,6 +48,7 @@ function input(overrides: Partial<CanvasEmptyStateInput> = {}): CanvasEmptyState
     scopedCount: 0,
     filteredCount: 0,
     viewMode: 'all',
+    selectedMeshId: null,
     harnessReady: true,
     ...overrides,
   };
@@ -61,14 +67,51 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(classifyCanvasEmpty(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
   });
 
-  it('returns selected-empty only when viewMode=mesh AND that mesh has zero nodes', () => {
-    expect(classifyCanvasEmpty(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3 }))).toBe('selected-empty');
+  it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
+    expect(
+      classifyCanvasEmpty(
+        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: 42 }),
+      ),
+    ).toBe('selected-empty');
+  });
+
+  it('re-routes to all-empty when viewMode=mesh but no mesh is selected (active-node-mesh fallback)', () => {
+    // Mesh view with scopedCount=0 but no sidebar selection is a
+    // misleading state for the user (they didn't pick a mesh). The
+    // senior review caught an earlier version that cast
+    // `selectedMeshId as number` and routed to `selected-empty`
+    // anyway — the new classifier guards against it.
+    expect(
+      classifyCanvasEmpty(
+        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null }),
+      ),
+    ).toBe('all-empty');
+  });
+
+  it('mesh view with empty scope AND no selection AND zero nodes globally → all-empty', () => {
+    // Defensive — same path as the fallback above when no agents
+    // exist anywhere; the caller's `onOpenSpawnMenu(null)` resolves
+    // to the sidebar's selection or first mesh.
+    expect(
+      classifyCanvasEmpty(
+        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null }),
+      ),
+    ).toBe('all-empty');
+  });
+
+  it('mesh view with empty scope AND no selection AND a stale search filter → still all-empty (not filters-exclude-all)', () => {
+    // A stale search query persisting into Mesh view would otherwise
+    // surface the "Clear filters" CTA — but the user is in Mesh
+    // view (not Filtered), and there's no active filter on this
+    // scope. Route to all-empty so the CTA offers a spawn action.
+    expect(
+      classifyCanvasEmpty(
+        input({ viewMode: 'mesh', scopedCount: 0, filteredCount: 0, totalNodeCount: 3, selectedMeshId: null }),
+      ),
+    ).toBe('all-empty');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
-    // viewMode=all with scopedCount=0 must surface as all-empty so
-    // the CTA offers a spawn action into any mesh (vs the no-meshes
-    // branch which offers to create a mesh).
     expect(classifyCanvasEmpty(input({ viewMode: 'all', scopedCount: 0, totalNodeCount: 0 }))).toBe('all-empty');
   });
 
@@ -86,7 +129,7 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
 describe('CanvasEmptyState (issue #1536)', () => {
   it('no-meshes branch: heading + New mesh CTA that fires onCreateMesh', () => {
     const cbs = { ...noopCallbacks, onCreateMesh: vi.fn() };
-    render(<CanvasEmptyState input={input({ meshCount: 0 })} callbacks={cbs} selectedMeshId={null} />);
+    render(<CanvasEmptyState input={input({ meshCount: 0 })} callbacks={cbs} />);
 
     expect(screen.getByText('Buildmesh')).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-create-mesh'));
@@ -95,7 +138,7 @@ describe('CanvasEmptyState (issue #1536)', () => {
 
   it('all-empty branch: heading + Spawn agent CTA that fires onOpenSpawnMenu(null)', () => {
     const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
-    render(<CanvasEmptyState input={input({ meshCount: 1, totalNodeCount: 0 })} callbacks={cbs} selectedMeshId={null} />);
+    render(<CanvasEmptyState input={input({ meshCount: 1, totalNodeCount: 0 })} callbacks={cbs} />);
 
     expect(screen.getByText('No agents yet')).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
@@ -106,9 +149,8 @@ describe('CanvasEmptyState (issue #1536)', () => {
     const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh' })}
+        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: 42 })}
         callbacks={cbs}
-        selectedMeshId={42}
       />,
     );
 
@@ -117,13 +159,29 @@ describe('CanvasEmptyState (issue #1536)', () => {
     expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(42);
   });
 
+  it('mesh view without a selection: renders all-empty (not selected-empty)', () => {
+    // Regression for the senior-review cast bug: mesh view with no
+    // selection must NOT render the "no agents in this mesh" CTA.
+    const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
+    render(
+      <CanvasEmptyState
+        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: null })}
+        callbacks={cbs}
+      />,
+    );
+
+    expect(screen.queryByText('No agents in this mesh')).toBeNull();
+    expect(screen.getByText('No agents yet')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
+    expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(null);
+  });
+
   it('filters-exclude-all branch: Clear search & filters CTA fires onClearFilters', () => {
     const cbs = { ...noopCallbacks, onClearFilters: vi.fn() };
     render(
       <CanvasEmptyState
         input={input({ meshCount: 2, totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })}
         callbacks={cbs}
-        selectedMeshId={null}
       />,
     );
 
@@ -132,31 +190,33 @@ describe('CanvasEmptyState (issue #1536)', () => {
     expect(cbs.onClearFilters).toHaveBeenCalledTimes(1);
   });
 
-  it('pinned-empty branch: View All Nodes CTA fires onViewAll', () => {
+  // The Pinned-empty branch was previously covered by a standalone
+  // test file against a now-removed `PinnedEmptyState` component.
+  // Its contract now lives here — the same heading, body, and
+  // "View All Nodes" CTA wired through the `onViewAll` callback
+  // (so the parent's `setViewMode('all')` doesn't leak into the
+  // component itself).
+  it('pinned-empty branch: heading + body + View All Nodes CTA fires onViewAll', () => {
     const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
         input={input({ meshCount: 2, totalNodeCount: 5, viewMode: 'pinned' })}
         callbacks={cbs}
-        selectedMeshId={null}
       />,
     );
 
     expect(screen.getByText('No pinned nodes')).toBeTruthy();
+    expect(screen.getByText(/Pin agents from any mesh/)).toBeTruthy();
     fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
     expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
   });
 
   it('selected-empty + no harness: routes to Open Settings instead of Spawn', () => {
-    // The harness-ready=false branch must route the CTA to Setup so a
-    // user with no installed CLI / keyed provider isn't stranded on a
-    // Spawn button that opens an empty menu.
     const cbs = { ...noopCallbacks, onOpenSetup: vi.fn(), onOpenSpawnMenu: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', harnessReady: false })}
+        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: 7, harnessReady: false })}
         callbacks={cbs}
-        selectedMeshId={7}
       />,
     );
 
@@ -172,7 +232,6 @@ describe('CanvasEmptyState (issue #1536)', () => {
       <CanvasEmptyState
         input={input({ meshCount: 2, totalNodeCount: 0, harnessReady: false })}
         callbacks={cbs}
-        selectedMeshId={null}
       />,
     );
 
