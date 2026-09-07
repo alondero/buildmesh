@@ -18,7 +18,6 @@ import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCl
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
 import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
 import { MeshCreateModal } from './components/Mesh/MeshCreateModal';
-import { defaultMeshColor } from './lib/meshColors';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -726,15 +725,13 @@ function App() {
           false on startup so a fresh app boot never flashes the
           dialog. */}
       {createMeshOpen && (
-        <MeshCreateModal
-          onClose={closeCreateMesh}
-          // Read `meshes.length` lazily at the conditional mount
-          // — the modal is closed 99.9% of the time, so subscribing
-          // here would re-render the entire App shell on every
-          // mesh add / delete / reorder for a defaultColor that's
-          // never observed. Senior-review perf finding.
-          defaultColor={defaultMeshColor(useMeshStore.getState().meshes.length)}
-        />
+        // `MeshCreateModal` owns its own `defaultColor` derivation
+        // (subscribes to `meshes.length` inside the modal, where the
+        // subscription is conditional on the modal being mounted).
+        // App.tsx used to read `useMeshStore.getState().meshes.length`
+        // inside the JSX render — a concurrent-render tear-safety
+        // anti-pattern. Senior-review round 4 fixed.
+        <MeshCreateModal onClose={closeCreateMesh} />
       )}
       {/* `canvasSpawnMenuMeshId !== null` is the ONLY mount trigger.
           The modal's internal fallback-to-first-mesh logic (an earlier

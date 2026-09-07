@@ -5,11 +5,11 @@ import {
 } from '@dnd-kit/core';
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
-import { useUIStore, type NonSingleViewMode } from '../../stores/uiStore';
+import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
-import { resolveSingleNode, scopeNodesForMode } from '../../lib/viewModes';
+import { resolveSingleNode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
@@ -19,9 +19,7 @@ import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
-import { CanvasEmptyState } from './CanvasEmptyState';
-import { useProviderList } from '../../hooks/useProviderList';
-import { hasSpawnableAgent } from '../../lib/groups';
+import { CanvasEmptyStateContainer } from './CanvasEmptyStateContainer';
 
 const MIN_PANE_PERCENT = 15;
 
@@ -381,98 +379,19 @@ export function AgentNodeView() {
     setDropIntent(null);
   };
 
-  // Issue #1536 — the inputs `CanvasEmptyState` needs to pick a branch
-  // are derived from the same sources as `visibleNodes`, but the
-  // distinction between "scope is empty" and "filters excluded
-  // everything" demands we read the pre-filter scope count separately.
-  //
-  // `scopeNodesForMode` ignores `controls` for non-'filtered' modes,
-  // and for 'filtered' it gives the unfiltered pool (because we pass
-  // NO_FILTERS-shaped controls by omitting the arg — `controls` is
-  // applied at the `matchesGridControls` call INSIDE
-  // `scopeNodesForMode`, so omitting the arg falls back to the empty
-  // controls exported from viewModes.ts). That gives us the right
-  // "what's in this view's scope, ignoring search" answer for every
-  // non-Single mode.
-  //
-  // Single mode is special: `visibleNodes` is `[]` because the grid
-  // helpers don't list single-mode candidates. The empty state is
-  // rendered in Single mode only when `singleNode === null`, which
-  // by `resolveSingleNode`'s contract means there are no nodes
-  // anywhere — so the classifier routes to `no-meshes` or `all-empty`
-  // without ever needing a separate single-no-candidate branch.
-  // Computing `scopedCount` against the `lastNonSingleMode` fallback
-  // scope (rather than hardcoded 0) preserves the "scoped" signal in
-  // case that invariant ever loosens.
-  const meshesCount = useMeshStore((s) => s.meshes.length);
-  const providerList = useProviderList();
-  const harnessReady = useMemo(() => hasSpawnableAgent(providerList), [providerList]);
-  const effectiveViewMode: NonSingleViewMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
-  const scopedCount = useMemo(
-    () => scopeNodesForMode(effectiveViewMode, agentNodes, selectedMeshId, activeNodeId).length,
-    [effectiveViewMode, agentNodes, selectedMeshId, activeNodeId],
-  );
-
-  // Issue #1536 — the canvas empty-state callbacks. Each one is a
-  // thin store-action shim so the empty-state component stays pure
-  // (no direct store access, easy to unit-test). `onOpenSpawnMenu`
-  // carries the selected mesh id when known — the App-scope
-  // `CanvasSpawnMenu` modal needs a CONCRETE id (senior-review fix:
-  // its internal fallback logic was the UI lockout trap).
-  const emptyStateInput = useMemo(
-    () => ({
-      meshCount: meshesCount,
-      totalNodeCount: agentNodes.length,
-      scopedCount,
-      filteredCount: visibleNodes.length,
-      viewMode,
-      selectedMeshId,
-      harnessReady,
-    }),
-    [
-      meshesCount,
-      agentNodes.length,
-      scopedCount,
-      visibleNodes.length,
-      viewMode,
-      selectedMeshId,
-      harnessReady,
-    ],
-  );
-  const openCreateMesh = useUIStore((s) => s.openCreateMesh);
-  const openCanvasSpawnMenu = useUIStore((s) => s.openCanvasSpawnMenu);
-  const resetGridControls = useUIStore((s) => s.resetGridControls);
-  const openAppSettings = useUIStore((s) => s.openAppSettings);
-  const setViewMode = useUIStore((s) => s.setViewMode);
-  // Issue #1536 senior review (#3): resolve the target mesh lazily
-  // inside the click handler instead of subscribing to `meshes[0].id`
-  // at the root. The first-mesh id is read once at click time and
-  // the handler runs only when the user actually clicks "Spawn", so
-  // a subscription here is wasted work for the 99.9% of renders
-  // that don't click anything.
-  const emptyStateCallbacks = useMemo(
-    () => ({
-      onCreateMesh: openCreateMesh,
-      onOpenSpawnMenu: (meshId: number | null) => {
-        // Resolve the target mesh HERE so the modal never has to
-        // fall back to "any mesh" — that fallback was the UI lockout
-        // trap an earlier iteration of `CanvasSpawnMenu` hit. The
-        // order matches the sidebar's `+ ▾` default: the caller-
-        // supplied id wins, else the sidebar's selection, else the
-        // first mesh in the list.
-        const target =
-          meshId
-          ?? useMeshStore.getState().selectedMeshId
-          ?? useMeshStore.getState().meshes[0]?.id
-          ?? null;
-        if (target !== null) openCanvasSpawnMenu(target);
-      },
-      onClearFilters: resetGridControls,
-      onOpenSetup: openAppSettings,
-      onViewAll: () => setViewMode('all'),
-    }),
-    [openCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId],
-  );
+  // The empty-state container owns the empty-state-only store
+  // subscriptions (provider list, harness readiness, mesh count, the
+  // canvas empty-state callbacks). Mounting it ONLY when the canvas
+  // is actually empty keeps the active terminal view free of those
+  // subscriptions — every provider-list invalidation or harness
+  // change would re-render `AgentNodeView` and cascade into the
+  // NodeCard / Terminal tree the user is typing into. Senior-review
+  // finding. The container reads its own inputs from the store so
+  // the closed-canvas render is identical to the pre-#1536 single
+  // subscription count.
+  const showEmptyState = viewMode === 'single'
+    ? singleNode === null
+    : visibleNodes.length === 0;
 
   return (
     <div className="relative flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
@@ -496,10 +415,24 @@ export function AgentNodeView() {
         >
         <DropIntentContext.Provider value={dropIntent}>
         <div className="flex-1 flex overflow-hidden">
-          {viewMode === 'single' ? (
-            // Single solos one node; with no nodes at all (singleNode null)
-            // the context-aware CanvasEmptyState picks the right branch
-            // (issue #1536).
+          {showEmptyState ? (
+            // The container owns every empty-state-only subscription
+            // (provider list, harness readiness, mesh count, the five
+            // CTA callbacks). Mounting it here — rather than at the
+            // `AgentNodeView` root — keeps the active terminal grid
+            // free of those subscriptions; provider-list invalidations
+            // and harness changes no longer cascade into NodeCard /
+            // Terminal re-renders while the user is typing. Senior-
+            // review finding: reactivity pollution.
+            <CanvasEmptyStateContainer
+              viewMode={viewMode}
+              lastNonSingleMode={lastNonSingleMode}
+              selectedMeshId={selectedMeshId}
+              activeNodeId={activeNodeId}
+              agentNodes={agentNodes}
+              visibleNodesLength={visibleNodes.length}
+            />
+          ) : viewMode === 'single' ? (
             singleNode ? (
               <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
                 <NodeCard
@@ -510,21 +443,7 @@ export function AgentNodeView() {
                   draggable={false}
                 />
               </div>
-            ) : (
-              <CanvasEmptyState
-                input={emptyStateInput}
-                callbacks={emptyStateCallbacks}
-              />
-            )
-          ) : visibleNodes.length === 0 ? (
-            // Issue #1536 — one context-aware empty state covers all four
-            // cases (no meshes / selected empty / all empty / filters
-            // exclude all / pinned). The previous ternary chain conflated
-            // no-mesh and no-node and offered "Add Mesh" for both.
-            <CanvasEmptyState
-              input={emptyStateInput}
-              callbacks={emptyStateCallbacks}
-            />
+            ) : null
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}

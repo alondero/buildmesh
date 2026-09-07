@@ -15,14 +15,41 @@
  * store flag if the requested mesh disappears. These tests pin the
  * lifecycle contract so a future "convenience" refactor doesn't
  * reintroduce the trap.
+ *
+ * Reactivity hygiene (senior-review round 4):
+ *   - `useProviderList` is mocked to a static list so the IPC-backed
+ *     cache doesn't run an unmocked background fetch and trigger
+ *     `publish()` during/after the test (the source of the four
+ *     `act(...)` warnings).
+ *   - `fireEvent.click` is used throughout instead of raw DOM
+ *     `.click()` so React's batching is preserved.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CanvasSpawnMenu } from '../../src/components/AgentNodeView/CanvasSpawnMenu';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { Mesh } from '../../src/types/generated/Mesh';
+import type { SpawnOption } from '../../src/lib/groups';
+
+// Mock the shared provider cache (issue #1502) so the test doesn't
+// run an unmocked background IPC fetch. Without this, `useSyncExternalStore`
+// would publish mid-test, generating the four `act(...)` stderr warnings
+// that senior review caught.
+vi.mock('../../src/hooks/useProviderList', () => ({
+  useProviderList: () => [{
+    id: 'claude',
+    label: 'Claude Code',
+    icon: '',
+    harness_id: 'claude',
+    provider_id: 'claude',
+    is_proxied: false,
+    group_key: 'claude',
+    resumable: true,
+  } satisfies SpawnOption],
+  __resetSharedProviderListForTests: () => undefined,
+}));
 
 // `GroupedProviderMenu` is the real spawn surface; mock it so the
 // tests don't drag the IPC layer into a render that only exercises
@@ -132,19 +159,19 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
 
     render(<CanvasSpawnMenu meshId={MESH.id} />);
 
-    // The mock fires synchronously — click triggers `onSelect` which
-    // closes the store flag before awaiting `selectProviderForMesh`.
-    const pickButton = screen.getByTestId('fake-spawn-pick');
-    pickButton.click();
+    // fireEvent.click — raw .click() bypasses React's batching and
+    // causes `act(...)` warnings (senior-review round 4).
+    fireEvent.click(screen.getByTestId('fake-spawn-pick'));
 
+    // Wait for the effect that fires the `selectProviderForMesh`
+    // await to settle — the modal closes synchronously inside
+    // `handleSelect` (before the await), but the spy assertion
+    // happens after the microtask. waitFor drains the queue so
+    // React commits and the spy sees the call.
+    await waitFor(() => {
+      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', true);
+    });
     expect(useUIStore.getState().canvasSpawnMenuMeshId).toBeNull();
-    await Promise.resolve();
-    // useWorktree is the 5th arg. With MESH.use_worktree=true and
-    // altKey=false, the call forwards the mesh's configured default
-    // (the senior-review fix: passing `altKey` directly would force
-    // every plain spawn to `useWorktree: false`, ignoring the mesh
-    // configuration).
-    expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', true);
   });
 
   it('alt+click toggles the worktree override against the mesh default', async () => {
@@ -159,9 +186,10 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
 
     render(<CanvasSpawnMenu meshId={MESH.id} />);
 
-    screen.getByTestId('fake-spawn-pick-alt').click();
-    await Promise.resolve();
+    fireEvent.click(screen.getByTestId('fake-spawn-pick-alt'));
     // MESH.use_worktree = true; altKey = true → invert → false
-    expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false);
+    await waitFor(() => {
+      expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false);
+    });
   });
 });

@@ -42,29 +42,16 @@ export interface CanvasEmptyStateInput {
   totalNodeCount: number;
   /** Nodes inside the active scope (mesh/all/filtered) BEFORE the
    *  grid controls narrow it. 0 means the scope is genuinely empty —
-   *  the "selected empty mesh" branch keys off this for 'mesh' view.
-   *  For 'single', this is the resolved scope's size (`lastNonSingleMode`
-   *  fallback) so a soloed empty mesh reports 0 even when other
-   *  meshes have nodes. */
+   *  the "selected empty mesh" branch keys off this for 'mesh' view. */
   scopedCount: number;
   /** Nodes the active scope actually shows. 0 while `scopedCount` > 0
-   *  drives `filters-exclude-all`. For 'single' the count is 0 when
-   *  there's no soloable node AND `scopedCount` > 0 — that case
-   *  routes to a dedicated `single-no-candidate` branch (same UX as
-   *  Pinned-empty) rather than the misleading "Clear filters" CTA. */
+   *  drives `filters-exclude-all`. */
   filteredCount: number;
-  /** The active view mode, including 'single'. The input accepts
-   *  'single' so the classifier can route the genuine single-mode
-   *  no-candidate case instead of faking through `lastNonSingleMode`
-   *  — which made `filteredCount === 0` always true and tripped the
-   *  `filters-exclude-all` branch even with no filter active
-   *  (senior-review finding). */
+  /** The active view mode. */
   viewMode: ViewMode;
   /** The sidebar's selected mesh id, or `null` when none is selected.
    *  Required (not assumed!) for the `selected-empty` branch. The
-   *  classifier reads this field explicitly and re-routes to
-   *  `all-empty` when viewMode is `mesh` but no mesh is actually
-   *  selected (e.g. the active node's mesh fallback wasn't enough). */
+   *  classifier reads this field explicitly. */
   selectedMeshId: number | null;
   /** Whether ANY non-terminal harness is reachable (issue #822).
    *  Drives the "Setup" routing when the user has no usable agent. */
@@ -111,45 +98,40 @@ interface CanvasEmptyStateProps {
  *  future caller adding a branch only edits one switch instead of
  *  re-nesting an inline ternary in the render.
  *
- * Decision order matters (issue #1536):
- *   1. Pinned always wins — its dedicated CTA swaps view mode, which
- *      would be wrong if the user landed here because of a filter.
- *   2. Single-mode-with-no-candidate wins next — the solo view has
- *      no node to display (the active node was deleted or the
- *      fallback scope is empty), and routing to filters-exclude-all
- *      would falsely suggest "Clear filters" when no filters are
- *      active in Single mode. Same UX as Pinned-empty: a "View All
- *      Nodes" CTA is the natural escape.
- *   3. "No meshes" wins next — the canonical Mesh Create CTA must be
- *      reachable even when the user has nodes in a mesh that was
- *      deleted out from under them.
- *   4. "Selected mesh is empty" — view mode is mesh AND that mesh has
- *      zero nodes AND the user explicitly picked it (selectedMeshId
- *      is set). Distinct from "all meshes empty" because the user
- *      has a place to spawn into.
- *   5. "All meshes empty" — meshes exist but zero nodes globally. The
- *      CTA still offers a spawn action because at least one mesh is
- *      wired up; it just has no agents yet.
- *   6. "Filters exclude all" — there ARE nodes, just none that match
- *      the active controls. The way out is `onClearFilters`, NOT
- *      adding meshes or spawning (issue #1609 mirrors this for the
- *      dedicated Filtered view; #1536 generalises it).
+ * Decision order matters (issue #1536, senior-review round 4):
+ *   1. "No meshes" wins first — regardless of view mode. A
+ *      brand-new user with zero meshes in Pinned mode would
+ *      otherwise see "No pinned nodes. Pin agents from any mesh"
+ *      even though they have no meshes to pin into. The
+ *      application-level "no meshes" CTA (New mesh) is the only
+ *      branch that addresses every "no meshes" state regardless of
+ *      how the user got there.
+ *   2. Pinned wins next — its dedicated CTA swaps view mode, which
+ *      is the right escape when the user has meshes but nothing
+ *      pinned.
+ *   3. "Selected mesh is empty" — view mode is mesh AND that mesh
+ *      has zero nodes AND the user explicitly picked it
+ *      (selectedMeshId is set). Distinct from "all meshes empty"
+ *      because the user has a place to spawn into.
+ *      `scopeNodesForMode` (viewModes.ts) falls back to the active
+ *      node's mesh, then to the first mesh — so the mesh-with-no-
+ *      selection case is unreachable in production. The classifier
+ *      routes only the explicit-selection case to `selected-empty`;
+ *      a mesh-view-with-fallback-scope renders through to the
+ *      `filters-exclude-all` branch via the existing checks below.
+ *   4. "All meshes empty" — meshes exist but zero nodes globally.
+ *      The CTA still offers a spawn action because at least one
+ *      mesh is wired up; it just has no agents yet.
+ *   5. "Filters exclude all" — there ARE nodes, just none that
+ *      match the active controls. The way out is `onClearFilters`,
+ *      NOT adding meshes or spawning (issue #1609 mirrors this for
+ *      the dedicated Filtered view; #1536 generalises it).
  */
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
-  if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
   if (input.meshCount === 0) return { branch: 'no-meshes' };
-  // Mesh view with `scopedCount === 0` and an explicit sidebar
-  // selection is the canonical "selected empty mesh" — the user
-  // picked a mesh and it has no agents. When the selection is null
-  // (scope fell back to the active node's mesh / first mesh), the
-  // "no agents in this mesh" CTA is misleading (the user never
-  // picked a mesh in the sidebar). Re-route to `all-empty` so the
-  // SPAWN CTA opens the global Spawn Menu — the caller resolves the
-  // target mesh id, same fallback the sidebar's `+ ▾` uses.
-  if (input.viewMode === 'mesh' && input.scopedCount === 0) {
-    return input.selectedMeshId !== null
-      ? { branch: 'selected-empty', meshId: input.selectedMeshId }
-      : { branch: 'all-empty' };
+  if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
+  if (input.viewMode === 'mesh' && input.scopedCount === 0 && input.selectedMeshId !== null) {
+    return { branch: 'selected-empty', meshId: input.selectedMeshId };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
   if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };
@@ -158,12 +140,6 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
   // a clear next step rather than the silent splash.
   return { branch: 'filters-exclude-all' };
 }
-
-// String-literal branch alias so callers can pattern-match by
-// branch name without reaching through `.branch`. Mirrors
-// `CanvasEmptyDecision['branch']` — any future branch must add
-// itself here too.
-export type CanvasEmptyBranch = CanvasEmptyDecision['branch'];
 
 /** The shared shell — centered, max-w-sm, heading + body + accent-cyan
  *  CTA. Mirrors the existing splash + Pinned/Filtered empty-state

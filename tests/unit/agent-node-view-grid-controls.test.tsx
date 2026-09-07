@@ -315,6 +315,17 @@ describe('AgentNodeView grid controls', () => {
 
     expect(screen.getByText('No nodes match')).toBeTruthy();
     expect(screen.getByTestId('canvas-empty-clear-filters')).toBeTruthy();
+
+    // Senior-review round 4: production-boundary check — the CTA
+    // must actually clear filters, not just render the button.
+    // Pre-round-4 the assertion stopped at `toBeTruthy()` and
+    // pinned the "paper-tiger" behaviour: the button rendered but
+    // was never exercised, so a regression could detach the click
+    // handler without any test failing.
+    fireEvent.click(screen.getByTestId('canvas-empty-clear-filters'));
+    expect(useUIStore.getState().gridSearchQuery).toBe('');
+    expect(useUIStore.getState().gridProviderFilter).toBeNull();
+    expect(useUIStore.getState().gridStatusFilter).toBeNull();
   });
 
   // Issue #1536 — pre-#1536 the test below pinned the misleading
@@ -333,6 +344,13 @@ describe('AgentNodeView grid controls', () => {
     expect(screen.queryByTestId('grid-output')).toBeNull();
     expect(screen.getByText('Buildmesh')).toBeTruthy();
     expect(screen.getByTestId('canvas-empty-create-mesh')).toBeTruthy();
+
+    // Senior-review round 4: the New Mesh CTA must actually open
+    // the modal (App.tsx gates the `<MeshCreateModal>` mount on
+    // `createMeshOpen`). The previous assertion only checked the
+    // button existed, never that pressing it opened anything.
+    fireEvent.click(screen.getByTestId('canvas-empty-create-mesh'));
+    expect(useUIStore.getState().createMeshOpen).toBe(true);
   });
 
   it('renders the all-empty branch when meshes exist but no nodes (#1536)', () => {
@@ -351,6 +369,16 @@ describe('AgentNodeView grid controls', () => {
     expect(screen.queryByTestId('grid-output')).toBeNull();
     expect(screen.queryByText('Buildmesh')).toBeNull();
     expect(screen.getByText('No agents yet')).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-spawn-agent')).toBeTruthy();
+
+    // Senior-review round 4: exercise the spawn CTA. The
+    // `CanvasEmptyStateContainer`'s `onOpenSpawnMenu` callback
+    // resolves the target mesh id with the documented fallback
+    // chain (caller-supplied → sidebar selection → first mesh) — a
+    // regression that breaks the fallback would no longer ship
+    // unnoticed.
+    fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
+    expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(1);
   });
 
   it('renders the selected-empty branch when the selected mesh has no nodes (#1536)', () => {

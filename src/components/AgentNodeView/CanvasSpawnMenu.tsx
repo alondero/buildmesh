@@ -157,11 +157,15 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
       <GroupedProviderMenu
         providers={providerList}
         onSelect={handleSelect}
-        // `Modal` already owns Escape / backdrop close — disable the
-        // menu's own Escape path so we don't double-fire (the menu's
-        // hook also has Tab-leave behaviour that conflicts with the
-        // Modal's focus trap).
-        onClose={close}
+        // Don't pass `onClose` here. `GroupedProviderMenu`'s
+        // `useAriaMenu` hook (issue #837) binds Escape AND Tab to
+        // `onClose` — Tab-in-menu would UNMOUNT THE WHOLE modal
+        // instead of tabbing to the close button / cycling focus
+        // inside the menu. The parent `<Modal>` already owns Escape
+        // and backdrop close (issue #808). Senior-review round 4
+        // caught the previous "disable the menu's own Escape path"
+        // comment claiming the opposite of what `onClose={close}`
+        // actually did.
       />
     </Modal>
   );

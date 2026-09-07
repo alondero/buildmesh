@@ -62,16 +62,26 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
   // the renderer) is the type-safe shape.
   const branch = (i: Parameters<typeof classifyCanvasEmpty>[0]) => classifyCanvasEmpty(i).branch;
 
-  it('returns pinned-empty whenever the view mode is pinned', () => {
-    expect(branch(input({ viewMode: 'pinned', meshCount: 0 }))).toBe('pinned-empty');
-    expect(branch(input({ viewMode: 'pinned', meshCount: 5, totalNodeCount: 3 }))).toBe('pinned-empty');
+  // Senior-review round 4: the precedence is now
+  //   no-meshes → pinned → selected-empty → all-empty → filters-exclude-all
+  // (no-meshes wins over pinned, brand-new user with 0 meshes in
+  // pinned mode gets the New mesh CTA, not the "Pin agents from any
+  // mesh" CTA which doesn't apply).
+  it('no-meshes wins over pinned for a fresh user (0 meshes in pinned mode)', () => {
+    expect(branch(input({ viewMode: 'pinned', meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 0, totalNodeCount: 3 }))).toBe('no-meshes');
   });
 
-  it('returns no-meshes when no meshes exist (regardless of nodes)', () => {
+  it('pinned wins next — meshes exist but user is in pinned mode', () => {
+    expect(branch(input({ viewMode: 'pinned', meshCount: 5, totalNodeCount: 3 }))).toBe('pinned-empty');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 1, totalNodeCount: 0 }))).toBe('pinned-empty');
+  });
+
+  it('no-meshes wins over everything when meshCount is 0', () => {
     expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
-    // Defensive — orphan nodes shouldn't be possible, but if they
-    // were, no-meshes still wins so the user can add a mesh to host them.
     expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'mesh', meshCount: 0 }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'filtered', meshCount: 0, gridSearchQuery: 'x' }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
@@ -84,24 +94,16 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(decision.branch === 'selected-empty' && decision.meshId).toBe(42);
   });
 
-  it('re-routes to all-empty when viewMode=mesh but no mesh is selected (active-node-mesh fallback)', () => {
+  it('mesh view without an explicit selection does NOT route to selected-empty (active-node-mesh fallback is unreachable)', () => {
+    // `scopeNodesForMode` falls back to agentNodes[0].mesh_id when
+    // selectedMeshId is null, so `scopedCount` is non-zero whenever
+    // any agent exists. The mesh-without-selection + scopedCount=0
+    // input is unreachable in production; the classifier correctly
+    // routes through to other branches (filters-exclude-all when
+    // filteredCount=0 and totalNodeCount>0).
     expect(
       branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null })),
-    ).toBe('all-empty');
-  });
-
-  it('mesh view with empty scope AND no selection AND zero nodes globally → all-empty', () => {
-    expect(
-      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null })),
-    ).toBe('all-empty');
-  });
-
-  it('mesh view with empty scope AND no selection AND a stale search filter → still all-empty (not filters-exclude-all)', () => {
-    expect(
-      branch(
-        input({ viewMode: 'mesh', scopedCount: 0, filteredCount: 0, totalNodeCount: 3, selectedMeshId: null }),
-      ),
-    ).toBe('all-empty');
+    ).toBe('filters-exclude-all');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
@@ -116,14 +118,6 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(
       branch(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
     ).toBe('filters-exclude-all');
-  });
-
-  it('returns pinned-empty even when scope has nodes in pinned mode', () => {
-    // Pinned branch wins first regardless of node counts.
-    const decision = classifyCanvasEmpty(
-      input({ viewMode: 'pinned', scopedCount: 5, filteredCount: 0, totalNodeCount: 5 }),
-    );
-    expect(decision.branch).toBe('pinned-empty');
   });
 });
 
@@ -160,21 +154,27 @@ describe('CanvasEmptyState (issue #1536)', () => {
     expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(42);
   });
 
-  it('mesh view without a selection: renders all-empty (not selected-empty)', () => {
-    // Regression for the senior-review cast bug: mesh view with no
-    // selection must NOT render the "no agents in this mesh" CTA.
-    const cbs = { ...noopCallbacks, onOpenSpawnMenu: vi.fn() };
+  it('mesh view with selectedMeshId=null surfaces filters-exclude-all when nodes exist', () => {
+    // Senior-review round 4: the previous mesh-without-selection
+    // branch rendered "No agents yet" while 3 agents existed — a
+    // blatant lie. The branch is gone; this case routes through to
+    // `filters-exclude-all` (the documented "Clear filters" CTA),
+    // which is at least truthful even though it assumes a filter
+    // is active when it isn't (the input classifier only knows
+    // `filteredCount` — the caller's grid controls know whether
+    // filters are active, but that's not part of the input shape).
+    const cbs = { ...noopCallbacks, onClearFilters: vi.fn(), onOpenSpawnMenu: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, viewMode: 'mesh', selectedMeshId: null })}
+        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 3, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
         callbacks={cbs}
       />,
     );
 
     expect(screen.queryByText('No agents in this mesh')).toBeNull();
-    expect(screen.getByText('No agents yet')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('canvas-empty-spawn-agent'));
-    expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(null);
+    expect(screen.queryByText('No agents yet')).toBeNull();
+    expect(screen.getByText('No nodes match')).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-clear-filters')).toBeTruthy();
   });
 
   it('filters-exclude-all branch: Clear search & filters CTA fires onClearFilters', () => {
