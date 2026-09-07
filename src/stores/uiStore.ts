@@ -364,6 +364,24 @@ interface UIState extends GridControls {
   openRemoteAccess: () => void;
   closeRemoteAccess: () => void;
 
+  // ---- Canvas empty-state modals (issue #1536) ----
+  // The Mesh Create modal lives in `Sidebar` today (a local `useState`
+  // gates its mount); the canvas empty state needs to summon the same
+  // modal but isn't in the Sidebar's render tree. These two flags are the
+  // shared signal so the Sidebar can react to a canvas-driven open and
+  // the App shell can mount a canvas-level Spawn Menu. Mirrors the
+  // existing `appSettingsOpen` / `openAppSettings` discipline — state +
+  // idempotent actions, rendering decided by the owning component.
+  canvasCreateMeshOpen: boolean;
+  openCanvasCreateMesh: () => void;
+  closeCanvasCreateMesh: () => void;
+  // The mesh whose spawn menu the canvas is requesting, or null when
+  // closed. The App shell mounts the canvas Spawn Menu dialog against
+  // this id; passing `null` closes the dialog.
+  canvasSpawnMenuMeshId: number | null;
+  openCanvasSpawnMenu: (meshId: number) => void;
+  closeCanvasSpawnMenu: () => void;
+
   // Agent node currently under an OS file-drag, or null. Drives the terminal
   // "drop file to paste path" overlay; set by the window-level drop listener.
   dragTargetNodeId: number | null;
@@ -557,6 +575,13 @@ export const useUIStore = create<UIState>((set, get) => {
     closeRemoteAccess: () => {
       set({ remoteAccessOpen: false });
     },
+
+    canvasCreateMeshOpen: false,
+    openCanvasCreateMesh: () => set({ canvasCreateMeshOpen: true }),
+    closeCanvasCreateMesh: () => set({ canvasCreateMeshOpen: false }),
+    canvasSpawnMenuMeshId: null,
+    openCanvasSpawnMenu: (meshId) => set({ canvasSpawnMenuMeshId: meshId }),
+    closeCanvasSpawnMenu: () => set({ canvasSpawnMenuMeshId: null }),
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
     // probeOpen = true`. Call sites stay one-liners; the inspector's close

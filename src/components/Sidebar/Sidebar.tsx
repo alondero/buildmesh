@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -63,6 +63,21 @@ export function Sidebar() {
   // single source of truth.
   const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
   const [createMeshOpen, setCreateMeshOpen] = useState(false);
+  // Issue #1536 — the canvas empty state needs to summon this same
+  // modal but lives outside the Sidebar's render tree. The store flag
+  // is the shared signal; when it flips true (from the canvas), we
+  // mirror it into the local open-state the modal mount already keys
+  // on. When the modal closes, the owner-side signal has to be cleared
+  // too so a re-open isn't a silent no-op.
+  const canvasCreateMeshOpen = useUIStore((s) => s.canvasCreateMeshOpen);
+  const closeCanvasCreateMesh = useUIStore((s) => s.closeCanvasCreateMesh);
+  useEffect(() => {
+    if (!canvasCreateMeshOpen) return;
+    setCreateMeshOpen(true);
+    closeCanvasCreateMesh();
+    // Only react to flag edges; the close-callback is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasCreateMeshOpen]);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).

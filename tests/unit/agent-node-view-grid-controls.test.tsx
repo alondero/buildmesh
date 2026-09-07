@@ -13,6 +13,7 @@ import type { AgentNode } from '../../src/stores/agentNodeStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
+import type { Mesh } from '../../src/types/generated/Mesh';
 
 vi.mock('../../src/components/AgentNodeView/NodeCard', () => ({
   // Issue #1384 — NodeCard now subscribes per-id via `state.nodesById[nodeId]`
@@ -43,6 +44,28 @@ vi.mock('../../src/components/AgentNodeView/GridSplitter', () => ({
       ))}
     </div>
   ),
+}));
+
+// Issue #1536 — `AgentNodeView` now reads `useProviderList` to compute
+// the canvas empty-state's `harnessReady` flag. The shared cache loads
+// via the mocked `listProviders` IPC, which returns `[]` in the test
+// environment; without overriding the mock, every empty-state branch
+// would land on the "no harness, route to Settings" CTA, which is the
+// wrong assertion surface for branches like "selected-empty + harness
+// ready" — those tests need the Spawn-agent CTA. `__reset…` clears the
+// module snapshot so the mock applies mid-test.
+vi.mock('../../src/hooks/useProviderList', () => ({
+  useProviderList: () => [{
+    id: 'claude',
+    label: 'Claude Code',
+    icon: '',
+    harness_id: 'claude',
+    provider_id: 'claude',
+    is_proxied: false,
+    group_key: 'claude',
+    resumable: true,
+  }],
+  __resetSharedProviderListForTests: () => undefined,
 }));
 
 import { AgentNodeView } from '../../src/components/AgentNodeView/AgentNodeView';
@@ -266,21 +289,85 @@ describe('AgentNodeView grid controls', () => {
     expect(renderedNodeIds()).toEqual([2, 3, 4, 1]);
   });
 
-  it('renders the Filtered empty state when no node matches (#1609)', () => {
-    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'no such node' });
+  // Issue #1536 — the legacy "Filtered empty state" had its own
+  // component (issue #1609) that this test pinned. Post-#1536 the
+  // unified CanvasEmptyState fires the `filters-exclude-all` branch
+  // when there are meshes + nodes + an active filter that excludes
+  // every node. The previous test didn't seed any meshes, so the
+  // classifier's no-meshes branch won instead — that's actually the
+  // correct precedence (no-meshes is more specific than
+  // filters-exclude-all) but it tested the wrong branch. The new
+  // assertion seeds a mesh + nodes + a filter and exercises the
+  // "no nodes match" CTA the spec calls for.
+  it('renders the filters-exclude-all branch when a filter excludes every node (#1536)', () => {
+    const meshOnly = { id: 1, name: 'Repo', path: '/r' } as Mesh;
+    useMeshStore.setState({
+      meshes: [meshOnly],
+      meshesById: new Map([[1, meshOnly]]),
+    });
+    useUIStore.setState({
+      viewMode: 'filtered',
+      lastNonSingleMode: 'filtered',
+      gridSearchQuery: 'no such node',
+    });
 
     render(<AgentNodeView />);
 
-    expect(screen.getByText('No matching nodes')).toBeTruthy();
+    expect(screen.getByText('No nodes match')).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-clear-filters')).toBeTruthy();
   });
 
-  it('renders the normal splash when the ALL grid is empty of nodes', () => {
+  // Issue #1536 — pre-#1536 the test below pinned the misleading
+  // "ALL empty of nodes → Buildmesh splash with Add Mesh" behavior.
+  // Post-#1536 the same input (no nodes anywhere, no meshes) must
+  // render the no-meshes branch of CanvasEmptyState, which still
+  // offers the New Mesh CTA. The legacy `meshStore.addMesh()` direct
+  // call is gone — the New Mesh button goes through the uiStore
+  // action that the Sidebar subscribes to.
+  it('renders the no-meshes branch when there are no nodes AND no meshes', () => {
     seedAgentNodes([], null);
+    useMeshStore.setState({ meshes: [], meshesById: new Map() });
 
     render(<AgentNodeView />);
 
     expect(screen.queryByTestId('grid-output')).toBeNull();
     expect(screen.getByText('Buildmesh')).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-create-mesh')).toBeTruthy();
+  });
+
+  it('renders the all-empty branch when meshes exist but no nodes (#1536)', () => {
+    seedAgentNodes([], null);
+    // A mesh exists but no nodes are loaded — the legacy test would
+    // still have rendered the "Add Mesh" splash here. Post-#1536 this
+    // is a distinct branch with a Spawn-agent CTA.
+    const meshOnly = { id: 1, name: 'Repo', path: '/r' } as Mesh;
+    useMeshStore.setState({
+      meshes: [meshOnly],
+      meshesById: new Map([[1, meshOnly]]),
+    });
+
+    render(<AgentNodeView />);
+
+    expect(screen.queryByTestId('grid-output')).toBeNull();
+    expect(screen.queryByText('Buildmesh')).toBeNull();
+    expect(screen.getByText('No agents yet')).toBeTruthy();
+  });
+
+  it('renders the selected-empty branch when the selected mesh has no nodes (#1536)', () => {
+    seedAgentNodes([], null);
+    const meshOnly = { id: 1, name: 'Empty Repo', path: '/r' } as Mesh;
+    useMeshStore.setState({
+      selectedMeshId: 1,
+      meshes: [meshOnly],
+      meshesById: new Map([[1, meshOnly]]),
+    });
+    useUIStore.setState({ viewMode: 'mesh' });
+
+    render(<AgentNodeView />);
+
+    expect(screen.queryByTestId('grid-output')).toBeNull();
+    expect(screen.getByText('No agents in this mesh')).toBeTruthy();
+    expect(screen.getByTestId('canvas-empty-spawn-agent')).toBeTruthy();
   });
 
   it('disables manual drag-and-drop while a non-custom sort is active', () => {

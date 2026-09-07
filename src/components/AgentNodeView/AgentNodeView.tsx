@@ -7,10 +7,9 @@ import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../store
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore, type NonSingleViewMode } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
-import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
-import { resolveSingleNode } from '../../lib/viewModes';
+import { resolveSingleNode, scopeNodesForMode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
@@ -20,6 +19,9 @@ import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
+import { CanvasEmptyState } from './CanvasEmptyState';
+import { useProviderList } from '../../hooks/useProviderList';
+import { hasSpawnableAgent } from '../../lib/groups';
 
 const MIN_PANE_PERCENT = 15;
 
@@ -125,114 +127,28 @@ function ResizablePanes({ nodes, activityMembersByRoot, draggable = true }: Resi
   );
 }
 
-/// Empty state for Mesh Grid / All Nodes / Single when the scope has no
-/// nodes — the original "Add Mesh" splash. The shortcut rows source from
-/// SHORTCUT_CATALOG (issue #748) so catalog edits propagate here.
-function NoNodesSplash() {
-  return (
-    <div className="flex-1 flex items-center justify-center text-text-muted">
-      <div className="text-center max-w-sm">
-        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
-        <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your meshes. Add a mesh pointing at a Git repository, then spawn agents to work in parallel.</p>
-        <button
-          onClick={() => useMeshStore.getState().addMesh()}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-          </svg>
-          Add Mesh
-        </button>
-        <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
-          {/* Issue #748: the splash now sources its rows from
-              SHORTCUT_CATALOG (entries flagged `splash: true`) instead
-              of hand-coding five inline strings. A future catalog edit
-              (e.g. renaming `?` to `Ctrl+/`) now propagates here
-              automatically — the previous hand-coded version would
-              silently drift.
+// The legacy `NoNodesSplash` ("Add Mesh" splash) was removed in #1536
+// and replaced by the `no-meshes` branch of `CanvasEmptyState` — same
+// catalogue rows, context-aware CTA wiring. The dedicated
+// `PinnedEmptyState` (below) stays exported because the standalone
+// `pinned-empty-state.test.tsx` pins its contract.
 
-              Modifier prefix follows the platform convention used
-              elsewhere (Terminal.tsx context menu, README): ⌘ on macOS,
-              Ctrl on Windows/Linux. The arrow glyphs (←/→/↑/↓) read
-              identically across platforms and match the key names
-              bound by Tauri's global-shortcut plugin.
-
-              Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
-              maximize/restore toggle. Listed here so users discover it
-              before they ever open a mesh. */}
-          {SHORTCUT_CATALOG.filter(e => e.splash).map(entry => (
-            <p key={entry.action}>
-              <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
-                {shortcutLabel(entry)}
-              </kbd>
-              {' '}{entry.description}
-            </p>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/// Empty state for the Filtered view (issue #1609) when no node matches the
-/// active Grid Controls. Mirrors the Pinned empty state's structure
-/// (centered, max-w-sm, heading + body) but the call to action is "Clear
-/// filters" — the way out is relaxing the search/filters, not switching
-/// scopes. The CTA routes through the store action so the cleared set also
-/// persists (the same contract `resetGridControls` tests pin).
-export function FilteredEmptyState() {
-  const resetGridControls = useUIStore(state => state.resetGridControls);
-  return (
-    <div className="flex-1 flex items-center justify-center text-text-muted">
-      <div className="text-center max-w-sm">
-        <svg
-          className="mx-auto mb-4 w-8 h-8 text-text-muted"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-        </svg>
-        <p className="text-xl mb-2 text-text-primary font-sans font-semibold">No matching nodes</p>
-        <p className="text-sm text-text-secondary mb-6 font-sans">
-          No node name matches the current search. Clear it to see every node again.
-        </p>
-        <button
-          onClick={resetGridControls}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-            <line x1="22" y1="3" x2="2" y2="3" />
-          </svg>
-          {/* Labelled "Clear search": the provider/status filters this reset
-              also clears have no setter UI yet (#997 owns the popover), so
-              the label must not advertise controls the user never set. */}
-          Clear search
-        </button>
-      </div>
-    </div>
-  );
-}
 
 /// Empty state for Pinned Grid mode with 0 pinned nodes (wayfinder #982 /
 /// ticket #986). Mirrors the splash's structure (centered, max-w-sm,
 /// heading + body + accent-cyan CTA) but the call to action is "View All
 /// Nodes" — the natural next step when nothing is pinned yet. Pin afford-
 /// ances live in the node header and the sidebar node context menu (#985).
-/** Mode-aware grid empty state (ticket #986, #1609). A function over the
- *  mode rather than inline ternaries in the render body — the mode→element
- *  mapping reads as a table, and adding a mode means adding a row, not
- *  re-nesting a conditional. */
-function gridEmptyState(mode: NonSingleViewMode) {
-  if (mode === 'pinned') return <PinnedEmptyState />;
-  if (mode === 'filtered') return <FilteredEmptyState />;
-  return <NoNodesSplash />;
-}
+//
+// The dedicated `FilteredEmptyState` (#1609) was folded into the
+// `filters-exclude-all` branch of `CanvasEmptyState` (issue #1536) and
+// removed; the legacy `PinnedEmptyState` stays exported because the
+// standalone `pinned-empty-state.test.tsx` pins its contract.
+//
+// The legacy `gridEmptyState` mode dispatcher (issues #986 / #1609) was
+// also replaced by the context-aware `CanvasEmptyState` (#1536); the
+// dispatcher is gone but the underlying components above are preserved
+// for the standalone tests.
 
 export function PinnedEmptyState() {
   const setViewMode = useUIStore(state => state.setViewMode);
@@ -518,6 +434,67 @@ export function AgentNodeView() {
     setDropIntent(null);
   };
 
+  // Issue #1536 — the inputs `CanvasEmptyState` needs to pick a branch
+  // are derived from the same sources as `visibleNodes`, but the
+  // distinction between "scope is empty" and "filters excluded
+  // everything" demands we read the pre-filter scope count separately.
+  // `scopeNodesForMode` ignores `controls` for non-'filtered' modes,
+  // and for 'filtered' it gives the unfiltered pool (because we pass
+  // NO_FILTERS-shaped controls by omitting the arg — `controls` is
+  // applied at the `matchesGridControls` call INSIDE
+  // `scopeNodesForMode`, so omitting the arg falls back to the empty
+  // controls exported from viewModes.ts). That gives us the right
+  // "what's in this view's scope, ignoring search" answer for every
+  // non-Single mode.
+  const meshesCount = useMeshStore((s) => s.meshes.length);
+  const providerList = useProviderList();
+  const harnessReady = useMemo(() => hasSpawnableAgent(providerList), [providerList]);
+  const scopedCount = useMemo(() => {
+    if (viewMode === 'single') return 0;
+    return scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId).length;
+  }, [viewMode, agentNodes, selectedMeshId, activeNodeId]);
+
+  // Issue #1536 — the canvas empty-state callbacks. Each one is a
+  // thin store-action shim so the empty-state component stays pure
+  // (no direct store access, easy to unit-test). `onOpenSpawnMenu`
+  // carries the selected mesh id when known — the App-scope
+  // `CanvasSpawnMenu` modal resolves `null` to the sidebar's current
+  // selection, falling back to the first mesh (matches the sidebar's
+  // `+ ▾` default).
+  const emptyStateInput = useMemo(
+    () => ({
+      meshCount: meshesCount,
+      totalNodeCount: agentNodes.length,
+      scopedCount,
+      filteredCount: visibleNodes.length,
+      viewMode: (viewMode === 'single' ? lastNonSingleMode : viewMode) as NonSingleViewMode,
+      harnessReady,
+    }),
+    [meshesCount, agentNodes.length, scopedCount, visibleNodes.length, viewMode, lastNonSingleMode, harnessReady],
+  );
+  const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
+  const openCanvasSpawnMenu = useUIStore((s) => s.openCanvasSpawnMenu);
+  const resetGridControls = useUIStore((s) => s.resetGridControls);
+  const openAppSettings = useUIStore((s) => s.openAppSettings);
+  const setViewMode = useUIStore((s) => s.setViewMode);
+  const emptyStateCallbacks = useMemo(
+    () => ({
+      onCreateMesh: openCanvasCreateMesh,
+      onOpenSpawnMenu: (meshId: number | null) => {
+        // Fall back to the sidebar's selection when the empty state
+        // didn't pass a mesh id — that's the 'all-empty' case where
+        // no specific mesh was selected in the canvas but the user
+        // IS scoped to one in the sidebar.
+        const target = meshId ?? useMeshStore.getState().selectedMeshId ?? useMeshStore.getState().meshes[0]?.id ?? null;
+        if (target !== null) openCanvasSpawnMenu(target);
+      },
+      onClearFilters: resetGridControls,
+      onOpenSetup: openAppSettings,
+      onViewAll: () => setViewMode('all'),
+    }),
+    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode],
+  );
+
   return (
     <div className="relative flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
       {/* Center Workspace Diff Overlay (#379) — covers the terminal grid with a
@@ -542,7 +519,8 @@ export function AgentNodeView() {
         <div className="flex-1 flex overflow-hidden">
           {viewMode === 'single' ? (
             // Single solos one node; with no nodes at all (singleNode null)
-            // the shared splash is the only sensible empty state.
+            // the context-aware CanvasEmptyState picks the right branch
+            // (issue #1536).
             singleNode ? (
               <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
                 <NodeCard
@@ -554,13 +532,22 @@ export function AgentNodeView() {
                 />
               </div>
             ) : (
-              <NoNodesSplash />
+              <CanvasEmptyState
+                input={emptyStateInput}
+                callbacks={emptyStateCallbacks}
+                selectedMeshId={selectedMeshId}
+              />
             )
           ) : visibleNodes.length === 0 ? (
-            // Empty states are mode-aware (ticket #986): Pinned explains
-            // pinning and offers All Nodes, Filtered offers clearing the
-            // search (#1609); mesh/all keep the splash.
-            gridEmptyState(viewMode)
+            // Issue #1536 — one context-aware empty state covers all four
+            // cases (no meshes / selected empty / all empty / filters
+            // exclude all / pinned). The previous ternary chain conflated
+            // no-mesh and no-node and offered "Add Mesh" for both.
+            <CanvasEmptyState
+              input={emptyStateInput}
+              callbacks={emptyStateCallbacks}
+              selectedMeshId={selectedMeshId}
+            />
           ) : visibleNodes.length <= 2 ? (
             <ResizablePanes
               nodes={visibleNodes}

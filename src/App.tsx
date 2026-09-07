@@ -16,6 +16,7 @@ import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
+import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -707,6 +708,7 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
+      <CanvasSpawnMenu />
       <WindowCloseGuard />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => useUIStore.getState().closeCheatsheet()} />
       {/* Universal Command Omnibar (issue #1411). Same mount/unmount
