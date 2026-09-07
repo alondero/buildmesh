@@ -99,9 +99,7 @@ pub enum AutopilotCompatibilityReason {
     /// Harness. Covers hand-edited `preferences.json`, future harness
     /// un-installs leaving stale selections, and any third-party composite
     /// id the user typed in directly.
-    UnknownHarness {
-        harness_id: String,
-    },
+    UnknownHarness { harness_id: String },
 
     /// The harness is a plain shell (Terminal) — there is no LLM agent
     /// loop, so the entire Autopilot pipeline has nothing to drive.
@@ -110,9 +108,7 @@ pub enum AutopilotCompatibilityReason {
     /// The harness has neither an attention hook nor a supported passive
     /// transcript watcher, so the turn-driven Autopilot pipeline
     /// (`autopilot::pipeline::on_turn`) never fires for its nodes.
-    MissingAttentionHook {
-        harness_id: String,
-    },
+    MissingAttentionHook { harness_id: String },
 
     /// The mesh disabled worktrees (`meshes.use_worktree = 0`). Autopilot
     /// forces worktree usage on every spawn (the wrap-up PR needs a real
@@ -377,11 +373,7 @@ mod tests {
     /// precedence over the Mesh default when determining compatibility").
     #[test]
     fn resolve_explicit_autopilot_wins_over_mesh_default() {
-        let r = resolve_autopilot_spawn_option(
-            Some("codex"),
-            Some("claude"),
-            Some("agy"),
-        );
+        let r = resolve_autopilot_spawn_option(Some("codex"), Some("claude"), Some("agy"));
         assert_eq!(r.spawn_option, "codex");
         assert_eq!(r.harness_id, "codex");
         assert!(r.explicit_autopilot_provider);
@@ -394,11 +386,7 @@ mod tests {
     /// is not the same as "explicitly empty" — it falls through.
     #[test]
     fn resolve_whitespace_explicit_falls_through_to_mesh_default() {
-        let r = resolve_autopilot_spawn_option(
-            Some("   "),
-            Some("claude"),
-            None,
-        );
+        let r = resolve_autopilot_spawn_option(Some("   "), Some("claude"), None);
         assert_eq!(r.spawn_option, "claude");
         assert_eq!(r.harness_id, "claude");
         assert!(
@@ -433,11 +421,7 @@ mod tests {
     /// label still shows "Claude Code · MiniMax" on the UI).
     #[test]
     fn resolve_proxied_provider_splits_harness_and_preserves_provider() {
-        let r = resolve_autopilot_spawn_option(
-            Some("claude:minimax"),
-            None,
-            None,
-        );
+        let r = resolve_autopilot_spawn_option(Some("claude:minimax"), None, None);
         assert_eq!(r.spawn_option, "claude:minimax");
         assert_eq!(r.harness_id, "claude");
         assert!(r.explicit_autopilot_provider);
@@ -455,15 +439,27 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("claude"), Some("anthropic"));
         assert_eq!(resolve_harness_adapter_id("anthropic"), Some("anthropic"));
         assert_eq!(resolve_harness_adapter_id("Claude"), Some("anthropic"));
-        assert_eq!(resolve_harness_adapter_id("  ANTHROPIC  "), Some("anthropic"));
+        assert_eq!(
+            resolve_harness_adapter_id("  ANTHROPIC  "),
+            Some("anthropic")
+        );
     }
 
     #[test]
     fn resolve_harness_adapter_id_maps_commandcode_and_aliases() {
-        assert_eq!(resolve_harness_adapter_id("commandcode"), Some("commandcode"));
-        assert_eq!(resolve_harness_adapter_id("command-code"), Some("commandcode"));
+        assert_eq!(
+            resolve_harness_adapter_id("commandcode"),
+            Some("commandcode")
+        );
+        assert_eq!(
+            resolve_harness_adapter_id("command-code"),
+            Some("commandcode")
+        );
         assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
-        assert_eq!(resolve_harness_adapter_id("CommandCode"), Some("commandcode"));
+        assert_eq!(
+            resolve_harness_adapter_id("CommandCode"),
+            Some("commandcode")
+        );
         assert_eq!(resolve_harness_adapter_id("  CMDC  "), Some("commandcode"));
     }
 
@@ -525,7 +521,11 @@ mod tests {
             mesh_use_worktree: true,
             explicit_autopilot_provider: true,
         });
-        assert!(result.allowed, "codex should be allowed: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "codex should be allowed: {:?}",
+            result.reasons
+        );
         assert!(result.explicit_autopilot_provider);
     }
 
@@ -668,7 +668,11 @@ mod tests {
             mesh_use_worktree: true,
             explicit_autopilot_provider: false,
         });
-        assert!(result.allowed, "Command Code watcher should allow Autopilot: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "Command Code watcher should allow Autopilot: {:?}",
+            result.reasons
+        );
         assert!(result.reasons.is_empty());
     }
 
@@ -803,7 +807,10 @@ mod tests {
         // The spawn_option field differs by construction (one is bare, one
         // is composite), but the resolved_harness_id and the verdict are
         // identical.
-        assert_eq!(result_native.resolved_harness_id, result_proxied.resolved_harness_id);
+        assert_eq!(
+            result_native.resolved_harness_id,
+            result_proxied.resolved_harness_id
+        );
     }
 
     // -- Combined reasons --------------------------------------------------
@@ -870,7 +877,11 @@ mod tests {
     #[test]
     fn compute_for_mesh_uses_explicit_when_present() {
         let result = compute_for_mesh(Some("codex"), Some("claude"), Some("agy"), true);
-        assert!(result.allowed, "codex should be allowed: {:?}", result.reasons);
+        assert!(
+            result.allowed,
+            "codex should be allowed: {:?}",
+            result.reasons
+        );
         assert_eq!(result.resolved_harness_id.as_deref(), Some("codex"));
         assert_eq!(result.resolved_spawn_option.as_deref(), Some("codex"));
         assert!(result.explicit_autopilot_provider);

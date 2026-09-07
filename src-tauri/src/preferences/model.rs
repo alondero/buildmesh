@@ -8,9 +8,7 @@
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 
-use crate::agent::provider::compatibility::{
-    CompatibilityDecision, ProviderAuthMode,
-};
+use crate::agent::provider::compatibility::{CompatibilityDecision, ProviderAuthMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -479,8 +477,7 @@ impl Default for AppPreferences {
         // without a serde default fails loudly here (and in the
         // `malformed_json_falls_back_to_default` test) instead of silently
         // compiling with a divergent default.
-        serde_json::from_value(serde_json::json!({})).expect(
-            "AppPreferences must deserialize from {}: every field needs a serde default",
-        )
+        serde_json::from_value(serde_json::json!({}))
+            .expect("AppPreferences must deserialize from {}: every field needs a serde default")
     }
 }

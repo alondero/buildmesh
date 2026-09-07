@@ -330,7 +330,11 @@ mod tests {
         // Burn the cap at t0.
         for i in 0..cap {
             assert_eq!(
-                check_and_record(&fp("window:alice"), t0 + Duration::from_millis(i as u64), cap),
+                check_and_record(
+                    &fp("window:alice"),
+                    t0 + Duration::from_millis(i as u64),
+                    cap
+                ),
                 Outcome::Allow
             );
         }
@@ -362,7 +366,10 @@ mod tests {
         let probe = t0 + WINDOW - Duration::from_millis(10);
         match check_and_record(&fp("floor:alice"), probe, 1) {
             Outcome::Deny { retry_after } => {
-                assert!(retry_after >= 1, "Retry-After must be >= 1; got {retry_after}");
+                assert!(
+                    retry_after >= 1,
+                    "Retry-After must be >= 1; got {retry_after}"
+                );
             }
             Outcome::Allow => panic!("over-cap should be Deny"),
         }
@@ -388,7 +395,10 @@ mod tests {
     fn default_constants_are_documented_for_reconnect_storms() {
         // Pin the public default — a refactor that drops the cap accidentally
         // is the kind of regression a hard constant breaks loudly.
-        assert_eq!(DEFAULT_MAX_PER_WINDOW, 30, "issue #552 default is 30/minute/token");
+        assert_eq!(
+            DEFAULT_MAX_PER_WINDOW, 30,
+            "issue #552 default is 30/minute/token"
+        );
         assert_eq!(WINDOW, Duration::from_secs(60), "issue #552 window is 60s");
     }
 

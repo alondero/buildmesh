@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::{command, AppHandle, Emitter};
 
 use crate::services::opencode_oauth::{
-    OpenCodeConsoleStatus, OpenCodeDeviceFlowStart, OpenCodeDeviceCodeStatus,
+    OpenCodeConsoleStatus, OpenCodeDeviceCodeStatus, OpenCodeDeviceFlowStart,
     OpenCodeTokenResponse, OPENCODE_CONSOLE_CHANGED_EVENT,
 };
 
@@ -221,8 +221,7 @@ pub async fn revoke_opencode_console(app: AppHandle) -> Result<(), String> {
 #[command]
 pub async fn get_opencode_console_status() -> Result<OpenCodeConsoleStatus, String> {
     crate::commands::run_blocking("get_opencode_console_status", move || {
-        crate::services::opencode_oauth::read_opencode_console_status()
-            .map_err(|e| e.to_string())
+        crate::services::opencode_oauth::read_opencode_console_status().map_err(|e| e.to_string())
     })
     .await
 }
@@ -249,16 +248,13 @@ pub async fn set_opencode_console_workspace(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<(), String> {
-    let result = crate::commands::run_blocking(
-        "set_opencode_console_workspace",
-        move || {
-            if workspace_id.is_empty() {
-                return Err("workspace_id must be non-empty".to_string());
-            }
-            crate::services::opencode_oauth::set_active_workspace(&workspace_id)
-                .map_err(|e| e.to_string())
-        },
-    )
+    let result = crate::commands::run_blocking("set_opencode_console_workspace", move || {
+        if workspace_id.is_empty() {
+            return Err("workspace_id must be non-empty".to_string());
+        }
+        crate::services::opencode_oauth::set_active_workspace(&workspace_id)
+            .map_err(|e| e.to_string())
+    })
     .await;
     if result.is_ok() {
         emit_opencode_console_changed(&app);

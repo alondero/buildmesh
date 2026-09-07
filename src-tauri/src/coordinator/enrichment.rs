@@ -12,7 +12,9 @@
 use crate::env;
 use crate::models::AgentNode;
 use crate::secret_scrubber::SecretScrubber;
-use crate::services::transcript_reader::{self, TranscriptFormat, TranscriptTail, UnavailableReason};
+use crate::services::transcript_reader::{
+    self, TranscriptFormat, TranscriptTail, UnavailableReason,
+};
 
 /// The directory the agent's transcript is keyed under — the
 /// [Node Working Directory](../../../CONTEXT.md) in its *spawn* form, because
@@ -80,8 +82,7 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
             }
             TranscriptTail::Available {
                 turns,
-                last_assistant_message: last_assistant_message
-                    .map(|m| SecretScrubber::scrub(&m)),
+                last_assistant_message: last_assistant_message.map(|m| SecretScrubber::scrub(&m)),
             }
         }
         other => other,
@@ -113,7 +114,9 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
 
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() { return None; }
+    if !adapter.produces_readable_transcript() {
+        return None;
+    }
     let mut report = transcript_reader::read_assistant_report(
         TranscriptFormat::for_harness(adapter.id()),
         node.cli_session_id.as_deref(),
@@ -158,7 +161,10 @@ mod tests {
             dir.contains("worktrees") && dir.contains("gentle-fox"),
             "expected the worktree dir, got: {dir}"
         );
-        assert_ne!(dir, n.path, "must not search the mesh root for a worktree node");
+        assert_ne!(
+            dir, n.path,
+            "must not search the mesh root for a worktree node"
+        );
     }
 
     /// A Root Node's transcript is keyed under the Mesh root itself.
@@ -265,7 +271,10 @@ mod tests {
                     turns[0].tool_calls[0].input["command"].as_str().unwrap(),
                     "curl -H 'Authorization: Bearer [REDACTED]'"
                 );
-                assert_eq!(last_assistant_message.unwrap(), "password=[REDACTED] leaked");
+                assert_eq!(
+                    last_assistant_message.unwrap(),
+                    "password=[REDACTED] leaked"
+                );
             }
             other => panic!("expected Available, got {other:?}"),
         }

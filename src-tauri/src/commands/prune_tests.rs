@@ -170,7 +170,11 @@ fn enumerates_local_branches() {
     branch_from_head(&repo, "feature-b");
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
-    let mut names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
+    let mut names: Vec<&str> = info
+        .local_branches
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
     names.sort();
     assert_eq!(names, vec!["feature-a", "feature-b", "main"]);
 }
@@ -195,7 +199,10 @@ fn merged_branch_detected() {
     commit_file(&repo, "more.txt", "more"); // advances main past feature-a
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
-    assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(true));
+    assert_eq!(
+        find_branch(&info, "feature-a").is_merged_into_main,
+        Some(true)
+    );
     // main is trivially "merged into" itself.
     assert_eq!(find_branch(&info, "main").is_merged_into_main, Some(true));
 }
@@ -212,7 +219,10 @@ fn unmerged_branch_detected() {
     commit_file(&repo, "feat.txt", "feature work");
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
-    assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(false));
+    assert_eq!(
+        find_branch(&info, "feature-a").is_merged_into_main,
+        Some(false)
+    );
 }
 
 #[test]
@@ -337,7 +347,10 @@ fn orphan_branch_detected() {
         .unwrap();
 
     let info = collect_prune_info(&work.path_str(), &[], &[], &no_pool_paths).unwrap();
-    assert!(find_branch(&info, "main").is_orphan, "upstream ref is gone → orphan");
+    assert!(
+        find_branch(&info, "main").is_orphan,
+        "upstream ref is gone → orphan"
+    );
 }
 
 #[test]
@@ -363,12 +376,17 @@ fn remote_tracking_branches_listed_without_head() {
 
     let info = collect_prune_info(&work.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(
-        info.remote_tracking_branches.iter().any(|b| b == "origin/main"),
+        info.remote_tracking_branches
+            .iter()
+            .any(|b| b == "origin/main"),
         "expected origin/main, got {:?}",
         info.remote_tracking_branches
     );
     assert!(
-        !info.remote_tracking_branches.iter().any(|b| b.ends_with("/HEAD")),
+        !info
+            .remote_tracking_branches
+            .iter()
+            .any(|b| b.ends_with("/HEAD")),
         "origin/HEAD should be filtered out"
     );
 }
@@ -394,9 +412,10 @@ fn linked_worktree_enumerated_and_active_flag() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
 
@@ -423,16 +442,20 @@ fn stale_worktree_when_branch_deleted() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/doomed").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/doomed").unwrap())),
+        ),
     )
     .unwrap();
 
     // Delete the branch the worktree was based on (it's checked out, but the
     // worktree's own HEAD still names it). Force a stale state by removing the
     // ref directly.
-    repo.find_reference("refs/heads/doomed").unwrap().delete().unwrap();
+    repo.find_reference("refs/heads/doomed")
+        .unwrap()
+        .delete()
+        .unwrap();
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let wt = info
@@ -462,15 +485,20 @@ fn branch_in_linked_worktree_has_checked_out_path() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let wt_branch = find_branch(&info, "wt-branch");
-    let wt_path = wt_dir.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    let wt_path = wt_dir
+        .path()
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string();
     assert_eq!(
         normalize_slashes(wt_branch.checked_out_in_worktree.as_deref().unwrap()),
         normalize_slashes(&wt_path),
@@ -491,7 +519,11 @@ fn main_head_branch_has_checked_out_path() {
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let main = find_branch(&info, "main");
-    let main_path = dir.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    let main_path = dir
+        .path()
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string();
     assert!(
         main.is_head,
         "main is HEAD of the main worktree in this fixture"
@@ -539,21 +571,18 @@ fn delete_branches_still_refuses_worktree_branch() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
 
     // `delete_branches` partitions active branches (the `active_branches`
     // arg) before attempting libgit2 deletes. Here we pass `wt-branch` as
     // *not* active, so it falls through to git2 — which then refuses.
-    let err = delete_branches_in_repo(
-        &dir.path_str(),
-        &["wt-branch".to_string()],
-        &[],
-    )
-    .expect_err("git2 refuses to delete a branch checked out in a linked worktree");
+    let err = delete_branches_in_repo(&dir.path_str(), &["wt-branch".to_string()], &[])
+        .expect_err("git2 refuses to delete a branch checked out in a linked worktree");
     assert!(
         err.contains("wt-branch") && err.contains("linked repository"),
         "expected libgit2's HEAD-of-linked-worktree error naming the branch; got: {}",
@@ -568,7 +597,9 @@ fn delete_branches_still_refuses_worktree_branch() {
         "wt-branch must survive a refused delete"
     );
     assert!(
-        info.worktrees.iter().any(|w| w.branch.as_deref() == Some("wt-branch")),
+        info.worktrees
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("wt-branch")),
         "linked worktree must survive a refused branch delete"
     );
 }
@@ -585,7 +616,11 @@ fn delete_branches_removes_named_branches() {
     delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()], &[]).unwrap();
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
-    let names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
+    let names: Vec<&str> = info
+        .local_branches
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
     assert!(!names.contains(&"feature-a"));
     assert!(names.contains(&"feature-b"));
     assert!(names.contains(&"main"));
@@ -597,7 +632,11 @@ fn delete_branches_cannot_delete_head() {
     init_repo(dir.path());
 
     let err = delete_branches_in_repo(&dir.path_str(), &["main".to_string()], &[]).unwrap_err();
-    assert!(err.contains("main"), "error should name the failed branch: {}", err);
+    assert!(
+        err.contains("main"),
+        "error should name the failed branch: {}",
+        err
+    );
 
     // main must survive.
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
@@ -648,9 +687,18 @@ fn collect_prune_info_marks_active_branches() {
     let active = vec!["feature-a".to_string()];
     let info = collect_prune_info(&dir.path_str(), &[], &active, &no_pool_paths).unwrap();
 
-    assert!(find_branch(&info, "feature-a").is_active, "feature-a is in the active set");
-    assert!(!find_branch(&info, "feature-b").is_active, "feature-b is not in the active set");
-    assert!(!find_branch(&info, "main").is_active, "main is not in the active set");
+    assert!(
+        find_branch(&info, "feature-a").is_active,
+        "feature-a is in the active set"
+    );
+    assert!(
+        !find_branch(&info, "feature-b").is_active,
+        "feature-b is not in the active set"
+    );
+    assert!(
+        !find_branch(&info, "main").is_active,
+        "main is not in the active set"
+    );
 }
 
 /// Empty active-branch set: every branch is idle. Guards against a
@@ -664,7 +712,11 @@ fn collect_prune_info_no_active_set_marks_all_idle() {
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     for b in &info.local_branches {
-        assert!(!b.is_active, "{} should not be active with empty set", b.name);
+        assert!(
+            !b.is_active,
+            "{} should not be active with empty set",
+            b.name
+        );
     }
 }
 
@@ -683,12 +735,8 @@ fn delete_branches_rejects_active_branch() {
     branch_from_head(&repo, "feature-b");
 
     let active = vec!["feature-a".to_string()];
-    let err = delete_branches_in_repo(
-        &dir.path_str(),
-        &["feature-a".to_string()],
-        &active,
-    )
-    .expect_err("active branch must be rejected with Err");
+    let err = delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()], &active)
+        .expect_err("active branch must be rejected with Err");
 
     assert!(
         err.contains("active"),
@@ -751,12 +799,8 @@ fn delete_branches_empty_active_set_unaffected() {
     let repo = init_repo(dir.path());
     branch_from_head(&repo, "feature-a");
 
-    delete_branches_in_repo(
-        &dir.path_str(),
-        &["feature-a".to_string()],
-        &[],
-    )
-    .expect("empty active set → ordinary delete proceeds");
+    delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()], &[])
+        .expect("empty active set → ordinary delete proceeds");
 
     let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(
@@ -787,12 +831,8 @@ fn delete_branches_in_repo_treats_passed_in_set_literally() {
     // by the time we get here, "feature-old" appears active. The guard
     // rejects it; the archive-status check is upstream.
     let active = vec!["feature-old".to_string()];
-    let err = delete_branches_in_repo(
-        &dir.path_str(),
-        &["feature-old".to_string()],
-        &active,
-    )
-    .expect_err("branches in the passed-in active set are rejected");
+    let err = delete_branches_in_repo(&dir.path_str(), &["feature-old".to_string()], &active)
+        .expect_err("branches in the passed-in active set are rejected");
     assert!(err.contains("feature-old"), "{}", err);
 }
 
@@ -808,9 +848,10 @@ fn remove_worktrees_removes_linked_worktree() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
     assert!(wt_dir.path().exists());
@@ -850,9 +891,10 @@ fn close_removes_worktree_and_its_branch() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
     assert!(wt_dir.path().exists());
@@ -880,9 +922,10 @@ fn manual_worktree_removal_keeps_branch() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
 
@@ -913,9 +956,10 @@ fn worktree_pinned_by_process_tree() -> (TempDir, TempDir, std::process::Child) 
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
     assert!(wt_dir.path().exists());
@@ -1011,9 +1055,10 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
     repo.worktree(
         "wt1",
         wt_dir.path(),
-        Some(git2::WorktreeAddOptions::new().reference(Some(
-            &repo.find_reference("refs/heads/wt-branch").unwrap(),
-        ))),
+        Some(
+            git2::WorktreeAddOptions::new()
+                .reference(Some(&repo.find_reference("refs/heads/wt-branch").unwrap())),
+        ),
     )
     .unwrap();
 
@@ -1137,7 +1182,8 @@ fn delete_worktrees_does_not_reject_non_pool_path() {
     // false → no rejection → proceeds to the actual remove call
     // (which will fail because the directory doesn't exist, but
     // that's a separate error path covered above).
-    let mesh = crate::db::create_mesh("non-pool-test", "/tmp/buildmesh_non_pool_test_mesh").unwrap();
+    let mesh =
+        crate::db::create_mesh("non-pool-test", "/tmp/buildmesh_non_pool_test_mesh").unwrap();
     let pool_path = "/tmp/buildmesh_non_pool_test_mesh/.claude/worktrees/pool-warm-abc";
     crate::db::insert_warm_worktree(
         mesh.id,
@@ -1182,14 +1228,13 @@ fn reject_blocked_combines_blocked_items_into_one_message() {
     // No blocks → Ok(()). The check is silent; the helper's only
     // side-effect is on the non-empty case.
     let empty: Vec<&String> = vec![];
-    reject_blocked(&empty, "cannot delete X")
-        .expect("empty blocked list → Ok(())");
+    reject_blocked(&empty, "cannot delete X").expect("empty blocked list → Ok(())");
 
     // Single block → Err names just that one item.
     let s1 = "feature-a".to_string();
     let one_blocked: Vec<&String> = vec![&s1];
-    let err1 = reject_blocked(&one_blocked, "cannot delete X")
-        .expect_err("non-empty blocked list → Err");
+    let err1 =
+        reject_blocked(&one_blocked, "cannot delete X").expect_err("non-empty blocked list → Err");
     assert_eq!(err1, "cannot delete X: feature-a");
 
     // Multiple blocks → Err lists every blocked name, comma-separated.
@@ -1253,7 +1298,10 @@ async fn prune_remote_tracking_returns_string_on_success() {
     run_git(seed.path(), &["push", "-u", "origin", "main"]);
 
     let local = TempDir::new();
-    run_git_clone(bare.path().to_str().unwrap(), local.path().to_str().unwrap());
+    run_git_clone(
+        bare.path().to_str().unwrap(),
+        local.path().to_str().unwrap(),
+    );
 
     let result = prune_remote_tracking(local.path_str()).await;
     // Type-anchor: the success variant MUST be a String. If the signature
@@ -1329,7 +1377,10 @@ async fn locked_prune_remote_tracking_serializes_via_per_mesh_sync_lock_gh709() 
     run_git(seed.path(), &["push", "-u", "origin", "main"]);
 
     let local = TempDir::new();
-    run_git_clone(bare.path().to_str().unwrap(), local.path().to_str().unwrap());
+    run_git_clone(
+        bare.path().to_str().unwrap(),
+        local.path().to_str().unwrap(),
+    );
 
     // The lock key is the worktree's own path (NOT the parent mesh's
     // path), matching the helper's signature. The holder thread keys

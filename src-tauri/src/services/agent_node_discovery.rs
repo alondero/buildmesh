@@ -116,7 +116,9 @@ fn strip_tags(input: &str) -> String {
 /// Skips synthetic injected messages (e.g. local-command-caveat) and reads until
 /// it finds a genuine user-authored entry.
 #[allow(clippy::type_complexity)]
-fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+fn parse_session_file(
+    path: &PathBuf,
+) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
 
@@ -125,7 +127,9 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
         if line.is_empty() {
             continue;
         }
-        let Some(val) = serde_json::from_str::<serde_json::Value>(&line).ok() else { continue };
+        let Some(val) = serde_json::from_str::<serde_json::Value>(&line).ok() else {
+            continue;
+        };
 
         if val.get("type").and_then(|t| t.as_str()) == Some("user") {
             if let Some(msg) = val.get("message") {
@@ -148,9 +152,18 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
                 if display.is_empty() {
                     continue;
                 }
-                let branch = val.get("gitBranch").and_then(|b| b.as_str()).map(|s| s.to_string());
-                let cwd = val.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string());
-                let timestamp = val.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string());
+                let branch = val
+                    .get("gitBranch")
+                    .and_then(|b| b.as_str())
+                    .map(|s| s.to_string());
+                let cwd = val
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
+                let timestamp = val
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
 
                 return Some((display, branch, cwd, timestamp));
             }
@@ -204,9 +217,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
         for entry in entries.flatten() {
             let dir_name = entry.file_name().to_string_lossy().to_string();
-            if !dir_name.starts_with(&encoded_prefix)
-                && !dir_name.starts_with(&effective_prefix)
-            {
+            if !dir_name.starts_with(&encoded_prefix) && !dir_name.starts_with(&effective_prefix) {
                 continue;
             }
 
@@ -301,10 +312,11 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     let normalized_mesh = env::normalize_unc_to_wsl(&spawn_mesh);
     // The CLI slugged its own cwd form, so slug the effective container
     // through the same normalization (issue #1519).
-    let effective_spawn = env::to_spawn_path(Path::new(&effective)).to_string_lossy().to_string();
+    let effective_spawn = env::to_spawn_path(Path::new(&effective))
+        .to_string_lossy()
+        .to_string();
     let normalized_effective = env::normalize_unc_to_wsl(&effective_spawn);
-    if let Some(projects_dir) = env::commandcode_projects_dir(env_type, &normalized_mesh)
-    {
+    if let Some(projects_dir) = env::commandcode_projects_dir(env_type, &normalized_mesh) {
         if projects_dir.is_dir() {
             let encoded_prefix = commandcode_project_slug(&normalized_mesh);
             let effective_slug = commandcode_project_slug(&normalized_effective);
@@ -524,29 +536,22 @@ fn discover_commandcode_sessions_in(
         // effective container gets the same dual-form treatment so custom
         // absolute WSL locations match (issue #1519).
         let normalized_mesh = env::normalize_unc_to_wsl(mesh_path);
-        let effective = effective_dir_raw
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let normalized_effective =
-            effective.map(|e| env::normalize_unc_to_wsl(e).into_owned());
+        let effective = effective_dir_raw.map(str::trim).filter(|s| !s.is_empty());
+        let normalized_effective = effective.map(|e| env::normalize_unc_to_wsl(e).into_owned());
         let is_mesh_root = env::directories_match(&candidate.directory, mesh_path)
             || env::directories_match(&candidate.directory, &normalized_mesh);
         let worktree_name = if is_mesh_root {
             None
         } else {
             extract_worktree_name_from_path(&candidate.directory, mesh_path)
+                .or_else(|| extract_worktree_name_from_path(&candidate.directory, &normalized_mesh))
                 .or_else(|| {
-                    extract_worktree_name_from_path(&candidate.directory, &normalized_mesh)
+                    effective.and_then(|e| worktree_name_under_dir(&candidate.directory, e))
                 })
                 .or_else(|| {
-                    effective.and_then(|e| {
-                        worktree_name_under_dir(&candidate.directory, e)
-                    })
-                })
-                .or_else(|| {
-                    normalized_effective.as_deref().and_then(|e| {
-                        worktree_name_under_dir(&candidate.directory, e)
-                    })
+                    normalized_effective
+                        .as_deref()
+                        .and_then(|e| worktree_name_under_dir(&candidate.directory, e))
                 })
         };
         if !is_mesh_root && worktree_name.is_none() {
@@ -645,13 +650,15 @@ fn discover_agy_sessions_in(
             continue;
         }
 
-        let jsonl_path = conv_dir.join(".system_generated").join("logs").join("transcript.jsonl");
+        let jsonl_path = conv_dir
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
         if !jsonl_path.is_file() {
             continue;
         }
 
-        let Some((first_message, workspace_path, created_at)) =
-            parse_agy_transcript(&jsonl_path)
+        let Some((first_message, workspace_path, created_at)) = parse_agy_transcript(&jsonl_path)
         else {
             continue;
         };
@@ -681,11 +688,9 @@ fn discover_agy_sessions_in(
         // `.claude/worktrees/<name>` suffix matching `mesh_path`); anything
         // else stays at the mesh root with no worktree_name so the user
         // sees a global session without a misleading association.
-        let worktree_name = workspace_path
-            .as_deref()
-            .and_then(|p| {
-                extract_worktree_name_from_path_with_effective(p, mesh_path, effective_dir_raw)
-            });
+        let worktree_name = workspace_path.as_deref().and_then(|p| {
+            extract_worktree_name_from_path_with_effective(p, mesh_path, effective_dir_raw)
+        });
 
         sessions.push(ArchivedAgentNode {
             session_id,
@@ -712,10 +717,7 @@ fn discover_agy_sessions_in(
 /// `env::effective_worktree_dir_raw` (Mesh override → app default →
 /// `.claude/worktrees`). `None` means "legacy only" (caller couldn't resolve
 /// settings, e.g. in a unit test without a DB).
-fn extract_worktree_name_from_path(
-    workspace_path: &str,
-    mesh_path: &str,
-) -> Option<String> {
+fn extract_worktree_name_from_path(workspace_path: &str, mesh_path: &str) -> Option<String> {
     extract_worktree_name_from_path_with_effective(workspace_path, mesh_path, None)
 }
 
@@ -726,10 +728,7 @@ fn extract_worktree_name_from_path_with_effective(
 ) -> Option<String> {
     // Issue #1519: try the effective container first (custom dirs, including
     // absolute locations outside the mesh root), then the legacy marker.
-    if let Some(effective) = effective_dir_raw
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(effective) = effective_dir_raw.map(str::trim).filter(|s| !s.is_empty()) {
         if let Some(name) = worktree_name_under_dir(workspace_path, effective) {
             return Some(name);
         }
@@ -815,7 +814,9 @@ fn same_path(a: &str, b: &str) -> bool {
 /// earliest step timestamp. The AGY transcript format isn't formally
 /// documented, so we accept a few field-name variants rather than betting on
 /// one: a missing field just degrades to `None` instead of dropping the row.
-fn parse_agy_transcript(path: &std::path::Path) -> Option<(String, Option<String>, Option<String>)> {
+fn parse_agy_transcript(
+    path: &std::path::Path,
+) -> Option<(String, Option<String>, Option<String>)> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
 
@@ -950,10 +951,7 @@ mod tests {
     fn encode_path_replaces_windows_drive_colon() {
         // Matches Claude Code's on-disk form: ~/.claude/projects/X--src-buildmesh
         // The drive colon and every backslash both collapse to `-`.
-        assert_eq!(
-            encode_path("X:\\src\\buildmesh"),
-            "X--src-buildmesh"
-        );
+        assert_eq!(encode_path("X:\\src\\buildmesh"), "X--src-buildmesh");
         assert_eq!(
             encode_path("C:\\Users\\adam\\src\\buildmesh"),
             "C--Users-adam-src-buildmesh"
@@ -981,7 +979,10 @@ mod tests {
             ),
             Some("fancy-name".to_string())
         );
-        assert_eq!(extract_worktree_name("-Users-adam-src-buildmesh", base, legacy_eff), None);
+        assert_eq!(
+            extract_worktree_name("-Users-adam-src-buildmesh", base, legacy_eff),
+            None
+        );
         assert_eq!(
             extract_worktree_name("-Users-adam-src-buildmesh-src-tauri", base, legacy_eff),
             None
@@ -1038,7 +1039,10 @@ mod tests {
             ),
             Some("bold-live-plume".to_string())
         );
-        assert_eq!(extract_worktree_name("X--src-buildmesh", base, legacy_eff), None);
+        assert_eq!(
+            extract_worktree_name("X--src-buildmesh", base, legacy_eff),
+            None
+        );
     }
 
     #[test]
@@ -1048,7 +1052,10 @@ mod tests {
             "grill-me"
         );
         assert_eq!(strip_tags("hello world"), "hello world");
-        assert_eq!(strip_tags("<b>bold</b> and <i>italic</i>"), "bold and italic");
+        assert_eq!(
+            strip_tags("<b>bold</b> and <i>italic</i>"),
+            "bold and italic"
+        );
     }
 
     #[test]
@@ -1085,8 +1092,10 @@ mod tests {
     /// Write a one-off JSONL session file in the temp dir, suffixed by pid +
     /// name so parallel tests don't trample each other.
     fn write_session(name: &str, body: &str) -> PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("buildmesh_discovery_{name}_{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "buildmesh_discovery_{name}_{}.jsonl",
+            std::process::id()
+        ));
         std::fs::write(&path, body).unwrap();
         path
     }
@@ -1103,7 +1112,10 @@ mod tests {
         let parsed = parse_session_file(&path);
         std::fs::remove_file(&path).ok();
         let (title, branch, cwd, ts) = parsed.expect("multi-block user message should parse");
-        assert_eq!(title, "Fix the login bug", "title is the first text block only");
+        assert_eq!(
+            title, "Fix the login bug",
+            "title is the first text block only"
+        );
         assert!(!title.contains('\n'), "title stays single-line");
         assert_eq!(branch.as_deref(), Some("main"));
         assert_eq!(cwd.as_deref(), Some("/x"));
@@ -1136,10 +1148,8 @@ mod tests {
 
     #[test]
     fn cursor_discovery_finds_workspace_scoped_sessions_and_worktrees() {
-        let root = std::env::temp_dir().join(format!(
-            "buildmesh_cursor_discovery_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("buildmesh_cursor_discovery_{}", std::process::id()));
         let base = root.join("Users-adam-src-buildmesh");
         let worktree = root.join("Users-adam-src-buildmesh--claude-worktrees-fancy-name");
         let session = base.join("agent-transcripts").join("cursor-1");
@@ -1178,7 +1188,10 @@ mod tests {
             .iter()
             .find(|session| session.session_id == "cursor-2")
             .expect("worktree session should be discovered");
-        assert_eq!(worktree_session.worktree_name.as_deref(), Some("fancy-name"));
+        assert_eq!(
+            worktree_session.worktree_name.as_deref(),
+            Some("fancy-name")
+        );
     }
 
     #[test]
@@ -1206,12 +1219,8 @@ mod tests {
         .unwrap();
         let tracked = ["cursor-1".to_string()].into_iter().collect();
 
-        let discovered = discover_cursor_sessions_in(
-            &root,
-            "/Users/adam/src/buildmesh",
-            &tracked,
-            None,
-        );
+        let discovered =
+            discover_cursor_sessions_in(&root, "/Users/adam/src/buildmesh", &tracked, None);
         std::fs::remove_dir_all(&root).ok();
         assert!(discovered.is_empty());
     }
@@ -1243,10 +1252,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!(discovered.len(), 1);
-        assert_eq!(
-            discovered[0].worktree_name.as_deref(),
-            Some("olive-fox")
-        );
+        assert_eq!(discovered[0].worktree_name.as_deref(), Some("olive-fox"));
     }
 
     #[test]
@@ -1358,7 +1364,11 @@ mod tests {
             prefix,
             no_eff
         ));
-        assert!(!is_commandcode_project_dir_for_mesh("home-user-api", "", ""));
+        assert!(!is_commandcode_project_dir_for_mesh(
+            "home-user-api",
+            "",
+            ""
+        ));
         assert!(!is_commandcode_project_dir_for_mesh("anything", "", ""));
         // Case-insensitive for Windows filesystems.
         assert!(is_commandcode_project_dir_for_mesh(
@@ -1497,10 +1507,7 @@ mod tests {
     /// provided JSONL body. Returns the conv dir so callers can attach extra
     /// files or directories if they need to.
     fn write_agy_conv(root: &std::path::Path, conv_id: &str, body: &str) -> PathBuf {
-        let logs = root
-            .join(conv_id)
-            .join(".system_generated")
-            .join("logs");
+        let logs = root.join(conv_id).join(".system_generated").join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("transcript.jsonl"), body).unwrap();
         root.join(conv_id)
@@ -1536,26 +1543,33 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(discovered.len(), 2, "both conversations should be discovered");
+        assert_eq!(
+            discovered.len(),
+            2,
+            "both conversations should be discovered"
+        );
         let base = discovered
             .iter()
             .find(|s| s.session_id == "conv-aaaa-1111")
             .expect("mesh-root session present");
         assert_eq!(base.first_message, "Open the AGY session");
-        assert_eq!(base.worktree_name, None, "mesh-root workspace → no worktree");
+        assert_eq!(
+            base.worktree_name, None,
+            "mesh-root workspace → no worktree"
+        );
         assert_eq!(base.cwd.as_deref(), Some("/Users/adam/src/buildmesh"));
         assert_eq!(base.timestamp.as_deref(), Some("2026-07-10T09:00:00Z"));
-        assert!(base.branch.is_none(), "AGY transcripts don't carry a branch");
+        assert!(
+            base.branch.is_none(),
+            "AGY transcripts don't carry a branch"
+        );
         let worktree = discovered
             .iter()
             .find(|s| s.session_id == "conv-bbbb-2222")
             .expect("worktree session present");
         assert_eq!(worktree.first_message, "Fix the worktree");
         assert_eq!(worktree.worktree_name.as_deref(), Some("fancy-name"));
-        assert_eq!(
-            worktree.timestamp.as_deref(),
-            Some("2026-07-12T11:30:00Z")
-        );
+        assert_eq!(worktree.timestamp.as_deref(), Some("2026-07-12T11:30:00Z"));
     }
 
     #[test]
@@ -1621,12 +1635,8 @@ mod tests {
         let tracked: std::collections::HashSet<String> =
             ["conv-tracked".to_string()].into_iter().collect();
 
-        let discovered = discover_agy_sessions_in(
-            &root,
-            "/Users/adam/src/buildmesh",
-            &tracked,
-            None,
-        );
+        let discovered =
+            discover_agy_sessions_in(&root, "/Users/adam/src/buildmesh", &tracked, None);
         std::fs::remove_dir_all(&root).ok();
 
         assert_eq!(discovered.len(), 1);

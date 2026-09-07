@@ -137,8 +137,8 @@ impl AgentProvider for McodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
     use crate::agent::capabilities::ResolvedAgentConfig;
+    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
     #[test]
     fn id_and_ui_metadata() {

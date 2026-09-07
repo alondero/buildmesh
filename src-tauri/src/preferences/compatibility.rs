@@ -18,8 +18,7 @@ use super::model::{
     ApiSurface, AppPreferences, HarnessConfigValue, ModelTiers, ProviderAccount, ProviderPairing,
 };
 use super::resolver::{
-    claude_harness_id, harness_capabilities_for, provider_accounts,
-    provider_pairings,
+    claude_harness_id, harness_capabilities_for, provider_accounts, provider_pairings,
 };
 use crate::agent::capabilities::EffortControlKind;
 
@@ -40,7 +39,9 @@ pub fn normalize_harness_default(raw: HarnessConfigValue) -> HarnessConfigValue 
 /// [`normalize_harness_default`] doesn't reach into
 /// `agent::capabilities::normalize_non_empty` (a private seam there).
 fn trim_to_none(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    s.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// Validate a harness default against the selected harness's capability
@@ -110,7 +111,9 @@ pub fn upsert_harness_default(
     if validated.is_empty() {
         prefs.harness_defaults.remove(profile_id);
     } else {
-        prefs.harness_defaults.insert(profile_id.to_string(), validated);
+        prefs
+            .harness_defaults
+            .insert(profile_id.to_string(), validated);
     }
     Ok(())
 }
@@ -166,8 +169,7 @@ fn resolve_pairing(
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
 /// means a clean slate, not a leaked override.
 pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let (harness_id, provider_id) = crate::agent::provider::parse_spawn_option_id(spawn_option_id);
     let accounts = provider_accounts();
     let pairings = provider_pairings();
     match provider_id {
@@ -205,8 +207,7 @@ pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
 /// UI can prompt the user to fill the `Default model` tier on the **Harnesses**
 /// page (ADR-0025).
 pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), String> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let (harness_id, provider_id) = crate::agent::provider::parse_spawn_option_id(spawn_option_id);
     let accounts = provider_accounts();
     let pairings = provider_pairings();
     let (pairing_opt, account_id) = match provider_id {
@@ -221,8 +222,8 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
             let Some(account) = accounts.iter().find(|a| a.id == spawn_option_id) else {
                 return Ok(());
             };
-            let pairing = stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id())
-                .cloned();
+            let pairing =
+                stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id()).cloned();
             (pairing, account.id.clone())
         }
     };
@@ -251,7 +252,12 @@ fn preflight_pairing_env(
     if pairing.surface != ApiSurface::Anthropic {
         return Ok(());
     }
-    if pairing.model_tiers.default.as_deref().is_none_or(|s| s.is_empty()) {
+    if pairing
+        .model_tiers
+        .default
+        .as_deref()
+        .is_none_or(|s| s.is_empty())
+    {
         return Err(format!(
             "Custom Claude-compatible endpoint '{account_id}' requires the 'Default model' tier to be set. Open the Harnesses page and configure it (e.g. 'anthropic/claude-3-5-sonnet-latest' for Claude via OpenRouter)."
         ));
@@ -354,10 +360,19 @@ fn anthropic_surface_env(
             let opus = model(&tiers.opus).unwrap_or_else(|| primary.clone());
             for (k, v) in [
                 ("ANTHROPIC_SMALL_FAST_MODEL", fast.clone()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", model(&tiers.sonnet).unwrap_or_else(|| primary.clone())),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    model(&tiers.sonnet).unwrap_or_else(|| primary.clone()),
+                ),
                 ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus.clone()),
-                ("ANTHROPIC_DEFAULT_FABLE_MODEL", model(&tiers.fable).unwrap_or(opus)),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model(&tiers.haiku).unwrap_or(fast)),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                    model(&tiers.fable).unwrap_or(opus),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    model(&tiers.haiku).unwrap_or(fast),
+                ),
             ] {
                 env.push((k.to_string(), v));
             }

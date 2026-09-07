@@ -97,14 +97,38 @@ pub fn minimax_backend_env() -> Vec<(String, String)> {
     let mut env = vec![
         ("ANTHROPIC_BASE_URL".to_string(), base_url),
         ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), "1".to_string()),
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), "512000".to_string()),
-        ("ANTHROPIC_MODEL".to_string(), tiers.default.clone().unwrap()),
-        ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), tiers.small_fast.clone().unwrap()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), tiers.sonnet.clone().unwrap()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), tiers.opus.clone().unwrap()),
-        ("ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(), tiers.fable.clone().unwrap()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), tiers.haiku.clone().unwrap()),
+        (
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+            "1".to_string(),
+        ),
+        (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            "512000".to_string(),
+        ),
+        (
+            "ANTHROPIC_MODEL".to_string(),
+            tiers.default.clone().unwrap(),
+        ),
+        (
+            "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+            tiers.small_fast.clone().unwrap(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            tiers.sonnet.clone().unwrap(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            tiers.opus.clone().unwrap(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            tiers.fable.clone().unwrap(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            tiers.haiku.clone().unwrap(),
+        ),
     ];
     // Prefer the legacy `~/.claude/providers.conf` key (Adam's existing setup),
     // then fall back to the key configured via the #537 Accounts UI
@@ -151,16 +175,29 @@ MINIMAX_API_KEY=sk-minimax-123
 MOONSHOT_API_KEY=sk-moonshot-456
 ";
         let map = parse_providers_conf(conf);
-        assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-minimax-123"));
-        assert_eq!(map.get("MOONSHOT_API_KEY").map(String::as_str), Some("sk-moonshot-456"));
+        assert_eq!(
+            map.get("MINIMAX_API_KEY").map(String::as_str),
+            Some("sk-minimax-123")
+        );
+        assert_eq!(
+            map.get("MOONSHOT_API_KEY").map(String::as_str),
+            Some("sk-moonshot-456")
+        );
         // A commented key must NOT be picked up.
-        assert!(!map.contains_key("MINIMAX_BASE_URL"), "commented line must be ignored");
+        assert!(
+            !map.contains_key("MINIMAX_BASE_URL"),
+            "commented line must be ignored"
+        );
     }
 
     #[test]
     fn strips_quotes_and_export_prefix() {
-        let map = parse_providers_conf("export MOONSHOT_API_KEY=\"sk-q\"\nMINIMAX_API_KEY='sk-s'\n");
-        assert_eq!(map.get("MOONSHOT_API_KEY").map(String::as_str), Some("sk-q"));
+        let map =
+            parse_providers_conf("export MOONSHOT_API_KEY=\"sk-q\"\nMINIMAX_API_KEY='sk-s'\n");
+        assert_eq!(
+            map.get("MOONSHOT_API_KEY").map(String::as_str),
+            Some("sk-q")
+        );
         assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-s"));
     }
 
@@ -174,11 +211,7 @@ MOONSHOT_API_KEY=sk-moonshot-456
 
         let tiers = minimax_default_tiers();
         let env = minimax_backend_env();
-        let get = |key: &str| {
-            env.iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-        };
+        let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
         assert_eq!(get("ANTHROPIC_MODEL"), tiers.default);
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), tiers.small_fast);
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), tiers.sonnet);

@@ -223,15 +223,8 @@ impl OwnedHandle {
         unsafe {
             let cur = ffi::GetCurrentProcess();
             let mut dup: HANDLE = std::ptr::null_mut();
-            let ok = ffi::DuplicateHandle(
-                cur,
-                self.0,
-                cur,
-                &mut dup,
-                0,
-                0,
-                ffi::DUPLICATE_SAME_ACCESS,
-            );
+            let ok =
+                ffi::DuplicateHandle(cur, self.0, cur, &mut dup, 0, 0, ffi::DUPLICATE_SAME_ACCESS);
             if ok == 0 {
                 Err(IoError::last_os_error())
             } else {
@@ -316,7 +309,14 @@ pub fn spawn_with_restricted_token(
     cols: u16,
     token: &RestrictedToken,
 ) -> Result<(SandboxChild, SandboxPty), String> {
-    spawn_confined(command_line, cwd, env, rows, cols, Confinement::RestrictedToken(token))
+    spawn_confined(
+        command_line,
+        cwd,
+        env,
+        rows,
+        cols,
+        Confinement::RestrictedToken(token),
+    )
 }
 
 /// The shared owned-ConPTY spawn core. Returns the child (process handle wrapper)
@@ -356,7 +356,10 @@ fn spawn_confined(
         // --- pseudoconsole over the child's ends ---
         let mut hpc: HANDLE = std::ptr::null_mut();
         let hr = ffi::CreatePseudoConsole(
-            ffi::COORD { X: cols as i16, Y: rows as i16 },
+            ffi::COORD {
+                X: cols as i16,
+                Y: rows as i16,
+            },
             stdin_read.raw(),
             stdout_write.raw(),
             ffi::PSEUDOCONSOLE_RESIZE_QUIRK | ffi::PSEUDOCONSOLE_WIN32_INPUT_MODE,
@@ -379,7 +382,10 @@ fn spawn_confined(
         let mut attr_buf = vec![0u8; size];
         let attr_list = attr_buf.as_mut_ptr() as *mut std::os::raw::c_void;
         if ffi::InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut size) == 0 {
-            return Err(format!("InitializeProcThreadAttributeList failed: {}", IoError::last_os_error()));
+            return Err(format!(
+                "InitializeProcThreadAttributeList failed: {}",
+                IoError::last_os_error()
+            ));
         }
         let _attr_guard = AttrListGuard(attr_list);
 
@@ -393,7 +399,10 @@ fn spawn_confined(
             std::ptr::null_mut(),
         ) == 0
         {
-            return Err(format!("UpdateProcThreadAttribute(PSEUDOCONSOLE) failed: {}", IoError::last_os_error()));
+            return Err(format!(
+                "UpdateProcThreadAttribute(PSEUDOCONSOLE) failed: {}",
+                IoError::last_os_error()
+            ));
         }
 
         let sec_caps = appcontainer.map(|p| p.security_capabilities());
@@ -408,7 +417,10 @@ fn spawn_confined(
                 std::ptr::null_mut(),
             ) == 0
             {
-                return Err(format!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES) failed: {}", IoError::last_os_error()));
+                return Err(format!(
+                    "UpdateProcThreadAttribute(SECURITY_CAPABILITIES) failed: {}",
+                    IoError::last_os_error()
+                ));
             }
         }
 
@@ -435,7 +447,10 @@ fn spawn_confined(
             .as_ref()
             .map(|b| b.as_ptr() as *const std::os::raw::c_void)
             .unwrap_or(std::ptr::null());
-        let cwd_ptr = cwd_w.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let cwd_ptr = cwd_w
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
         let (ok, create_fn) = if let Some(token) = restricted_token {
             (
                 ffi::CreateProcessAsUserW(
@@ -471,7 +486,11 @@ fn spawn_confined(
             )
         };
         if ok == 0 {
-            return Err(format!("{} failed: {}", create_fn, IoError::last_os_error()));
+            return Err(format!(
+                "{} failed: {}",
+                create_fn,
+                IoError::last_os_error()
+            ));
         }
         // The thread handle is unused; close it so it doesn't leak.
         ffi::CloseHandle(pi.hThread);
@@ -660,7 +679,10 @@ impl MasterPty for SandboxPty {
         let hr = unsafe {
             ffi::ResizePseudoConsole(
                 inner.pseudo.0,
-                ffi::COORD { X: size.cols as i16, Y: size.rows as i16 },
+                ffi::COORD {
+                    X: size.cols as i16,
+                    Y: size.rows as i16,
+                },
             )
         };
         if hr != ffi::S_OK {
@@ -780,11 +802,9 @@ mod tests {
     /// this the reader would block forever.
     #[test]
     fn spawns_command_in_container_and_reads_output() {
-        let profile = AppContainerProfile::create_or_derive(
-            "com.alond.buildmesh.test-conpty",
-            false,
-        )
-        .expect("create profile");
+        let profile =
+            AppContainerProfile::create_or_derive("com.alond.buildmesh.test-conpty", false)
+                .expect("create profile");
 
         // Keep the child alive with `pause` so ConPTY actually repaints its
         // screen buffer (the echoed line) — `cmd /c echo` alone exits before the
@@ -1004,9 +1024,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker.txt"), "GRANTED_READ_OK\n").unwrap();
 
-        let profile =
-            AppContainerProfile::create_or_derive("com.alond.buildmesh.test-acl", false)
-                .expect("create profile");
+        let profile = AppContainerProfile::create_or_derive("com.alond.buildmesh.test-acl", false)
+            .expect("create profile");
         let sid = profile.sid_string().expect("sid string");
         acl::grant_dir(&dir, &sid, acl::Access::Full).expect("grant dir");
 

@@ -94,10 +94,7 @@ pub fn enumerate_with_classes() -> (Vec<IpAddr>, HashMap<IpAddr, IfaceClass>) {
 /// `range_rank` — only soft-demoted below generic addresses); a host whose only
 /// candidate is a Docker bridge still surfaces that IP rather than returning
 /// `None`.
-pub fn pick_best_lan(
-    ips: &[IpAddr],
-    classes: &HashMap<IpAddr, IfaceClass>,
-) -> Option<IpAddr> {
+pub fn pick_best_lan(ips: &[IpAddr], classes: &HashMap<IpAddr, IfaceClass>) -> Option<IpAddr> {
     ips.iter()
         .copied()
         .filter(|ip| !is_excluded_for_qr(ip))
@@ -166,8 +163,16 @@ pub(crate) fn rank_with_classes(
 fn rank_key(ip: &IpAddr, class: Option<&IfaceClass>) -> (u8, u8, u8, u8, u8) {
     let ipv6 = if ip.is_ipv6() { 1 } else { 0 };
     let vbox = if is_vbox_host_only(ip) { 1 } else { 0 };
-    let gateway = if class.is_some_and(|c| c.has_gateway) { 0 } else { 1 };
-    let physical = if class.is_some_and(|c| c.is_physical) { 0 } else { 1 };
+    let gateway = if class.is_some_and(|c| c.has_gateway) {
+        0
+    } else {
+        1
+    };
+    let physical = if class.is_some_and(|c| c.is_physical) {
+        0
+    } else {
+        1
+    };
     (ipv6, vbox, gateway, physical, range_rank(ip))
 }
 
@@ -362,7 +367,9 @@ mod windows_impl {
             // SAFETY: `ptr`/`size` describe `buf` (8-byte aligned, `size` bytes);
             // on ERROR_BUFFER_OVERFLOW the OS writes the required byte count back
             // into `size` and writes nothing into the buffer.
-            let ret = unsafe { GetAdaptersAddresses(AF_UNSPEC, flags, std::ptr::null_mut(), ptr, &mut size) };
+            let ret = unsafe {
+                GetAdaptersAddresses(AF_UNSPEC, flags, std::ptr::null_mut(), ptr, &mut size)
+            };
             last_ret = ret;
             if ret == ERROR_SUCCESS {
                 break;
@@ -377,7 +384,9 @@ mod windows_impl {
             return Err(format!("GetAdaptersAddresses failed: {ret}"));
         }
         if last_ret != ERROR_SUCCESS {
-            return Err(format!("GetAdaptersAddresses still overflowing after retries: {last_ret}"));
+            return Err(format!(
+                "GetAdaptersAddresses still overflowing after retries: {last_ret}"
+            ));
         }
 
         let mut ips = Vec::new();
@@ -391,8 +400,12 @@ mod windows_impl {
                 let a = &*adapter;
                 let up = a.OperStatus == IF_OPER_STATUS_UP;
                 let has_gateway = up && !a.FirstGatewayAddress.is_null();
-                let is_physical = a.IfType == IF_TYPE_ETHERNET_CSMACD || a.IfType == IF_TYPE_IEEE80211;
-                let class = IfaceClass { has_gateway, is_physical };
+                let is_physical =
+                    a.IfType == IF_TYPE_ETHERNET_CSMACD || a.IfType == IF_TYPE_IEEE80211;
+                let class = IfaceClass {
+                    has_gateway,
+                    is_physical,
+                };
 
                 let mut unicast = a.FirstUnicastAddress;
                 while !unicast.is_null() {
@@ -518,7 +531,10 @@ mod tests {
     fn falls_back_to_range_heuristic_without_classes() {
         let enumerated = vec![ip("10.5.0.2"), ip("192.168.1.10"), ip("172.23.16.1")];
         let ranked = rank_with_classes(enumerated, &HashMap::new());
-        assert_eq!(ranked, vec![ip("192.168.1.10"), ip("10.5.0.2"), ip("172.23.16.1")]);
+        assert_eq!(
+            ranked,
+            vec![ip("192.168.1.10"), ip("10.5.0.2"), ip("172.23.16.1")]
+        );
     }
 
     /// Equal-ranked IPs keep OS enumeration order (stable sort) — two plain
@@ -682,7 +698,10 @@ mod tests {
             .copied()
             .filter(|ip| !is_excluded_for_qr(ip))
             .collect();
-        assert!(!filtered.is_empty(), "sanity: at least the Ethernet IP survives the filter");
+        assert!(
+            !filtered.is_empty(),
+            "sanity: at least the Ethernet IP survives the filter"
+        );
         let head = rank_with_classes(filtered, &classes).into_iter().next();
         assert_eq!(picked, head);
         assert_eq!(picked, Some(ip("192.168.1.10")));

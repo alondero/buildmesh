@@ -14,8 +14,8 @@
 
 pub mod context;
 pub mod model;
-pub mod stepper;
 mod node_review;
+pub mod stepper;
 
 #[cfg(test)]
 mod blueprint_contract;

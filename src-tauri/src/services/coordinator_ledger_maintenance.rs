@@ -236,8 +236,8 @@ mod tests {
         insert(&conn, 2, "old1", Some("'-10 days'"));
         insert(&conn, 3, "old2", Some("'-30 days'"));
 
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 2);
 
         let count: i64 = conn
@@ -266,8 +266,8 @@ mod tests {
     #[test]
     fn empty_table_is_a_no_op() {
         let conn = db();
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 0);
     }
 
@@ -284,8 +284,8 @@ mod tests {
             "boundary",
             Some(&format!("'-{} days'", LEDGER_RETENTION_DAYS)),
         );
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 0);
     }
 

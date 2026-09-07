@@ -70,8 +70,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_serialises_as_tagged_json() {
-        let json =
-            serde_json::to_string(&EventMsg::AttentionCleared { session_id: 42 }).unwrap();
+        let json = serde_json::to_string(&EventMsg::AttentionCleared { session_id: 42 }).unwrap();
         assert!(json.contains(r#""type":"attention-cleared""#));
         assert!(json.contains(r#""session_id":42"#));
     }

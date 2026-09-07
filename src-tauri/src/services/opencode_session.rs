@@ -143,13 +143,25 @@ pub(crate) fn list_root_sessions_in_window(
     not_before: i64,
     not_after: i64,
 ) -> Result<Vec<ListedSession>, String> {
-    let mut stmt = conn.prepare("SELECT id, directory, time_created, time_updated
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, directory, time_created, time_updated
         FROM session WHERE parent_id IS NULL AND time_archived IS NULL
-        AND time_created BETWEEN ?1 AND ?2").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([not_before, not_after], |row| Ok(ListedSession {
-        id: row.get(0)?, directory: row.get(1)?, created: row.get(2)?, updated: row.get(3)?,
-    })).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        AND time_created BETWEEN ?1 AND ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([not_before, not_after], |row| {
+            Ok(ListedSession {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                created: row.get(2)?,
+                updated: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Historic startup recovery entry point used by the OpenCode adapter. The
@@ -162,12 +174,7 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let db_path = opencode_db_path(env_type)?;
-    find_historic_id_for_db_path(
-        &db_path,
-        spawn_directory,
-        anchor_ms,
-        recorded_start,
-    )
+    find_historic_id_for_db_path(&db_path, spawn_directory, anchor_ms, recorded_start)
 }
 
 pub(crate) fn find_historic_id_for_db_path(
@@ -277,9 +284,7 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 return;
             }
         }
-        tracing::warn!(
-            "opencode session capture: gave up for node {node_id} in {spawn_directory}"
-        );
+        tracing::warn!("opencode session capture: gave up for node {node_id} in {spawn_directory}");
     });
 }
 
@@ -384,10 +389,7 @@ mod tests {
             "/tmp/worktree",
             1,
         )];
-        assert_eq!(
-            select_id_for_directory(&sessions, "/tmp/worktree", 0),
-            None
-        );
+        assert_eq!(select_id_for_directory(&sessions, "/tmp/worktree", 0), None);
     }
 
     #[cfg(not(target_os = "macos"))]

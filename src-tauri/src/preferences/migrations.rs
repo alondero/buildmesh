@@ -54,10 +54,7 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
     let mut pairings_to_add: Vec<serde_json::Value> = Vec::new();
 
     if !already_migrated {
-        if let Some(accounts) = root
-            .get("provider_accounts")
-            .and_then(|v| v.as_array())
-        {
+        if let Some(accounts) = root.get("provider_accounts").and_then(|v| v.as_array()) {
             for account in accounts {
                 let Some(obj) = account.as_object() else {
                     continue;
@@ -70,10 +67,7 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
                 if id.is_empty() || !is_claude_compatible_id(&id) {
                     continue;
                 }
-                let enabled = obj
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                let enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let api_key = obj
                     .get("api_key")
                     .and_then(|v| v.as_str())
@@ -195,9 +189,10 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
     else {
         return false;
     };
-    let Some(companion_idx) = accounts.iter().position(|a| {
-        a.get("id").and_then(|v| v.as_str()) == Some("kimi-via-claude")
-    }) else {
+    let Some(companion_idx) = accounts
+        .iter()
+        .position(|a| a.get("id").and_then(|v| v.as_str()) == Some("kimi-via-claude"))
+    else {
         return false;
     };
     let companion = accounts[companion_idx].clone();
@@ -207,9 +202,10 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    if let Some(kimi) = accounts.iter_mut().find(|a| {
-        a.get("id").and_then(|v| v.as_str()) == Some("kimi")
-    }) {
+    if let Some(kimi) = accounts
+        .iter_mut()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some("kimi"))
+    {
         if let Some(obj) = kimi.as_object_mut() {
             let empty = obj
                 .get("api_key")

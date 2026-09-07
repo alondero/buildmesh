@@ -32,7 +32,9 @@ mod tests {
         )
         .unwrap();
         let id: i64 = conn
-            .query_row("SELECT id FROM meshes WHERE name = 'test'", [], |row| row.get(0))
+            .query_row("SELECT id FROM meshes WHERE name = 'test'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         (conn, id)
     }
@@ -118,7 +120,9 @@ mod tests {
         assert!(col_present, "sandbox column should be added on first call");
 
         let legacy_id: i64 = conn
-            .query_row("SELECT id FROM meshes WHERE name = 'legacy'", [], |row| row.get(0))
+            .query_row("SELECT id FROM meshes WHERE name = 'legacy'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(
             !read(&conn, legacy_id),

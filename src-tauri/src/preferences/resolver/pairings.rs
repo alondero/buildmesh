@@ -1,11 +1,13 @@
 //! Pairing resolution — stored-pairing lookups, attach-form defaults, ordering, mutators.
 
 use super::super::model::{
-    ApiSurface, AppPreferences, ModelTiers, ProxiedProviderOrder, ProviderAccount, ProviderPairing,
+    ApiSurface, AppPreferences, ModelTiers, ProviderAccount, ProviderPairing, ProxiedProviderOrder,
 };
 use super::super::storage::{load, save};
 use super::accounts::provider_accounts;
-use super::catalog::{first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces};
+use super::catalog::{
+    first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces,
+};
 use super::pairing_compat::pairing_can_potentially_match;
 
 /// Dedupe an id sequence keeping the first occurrence of each id, preserving
@@ -22,7 +24,10 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
     match load() {
         Ok(prefs) => prefs.provider_pairings,
         Err(e) => {
-            tracing::warn!("preferences::provider_pairings load failed, using none: {}", e);
+            tracing::warn!(
+                "preferences::provider_pairings load failed, using none: {}",
+                e
+            );
             Vec::new()
         }
     }
@@ -86,14 +91,15 @@ pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
 ///     the order is meaningful for any account the user could attach under
 ///     this harness, even before the pairing exists (a user can rearrange
 ///     after a future attach and the slot is reserved).
-pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>) -> Result<(), String> {
+pub fn set_proxied_provider_order(
+    harness_id: String,
+    provider_ids: Vec<String>,
+) -> Result<(), String> {
     let mut prefs = load()?;
     // Known = effective accounts ∪ keyed first-class catalog (ADR-0025: keyed
     // rows may not be materialised yet but are still attachable / orderable).
-    let mut known_ids: std::collections::HashSet<String> = provider_accounts()
-        .into_iter()
-        .map(|a| a.id)
-        .collect();
+    let mut known_ids: std::collections::HashSet<String> =
+        provider_accounts().into_iter().map(|a| a.id).collect();
     for a in super::catalog::keyed_first_class_catalog() {
         known_ids.insert(a.id);
     }
@@ -112,7 +118,9 @@ pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>)
             // backend falls through to natural order — a stored empty
             // would silently no-op the ordering seam.
             let _ = entry; // `entry` is borrowed only for the empty-list check
-            prefs.proxied_provider_order.retain(|o| o.harness_id != harness_id);
+            prefs
+                .proxied_provider_order
+                .retain(|o| o.harness_id != harness_id);
         }
         Some(entry) => entry.provider_ids = incoming,
         None if !incoming.is_empty() => prefs.proxied_provider_order.push(ProxiedProviderOrder {
@@ -141,8 +149,7 @@ pub(crate) fn resolve_pairing(
 pub fn resolve_stored_pairing_and_account(
     spawn_option_id: &str,
 ) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let (harness_id, provider_id) = crate::agent::provider::parse_spawn_option_id(spawn_option_id);
     let Some(provider_id) = provider_id else {
         return Ok(None);
     };

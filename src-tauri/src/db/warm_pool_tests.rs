@@ -26,15 +26,12 @@
 mod tests {
     use crate::db::{
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
-        count_droppable_warm_entries_for_mesh_inner,
-        delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
-        insert_warm_worktree_inner, is_warm_pool_path_inner,
-        warm_pool_claims_path_inner,
-        list_oldest_warm_entries_for_mesh_inner,
-        list_warm_paths_for_mesh_droppable_inner, list_warm_paths_for_mesh_inner,
-        list_warm_worktrees_to_reconcile_inner,
+        count_droppable_warm_entries_for_mesh_inner, delete_orphaned_claimed_warm_worktrees_inner,
+        delete_warm_worktrees_for_mesh_inner, insert_warm_worktree_inner, is_warm_pool_path_inner,
+        list_oldest_warm_entries_for_mesh_inner, list_warm_paths_for_mesh_droppable_inner,
+        list_warm_paths_for_mesh_inner, list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
-        WarmWorktreeStatus,
+        warm_pool_claims_path_inner, WarmWorktreeStatus,
     };
     use rusqlite::Connection;
 
@@ -155,7 +152,10 @@ mod tests {
 
         // FIFO by created_at: both rows were inserted sequentially; the
         // older one wins the first claim. The two ids must differ.
-        assert_ne!(first.id, second.id, "concurrent claims must hand out distinct rows");
+        assert_ne!(
+            first.id, second.id,
+            "concurrent claims must hand out distinct rows"
+        );
         assert_eq!(
             first.id, id_a,
             "oldest available row must win the first claim (FIFO)"
@@ -266,11 +266,18 @@ mod tests {
 
         let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![ghost_id], "only the ghost row should be reconciled");
+        assert_eq!(
+            ids,
+            vec![ghost_id],
+            "only the ghost row should be reconciled"
+        );
         // The entry carries the path + a `dir_present=false` flag so the
         // reconcile skips the (pointless) git teardown and drops the row.
         assert_eq!(entries[0].path, "/this/path/does/not/exist/anywhere");
-        assert!(!entries[0].dir_present, "a missing-dir entry must report dir_present=false");
+        assert!(
+            !entries[0].dir_present,
+            "a missing-dir entry must report dir_present=false"
+        );
         assert!(
             !ids.contains(&live_id),
             "row pointing at an existing directory must not be flagged stale"
@@ -300,10 +307,14 @@ mod tests {
         let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
         assert_eq!(
-            ids, vec![filling_id],
+            ids,
+            vec![filling_id],
             "an aged `filling` crash-orphan must be reconciled even when its directory exists"
         );
-        assert!(entries[0].dir_present, "a live-directory entry must report dir_present=true");
+        assert!(
+            entries[0].dir_present,
+            "a live-directory entry must report dir_present=true"
+        );
     }
 
     /// THE RACE GUARD: a FRESH `filling` row (a worker is mid-checkout right
@@ -356,7 +367,11 @@ mod tests {
 
         let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
         let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![id], "an aged `refreshing` crash-orphan must be reconciled");
+        assert_eq!(
+            ids,
+            vec![id],
+            "an aged `refreshing` crash-orphan must be reconciled"
+        );
     }
 
     /// A `claimed` row is NEVER reconciled here — even aged, even dir-present:
@@ -445,8 +460,7 @@ mod tests {
             .unwrap();
         }
 
-        let deleted =
-            delete_orphaned_claimed_warm_worktrees_inner(&conn, &[]).unwrap();
+        let deleted = delete_orphaned_claimed_warm_worktrees_inner(&conn, &[]).unwrap();
         assert_eq!(deleted, 3, "exactly the three claimed rows must be pruned");
 
         // The claimed rows are gone.
@@ -468,7 +482,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(available_remaining, 2, "every available row must survive the GC");
+        assert_eq!(
+            available_remaining, 2,
+            "every available row must survive the GC"
+        );
     }
 
     // The `claimed`-row GC's safety contract is **per-row classification**,
@@ -586,11 +603,9 @@ mod tests {
         .unwrap();
         let session_id = conn.last_insert_rowid();
 
-        let n = delete_orphaned_claimed_warm_worktrees_inner(
-            &conn,
-            std::slice::from_ref(&session_id),
-        )
-        .unwrap();
+        let n =
+            delete_orphaned_claimed_warm_worktrees_inner(&conn, std::slice::from_ref(&session_id))
+                .unwrap();
         assert_eq!(n, 1, "the claimed row must be pruned");
 
         // Row gone, directory INTACT.
@@ -755,11 +770,9 @@ mod tests {
         .unwrap();
         let session_id = conn.last_insert_rowid();
 
-        let n = delete_orphaned_claimed_warm_worktrees_inner(
-            &conn,
-            std::slice::from_ref(&session_id),
-        )
-        .unwrap();
+        let n =
+            delete_orphaned_claimed_warm_worktrees_inner(&conn, std::slice::from_ref(&session_id))
+                .unwrap();
         assert_eq!(n, 1, "the claimed row must be pruned");
 
         // The dir MUST be preserved — a live process exists on this mesh,
@@ -867,11 +880,7 @@ mod tests {
         );
         // Mid-move row's path was already absent; nothing to verify on disk.
         let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM warm_worktrees",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM warm_worktrees", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 0, "every `claimed` row must be pruned");
     }
@@ -983,8 +992,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let db_path = std::env::temp_dir()
-            .join(format!("buildmesh_issue_1228_fs_lock_test_{}.db", test_id));
+        let db_path =
+            std::env::temp_dir().join(format!("buildmesh_issue_1228_fs_lock_test_{}.db", test_id));
         // First-init-wins: a no-op if another test file in this binary
         // already initialised the global DB with a different path. Either
         // way the `write_conn()` we hold below targets the live writer.
@@ -1073,8 +1082,7 @@ mod tests {
         // for the entire FS phase (could be many seconds on slow disks);
         // post-fix, it completes in normal query time.
         let probe_start = std::time::Instant::now();
-        crate::db::delete_warm_worktree(probe_row_id)
-            .expect("probe write must succeed");
+        crate::db::delete_warm_worktree(probe_row_id).expect("probe write must succeed");
         let probe_duration = probe_start.elapsed();
 
         assert!(
@@ -1284,21 +1292,41 @@ mod tests {
         let path_c = tmp.path().join("c").to_str().unwrap().to_string();
         let path_d = tmp.path().join("d").to_str().unwrap().to_string();
         insert_warm_worktree_inner(
-            &conn, 1, &path_a, "pool-warm-a", Some("a"),
+            &conn,
+            1,
+            &path_a,
+            "pool-warm-a",
+            Some("a"),
             WarmWorktreeStatus::Available,
-        ).unwrap();
+        )
+        .unwrap();
         insert_warm_worktree_inner(
-            &conn, 1, &path_b, "pool-warm-b", None,
+            &conn,
+            1,
+            &path_b,
+            "pool-warm-b",
+            None,
             WarmWorktreeStatus::Filling,
-        ).unwrap();
+        )
+        .unwrap();
         insert_warm_worktree_inner(
-            &conn, 1, &path_c, "pool-warm-c", None,
+            &conn,
+            1,
+            &path_c,
+            "pool-warm-c",
+            None,
             WarmWorktreeStatus::Refreshing,
-        ).unwrap();
+        )
+        .unwrap();
         insert_warm_worktree_inner(
-            &conn, 1, &path_d, "pool-warm-d", Some("d"),
+            &conn,
+            1,
+            &path_d,
+            "pool-warm-d",
+            Some("d"),
             WarmWorktreeStatus::Claimed,
-        ).unwrap();
+        )
+        .unwrap();
 
         let paths = list_warm_paths_for_mesh_droppable_inner(&conn, 1).unwrap();
         let mut got = paths.clone();
@@ -1374,7 +1402,11 @@ mod tests {
         .unwrap();
 
         let rows = list_worktree_enabled_meshes_for_warm_inner(&conn).unwrap();
-        assert_eq!(rows.len(), 1, "only the worktree-enabled mesh must be listed");
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the worktree-enabled mesh must be listed"
+        );
         assert_eq!(rows[0].path, "/r/enabled");
         assert_eq!(rows[0].pre_spawn_pool_size, 0);
     }
@@ -1447,24 +1479,10 @@ mod tests {
             WarmWorktreeStatus::Available,
         )
         .unwrap();
-        insert_warm_worktree_inner(
-            &conn,
-            1,
-            &p("c"),
-            "c",
-            None,
-            WarmWorktreeStatus::Filling,
-        )
-        .unwrap();
-        insert_warm_worktree_inner(
-            &conn,
-            1,
-            &p("d"),
-            "d",
-            None,
-            WarmWorktreeStatus::Claimed,
-        )
-        .unwrap();
+        insert_warm_worktree_inner(&conn, 1, &p("c"), "c", None, WarmWorktreeStatus::Filling)
+            .unwrap();
+        insert_warm_worktree_inner(&conn, 1, &p("d"), "d", None, WarmWorktreeStatus::Claimed)
+            .unwrap();
 
         // 2 available + 1 filling = 3 droppable; the claimed row is excluded.
         let droppable = count_droppable_warm_entries_for_mesh_inner(&conn, 1).unwrap();
@@ -1784,14 +1802,15 @@ mod tests {
     /// to 1 (the v24 inline default).
     fn v22_schema_for_backfill() -> Connection {
         let conn = v20_schema_with_mesh(true); // mesh 1: use_worktree=1
-        // Stamp schema_version as 23 — one version below the v24
-        // backfill, so the version-gated pass walks every entry that
-        // adds columns AND runs the OneShotBackfill (gated flag clear
-        // on first call). Mesh 1 ends up at pre_spawn_pool_size = 1.
+                                               // Stamp schema_version as 23 — one version below the v24
+                                               // backfill, so the version-gated pass walks every entry that
+                                               // adds columns AND runs the OneShotBackfill (gated flag clear
+                                               // on first call). Mesh 1 ends up at pre_spawn_pool_size = 1.
         conn.execute(
             "UPDATE app_settings SET value = '23' WHERE key = 'schema_version'",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // Post-backfill: mesh 1 has pre_spawn_pool_size = 1 (flipped).
         // The non-backfill scenarios below are inserted AFTER the
@@ -1852,8 +1871,11 @@ mod tests {
         let conn = v22_schema_for_backfill();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         // User opts back out.
-        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE path = '/repo/m'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE meshes SET pre_spawn_pool_size = 0 WHERE path = '/repo/m'",
+            [],
+        )
+        .unwrap();
         // Every subsequent init re-calls the ensure — it must be a no-op.
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(

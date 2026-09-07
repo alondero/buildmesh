@@ -1,0 +1,14 @@
+# Rust toolchain pin (issue #1543).
+#
+# Pinned to a specific stable release so contributors and CI format the same
+# code identically. The CI job uses dtolnay/rust-toolchain@stable which honours
+# this file (it will install exactly this version instead of "whatever stable
+# is today"). bump with `rustup update` and a follow-up PR; do not edit the
+# version in place without re-running `cargo fmt --all` against the new rustfmt.
+#
+# `rustfmt` is required for `cargo fmt -- --check`; `clippy` is required for
+# scripts/check.ps1's `rust` target once issue #1491 lands.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

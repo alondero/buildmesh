@@ -379,11 +379,10 @@ mod tests {
     /// Uncontended: the closure runs and its value round-trips.
     #[test]
     fn timeout_variant_runs_when_lock_is_free() {
-        let result = try_with_mesh_sync_lock_timeout(
-            "mesh://timeout-free",
-            Duration::from_secs(1),
-            || 7_i32,
-        );
+        let result =
+            try_with_mesh_sync_lock_timeout("mesh://timeout-free", Duration::from_secs(1), || {
+                7_i32
+            });
         assert_eq!(result, Some(7));
     }
 
@@ -451,8 +450,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("holder never acquired the lock");
 
-        let result =
-            try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
+        let result = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
         assert_eq!(
             result,
             Some(99),

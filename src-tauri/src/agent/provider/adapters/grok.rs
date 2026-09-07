@@ -385,9 +385,7 @@ impl AgentProvider for GrokAdapter {
         // issue links pin this; the same mechanism is documented
         // for `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`).
         let token = crate::agent::mint_runtime_hook_token();
-        tracing::info!(
-            "grok provision_attention_hooks: minted runtime hook token {token}"
-        );
+        tracing::info!("grok provision_attention_hooks: minted runtime hook token {token}");
         let dir = grok_home()?;
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
@@ -454,8 +452,7 @@ mod tests {
             raw_path: path,
             env_type: EnvType::Windows,
         };
-        GROK
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
+        GROK.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
@@ -542,7 +539,10 @@ mod tests {
         // (`grok "fix the bug"`). There is no `--prefill` flag; emitting
         // the trait default would be rejected upstream.
         assert!(GROK.supports_prefill());
-        assert_eq!(GROK.prefill_args("fix the auth bug"), vec!["fix the auth bug"]);
+        assert_eq!(
+            GROK.prefill_args("fix the auth bug"),
+            vec!["fix the auth bug"]
+        );
     }
 
     #[test]
@@ -590,7 +590,9 @@ mod tests {
     #[test]
     fn grok_assign_recipe_carries_session_id_flag() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
 
         let config = ResolvedAgentConfig::default();
         let id = "550e8400-e29b-41d4-a716-446655440000";
@@ -616,7 +618,9 @@ mod tests {
     #[test]
     fn grok_resume_recipe_keeps_resume_flag_and_positional_prefill() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
 
         let config = ResolvedAgentConfig {
             model: Some("grok-3".to_string()),
@@ -653,7 +657,9 @@ mod tests {
     #[test]
     fn grok_interactive_recipe_carries_long_model_arg() {
         use crate::agent::capabilities::ResolvedAgentConfig;
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
 
         let config = ResolvedAgentConfig {
             model: Some("grok-3".to_string()),
@@ -694,7 +700,10 @@ mod tests {
         assert!(caps.supports_effort_override);
         assert!(caps.supports_prefill);
         // Issue #1282: Grok now ships attention hooks.
-        assert!(caps.requires_attention_hook, "issue #1282: Grok now ships attention hooks");
+        assert!(
+            caps.requires_attention_hook,
+            "issue #1282: Grok now ships attention hooks"
+        );
         // Issue #1281: Grok's per-session chat_history.jsonl / updates.jsonl
         // are parsed via TranscriptFormat::Grok, so the archived-node picker
         // and Node Digest rich layer surface Grok.
@@ -723,9 +732,9 @@ mod tests {
         );
         let allowed: Vec<String> = match &caps.effort_control {
             crate::agent::capabilities::EffortControlKind::Closed { allowed } => allowed.clone(),
-            other => panic!(
-                "Grok must advertise Closed-vocab effort control after #1280; got {other:?}"
-            ),
+            other => {
+                panic!("Grok must advertise Closed-vocab effort control after #1280; got {other:?}")
+            }
         };
         let expected: Vec<String> = GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect();
         assert_eq!(
@@ -743,8 +752,12 @@ mod tests {
     /// override that emits the long form instead of the alias).
     #[test]
     fn grok_recipe_appends_effort_arg_when_resolved() {
-        use crate::agent::capabilities::{EffortControlKind, ResolvedAgentConfig, GROK_EFFORT_ALLOWED};
-        use crate::agent::launch::{assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::agent::capabilities::{
+            EffortControlKind, ResolvedAgentConfig, GROK_EFFORT_ALLOWED,
+        };
+        use crate::agent::launch::{
+            assert_flag_followed_by_value, default_prepare, HarnessLaunchInput, SessionIdModeRef,
+        };
 
         // Sanity check the adapter advertises the same vocabulary the
         // constant carries — protects a future refactor that moves the
@@ -777,7 +790,11 @@ mod tests {
         // `--reasoning-effort`; the documented alias is `--effort` and
         // Buildmesh emits it (issue #1280 acceptance criteria).
         assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--reasoning-effort"),
+            !prepared
+                .recipe
+                .base_args
+                .iter()
+                .any(|a| a == "--reasoning-effort"),
             "Grok must use the --effort alias, not the long --reasoning-effort form; \
              got {:?}",
             prepared.recipe.base_args
@@ -818,9 +835,7 @@ mod tests {
     /// Mirrors the AGY precedent (`agy::tests::agy_recipe_appends_effort_arg_when_resolved`).
     #[test]
     fn grok_resolver_keeps_in_vocabulary_drops_out_of_vocabulary() {
-        use crate::agent::capabilities::{
-            resolve_agent_config, AgentConfigInputs, FieldInputs,
-        };
+        use crate::agent::capabilities::{resolve_agent_config, AgentConfigInputs, FieldInputs};
         use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
         let caps = GROK.capabilities();
@@ -909,7 +924,11 @@ mod tests {
         let temp = with_user_home_redirect();
         provision_grok(Path::new("/any"));
 
-        let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
+        let path = temp
+            .path()
+            .join(".grok")
+            .join("hooks")
+            .join("buildmesh-attention.json");
         let content = std::fs::read_to_string(&path).expect("hook file not written");
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("hook file is not valid JSON");
@@ -946,13 +965,19 @@ mod tests {
         let temp = with_user_home_redirect();
         provision_grok(Path::new("/any"));
         let first = std::fs::read_to_string(
-            temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+            temp.path()
+                .join(".grok")
+                .join("hooks")
+                .join("buildmesh-attention.json"),
         )
         .unwrap();
 
         provision_grok(Path::new("/any"));
         let second = std::fs::read_to_string(
-            temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+            temp.path()
+                .join(".grok")
+                .join("hooks")
+                .join("buildmesh-attention.json"),
         )
         .unwrap();
 
@@ -1030,13 +1055,12 @@ mod tests {
             "project-local path should be skipped — folder-trust gate has no spawn flag"
         );
         // The global one did land.
-        assert!(
-            temp.path()
-                .join(".grok")
-                .join("hooks")
-                .join("buildmesh-attention.json")
-                .exists()
-        );
+        assert!(temp
+            .path()
+            .join(".grok")
+            .join("hooks")
+            .join("buildmesh-attention.json")
+            .exists());
     }
 
     /// `grok_home()` resolves to `<USERPROFILE|HOME>/.grok/hooks/`. A
@@ -1212,7 +1236,11 @@ mod tests {
         let notification = value["hooks"]["Notification"]
             .as_array()
             .expect("Notification must be present");
-        assert_eq!(notification.len(), 1, "single Buildmesh matcher group expected");
+        assert_eq!(
+            notification.len(),
+            1,
+            "single Buildmesh matcher group expected"
+        );
         assert!(is_buildmesh_handler(&notification[0]["hooks"][0]));
         let stop = value["hooks"]["Stop"]
             .as_array()
@@ -1233,7 +1261,10 @@ mod tests {
 
         let value: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
-                temp.path().join(".grok").join("hooks").join("buildmesh-attention.json"),
+                temp.path()
+                    .join(".grok")
+                    .join("hooks")
+                    .join("buildmesh-attention.json"),
             )
             .unwrap(),
         )
@@ -1279,7 +1310,11 @@ mod tests {
     #[test]
     fn idempotent_rerun_does_not_rewrite_when_already_wired() {
         let temp = with_user_home_redirect();
-        let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
+        let path = temp
+            .path()
+            .join(".grok")
+            .join("hooks")
+            .join("buildmesh-attention.json");
         provision_grok(Path::new("/any"));
         let first_bytes = std::fs::read(&path).unwrap();
         let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1342,10 +1377,7 @@ mod tests {
         assert!(!dir.join("buildmesh-attention.json").exists());
 
         try_provision_grok(Path::new("/any")).unwrap();
-        let written = std::fs::read_to_string(
-            dir.join("buildmesh-attention.json"),
-        )
-        .unwrap();
+        let written = std::fs::read_to_string(dir.join("buildmesh-attention.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert!(value["hooks"]["Notification"].is_array());
         assert!(value["hooks"]["Stop"].is_array());
@@ -1405,7 +1437,12 @@ mod tests {
         let key = home_key();
         let previous = std::env::var_os(key);
         std::env::set_var(key, temp.path());
-        HomeRedirect { temp, key, previous, _lock: lock }
+        HomeRedirect {
+            temp,
+            key,
+            previous,
+            _lock: lock,
+        }
     }
 
     /// Process-wide lock for tests that mutate USERPROFILE / HOME.

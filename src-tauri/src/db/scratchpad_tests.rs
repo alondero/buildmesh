@@ -41,7 +41,9 @@ mod tests {
         )
         .unwrap();
         let id: i64 = conn
-            .query_row("SELECT id FROM meshes WHERE name = 'test'", [], |row| row.get(0))
+            .query_row("SELECT id FROM meshes WHERE name = 'test'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         (conn, id)
     }
@@ -109,7 +111,10 @@ mod tests {
         // the helper itself is honest about the row not existing.
         let (conn, _id) = fresh_db_with_mesh();
         let result = db::get_mesh_scratchpad_inner(&conn, 999_999);
-        assert!(result.is_err(), "unknown mesh id should error, not silently return empty");
+        assert!(
+            result.is_err(),
+            "unknown mesh id should error, not silently return empty"
+        );
     }
 
     #[test]
@@ -156,11 +161,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(col_present, "scratchpad column should be added on first call");
+        assert!(
+            col_present,
+            "scratchpad column should be added on first call"
+        );
 
         // Writing into the new column must succeed and round-trip.
         let legacy_id: i64 = conn
-            .query_row("SELECT id FROM meshes WHERE name = 'legacy'", [], |row| row.get(0))
+            .query_row("SELECT id FROM meshes WHERE name = 'legacy'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         conn.execute(
             "UPDATE meshes SET scratchpad = 'upgraded' WHERE id = ?1",

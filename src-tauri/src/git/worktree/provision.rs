@@ -212,10 +212,16 @@ pub(crate) fn fetch_fork_head(
     if !url_matches {
         let mut cmd = git_command();
         if existing.is_some() {
-            cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
+            cmd.arg("remote")
+                .arg("set-url")
+                .arg(&alias)
+                .arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: updating remote {} URL", alias);
         } else {
-            cmd.arg("remote").arg("add").arg(&alias).arg(head_repo_clone_url);
+            cmd.arg("remote")
+                .arg("add")
+                .arg(&alias)
+                .arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: adding remote {}", alias);
         }
         let output = match cmd.current_dir(&host_root).output() {
@@ -423,10 +429,7 @@ pub(crate) fn upgrade_warm_to_mode(
     // prewarm snapshot. Best-effort like the other call sites: a copy
     // failure here is logged inside `apply_worktree_include` but doesn't fail
     // the spawn — the worktree is already usable without the extras.
-    super::apply_worktree_include(
-        project_root,
-        std::path::Path::new(host_path),
-    );
+    super::apply_worktree_include(project_root, std::path::Path::new(host_path));
     Ok(())
 }
 
@@ -467,7 +470,10 @@ pub(crate) fn adopt_warm_worktree_by_move(
         let host_root = crate::env::to_host_path(project_root);
         match git2::Repository::open(&host_root) {
             Ok(repo) => {
-                if repo.find_branch(branch_name, git2::BranchType::Local).is_ok() {
+                if repo
+                    .find_branch(branch_name, git2::BranchType::Local)
+                    .is_ok()
+                {
                     return Err(format!(
                         "a branch named '{}' already exists — refusing to adopt the warm worktree over it",
                         branch_name
@@ -488,10 +494,7 @@ pub(crate) fn adopt_warm_worktree_by_move(
     }
     super::move_git_worktree(project_root, old_host_path, new_host_path)?;
     checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
-    super::apply_worktree_include(
-        project_root,
-        std::path::Path::new(new_host_path),
-    );
+    super::apply_worktree_include(project_root, std::path::Path::new(new_host_path));
     Ok(())
 }
 
@@ -809,9 +812,7 @@ pub enum ProvisionOutcome {
     /// No worktree was created or moved — the existing path already exists
     /// (resume / handover / re-spawn of an existing worktree) or the spawn
     /// is a Root Node (`use_worktree = false`).
-    Reused {
-        host_path: String,
-    },
+    Reused { host_path: String },
     /// Issue/PR spawn adopted a warm entry via `git worktree move` +
     /// `git checkout -b <branch> <base_sha>`. `entry` is the claim the
     /// caller hands to `warm_pool::forget_after_spawn` after registration.
@@ -835,10 +836,7 @@ pub enum ProvisionOutcome {
     /// Cold create via `crate::git::worktree::create_git_worktree` — the
     /// pool was empty, or the spawn didn't qualify for a claim (resume,
     /// Root Node already covered by `Reused`, etc.).
-    Created {
-        host_path: String,
-        elapsed_ms: u64,
-    },
+    Created { host_path: String, elapsed_ms: u64 },
 }
 
 /// Resolve a `SpawnContext` to an on-disk worktree state. Returns one of
@@ -914,60 +912,58 @@ pub fn provision_for_spawn(
         _ => None,
     };
 
-    let warm_result: Result<Option<ProvisionOutcome>, (String, crate::services::warm_pool::ClaimedWarmEntry)> =
-        if let Some(entry) = warm_entry_for_cleanup {
-            // Manual spawns adopt the pool's pre-assigned slug (it's the node's
-            // `worktree_name` by the time this fn runs — see orchestrator's
-            // pre-call rename); Issue/PR spawns keep the node's own deterministic
-            // `gh{N}-`/`pr{N}-` name.
-            let branch_name = ctx
-                .node
-                .worktree_name
-                .clone()
-                .unwrap_or_else(|| "buildmesh-spawn".to_string());
-            let start = std::time::Instant::now();
-            // `entry.clone()` borrows from `entry` so the original stays in scope
-            // for the warm-failure cleanup branch below — only one of
-            // `outcome_result = Ok(...)` or `Err((e, entry))` runs, but Rust's
-            // borrow checker tracks moves statically, so we must clone (entry
-            // holds 4 short strings per `ClaimedWarmEntry` — cheap).
-            let outcome_result: Result<ProvisionOutcome, String> = match ctx.source {
-                SpawnSource::Issue | SpawnSource::PullRequest => {
-                    adopt_warm_worktree_by_move(
-                        &ctx.node.path,
-                        &entry.path,
-                        &ctx.host_path,
-                        &branch_name,
-                        &ctx.worktree_mode,
-                        &ctx.base_ref,
-                    )
-                    .map(|()| ProvisionOutcome::Adopted {
-                        entry: entry.clone(),
-                        host_path: ctx.host_path.clone(),
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                    })
-                }
-                SpawnSource::Manual => {
-                    upgrade_warm_to_mode(
-                        &ctx.node.path,
-                        &ctx.host_path,
-                        &branch_name,
-                        &ctx.worktree_mode,
-                    )
-                    .map(|()| ProvisionOutcome::Upgraded {
-                        entry: entry.clone(),
-                        host_path: ctx.host_path.clone(),
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                    })
-                }
-            };
-            match outcome_result {
-                Ok(o) => Ok(Some(o)),
-                Err(e) => Err((e, entry)),
-            }
-        } else {
-            Ok(None) // no warm entry — drive the cold-path branches below
+    let warm_result: Result<
+        Option<ProvisionOutcome>,
+        (String, crate::services::warm_pool::ClaimedWarmEntry),
+    > = if let Some(entry) = warm_entry_for_cleanup {
+        // Manual spawns adopt the pool's pre-assigned slug (it's the node's
+        // `worktree_name` by the time this fn runs — see orchestrator's
+        // pre-call rename); Issue/PR spawns keep the node's own deterministic
+        // `gh{N}-`/`pr{N}-` name.
+        let branch_name = ctx
+            .node
+            .worktree_name
+            .clone()
+            .unwrap_or_else(|| "buildmesh-spawn".to_string());
+        let start = std::time::Instant::now();
+        // `entry.clone()` borrows from `entry` so the original stays in scope
+        // for the warm-failure cleanup branch below — only one of
+        // `outcome_result = Ok(...)` or `Err((e, entry))` runs, but Rust's
+        // borrow checker tracks moves statically, so we must clone (entry
+        // holds 4 short strings per `ClaimedWarmEntry` — cheap).
+        let outcome_result: Result<ProvisionOutcome, String> = match ctx.source {
+            SpawnSource::Issue | SpawnSource::PullRequest => adopt_warm_worktree_by_move(
+                &ctx.node.path,
+                &entry.path,
+                &ctx.host_path,
+                &branch_name,
+                &ctx.worktree_mode,
+                &ctx.base_ref,
+            )
+            .map(|()| ProvisionOutcome::Adopted {
+                entry: entry.clone(),
+                host_path: ctx.host_path.clone(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            }),
+            SpawnSource::Manual => upgrade_warm_to_mode(
+                &ctx.node.path,
+                &ctx.host_path,
+                &branch_name,
+                &ctx.worktree_mode,
+            )
+            .map(|()| ProvisionOutcome::Upgraded {
+                entry: entry.clone(),
+                host_path: ctx.host_path.clone(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            }),
         };
+        match outcome_result {
+            Ok(o) => Ok(Some(o)),
+            Err(e) => Err((e, entry)),
+        }
+    } else {
+        Ok(None) // no warm entry — drive the cold-path branches below
+    };
 
     let outcome = match warm_result {
         Ok(Some(o)) => Ok(o),
@@ -1124,7 +1120,9 @@ pub fn provision_for_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::test_helpers::{commit_file, init_repo_with_commit, repo_with_drifted_head, TestDir};
+    use crate::env::test_helpers::{
+        commit_file, init_repo_with_commit, repo_with_drifted_head, TestDir,
+    };
     use crate::models::{AgentNode, EnvType, SessionStatus};
     use crate::services::warm_pool::ClaimedWarmEntry;
     use std::fs;
@@ -1218,13 +1216,17 @@ mod tests {
         init_repo_with_commit(root, &[("README.md", "# project\n")]);
 
         let node = empty_node(root, None);
-        let host_path = root.join("does-not-exist-yet").to_string_lossy().to_string();
+        let host_path = root
+            .join("does-not-exist-yet")
+            .to_string_lossy()
+            .to_string();
         let ctx = SpawnContext {
             use_worktree: false,
             ..make_ctx(node, SpawnSource::Manual, host_path, None)
         };
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("Root Node must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("Root Node must succeed");
         match outcome {
             ProvisionOutcome::Reused { host_path: p } => {
                 assert!(p.ends_with("does-not-exist-yet"));
@@ -1257,13 +1259,17 @@ mod tests {
         // No warm entry — resume / handover / re-spawn path.
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), None);
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("resume must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("resume must succeed");
         match outcome {
             ProvisionOutcome::Reused { host_path: p } => assert_eq!(p, host_path_str),
             other => panic!("expected Reused for existing path, got {:?}", other),
         }
         // Prior work preserved.
-        assert_eq!(fs::read_to_string(host_path.join("agent-notes.md")).unwrap(), "carried over");
+        assert_eq!(
+            fs::read_to_string(host_path.join("agent-notes.md")).unwrap(),
+            "carried over"
+        );
     }
 
     // ── Created (cold) ────────────────────────────────────────────────────────
@@ -1278,23 +1284,37 @@ mod tests {
         init_repo_with_commit(root, &[("f.txt", "v1\n")]);
 
         let node = empty_node(root, Some("bold-amber-fox"));
-        let host_path = root.join(".claude").join("worktrees").join("bold-amber-fox");
+        let host_path = root
+            .join(".claude")
+            .join("worktrees")
+            .join("bold-amber-fox");
         let host_path_str = host_path.to_string_lossy().to_string();
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), None);
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("cold create must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("cold create must succeed");
         match outcome {
-            ProvisionOutcome::Created { host_path: p, elapsed_ms } => {
+            ProvisionOutcome::Created {
+                host_path: p,
+                elapsed_ms,
+            } => {
                 assert_eq!(p, host_path_str);
                 // Elapsed_ms is intentionally permissive (cold create on
                 // Windows Defender / NTFS-indexed disks can spend >100ms in
                 // the first write). A `0` here would mean the timer wasn't
                 // started, which would be a real regression.
-                assert!(elapsed_ms < 60_000, "elapsed_ms {} implausibly large", elapsed_ms);
+                assert!(
+                    elapsed_ms < 60_000,
+                    "elapsed_ms {} implausibly large",
+                    elapsed_ms
+                );
             }
             other => panic!("expected Created for empty pool, got {:?}", other),
         }
-        assert!(host_path.exists(), "cold create must materialise the worktree");
+        assert!(
+            host_path.exists(),
+            "cold create must materialise the worktree"
+        );
         assert_eq!(fs::read_to_string(host_path.join("f.txt")).unwrap(), "v1\n");
     }
 
@@ -1321,7 +1341,8 @@ mod tests {
         // NOT the local drift that `repo.head()` resolves to.
         ctx.base_ref = "origin/main".to_string();
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("cold create must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("cold create must succeed");
         match outcome {
             ProvisionOutcome::Created { host_path: p, .. } => assert_eq!(p, host_path_str),
             other => panic!("expected Created, got {:?}", other),
@@ -1353,11 +1374,21 @@ mod tests {
         let host_path = root.join(".claude").join("worktrees").join("pr123-feature");
         let host_path_str = host_path.to_string_lossy().to_string();
         let warm = claimed_warm(&pool_path, "warm-pool-slug");
-        let ctx = make_ctx(node, SpawnSource::PullRequest, host_path_str.clone(), Some(warm));
+        let ctx = make_ctx(
+            node,
+            SpawnSource::PullRequest,
+            host_path_str.clone(),
+            Some(warm),
+        );
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("PR adopt must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("PR adopt must succeed");
         match outcome {
-            ProvisionOutcome::Adopted { entry, host_path: p, elapsed_ms } => {
+            ProvisionOutcome::Adopted {
+                entry,
+                host_path: p,
+                elapsed_ms,
+            } => {
                 assert_eq!(entry.id, 42);
                 assert_eq!(p, host_path_str);
                 assert!(elapsed_ms < 60_000);
@@ -1366,7 +1397,10 @@ mod tests {
         }
         // Pool dir was moved — old path gone, target path present.
         assert!(!pool_path.exists(), "pool directory must be moved away");
-        assert!(host_path.exists(), "adopted worktree must exist at target path");
+        assert!(
+            host_path.exists(),
+            "adopted worktree must exist at target path"
+        );
     }
 
     /// Issue spawn adopts the warm entry similarly, but the worktree lands
@@ -1386,9 +1420,14 @@ mod tests {
         let warm = claimed_warm(&pool_path, "warm-issue-slug");
 
         let ctx = make_ctx(node, SpawnSource::Issue, host_path_str.clone(), Some(warm));
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("Issue adopt must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("Issue adopt must succeed");
         match outcome {
-            ProvisionOutcome::Adopted { entry, host_path: p, .. } => {
+            ProvisionOutcome::Adopted {
+                entry,
+                host_path: p,
+                ..
+            } => {
                 assert_eq!(entry.preassigned_name, "warm-issue-slug");
                 assert_eq!(p, host_path_str);
             }
@@ -1474,7 +1513,8 @@ mod tests {
             base_ref: "definitely-not-a-ref-12345".to_string(),
             ..make_ctx(node, SpawnSource::Issue, host_path_str.clone(), Some(warm))
         };
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("offline fallback must succeed (ADR 0001)");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("offline fallback must succeed (ADR 0001)");
         match outcome {
             ProvisionOutcome::Adopted { host_path: p, .. } => {
                 assert_eq!(p, host_path_str);
@@ -1503,9 +1543,14 @@ mod tests {
         let warm = claimed_warm(&pool_path, "bold-amber-fox");
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str.clone(), Some(warm));
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("manual upgrade must succeed");
         match outcome {
-            ProvisionOutcome::Upgraded { entry, host_path: p, .. } => {
+            ProvisionOutcome::Upgraded {
+                entry,
+                host_path: p,
+                ..
+            } => {
                 assert_eq!(entry.preassigned_name, "bold-amber-fox");
                 assert_eq!(p, host_path_str);
             }
@@ -1515,7 +1560,10 @@ mod tests {
         // The pool's plain slug is preserved (no `git worktree move`).
         let wt = git2::Repository::open(&pool_path).unwrap();
         let head_name = wt.head().unwrap().shorthand().unwrap_or("").to_string();
-        assert_eq!(head_name, "bold-amber-fox", "manual upgrade must land on the slug");
+        assert_eq!(
+            head_name, "bold-amber-fox",
+            "manual upgrade must land on the slug"
+        );
     }
 
     /// Detached-mode Manual warm claim is a no-op on the `git checkout`
@@ -1538,7 +1586,8 @@ mod tests {
             ..make_ctx(node, SpawnSource::Manual, host_path_str.clone(), Some(warm))
         };
 
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("detached manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("detached manual upgrade must succeed");
         match outcome {
             ProvisionOutcome::Upgraded { host_path: p, .. } => assert_eq!(p, host_path_str),
             other => panic!("expected Upgraded for detached manual, got {:?}", other),
@@ -1563,14 +1612,18 @@ mod tests {
         commit_file(&repo, root, ".worktreeinclude", "secrets.env\n");
 
         let pool_path = make_pool_entry(root, "warm-include");
-        assert_eq!(fs::read_to_string(pool_path.join("secrets.env")).unwrap(), "v1=old\n");
+        assert_eq!(
+            fs::read_to_string(pool_path.join("secrets.env")).unwrap(),
+            "v1=old\n"
+        );
         fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
 
         let node = empty_node(root, Some("warm-include"));
         let host_path_str = pool_path.to_string_lossy().to_string();
         let warm = claimed_warm(&pool_path, "warm-include");
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, Some(warm));
-        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink).expect("manual upgrade must succeed");
+        let outcome = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink)
+            .expect("manual upgrade must succeed");
         assert!(matches!(outcome, ProvisionOutcome::Upgraded { .. }));
         assert_eq!(
             fs::read_to_string(pool_path.join("secrets.env")).unwrap(),
@@ -1606,7 +1659,8 @@ mod tests {
             host_c.to_string_lossy().to_string(),
             None,
         );
-        let ProvisionOutcome::Created { elapsed_ms, .. } = provision_for_spawn(ctx_c, &ProvisionHooks::default(), &NullSink).unwrap()
+        let ProvisionOutcome::Created { elapsed_ms, .. } =
+            provision_for_spawn(ctx_c, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Created branch expected");
         };
@@ -1623,7 +1677,8 @@ mod tests {
             host_a.to_string_lossy().to_string(),
             Some(warm_a),
         );
-        let ProvisionOutcome::Adopted { elapsed_ms, .. } = provision_for_spawn(ctx_a, &ProvisionHooks::default(), &NullSink).unwrap()
+        let ProvisionOutcome::Adopted { elapsed_ms, .. } =
+            provision_for_spawn(ctx_a, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Adopted branch expected");
         };
@@ -1638,7 +1693,8 @@ mod tests {
             pool_upgraded.to_string_lossy().to_string(),
             Some(warm_u),
         );
-        let ProvisionOutcome::Upgraded { elapsed_ms, .. } = provision_for_spawn(ctx_u, &ProvisionHooks::default(), &NullSink).unwrap()
+        let ProvisionOutcome::Upgraded { elapsed_ms, .. } =
+            provision_for_spawn(ctx_u, &ProvisionHooks::default(), &NullSink).unwrap()
         else {
             panic!("Upgraded branch expected");
         };
@@ -1719,12 +1775,7 @@ mod tests {
             crate::db::adopt_manual_pool_slug_with_path(node_id, slug, worktree_path)
                 .expect("DB write must succeed in this test");
         }
-        fn on_pool_maintenance_required(
-            &self,
-            _mesh_id: i64,
-            _do_refresh: bool,
-            _do_refill: bool,
-        ) {
+        fn on_pool_maintenance_required(&self, _mesh_id: i64, _do_refresh: bool, _do_refill: bool) {
         }
     }
 
@@ -1765,8 +1816,13 @@ mod tests {
 
         let td = TestDir::new("manual_adopt_db");
         let root = td.path();
-        init_repo_with_commit(root, &[("f.txt", "v1
-")]);
+        init_repo_with_commit(
+            root,
+            &[(
+                "f.txt", "v1
+",
+            )],
+        );
         let pool_path = make_pool_entry(root, "bold-amber-fox");
 
         // Stage-1 row that `agent_node::create` would have written before
@@ -1872,7 +1928,10 @@ mod tests {
 
         let mut node = empty_node(root, Some("stage-one-slug"));
         node.id = 555;
-        let host_path = root.join(".claude").join("worktrees").join("stage-one-slug");
+        let host_path = root
+            .join(".claude")
+            .join("worktrees")
+            .join("stage-one-slug");
         let host_path_str = host_path.to_string_lossy().to_string();
         // `None` — pool was empty, so this spawn cuts its own worktree.
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
@@ -1937,7 +1996,10 @@ mod tests {
         let host_path_str = host_path.to_string_lossy().to_string();
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
 
-        let hooks = ProvisionHooks { ref_advanced_for_pool: true, pool_was_drained_by_this_spawn: false };
+        let hooks = ProvisionHooks {
+            ref_advanced_for_pool: true,
+            pool_was_drained_by_this_spawn: false,
+        };
         let sink = RecordingSink::new();
         let _ = provision_for_spawn(ctx, &hooks, &sink).expect("cold create must succeed");
         assert_eq!(
@@ -1965,7 +2027,10 @@ mod tests {
         let host_path_str = host_path.to_string_lossy().to_string();
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
 
-        let hooks = ProvisionHooks { ref_advanced_for_pool: false, pool_was_drained_by_this_spawn: true };
+        let hooks = ProvisionHooks {
+            ref_advanced_for_pool: false,
+            pool_was_drained_by_this_spawn: true,
+        };
         let sink = RecordingSink::new();
         let _ = provision_for_spawn(ctx, &hooks, &sink).expect("cold create must succeed");
         assert_eq!(
@@ -1990,7 +2055,8 @@ mod tests {
         let ctx = make_ctx(node, SpawnSource::Manual, host_path_str, None);
 
         let sink = RecordingSink::new();
-        let _ = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink).expect("cold create must succeed");
+        let _ = provision_for_spawn(ctx, &ProvisionHooks::default(), &sink)
+            .expect("cold create must succeed");
         assert!(
             sink.maintenance_calls().is_empty(),
             "no flags → no maintenance call (no false-positive refills)"
@@ -2091,7 +2157,10 @@ mod tests {
             "warm-failure error must name the refusal cause, got: {}",
             err
         );
-        assert!(pool_path.exists(), "pre-move refusal: pool directory must remain intact");
+        assert!(
+            pool_path.exists(),
+            "pre-move refusal: pool directory must remain intact"
+        );
         assert!(sink.adopted_slugs().is_empty());
         assert!(sink.maintenance_calls().is_empty());
     }

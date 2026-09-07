@@ -21,7 +21,12 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("hooks.json");
-    let tmp = path.with_file_name(format!("{}.{}.{}.tmp", file_name, std::process::id(), counter));
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ));
 
     {
         use std::io::Write;
@@ -32,7 +37,11 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!("atomic_write: failed to clean up temp file {:?}: {}", tmp, rm_err);
+            tracing::warn!(
+                "atomic_write: failed to clean up temp file {:?}: {}",
+                tmp,
+                rm_err
+            );
         }
         return Err(e);
     }
@@ -144,7 +153,10 @@ impl AgentProvider for AgyAdapter {
         use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
         use crate::agent::session_lifecycle::LifecycleKind;
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::BackgroundRunning,
+            ],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: Some("workspace trust".into()),
             min_version: Some("1.0.0".into()),
@@ -232,7 +244,10 @@ impl AgentProvider for AgyAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::agy_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -299,8 +314,7 @@ mod tests {
             raw_path: path,
             env_type: EnvType::Windows,
         };
-        AGY
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
+        AGY.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
@@ -590,7 +604,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(tmp_files.is_empty(), "found leftover tmp files: {tmp_files:?}");
+        assert!(
+            tmp_files.is_empty(),
+            "found leftover tmp files: {tmp_files:?}"
+        );
     }
 
     /// Issue #1367: Verify that user-defined sibling namespaces in

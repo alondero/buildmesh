@@ -36,10 +36,10 @@ use crate::services::windows_cred;
 // it; the parser stays qualified (call sites read
 // `opencode_oauth::parse_opencode_console_credential(...)`) to make the
 // module boundary obvious at every read site.
+use crate::services::opencode_oauth::device_flow;
 use crate::services::opencode_oauth::OpenCodeConsoleCred;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_HOST;
-use crate::services::opencode_oauth::device_flow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
@@ -234,7 +234,8 @@ impl CodexAuthFile {
     /// out Codex CLI (which writes `"access_token": ""`) returns `None`
     /// rather than a bogus token.
     fn extract_credentials(&self) -> Option<CodexAuthCredentials> {
-        let non_empty = |s: &Option<String>| s.as_deref().filter(|v| !v.is_empty()).map(str::to_owned);
+        let non_empty =
+            |s: &Option<String>| s.as_deref().filter(|v| !v.is_empty()).map(str::to_owned);
 
         if let Some(token) = non_empty(&self.access_token) {
             return Some(CodexAuthCredentials {
@@ -269,7 +270,8 @@ struct AnthropicOAuthCred {
 
 /// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
 fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let content = fs::read_to_string(&path)
+        .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
     let cred: AnthropicOAuthCred =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     cred.claude_ai_oauth
@@ -284,8 +286,8 @@ fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
 fn read_codex_auth_file(path: &Path) -> Result<CodexAuthCredentials, UsageError> {
     let content = fs::read_to_string(path)
         .map_err(|_| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
-    let cred: CodexAuthFile = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let cred: CodexAuthFile =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     cred.extract_credentials()
         .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
@@ -295,7 +297,9 @@ fn read_codex_auth_file(path: &Path) -> Result<CodexAuthCredentials, UsageError>
 /// `logged_out` error message so the UI can show the user where we looked.
 /// Pure: takes an explicit candidate list so tests don't need to mutate
 /// `$CODEX_HOME` or `$USERPROFILE` across the process.
-fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthCredentials), UsageError> {
+fn read_codex_credentials(
+    candidates: &[PathBuf],
+) -> Result<(PathBuf, CodexAuthCredentials), UsageError> {
     let first = candidates.first().cloned().unwrap_or_default();
     for path in candidates {
         if path.exists() {
@@ -311,7 +315,9 @@ fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthC
             }
         }
     }
-    Err(UsageError::NoCredential(first.to_string_lossy().to_string()))
+    Err(UsageError::NoCredential(
+        first.to_string_lossy().to_string(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -320,9 +326,10 @@ struct OpenCodeAuthEntry {
 }
 
 fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let entries: HashMap<String, OpenCodeAuthEntry> = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let content = fs::read_to_string(&path)
+        .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let entries: HashMap<String, OpenCodeAuthEntry> =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     if let Some(entry) = entries.get("opencode-go") {
         if let Some(ref key) = entry.key {
             if !key.is_empty() {
@@ -564,9 +571,9 @@ fn parse_codex_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>)
                 .limit_window_seconds
                 .map(format_codex_window_label)
                 .unwrap_or_else(|| "5-hour".to_string());
-            let resets_at = w
-                .reset_at
-                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339()));
+            let resets_at = w.reset_at.and_then(|epoch| {
+                chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.to_rfc3339())
+            });
             if highest.is_none_or(|h| used > h) {
                 *highest = Some(used);
             }
@@ -727,8 +734,16 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
             }
         };
 
-        push_window("5-hour", model.current_interval_remaining_percent, model.end_time);
-        push_window("Weekly", model.current_weekly_remaining_percent, model.weekly_end_time);
+        push_window(
+            "5-hour",
+            model.current_interval_remaining_percent,
+            model.end_time,
+        );
+        push_window(
+            "Weekly",
+            model.current_weekly_remaining_percent,
+            model.weekly_end_time,
+        );
     }
 
     let detail = if windows.is_empty() {
@@ -836,10 +851,7 @@ fn parse_kimi_response(body: &str) -> Result<BillingBalance, UsageError> {
     // balance. Same shape as Moonshot's chat-API errors.
     if let Some(c) = resp.code {
         if c != 0 {
-            return Err(UsageError::Shape(format!(
-                "Kimi API returned code {}",
-                c
-            )));
+            return Err(UsageError::Shape(format!("Kimi API returned code {}", c)));
         }
     }
 
@@ -1072,11 +1084,7 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
         "{}/organization/costs?start_time={}&bucket_width=1d",
         base_url, start_time
     );
-    let resp = match client
-        .get(&url)
-        .header("Authorization", auth)
-        .send()
-    {
+    let resp = match client.get(&url).header("Authorization", auth).send() {
         Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
             // Project key — graceful degradation. The key is valid for
             // inference; we just can't reach the admin endpoint. Spec §3.2:
@@ -1104,10 +1112,7 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
         }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
-            return unavailable(
-                "openai",
-                format!("API error {}: costs query failed", code),
-            );
+            return unavailable("openai", format!("API error {}: costs query failed", code));
         }
         Ok(r) => r,
         Err(e) => return unavailable("openai", format!("Costs query failed: {}", e)),
@@ -1222,10 +1227,7 @@ pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
                     )
                 }
             };
-            return unavailable(
-                "openrouter",
-                format!("API error {}: {}", code, body),
-            );
+            return unavailable("openrouter", format!("API error {}: {}", code, body));
         }
         Ok(r) => r,
         Err(e) => return unavailable("openrouter", format!("Request failed: {}", e)),
@@ -1330,11 +1332,10 @@ fn parse_deepseek_response(body: &str) -> Result<BillingBalance, UsageError> {
     let info = resp.balance_infos.into_iter().next().ok_or_else(|| {
         UsageError::Shape("DeepSeek balance response had no balance_infos entry".to_string())
     })?;
-    let remaining = info
-        .total_balance
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| UsageError::Shape(format!("DeepSeek total_balance not a number: {}", e)))?;
+    let remaining =
+        info.total_balance.trim().parse::<f64>().map_err(|e| {
+            UsageError::Shape(format!("DeepSeek total_balance not a number: {}", e))
+        })?;
     Ok(BillingBalance {
         remaining,
         monthly_spend: None,
@@ -1565,7 +1566,9 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
     };
     let body = match response.text() {
         Ok(body) => body,
-        Err(error) => return unavailable("commandcode", format!("Failed to read response: {error}")),
+        Err(error) => {
+            return unavailable("commandcode", format!("Failed to read response: {error}"))
+        }
     };
     match parse_commandcode_credits_response(&body) {
         Ok((windows, balance)) => ProviderUsage {
@@ -1604,10 +1607,12 @@ fn deepseek_usage_with_url(api_key: &str, live_url: &str) -> ProviderUsage {
     };
     let auth = format!("Bearer {}", api_key);
     let resp = match client.get(live_url).header("Authorization", auth).send() {
-        Ok(r) if r.status() == 429 => return unavailable(
-            "deepseek",
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
+        Ok(r) if r.status() == 429 => {
+            return unavailable(
+                "deepseek",
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            )
+        }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
             if code == 401 || code == 403 {
@@ -1662,8 +1667,8 @@ struct GrokAuthEntry {
 fn read_grok_token(path: PathBuf) -> Result<(String, String), UsageError> {
     let content = fs::read_to_string(&path)
         .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let entries: HashMap<String, GrokAuthEntry> = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let entries: HashMap<String, GrokAuthEntry> =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     for (k, v) in entries {
         if k.starts_with("https://auth.x.ai::") {
             if let (Some(key), Some(user_id)) = (v.key, v.user_id) {
@@ -1720,8 +1725,8 @@ struct GrokBillingResp {
 }
 
 fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
-    let resp: GrokBillingResp = serde_json::from_str(body)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let resp: GrokBillingResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
     let config = resp.config;
 
     let mut windows = Vec::new();
@@ -1742,20 +1747,27 @@ fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
     };
 
     if is_unified {
-        let used_percent = config.credit_usage_percent
+        let used_percent = config
+            .credit_usage_percent
             .map(|percent| percent.clamp(0.0, 100.0))
-            .or_else(|| config.on_demand_cap.as_ref().map(|cap| {
-                if cap.val > 0.0 {
-                    config.on_demand_used.as_ref()
-                        .map(|used| ((used.val / cap.val) * 100.0).clamp(0.0, 100.0))
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                }
-            }));
+            .or_else(|| {
+                config.on_demand_cap.as_ref().map(|cap| {
+                    if cap.val > 0.0 {
+                        config
+                            .on_demand_used
+                            .as_ref()
+                            .map(|used| ((used.val / cap.val) * 100.0).clamp(0.0, 100.0))
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    }
+                })
+            });
 
         if let Some(used_percent) = used_percent {
-            let label = config.current_period.as_ref()
+            let label = config
+                .current_period
+                .as_ref()
                 .and_then(|p| p.period_type.as_ref())
                 .map(|t| {
                     if t.contains("WEEKLY") {
@@ -1850,9 +1862,11 @@ pub fn grok_usage() -> ProviderUsage {
     }
 }
 
-fn calculate_opencode_windows_impl(conn: &rusqlite::Connection) -> Result<Vec<UsageWindow>, String> {
+fn calculate_opencode_windows_impl(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<UsageWindow>, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    
+
     let sum_cost_since = |since_ms: i64| -> Result<f64, rusqlite::Error> {
         let mut stmt = conn.prepare("SELECT SUM(cost) FROM session WHERE time_created >= ?")?;
         let cost: Option<f64> = stmt.query_row([since_ms], |row| row.get(0))?;
@@ -1919,8 +1933,8 @@ fn calculate_opencode_windows(db_path: &std::path::Path) -> Result<Vec<UsageWind
         ]);
     }
 
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    let conn =
+        rusqlite::Connection::open(db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
 
     calculate_opencode_windows_impl(&conn)
 }
@@ -1991,10 +2005,7 @@ fn parse_opencode_billing_response(
 /// a usable envelope (no `error`); any failure — `None` = no credential,
 /// or `Some` carrying an error — falls through to the SQLite result so a
 /// user mid-OAuth always sees SOMETHING (issue #957 sub-spec point 4).
-fn choose_opencode_usage(
-    live: Option<&ProviderUsage>,
-    sqlite: ProviderUsage,
-) -> ProviderUsage {
+fn choose_opencode_usage(live: Option<&ProviderUsage>, sqlite: ProviderUsage) -> ProviderUsage {
     if let Some(usage) = live {
         if usage.error.is_none() {
             return usage.clone();
@@ -2068,9 +2079,7 @@ fn opencode_usage_impl_with_hosts(
     if let Some(c) = &current_cred {
         let cached_age = {
             let guard = USAGE_CACHE.lock().unwrap();
-            guard
-                .get("opencode")
-                .map(|(instant, _)| instant.elapsed())
+            guard.get("opencode").map(|(instant, _)| instant.elapsed())
         };
         let now_unix = chrono::Utc::now().timestamp();
         if opencode_needs_refresh(c, cached_age, now_unix) {
@@ -2123,11 +2132,8 @@ fn opencode_usage_impl_with_hosts(
                     refresh_url,
                     &refresh_token,
                 ) {
-                    let new_cred = cred_from_token(
-                        &token,
-                        c.workspace_id.as_deref(),
-                        c.server_id.as_deref(),
-                    );
+                    let new_cred =
+                        cred_from_token(&token, c.workspace_id.as_deref(), c.server_id.as_deref());
                     live = opencode_live_request_at(live_url, &new_cred);
                 }
             }
@@ -2165,10 +2171,7 @@ fn opencode_usage_impl_with_hosts(
 /// pre-emptive + reactive retry paths share the same wire-binding
 /// closure (header set, JSON body, parser) without duplicating the
 /// `opencode_live_request_parts` + `fetch_usage` composition.
-fn opencode_live_request_at(
-    live_url: &str,
-    cred: &OpenCodeConsoleCred,
-) -> Option<ProviderUsage> {
+fn opencode_live_request_at(live_url: &str, cred: &OpenCodeConsoleCred) -> Option<ProviderUsage> {
     let (token, workspace_id, server_id) = opencode_live_request_parts(cred)?;
     let live_url_owned = live_url.to_string();
     Some(fetch_usage(
@@ -2282,8 +2285,7 @@ const AGY_CRED_TARGET: &str = "gemini:antigravity";
 /// constant stays as the documented legacy default for at least one
 /// release (#963/#972); remove it after re-authentication has rolled out
 /// everywhere.
-const OPENCODE_SERVER_ID: &str =
-    "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
+const OPENCODE_SERVER_ID: &str = "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
 
 #[derive(Deserialize)]
 struct AgyTokenField {
@@ -2546,9 +2548,7 @@ fn agy_window_rank(window: &str) -> u8 {
     }
 }
 
-fn parse_agy_quota_summary(
-    body: &str,
-) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+fn parse_agy_quota_summary(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
     let resp: AgyQuotaSummaryResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
@@ -2642,7 +2642,12 @@ fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), Us
     let ordered_ids: Vec<&String> = resp
         .agent_model_sorts
         .first()
-        .map(|sort| sort.groups.iter().flat_map(|g| g.model_ids.iter()).collect())
+        .map(|sort| {
+            sort.groups
+                .iter()
+                .flat_map(|g| g.model_ids.iter())
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut windows = vec![];
@@ -2672,10 +2677,7 @@ pub fn agy_usage() -> ProviderUsage {
         Ok(t) => t,
         Err(e) => return logged_out("agy", e.to_string()),
     };
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
+    let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(c) => c,
         Err(e) => return logged_out("agy", format!("Client error: {e}")),
     };
@@ -2829,9 +2831,13 @@ fn read_cursor_sqlite_token(path: &Path) -> Result<String, UsageError> {
         .prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'")
         .map_err(|e| UsageError::Shape(format!("Failed to prepare ItemTable query: {}", e)))?;
 
-    let raw: String = stmt
-        .query_row([], |row| row.get(0))
-        .map_err(|e| UsageError::NoCredential(format!("Key cursorAuth/accessToken not found in {}: {}", path.display(), e)))?;
+    let raw: String = stmt.query_row([], |row| row.get(0)).map_err(|e| {
+        UsageError::NoCredential(format!(
+            "Key cursorAuth/accessToken not found in {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
 
     let token = if let Ok(parsed) = serde_json::from_str::<String>(&raw) {
         parsed
@@ -2840,7 +2846,10 @@ fn read_cursor_sqlite_token(path: &Path) -> Result<String, UsageError> {
     };
 
     if token.is_empty() {
-        return Err(UsageError::NoCredential(format!("{}: empty token", path.display())));
+        return Err(UsageError::NoCredential(format!(
+            "{}: empty token",
+            path.display()
+        )));
     }
 
     Ok(token)
@@ -2861,8 +2870,8 @@ fn read_cursor_auth_json(path: &Path) -> Result<String, UsageError> {
         token: Option<String>,
     }
 
-    let parsed: CursorAuthFile = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let parsed: CursorAuthFile =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
 
     parsed
         .access_token_camel
@@ -3200,7 +3209,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(18.5));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2025-08-15T20:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2025-08-15T20:00:00+00:00")
+        );
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(42.0));
         // Highest-used window drives the detail phrasing (spec §4 wire
@@ -3266,7 +3278,10 @@ pub(crate) mod tests {
         // loudly rather than silently returning zero windows (spec §5 wire
         // invariant: missing data ≠ empty data).
         let err = parse_codex_response(r#"{"foo":"bar"}"#).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]
@@ -3299,7 +3314,10 @@ pub(crate) mod tests {
         }"#;
         let (windows, detail) = parse_codex_response(json).unwrap();
         assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active Codex rate-limit windows"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("No active Codex rate-limit windows")
+        );
     }
 
     #[test]
@@ -3317,7 +3335,10 @@ pub(crate) mod tests {
             }
         }"#;
         let (windows, _) = parse_codex_response(json).unwrap();
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2025-01-01T00:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2025-01-01T00:00:00+00:00")
+        );
     }
 
     // ── Codex auth-file parser (spec §2.3) ───────────────────────────────
@@ -3588,9 +3609,7 @@ pub(crate) mod tests {
         let candidates = vec![auth_path];
 
         let port = codex_live_loopback(move |req| {
-            let _ = req.respond(
-                tiny_http::Response::from_string(r#"{}"#).with_status_code(403),
-            );
+            let _ = req.respond(tiny_http::Response::from_string(r#"{}"#).with_status_code(403));
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
@@ -3623,7 +3642,11 @@ pub(crate) mod tests {
 
         let usage = codex_usage_with_paths(&candidates, &url);
         assert!(usage.logged_in);
-        assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("Rate limited"))
+            .unwrap_or(false));
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -3658,7 +3681,11 @@ pub(crate) mod tests {
 
         let usage = codex_usage_with_paths(&candidates, &url);
         assert!(usage.logged_in);
-        assert!(usage.error.as_deref().map(|e| e.contains("parse")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("parse"))
+            .unwrap_or(false));
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -3739,7 +3766,12 @@ pub(crate) mod tests {
         // month-day boundary: the value is always day=1 at 00:00:00 UTC.
         let epoch = current_month_start_epoch();
         let dt = chrono::DateTime::from_timestamp(epoch, 0).expect("valid epoch");
-        assert_eq!(dt.day(), 1, "month start must be day 1, got day {}", dt.day());
+        assert_eq!(
+            dt.day(),
+            1,
+            "month start must be day 1, got day {}",
+            dt.day()
+        );
         assert_eq!(dt.hour(), 0);
         assert_eq!(dt.minute(), 0);
         assert_eq!(dt.second(), 0);
@@ -3833,12 +3865,15 @@ pub(crate) mod tests {
                 for req in server.incoming_requests() {
                     match req.url() {
                         url if url.ends_with("/models") => {
-                            let _ = req.respond(tiny_http::Response::from_string(OPENAI_MODELS_BODY));
+                            let _ =
+                                req.respond(tiny_http::Response::from_string(OPENAI_MODELS_BODY));
                         }
                         url if url.contains("/organization/costs") => {
                             let _ = req.respond(
-                                tiny_http::Response::from_string(r#"{"error":"insufficient permissions"}"#)
-                                    .with_status_code(403),
+                                tiny_http::Response::from_string(
+                                    r#"{"error":"insufficient permissions"}"#,
+                                )
+                                .with_status_code(403),
                             );
                         }
                         _ => {
@@ -3909,7 +3944,11 @@ pub(crate) mod tests {
         let usage = openai_usage_with_base_url("", "http://127.0.0.1:1");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "openai");
-        assert!(usage.error.as_deref().map(|e| e.contains("No API key")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("No API key"))
+            .unwrap_or(false));
         assert!(usage.balance.is_none());
     }
 
@@ -3935,7 +3974,11 @@ pub(crate) mod tests {
 
         let usage = openai_usage_with_base_url("sk-test", &base);
         assert!(usage.logged_in, "429 must not flip to logged_out");
-        assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
+        assert!(usage
+            .error
+            .as_deref()
+            .map(|e| e.contains("Rate limited"))
+            .unwrap_or(false));
         let _ = fs::remove_dir_all(openai_temp_home());
     }
 
@@ -4156,10 +4199,16 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 4);
         assert_eq!(windows[0].label, "Gemini Models — 5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-08-28T00:03:11Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-28T00:03:11Z")
+        );
         assert_eq!(windows[1].label, "Gemini Models — Weekly");
         assert_eq!(windows[1].used_percent, Some(50.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-08-29T17:48:59Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-08-29T17:48:59Z")
+        );
         assert_eq!(windows[2].label, "Claude and GPT models — 5-hour");
         // remainingFraction 0 is a real exhausted window, not "missing".
         assert_eq!(windows[2].used_percent, Some(100.0));
@@ -4221,13 +4270,17 @@ pub(crate) mod tests {
         assert_eq!(windows[1].label, "Gemini (all models)");
         // Same float expression the parser uses (0.8 remaining → ~20% used).
         assert_eq!(windows[1].used_percent, Some((1.0 - 0.8) * 100.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-05-31T12:22:46Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-05-31T12:22:46Z")
+        );
         assert_eq!(detail, None);
     }
 
     #[test]
     fn parse_agy_models_falls_back_to_all_when_no_sorts() {
-        let json = r#"{"models":{"a":{"displayName":"Model A","quotaInfo":{"remainingFraction":0.5}}}}"#;
+        let json =
+            r#"{"models":{"a":{"displayName":"Model A","quotaInfo":{"remainingFraction":0.5}}}}"#;
         let (windows, _) = parse_agy_models(json).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].used_percent, Some(50.0));
@@ -4260,12 +4313,19 @@ pub(crate) mod tests {
         }"#;
         let (windows, detail) = parse_agy_models(json).unwrap();
         // 5 input models → 3 windows out (the 3 Gemini rows collapse to 1).
-        assert_eq!(windows.len(), 3, "Gemini effort levels should collapse to a single row");
+        assert_eq!(
+            windows.len(),
+            3,
+            "Gemini effort levels should collapse to a single row"
+        );
         // Sort order preserved: claude → (collapsed gemini at first gemini's slot) → gpt.
         assert_eq!(windows[0].label, "Claude Sonnet 4.6 (Thinking)");
         assert_eq!(windows[1].label, "Gemini (all models)");
         assert_eq!(windows[1].used_percent, Some((1.0 - 0.7) * 100.0));
-        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-06-04T12:00:00Z"));
+        assert_eq!(
+            windows[1].resets_at.as_deref(),
+            Some("2026-06-04T12:00:00Z")
+        );
         assert_eq!(windows[2].label, "GPT-OSS 120B");
         assert_eq!(detail, None);
     }
@@ -4276,7 +4336,10 @@ pub(crate) mod tests {
             r#"{"currentTier":{"id":"standard-tier"},"cloudaicompanionProject":"sinuous-strategy-j3z18"}"#,
         )
         .unwrap();
-        assert_eq!(resp.cloudaicompanion_project.as_deref(), Some("sinuous-strategy-j3z18"));
+        assert_eq!(
+            resp.cloudaicompanion_project.as_deref(),
+            Some("sinuous-strategy-j3z18")
+        );
     }
 
     // ── Kimi (Moonshot) wallet meter ────────────────────────────────────────
@@ -4313,7 +4376,10 @@ pub(crate) mod tests {
         // Vendor envelope: non-zero `code` is an error, not a zero balance.
         let json = r#"{"code":401,"data":{"available_balance":0.0},"status":false}"#;
         let err = parse_kimi_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]
@@ -4391,7 +4457,10 @@ pub(crate) mod tests {
         // Required-field failure — a body without `data` is malformed.
         let json = r#"{}"#;
         let err = parse_openrouter_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]
@@ -4446,7 +4515,10 @@ pub(crate) mod tests {
         assert_eq!(usage.windows.len(), 1);
         assert_eq!(usage.windows[0].label, "Weekly Pool");
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            Some("2026-07-22T00:00:00+00:00")
+        );
         assert!(usage.balance.is_none());
     }
 
@@ -4491,7 +4563,10 @@ pub(crate) mod tests {
         assert_eq!(usage.windows.len(), 1);
         assert_eq!(usage.windows[0].label, "Monthly Limit");
         assert_eq!(usage.windows[0].used_percent, Some(20.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-08-01T00:00:00+00:00"));
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            Some("2026-08-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -4513,7 +4588,9 @@ pub(crate) mod tests {
     #[test]
     fn grok_usage_with_empty_key_returns_logged_out() {
         // Force an empty path to trigger logged_out path
-        let usage = read_grok_token(PathBuf::from("")).map(|(t, _u)| t).unwrap_or_else(|e| e.to_string());
+        let usage = read_grok_token(PathBuf::from(""))
+            .map(|(t, _u)| t)
+            .unwrap_or_else(|e| e.to_string());
         assert!(usage.contains("No credential found"));
     }
 
@@ -4617,7 +4694,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 3);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-07-20T22:00:00Z")
+        );
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(12.0));
         assert_eq!(windows[2].label, "Monthly");
@@ -4640,7 +4720,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(80.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-20T22:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-07-20T22:00:00Z")
+        );
         assert_eq!(detail, None);
     }
 
@@ -4652,7 +4735,10 @@ pub(crate) mod tests {
         // and the degradation chain falls through to SQLite.
         let json = r#"{"foo": "bar"}"#;
         let err = parse_opencode_billing_response(json).unwrap_err();
-        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+        assert!(
+            matches!(err, UsageError::Shape(_)),
+            "expected Shape error, got {err:?}"
+        );
     }
 
     #[test]
@@ -4664,7 +4750,10 @@ pub(crate) mod tests {
         let json = r#"{"windows": []}"#;
         let (windows, detail) = parse_opencode_billing_response(json).unwrap();
         assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("No active OpenCode Go quotas found")
+        );
     }
 
     #[test]
@@ -4700,7 +4789,10 @@ pub(crate) mod tests {
         let json = r#"{"windows": [{"label": "junk"}, {"usedPercent": null}]}"#;
         let (windows, detail) = parse_opencode_billing_response(json).unwrap();
         assert!(windows.is_empty());
-        assert_eq!(detail.as_deref(), Some("No active OpenCode Go quotas found"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("No active OpenCode Go quotas found")
+        );
     }
 
     // The OpenCode Console credential parser tests (formerly
@@ -4755,7 +4847,10 @@ pub(crate) mod tests {
         let live = fake_unavailable("API error 401: Unauthorized");
         let sqlite = fake_usage(50.0);
         let result = choose_opencode_usage(Some(&live), sqlite);
-        assert!(result.error.is_none(), "sqlite fallback must clear live error");
+        assert!(
+            result.error.is_none(),
+            "sqlite fallback must clear live error"
+        );
         assert_eq!(result.windows[0].used_percent, Some(50.0));
     }
 
@@ -4931,7 +5026,11 @@ pub(crate) mod tests {
 
         assert_eq!(usage.provider, "opencode");
         assert!(usage.logged_in, "sqlite fallback should be logged_in");
-        assert!(usage.error.is_none(), "sqlite fallback must not carry an error: {:?}", usage.error);
+        assert!(
+            usage.error.is_none(),
+            "sqlite fallback must not carry an error: {:?}",
+            usage.error
+        );
         assert_eq!(usage.windows.len(), 3);
         assert_eq!(usage.windows[0].label, "5-hour");
         assert_eq!(
@@ -4966,7 +5065,11 @@ pub(crate) mod tests {
             ..Default::default()
         };
         assert!(opencode_needs_refresh(&cred, None, 1_700_000_000));
-        assert!(opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
+        assert!(opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(0)),
+            1_700_000_000
+        ));
     }
 
     #[test]
@@ -5002,8 +5105,16 @@ pub(crate) mod tests {
             ..Default::default()
         };
         assert!(!opencode_needs_refresh(&cred, None, 1_700_000_000));
-        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(0)), 1_700_000_000));
-        assert!(!opencode_needs_refresh(&cred, Some(Duration::from_secs(300)), 1_700_000_000));
+        assert!(!opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(0)),
+            1_700_000_000
+        ));
+        assert!(!opencode_needs_refresh(
+            &cred,
+            Some(Duration::from_secs(300)),
+            1_700_000_000
+        ));
     }
 
     #[test]
@@ -5022,7 +5133,11 @@ pub(crate) mod tests {
         // Missing expires_at + no cache → no refresh (let the live fetch try).
         assert!(!opencode_needs_refresh(&missing, None, now));
         // Missing expires_at + stale cache → refresh (cache age wins).
-        assert!(opencode_needs_refresh(&missing, Some(Duration::from_secs(600)), now));
+        assert!(opencode_needs_refresh(
+            &missing,
+            Some(Duration::from_secs(600)),
+            now
+        ));
         // Malformed expires_at + no cache → no refresh.
         assert!(!opencode_needs_refresh(&malformed, None, now));
     }
@@ -5190,9 +5305,8 @@ pub(crate) mod tests {
                 let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -5205,12 +5319,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -5223,7 +5332,11 @@ pub(crate) mod tests {
             "live probe is called once with the refreshed bearer"
         );
         assert!(usage.logged_in, "live result wins over the SQLite fallback");
-        assert!(usage.error.is_none(), "live path carries no error: {:?}", usage.error);
+        assert!(
+            usage.error.is_none(),
+            "live path carries no error: {:?}",
+            usage.error
+        );
         assert_eq!(usage.windows.len(), 3);
         assert_eq!(usage.windows[0].label, "5-hour");
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
@@ -5267,9 +5380,8 @@ pub(crate) mod tests {
                 );
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -5282,12 +5394,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -5347,9 +5454,8 @@ pub(crate) mod tests {
                 let _ = req.respond(tiny_http::Response::from_string(LIVE_BODY_OK));
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -5362,12 +5468,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -5428,9 +5529,8 @@ pub(crate) mod tests {
                 }
             }
             _ => {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
             }
         });
         let live_url = format!("http://127.0.0.1:{port}/_server");
@@ -5443,12 +5543,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
-            &temp,
-            &live_url,
-            &refresh_url,
-            Some(&cred),
-        );
+        let usage = opencode_usage_impl_with_hosts(&temp, &live_url, &refresh_url, Some(&cred));
 
         assert_eq!(
             refresh_count.load(Ordering::SeqCst),
@@ -5461,7 +5556,11 @@ pub(crate) mod tests {
             "live probe is called twice: first 401, then 200 after refresh"
         );
         assert!(usage.logged_in, "live result wins over the SQLite fallback");
-        assert!(usage.error.is_none(), "live eventually succeeds: {:?}", usage.error);
+        assert!(
+            usage.error.is_none(),
+            "live eventually succeeds: {:?}",
+            usage.error
+        );
         // Three windows from the retry's success body — proves the
         // second live call's token was accepted (the seeded SQLite
         // fallback would have been 50%/...).
@@ -5490,8 +5589,14 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Fast Requests");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-09-01T00:00:00+00:00"));
-        assert_eq!(detail.as_deref(), Some("375 of 500 fast requests remaining"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-09-01T00:00:00+00:00")
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some("375 of 500 fast requests remaining")
+        );
     }
 
     #[test]
@@ -5526,7 +5631,10 @@ pub(crate) mod tests {
         let (windows, detail) = parse_cursor_response(json).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].used_percent, None);
-        assert_eq!(detail.as_deref(), Some("88 requests used this billing period"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("88 requests used this billing period")
+        );
     }
 
     #[test]
@@ -5673,11 +5781,8 @@ pub(crate) mod tests {
         assert_eq!(tok1, "env-token");
 
         // 2. DB candidate wins when env token is None
-        let tok2 = read_cursor_token_from_candidates(
-            None,
-            &[db_path.clone(), json_path.clone()],
-        )
-        .unwrap();
+        let tok2 =
+            read_cursor_token_from_candidates(None, &[db_path.clone(), json_path.clone()]).unwrap();
         assert_eq!(tok2, "db-token");
 
         // 3. JSON candidate used when DB is absent
@@ -5745,7 +5850,11 @@ pub(crate) mod tests {
             &format!("http://127.0.0.1:{port_401}/auth/usage"),
         );
         assert!(!usage_401.logged_in);
-        assert!(usage_401.error.as_deref().unwrap().contains("cursor-agent login"));
+        assert!(usage_401
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("cursor-agent login"));
 
         // 429 Rate Limited -> unavailable
         let port_429 = spawn_loopback(1, |req| {
@@ -5847,8 +5956,8 @@ pub(crate) mod tests {
         // one entry per the wire contract). Treat as a shape error rather
         // than silently zero-balance — a future API that drops the entry
         // would otherwise look like a fresh user with no wallet.
-        let err = parse_deepseek_response(r#"{"is_available":true,"balance_infos":[]}"#)
-            .unwrap_err();
+        let err =
+            parse_deepseek_response(r#"{"is_available":true,"balance_infos":[]}"#).unwrap_err();
         assert!(
             matches!(err, UsageError::Shape(_)),
             "expected Shape error, got {err:?}"
@@ -6030,7 +6139,10 @@ pub(crate) mod tests {
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].label, "5-hour");
         assert_eq!(usage.windows[0].used_percent, Some(25.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            usage.windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
         assert_eq!(usage.windows[1].label, "Weekly");
         assert_eq!(usage.windows[1].used_percent, Some(20.0));
         let balance = usage.balance.expect("credits must surface as a balance");
@@ -6053,7 +6165,10 @@ pub(crate) mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(20.0));
         assert_eq!(balance.remaining, 15.0);
@@ -6071,7 +6186,10 @@ pub(crate) mod tests {
 
         let (windows, balance) = parse_commandcode_credits_response(body).unwrap();
         assert_eq!(windows[0].used_percent, Some(12.5));
-        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert_eq!(balance.remaining, 10.0);
     }
 
@@ -6144,11 +6262,7 @@ pub(crate) mod tests {
             Err(UsageError::Shape(_))
         ));
 
-        fs::write(
-            &auth_path,
-            r#"{"apiKey":"  ","access_token":"\t"}"#,
-        )
-        .unwrap();
+        fs::write(&auth_path, r#"{"apiKey":"  ","access_token":"\t"}"#).unwrap();
         assert!(matches!(
             read_commandcode_token(&auth_path),
             Err(UsageError::NoCredential(_))

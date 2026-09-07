@@ -9,7 +9,11 @@ use tauri::command;
 pub async fn log_frontend(level: String, message: String) {
     // Cap to avoid runaway log floods if the frontend dumps something huge.
     let truncated = if message.len() > 8192 {
-        format!("{}…<truncated {} bytes>", &message[..8192], message.len() - 8192)
+        format!(
+            "{}…<truncated {} bytes>",
+            &message[..8192],
+            message.len() - 8192
+        )
     } else {
         message
     };

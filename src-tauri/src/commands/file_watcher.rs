@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::env;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, Event};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -84,10 +84,7 @@ pub(crate) fn run_coalescer(rx: Receiver<()>, quiet_gap: Duration, mut emit: imp
 
 /// Start watching an agent node's worktree for file changes
 #[command]
-pub fn watch_agent_node(
-    node_id: i64,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+pub fn watch_agent_node(node_id: i64, app_handle: tauri::AppHandle) -> Result<(), String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     // The directory actually watched: the canonical Node Working Directory
     // (host form), which gates on `use_worktree` and trims the name. Using the
@@ -114,10 +111,13 @@ pub fn watch_agent_node(
             .spawn(move || {
                 run_coalescer(rx, EMIT_INTERVAL, || {
                     crate::diagnostics::record_git_changed_emit();
-                    let _ = app_handle.emit("git-changed", serde_json::json!({
-                        "path": &watch_path,
-                        "internal_path": &internal_path
-                    }));
+                    let _ = app_handle.emit(
+                        "git-changed",
+                        serde_json::json!({
+                            "path": &watch_path,
+                            "internal_path": &internal_path
+                        }),
+                    );
                 });
             })
             .map_err(|e| format!("failed to spawn coalescer thread: {}", e))?;
@@ -138,19 +138,24 @@ pub fn watch_agent_node(
             }
         },
         Config::default().with_poll_interval(std::time::Duration::from_secs(2)),
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let path = std::path::Path::new(&watch_path);
     if path.exists() {
-        watcher.watch(path, RecursiveMode::Recursive)
+        watcher
+            .watch(path, RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
         // Emit an immediate GIT_CHANGED so any pre-existing uncommitted changes
         // are reflected without waiting for the next file write.
         crate::diagnostics::record_git_changed_emit();
-        let _ = app_handle_outer.emit("git-changed", serde_json::json!({
-            "path": &watch_path,
-            "internal_path": &internal_path
-        }));
+        let _ = app_handle_outer.emit(
+            "git-changed",
+            serde_json::json!({
+                "path": &watch_path,
+                "internal_path": &internal_path
+            }),
+        );
     }
 
     let mut watchers = WATCHERS.lock().unwrap();
@@ -270,8 +275,11 @@ mod tests {
 
     const TEST_QUIET_GAP: Duration = Duration::from_millis(50);
 
-    fn spawn_coalescer(
-    ) -> (std::sync::mpsc::Sender<()>, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+    fn spawn_coalescer() -> (
+        std::sync::mpsc::Sender<()>,
+        Arc<AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
         let (tx, rx) = channel();
         let emits = Arc::new(AtomicUsize::new(0));
         let emits_clone = emits.clone();
@@ -294,7 +302,11 @@ mod tests {
         assert_eq!(emits.load(Ordering::SeqCst), 1);
         drop(tx);
         handle.join().unwrap();
-        assert_eq!(emits.load(Ordering::SeqCst), 1, "drop must not re-emit with nothing pending");
+        assert_eq!(
+            emits.load(Ordering::SeqCst),
+            1,
+            "drop must not re-emit with nothing pending"
+        );
     }
 
     /// A rapid burst emits the leading edge immediately AND a trailing edge
@@ -327,6 +339,10 @@ mod tests {
         tx.send(()).unwrap(); // pending, inside the quiet gap
         drop(tx); // disconnect before the gap elapses
         handle.join().unwrap();
-        assert_eq!(emits.load(Ordering::SeqCst), 2, "pending trailing emit must flush on drop");
+        assert_eq!(
+            emits.load(Ordering::SeqCst),
+            2,
+            "pending trailing emit must flush on drop"
+        );
     }
 }

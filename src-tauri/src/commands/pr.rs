@@ -206,15 +206,15 @@ pub struct PrFileEntry {
 /// sibling spawn endpoint surfaces directly.
 #[command]
 pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
-    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
+    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id))
+        .await
 }
 
 /// Sync core for [`get_repo_issues`]. Kept as a plain fn so the mobile HTTP
 /// route (`http::routes::issues`) can call it directly; the Tauri command
 /// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
 pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| e.to_string())?;
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
     let (owner, repo) = match resolve_github_owner_repo(&mesh) {
         Ok(pair) => pair,
@@ -225,30 +225,35 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let issues = client.list_issues_only(&owner, &repo).map_err(|e| e.to_string())?;
+    let issues = client
+        .list_issues_only(&owner, &repo)
+        .map_err(|e| e.to_string())?;
 
-    Ok(issues.into_iter().map(|issue| {
-        // Extract `blocked_by` BEFORE moving `issue.body` into the struct
-        // literal (Rust's move checker rejects the borrow-after-move).
-        // The parser is pure and bounded — see its doc comment.
-        let blocked_by: Vec<i32> = github::parse_blocked_by(&issue.body)
-            .into_iter()
-            .map(|n| n as i32)
-            .collect();
-        GitHubIssue {
-            number: issue.number,
-            title: issue.title,
-            body: issue.body,
-            url: issue.html_url,
-            state: issue.state,
-            labels: issue.labels,
-            // Downcast internal `i64` → wire `i32` (issue numbers fit
-            // comfortably in i32's ~2.1B max; matches the existing
-            // `#[ts(as = "i32")]` convention on the wire struct's other
-            // integer fields).
-            blocked_by,
-        }
-    }).collect())
+    Ok(issues
+        .into_iter()
+        .map(|issue| {
+            // Extract `blocked_by` BEFORE moving `issue.body` into the struct
+            // literal (Rust's move checker rejects the borrow-after-move).
+            // The parser is pure and bounded — see its doc comment.
+            let blocked_by: Vec<i32> = github::parse_blocked_by(&issue.body)
+                .into_iter()
+                .map(|n| n as i32)
+                .collect();
+            GitHubIssue {
+                number: issue.number,
+                title: issue.title,
+                body: issue.body,
+                url: issue.html_url,
+                state: issue.state,
+                labels: issue.labels,
+                // Downcast internal `i64` → wire `i32` (issue numbers fit
+                // comfortably in i32's ~2.1B max; matches the existing
+                // `#[ts(as = "i32")]` convention on the wire struct's other
+                // integer fields).
+                blocked_by,
+            }
+        })
+        .collect())
 }
 
 /// Add or remove a label on a mesh's GitHub issue (issue #979).
@@ -323,12 +328,18 @@ pub(crate) fn set_issue_label_blocking(
 /// enrichment.
 #[command]
 pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
-    crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
+    crate::commands::run_blocking("get_repo_pulls", move || {
+        get_repo_pulls_blocking(mesh_id, state)
+    })
+    .await
 }
 
 /// Sync core for [`get_repo_pulls`] — see [`get_repo_issues_blocking`] for the
 /// split rationale.
-pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+pub(crate) fn get_repo_pulls_blocking(
+    mesh_id: i64,
+    state: String,
+) -> Result<Vec<GitHubPullRequest>, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
     let state = if state == "closed" { "closed" } else { "open" };
@@ -348,20 +359,23 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
         .list_pr_summaries(&owner, &repo, state)
         .map_err(|e| e.to_string())?;
 
-    Ok(prs.into_iter().map(|pr| GitHubPullRequest {
-        number: pr.number,
-        title: pr.title,
-        body: pr.body,
-        url: pr.html_url,
-        state: pr.state,
-        draft: pr.draft,
-        head_ref: pr.head_ref,
-        head_repo_owner: pr.head_repo_owner,
-        head_repo_clone_url: pr.head_repo_clone_url,
-        head_sha: pr.head_sha,
-        mergeable: pr.mergeable,
-        mergeable_state: pr.mergeable_state,
-    }).collect())
+    Ok(prs
+        .into_iter()
+        .map(|pr| GitHubPullRequest {
+            number: pr.number,
+            title: pr.title,
+            body: pr.body,
+            url: pr.html_url,
+            state: pr.state,
+            draft: pr.draft,
+            head_ref: pr.head_ref,
+            head_repo_owner: pr.head_repo_owner,
+            head_repo_clone_url: pr.head_repo_clone_url,
+            head_sha: pr.head_sha,
+            mergeable: pr.mergeable,
+            mergeable_state: pr.mergeable_state,
+        })
+        .collect())
 }
 
 /// Get a single PR's mergeability for a mesh's repo. The panel calls this once
@@ -376,7 +390,10 @@ pub async fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMerge
 }
 
 /// Sync core for [`get_pr_mergeability`] — see [`get_repo_issues_blocking`].
-pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+pub(crate) fn get_pr_mergeability_blocking(
+    mesh_id: i64,
+    pr_number: i64,
+) -> Result<PrMergeability, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -385,7 +402,10 @@ pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Resu
         .pull_request_mergeability(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())?;
 
-    Ok(PrMergeability { mergeable, mergeable_state })
+    Ok(PrMergeability {
+        mergeable,
+        mergeable_state,
+    })
 }
 
 /// Get mergeability for a batch of PRs on a mesh's repo (issue #418,
@@ -547,10 +567,7 @@ pub(crate) fn mergeability_from_summaries(
 /// `pull_request_mergeability`. The closure accepts the per-PR probe
 /// function as data, so a test passes its own closure and asserts on
 /// the helper's mapping logic in isolation.
-fn mergeability_entries<F>(
-    pr_numbers: Vec<i64>,
-    probe: F,
-) -> Vec<PrMergeabilityEntry>
+fn mergeability_entries<F>(pr_numbers: Vec<i64>, probe: F) -> Vec<PrMergeabilityEntry>
 where
     F: Fn(i64) -> Result<(Option<bool>, String), GitHubError>,
 {
@@ -586,11 +603,17 @@ where
 /// REST API, and forwards the HTTP error verbatim.
 #[command]
 pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
-    crate::commands::run_blocking("get_pr_files", move || get_pr_files_blocking(mesh_id, pr_number)).await
+    crate::commands::run_blocking("get_pr_files", move || {
+        get_pr_files_blocking(mesh_id, pr_number)
+    })
+    .await
 }
 
 /// Sync core for [`get_pr_files`] — see [`get_repo_issues_blocking`].
-pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+pub(crate) fn get_pr_files_blocking(
+    mesh_id: i64,
+    pr_number: i64,
+) -> Result<Vec<PrFileEntry>, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -599,24 +622,26 @@ pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<
         .list_pr_files(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())?;
 
-    Ok(files.into_iter().map(|f| PrFileEntry {
-        filename: f.filename,
-        status: f.status,
-        additions: f.additions,
-        deletions: f.deletions,
-        patch: f.patch,
-        previous_filename: f.previous_filename,
-    }).collect())
+    Ok(files
+        .into_iter()
+        .map(|f| PrFileEntry {
+            filename: f.filename,
+            status: f.status,
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
+            previous_filename: f.previous_filename,
+        })
+        .collect())
 }
 
 /// Create a PR for the node
 #[command]
-pub async fn create_pr(
-    session_id: i64,
-    title: String,
-    body: String,
-) -> Result<String, String> {
-    crate::commands::run_blocking("create_pr", move || create_pr_blocking(session_id, title, body)).await
+pub async fn create_pr(session_id: i64, title: String, body: String) -> Result<String, String> {
+    crate::commands::run_blocking("create_pr", move || {
+        create_pr_blocking(session_id, title, body)
+    })
+    .await
 }
 
 /// Sync core for [`create_pr`] — see [`get_repo_issues_blocking`].
@@ -625,8 +650,7 @@ pub(crate) fn create_pr_blocking(
     title: String,
     body: String,
 ) -> Result<String, String> {
-    let node = db::get_agent_node_by_id(session_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
 
     let base_branch = &node.branch;
 
@@ -639,7 +663,8 @@ pub(crate) fn create_pr_blocking(
 
     let (owner, repo) = info.owner_repo()?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, base_branch)
+    client
+        .create_pull_request(&owner, &repo, &title, &body, &info.branch, base_branch)
         .map_err(|e| e.to_string())
 }
 
@@ -675,7 +700,8 @@ pub(crate) fn create_pr_for_mesh_blocking(
 
     let (owner, repo) = info.owner_repo()?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, &base_branch)
+    client
+        .create_pull_request(&owner, &repo, &title, &body, &info.branch, &base_branch)
         .map_err(|e| e.to_string())
 }
 
@@ -688,11 +714,12 @@ pub async fn merge_pr(pr_url: String) -> Result<String, String> {
 
 /// Sync core for [`merge_pr`] — see [`get_repo_issues_blocking`].
 pub(crate) fn merge_pr_blocking(pr_url: String) -> Result<String, String> {
-    let (owner, repo, pr_number) = parse_pr_url(&pr_url)
-        .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
+    let (owner, repo, pr_number) =
+        parse_pr_url(&pr_url).ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.merge_pull_request(&owner, &repo, pr_number)
+    client
+        .merge_pull_request(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())
 }
 
@@ -714,8 +741,7 @@ pub async fn get_current_branch(session_id: i64) -> Result<String, String> {
 
 /// Sync core for [`get_current_branch`].
 pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, String> {
-    let node = db::get_agent_node_by_id(session_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
 
     // Route through the worktree (if any) — the mesh root is on the base
     // branch for worktree nodes. See `node_working_path` for the rationale.
@@ -747,13 +773,15 @@ pub struct OpenPr {
 /// Returns `Err(_)` only for true internal failures (DB lookup blows up, etc.).
 #[command]
 pub async fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
-    crate::commands::run_blocking("get_open_pr_for_node", move || get_open_pr_for_node_blocking(node_id)).await
+    crate::commands::run_blocking("get_open_pr_for_node", move || {
+        get_open_pr_for_node_blocking(node_id)
+    })
+    .await
 }
 
 /// Sync core for [`get_open_pr_for_node`] — see [`get_repo_issues_blocking`].
 pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenPr>, String> {
-    let node = db::get_agent_node_by_id(node_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
 
     // Archived = closed; saves a GitHub API call and matches the chip's
     // "doesn't show after close" contract. Node deletion removes the row,
@@ -823,10 +851,7 @@ impl RepoInfo {
 
 /// Pure helper: given a `RepoInfo` and a `GitHubClient`, return the open PR for the
 /// current branch, or `None` if no branch / no PR / not a GitHub remote.
-fn resolve_open_pr(
-    info: &RepoInfo,
-    client: &GitHubClient,
-) -> Result<Option<PullRequest>, String> {
+fn resolve_open_pr(info: &RepoInfo, client: &GitHubClient) -> Result<Option<PullRequest>, String> {
     if info.branch.is_empty() {
         return Ok(None);
     }
@@ -835,7 +860,6 @@ fn resolve_open_pr(
         .find_open_pr_for_branch(&owner, &repo, &info.branch)
         .map_err(|e| e.to_string())
 }
-
 
 /// Open the repo once and extract both the current branch and origin URL.
 fn repo_info(path: &str) -> Result<RepoInfo, String> {
@@ -854,12 +878,17 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
         Err(_) => String::new(),
     };
 
-    let remote_url = repo.find_remote("origin")
+    let remote_url = repo
+        .find_remote("origin")
         .ok()
         .and_then(|r| r.url().map(|u| u.to_string()));
     let owner_repo = remote_url.as_deref().and_then(github::parse_owner_repo);
 
-    Ok(RepoInfo { branch, remote_url, owner_repo })
+    Ok(RepoInfo {
+        branch,
+        remote_url,
+        owner_repo,
+    })
 }
 
 /// Resolve a Mesh's `origin` remote to (owner, repo) for GitHub operations,
@@ -1012,7 +1041,10 @@ mod tests {
             "labels": []
         }"#;
         let issue: GitHubIssue = serde_json::from_str(json).expect("partial wire shape parses");
-        assert!(issue.blocked_by.is_empty(), "missing blocked_by defaults to empty vec");
+        assert!(
+            issue.blocked_by.is_empty(),
+            "missing blocked_by defaults to empty vec"
+        );
     }
 
     /// Round-trip: serialise a populated `blocked_by` and re-parse it
@@ -1079,8 +1111,14 @@ mod tests {
         let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
         assert_eq!(pr.head_sha, "", "missing head_sha defaults to empty");
-        assert_eq!(pr.mergeable, None, "missing mergeable defaults to None (unknown)");
-        assert_eq!(pr.mergeable_state, "", "missing mergeable_state defaults to empty");
+        assert_eq!(
+            pr.mergeable, None,
+            "missing mergeable defaults to None (unknown)"
+        );
+        assert_eq!(
+            pr.mergeable_state, "",
+            "missing mergeable_state defaults to empty"
+        );
     }
 
     /// Issue #1529: mergeability rides inline on the list wire shape.
@@ -1167,9 +1205,12 @@ mod tests {
             "draft": false,
             "head_ref": "feat/legacy"
         }"#;
-        let pr: GitHubPullRequest =serde_json::from_str(json).expect("partial wire shape parses");
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "feat/legacy");
-        assert_eq!(pr.head_repo_owner, "", "missing head_repo_owner defaults to empty");
+        assert_eq!(
+            pr.head_repo_owner, "",
+            "missing head_repo_owner defaults to empty"
+        );
         assert_eq!(
             pr.head_repo_clone_url, "",
             "missing head_repo_clone_url defaults to empty"
@@ -1215,9 +1256,11 @@ mod tests {
             "mergeable": null,
             "mergeable_state": "unknown"
         }"#;
-        let entry: PrMergeabilityEntry =
-            serde_json::from_str(json).expect("null mergeable parses");
-        assert_eq!(entry.mergeable, None, "null must stay None, not coerce to Some(false)");
+        let entry: PrMergeabilityEntry = serde_json::from_str(json).expect("null mergeable parses");
+        assert_eq!(
+            entry.mergeable, None,
+            "null must stay None, not coerce to Some(false)"
+        );
         assert_eq!(entry.mergeable_state, "unknown");
     }
 
@@ -1235,8 +1278,7 @@ mod tests {
             "mergeable": null,
             "mergeable_state": "error: GitHub API error (404): Not Found"
         }"#;
-        let entry: PrMergeabilityEntry =
-            serde_json::from_str(json).expect("error state parses");
+        let entry: PrMergeabilityEntry = serde_json::from_str(json).expect("error state parses");
         assert_eq!(entry.mergeable, None);
         assert!(
             entry.mergeable_state.starts_with("error: "),
@@ -1293,7 +1335,10 @@ mod tests {
             Ok((Some(true), "clean".into()))
         });
         assert!(entries.is_empty(), "empty input → empty output");
-        assert!(calls.borrow().is_empty(), "probe must not fire on empty input");
+        assert!(
+            calls.borrow().is_empty(),
+            "probe must not fire on empty input"
+        );
     }
 
     /// All-success path: each probe succeeds, the entry carries the
@@ -1304,15 +1349,12 @@ mod tests {
     /// frontend's PR list.
     #[test]
     fn mergeability_entries_preserves_pr_number_on_success() {
-        let entries = mergeability_entries(
-            vec![201, 202, 204],
-            |n| match n {
-                201 => Ok((Some(true), "clean".into())),
-                202 => Ok((Some(false), "dirty".into())),
-                204 => Ok((None, "unknown".into())),
-                _ => unreachable!(),
-            },
-        );
+        let entries = mergeability_entries(vec![201, 202, 204], |n| match n {
+            201 => Ok((Some(true), "clean".into())),
+            202 => Ok((Some(false), "dirty".into())),
+            204 => Ok((None, "unknown".into())),
+            _ => unreachable!(),
+        });
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].number, 201);
         assert_eq!(entries[0].mergeable, Some(true));
@@ -1335,22 +1377,29 @@ mod tests {
     /// "first failure drops the whole list" behaviour.
     #[test]
     fn mergeability_entries_per_pr_failure_does_not_fail_batch() {
-        let entries = mergeability_entries(
-            vec![1, 2, 3],
-            |n| match n {
-                1 => Ok((Some(true), "clean".into())),
-                2 => Err(GitHubError::Api(404, "Not Found".into())),
-                3 => Ok((Some(false), "dirty".into())),
-                _ => unreachable!(),
-            },
+        let entries = mergeability_entries(vec![1, 2, 3], |n| match n {
+            1 => Ok((Some(true), "clean".into())),
+            2 => Err(GitHubError::Api(404, "Not Found".into())),
+            3 => Ok((Some(false), "dirty".into())),
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            entries.len(),
+            3,
+            "batch must carry one entry per PR even when one fails"
         );
-        assert_eq!(entries.len(), 3, "batch must carry one entry per PR even when one fails");
         // The success entries round-trip unchanged.
         assert_eq!(entries[0].number, 1);
         assert_eq!(entries[0].mergeable, Some(true));
         // The failed entry becomes the "checking" sentinel.
-        assert_eq!(entries[1].number, 2, "failed entry must still carry the PR number");
-        assert_eq!(entries[1].mergeable, None, "failed entry must report mergeable: None");
+        assert_eq!(
+            entries[1].number, 2,
+            "failed entry must still carry the PR number"
+        );
+        assert_eq!(
+            entries[1].mergeable, None,
+            "failed entry must report mergeable: None"
+        );
         assert!(
             entries[1].mergeable_state.starts_with("error: "),
             "failed entry must carry the 'error: ' prefix; got: {}",
@@ -1420,8 +1469,7 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let open = serde_json::Value::Array(vec![fake_node(1)]);
-        let (base, count, handle) =
-            fake_server(vec![Scripted::Page(open, false, None)]);
+        let (base, count, handle) = fake_server(vec![Scripted::Page(open, false, None)]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
         let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 1])
             .expect("batch must not fail on duplicates");
@@ -1499,7 +1547,9 @@ mod tests {
             let tmp = std::env::temp_dir().join(format!("buildmesh_pr_test_{}", id));
             Self(tmp)
         }
-        fn path(&self) -> &Path { &self.0 }
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
 
     impl Drop for TempGitRepo {
@@ -1550,7 +1600,10 @@ mod tests {
         let (_guard, path) = init_repo_unborn();
         let info = repo_info(&path).expect("repo_info should succeed even with no commits");
         assert_eq!(info.branch, "", "unborn head should produce empty branch");
-        assert!(info.remote_url.is_none(), "no origin configured in this test");
+        assert!(
+            info.remote_url.is_none(),
+            "no origin configured in this test"
+        );
         assert!(info.owner_repo.is_none(), "no origin → no owner_repo");
     }
 
@@ -1559,14 +1612,20 @@ mod tests {
         let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
         let info = repo_info(&path).expect("repo_info");
         assert_eq!(info.branch, "main");
-        assert_eq!(info.owner_repo, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            info.owner_repo,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
     fn repo_info_parses_github_origin_ssh() {
         let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
         let info = repo_info(&path).expect("repo_info");
-        assert_eq!(info.owner_repo, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            info.owner_repo,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
@@ -1598,14 +1657,20 @@ mod tests {
     fn github_url_for_path_https_origin() {
         let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
-        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/alondero/buildmesh".to_string())
+        );
     }
 
     #[test]
     fn github_url_for_path_ssh_origin() {
         let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
-        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/alondero/buildmesh".to_string())
+        );
     }
 
     #[test]
@@ -1621,14 +1686,20 @@ mod tests {
     fn github_url_for_path_non_github_origin_is_none() {
         let (_guard, path) = init_repo_with_origin("https://gitlab.com/alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("non-github origin should not error");
-        assert_eq!(url, None, "GitLab URLs must collapse to None so the menu hides the item");
+        assert_eq!(
+            url, None,
+            "GitLab URLs must collapse to None so the menu hides the item"
+        );
     }
 
     #[test]
     fn github_url_for_path_no_origin_is_none() {
         let (_guard, path) = init_repo_with_commit();
         let url = github_url_for_path(&path).expect("no origin should not error");
-        assert_eq!(url, None, "repos with no origin remote must collapse to None");
+        assert_eq!(
+            url, None,
+            "repos with no origin remote must collapse to None"
+        );
     }
 
     /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).
@@ -1660,8 +1731,14 @@ mod tests {
     fn node_working_path_resolves_to_mesh_path_for_root_nodes() {
         let (_guard, _root_path, node) = make_root_node();
         let resolved = env::node_working_path(&node).host_path;
-        assert_eq!(resolved, node.path, "non-worktree node must resolve to its own path");
-        assert!(!resolved.contains("worktrees"), "must NOT add a worktree subdir for root nodes");
+        assert_eq!(
+            resolved, node.path,
+            "non-worktree node must resolve to its own path"
+        );
+        assert!(
+            !resolved.contains("worktrees"),
+            "must NOT add a worktree subdir for root nodes"
+        );
     }
 
     /// End-to-end: with a real worktree on branch `agent-1` and the mesh root
@@ -1694,7 +1771,10 @@ mod tests {
         let branch = repo_info(&env::node_working_path(&node).host_path)
             .expect("worktree repo must open")
             .branch;
-        assert_eq!(branch, "agent-1", "must read the worktree's HEAD, not the mesh root's");
+        assert_eq!(
+            branch, "agent-1",
+            "must read the worktree's HEAD, not the mesh root's"
+        );
     }
 
     /// Opt-in live test — runs only with `cargo test -- --ignored` and a valid

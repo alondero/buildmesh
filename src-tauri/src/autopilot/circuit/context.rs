@@ -197,8 +197,14 @@ mod tests {
     #[test]
     fn resolves_dotted_paths_in_both_brace_styles() {
         let ctx = sample_context();
-        assert_eq!(ctx.resolve("run {{circuit.name}} now"), "run nightly-sweep now");
-        assert_eq!(ctx.resolve("run {{ circuit.name }} now"), "run nightly-sweep now");
+        assert_eq!(
+            ctx.resolve("run {{circuit.name}} now"),
+            "run nightly-sweep now"
+        );
+        assert_eq!(
+            ctx.resolve("run {{ circuit.name }} now"),
+            "run nightly-sweep now"
+        );
     }
 
     #[test]
@@ -310,7 +316,10 @@ mod tests {
         ctx.with_pr(10, "pt", "", "pa", "pu", "head", &[]);
         let back = CircuitContext::from_json(&ctx.to_json().unwrap()).unwrap();
         assert_eq!(back, ctx);
-        assert_eq!(back.resolve("fix {{issue.number}} via {{pr.head_ref}}"), "fix 9 via head");
+        assert_eq!(
+            back.resolve("fix {{issue.number}} via {{pr.head_ref}}"),
+            "fix 9 via head"
+        );
     }
 
     #[test]

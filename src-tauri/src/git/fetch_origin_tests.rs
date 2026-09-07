@@ -25,12 +25,7 @@ fn set_local_remote(host_path: &Path, remote_name: &str, remote_path: &Path) {
         .output();
 
     let status = Command::new("git")
-        .args([
-            "remote",
-            "add",
-            remote_name,
-            &remote_path.to_string_lossy(),
-        ])
+        .args(["remote", "add", remote_name, &remote_path.to_string_lossy()])
         .current_dir(host_path)
         .status()
         .expect("git remote add failed");
@@ -57,7 +52,12 @@ fn set_local_origin(host_path: &Path, origin_path: &Path) {
 fn fetch_origin_fetches_but_skips_pull_when_parent_dirty() {
     let td = TestDir::new("autosync_dirty");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -158,7 +158,12 @@ fn fetch_origin_reports_repo_unusable_for_non_repo() {
 fn fetch_origin_fetches_and_fast_forwards_clean_local_remote() {
     let td = TestDir::new("autosync_clean_remote");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -245,7 +250,12 @@ fn fetch_origin_fetches_and_fast_forwards_clean_local_remote() {
 fn fetch_origin_reports_diverged_when_fast_forward_impossible() {
     let td = TestDir::new("autosync_diverged");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
     let status = Command::new("git")
@@ -384,8 +394,17 @@ fn fetch_origin_reports_diverged_when_fast_forward_impossible() {
 fn fetch_origin_uses_base_ref_remote_not_origin() {
     let td = TestDir::new("autosync_upstream_remote");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
-    let upstream_dir = td.path().parent().unwrap().join(format!("{}_upstream", name));
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let upstream_dir = td
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("{}_upstream", name));
     std::fs::create_dir_all(&upstream_dir).unwrap();
 
     // Bare "remote" under the name `upstream` (NOT `origin`).
@@ -464,7 +483,12 @@ fn fetch_origin_uses_base_ref_remote_not_origin() {
 fn fetch_origin_falls_back_to_origin_when_base_ref_is_head() {
     let td = TestDir::new("autosync_base_ref_head");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -516,7 +540,12 @@ fn fetch_origin_falls_back_to_origin_when_base_ref_is_head() {
 fn fetch_origin_falls_back_to_origin_when_base_ref_is_empty() {
     let td = TestDir::new("autosync_base_ref_empty");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -566,7 +595,12 @@ fn fetch_origin_falls_back_to_origin_when_base_ref_is_empty() {
 fn fetch_origin_falls_back_to_origin_for_refs_heads_branch() {
     let td = TestDir::new("autosync_refs_heads_main");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -682,14 +716,8 @@ fn sync_outcome_advanced_ref_table() {
     assert!(FetchedButDirty { new_commits: 1 }.advanced_ref());
     assert!(!UpToDate.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
-    assert!(!FetchFailed {
-        reason: "x".into()
-    }
-    .advanced_ref());
-    assert!(!RepoUnusable {
-        reason: "x".into()
-    }
-    .advanced_ref());
+    assert!(!FetchFailed { reason: "x".into() }.advanced_ref());
+    assert!(!RepoUnusable { reason: "x".into() }.advanced_ref());
 }
 
 // ── 2026-07-17 incident — URL-only remote (no fetch refspec) ────────────────
@@ -715,7 +743,12 @@ fn sync_outcome_advanced_ref_table() {
 fn fetch_origin_syncs_when_remote_has_no_fetch_refspec() {
     let td = TestDir::new("autosync_no_refspec");
     let parent = td.path();
-    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = td
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
     std::fs::create_dir_all(&origin_dir).unwrap();
 
@@ -770,7 +803,10 @@ fn fetch_origin_syncs_when_remote_has_no_fetch_refspec() {
 
     // Both the checkout and the remote-tracking ref must be at v2.
     let content = std::fs::read_to_string(parent.join("README.md")).unwrap();
-    assert_eq!(content, "v2\n", "ff-pull must move the local branch forward");
+    assert_eq!(
+        content, "v2\n",
+        "ff-pull must move the local branch forward"
+    );
     let tracking = repo
         .find_reference("refs/remotes/origin/main")
         .unwrap()

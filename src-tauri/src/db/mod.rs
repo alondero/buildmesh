@@ -62,9 +62,9 @@ mod circuit_tests;
 #[cfg(test)]
 mod circuit_prune_tests;
 
-use rusqlite::{Connection, OpenFlags, params};
-pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
+pub use rusqlite::Result as SqlResult;
+use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -126,7 +126,10 @@ impl ReaderPool {
         loop {
             if let Some(conn) = available.pop() {
                 if started.elapsed() >= Duration::from_millis(10) {
-                    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "database reader pool contention ended");
+                    tracing::debug!(
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "database reader pool contention ended"
+                    );
                 }
                 return Ok(ReadConnection {
                     pool: self,
@@ -135,7 +138,10 @@ impl ReaderPool {
             }
             let wait = self.ready.wait_for(&mut available, READER_CHECKOUT_TIMEOUT);
             if wait.timed_out() {
-                tracing::warn!(elapsed_ms = started.elapsed().as_millis(), "database reader pool checkout timed out");
+                tracing::warn!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "database reader pool checkout timed out"
+                );
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
@@ -167,11 +173,12 @@ impl Drop for ReadConnection<'_> {
                 if conn.execute_batch("ROLLBACK").is_ok() && conn.is_autocommit() {
                     conn
                 } else {
-                    match Connection::open_with_flags(&self.pool.db_path, self.pool.flags)
-                        .and_then(|replacement| {
+                    match Connection::open_with_flags(&self.pool.db_path, self.pool.flags).and_then(
+                        |replacement| {
                             apply_connection_pragmas(&replacement, true)?;
                             Ok(replacement)
-                        }) {
+                        },
+                    ) {
                         Ok(replacement) => replacement,
                         Err(error) => {
                             tracing::error!(%error, "failed to recycle database reader connection");
@@ -387,7 +394,9 @@ fn open_writer(db_path: &Path) -> SqlResult<Connection> {
 
 /// Initialize the database
 pub fn init(db_path: &Path) -> SqlResult<()> {
-    let _init_guard = INIT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _init_guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if DB.get().is_some() {
         return Ok(());
     }
@@ -444,7 +453,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        "
+        ",
     )?;
 
     // Create the baseline tables (IF NOT EXISTS so they're idempotent). For
@@ -654,7 +663,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             completed_at TEXT,
             UNIQUE (run_id, node_id)
         );
-        "
+        ",
     )?;
 
     // Single schema-evolution entry point (issue #249). Owns the
@@ -917,12 +926,7 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
     // string-interpolated.
     let custom_ids: Vec<String> = accounts
         .iter()
-        .filter(|a| {
-            a.claude_compatible
-                && a.enabled
-                && !a.id.is_empty()
-                && !a.id.contains(':')
-        })
+        .filter(|a| a.claude_compatible && a.enabled && !a.id.is_empty() && !a.id.contains(':'))
         .map(|a| a.id.clone())
         .collect();
     if !custom_ids.is_empty() {
@@ -991,7 +995,10 @@ pub fn persist_semantic_turn(node_id: i64, value: Option<&str>) -> SqlResult<()>
     let conn = write_conn();
     let key = format!("{SEMANTIC_TURN_KEY_PREFIX}{node_id}");
     match value {
-        Some(value) => conn.execute("INSERT OR REPLACE INTO app_settings (key,value) VALUES (?1,?2)", params![key, value])?,
+        Some(value) => conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key,value) VALUES (?1,?2)",
+            params![key, value],
+        )?,
         None => conn.execute("DELETE FROM app_settings WHERE key=?1", params![key])?,
     };
     Ok(())
@@ -1002,7 +1009,9 @@ pub fn list_semantic_turns() -> SqlResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare("SELECT key,value FROM app_settings WHERE key LIKE ?1")?;
     let rows = stmt.query_map(params![format!("{SEMANTIC_TURN_KEY_PREFIX}%")], |row| {
         let key: String = row.get(0)?;
-        let id = key[SEMANTIC_TURN_KEY_PREFIX.len()..].parse::<i64>().unwrap_or(0);
+        let id = key[SEMANTIC_TURN_KEY_PREFIX.len()..]
+            .parse::<i64>()
+            .unwrap_or(0);
         Ok((id, row.get(1)?))
     })?;
     rows.collect()
@@ -1066,9 +1075,12 @@ pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bo
     // LLVM cannot optimise the comparison into a short-circuit under our
     // `lto = "thin"` release profile. The Choice → bool conversion is
     // `From<Choice> for bool` and is itself constant-time.
-    Ok(stored.is_some_and(|s| bool::from(
-        subtle::ConstantTimeEq::ct_eq(s.as_bytes(), token.as_bytes()),
-    )))
+    Ok(stored.is_some_and(|s| {
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            s.as_bytes(),
+            token.as_bytes(),
+        ))
+    }))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -1211,9 +1223,10 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
     // `validate_root_token_inner` for the rationale.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(bool::from(
-            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
-        )),
+        Some(stored) => Ok(bool::from(subtle::ConstantTimeEq::ct_eq(
+            stored.as_bytes(),
+            hash_token(token).as_bytes(),
+        ))),
         None => Ok(false),
     }
 }
@@ -1246,7 +1259,10 @@ pub fn set_coordinator_drive_enabled(enabled: bool) -> SqlResult<()> {
 pub fn set_coordinator_drive_enabled_inner(conn: &Connection, enabled: bool) -> SqlResult<()> {
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-        params![COORDINATOR_DRIVE_ENABLED_KEY, if enabled { "1" } else { "0" }],
+        params![
+            COORDINATOR_DRIVE_ENABLED_KEY,
+            if enabled { "1" } else { "0" }
+        ],
     )?;
     Ok(())
 }
@@ -1299,9 +1315,10 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
     // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
     // `validate_root_token_inner` for the rationale.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(bool::from(
-            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
-        )),
+        Some(stored) => Ok(bool::from(subtle::ConstantTimeEq::ct_eq(
+            stored.as_bytes(),
+            hash_token(token).as_bytes(),
+        ))),
         None => Ok(false),
     }
 }
@@ -1359,11 +1376,7 @@ pub const PENDING_CLAIM_TIMEOUT_SECS: i64 = 30;
 /// real DB failure (lock, IO, corruption) — the same fail-safe contract
 /// the pre-#750 `lookup` established (issue #320 review): the orchestrator
 /// must never mistake "couldn't read" for "key never seen".
-pub fn claim_drive_prompt(
-    node_id: i64,
-    key: &str,
-    prompt_hash: &str,
-) -> SqlResult<ClaimOutcome> {
+pub fn claim_drive_prompt(node_id: i64, key: &str, prompt_hash: &str) -> SqlResult<ClaimOutcome> {
     let db = write_conn();
     claim_drive_prompt_inner(&db, node_id, key, prompt_hash)
 }
@@ -1454,11 +1467,7 @@ pub fn claim_drive_prompt_inner(
 /// wins, mirroring the pre-#750 `INSERT OR IGNORE` rule). Returns the number
 /// of rows actually changed so the caller can log a warning when a drive
 /// completed but the finalize found no row to update.
-pub fn finalize_drive_prompt(
-    node_id: i64,
-    key: &str,
-    verdict: VerdictStr<'_>,
-) -> SqlResult<usize> {
+pub fn finalize_drive_prompt(node_id: i64, key: &str, verdict: VerdictStr<'_>) -> SqlResult<usize> {
     let db = write_conn();
     finalize_drive_prompt_inner(&db, node_id, key, verdict)
 }
@@ -1544,10 +1553,7 @@ pub fn prune_drive_prompts_older_than(days: i64) -> SqlResult<usize> {
     prune_drive_prompts_older_than_inner(&db, days)
 }
 
-pub fn prune_drive_prompts_older_than_inner(
-    conn: &Connection,
-    days: i64,
-) -> SqlResult<usize> {
+pub fn prune_drive_prompts_older_than_inner(conn: &Connection, days: i64) -> SqlResult<usize> {
     conn.execute(
         "DELETE FROM coordinator_drive_prompts
              WHERE created_at < datetime('now', '-' || ?1 || ' days')",
@@ -1866,14 +1872,19 @@ fn parse_harness_overrides(raw: &str) -> std::collections::HashMap<String, Harne
 }
 
 fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM meshes WHERE id = ?1", mesh_columns())
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM meshes WHERE id = ?1",
+        mesh_columns()
+    ))?;
     stmt.query_row(params![id], map_mesh_row)
 }
 
 fn parse_str(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 const AGENT_NODE_COLUMNS: &str =
@@ -1926,12 +1937,14 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // means legacy `<mesh>/.claude/worktrees/<name>` fallback
         // (pre-#1519 rows + Root Nodes). Empty string degrades to `None`
         // so a hand-edited blank doesn't resolve to a bare empty dir.
-        worktree_path: row
-            .get::<_, Option<String>>(20)?
-            .and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() { None } else { Some(t.to_string()) }
-            }),
+        worktree_path: row.get::<_, Option<String>>(20)?.and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -1959,8 +1972,8 @@ fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
 /// order the grid renders. The two extra fields aren't on `AgentNode`, so we
 /// return them alongside it; `coordinator::node_digest::spine` turns each tuple
 /// into a Node Digest. Spine-only — no transcript enrichment in this slice.
-pub fn list_coordinator_node_rows()
--> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
+pub fn list_coordinator_node_rows(
+) -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
     let db = read_conn();
     list_coordinator_node_rows_inner(&db)
 }
@@ -2006,9 +2019,10 @@ pub fn list_coordinator_node_rows_inner(
 }
 
 pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE id = ?1", AGENT_NODE_COLUMNS)
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE id = ?1",
+        AGENT_NODE_COLUMNS
+    ))?;
     stmt.query_row(params![id], map_agent_node_row)
 }
 
@@ -2018,11 +2032,13 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     let db = write_conn();
 
     // Check if mesh with this path already exists (idempotent upsert)
-    let existing: Option<i64> = db.query_row(
-        "SELECT id FROM meshes WHERE path = ?1",
-        params![path],
-        |row| row.get(0),
-    ).ok();
+    let existing: Option<i64> = db
+        .query_row(
+            "SELECT id FROM meshes WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .ok();
 
     if let Some(id) = existing {
         return get_mesh_by_id_inner(&db, id);
@@ -2193,10 +2209,11 @@ pub fn set_mesh_loop_config(
 
 /// Read the typed `harness_overrides` map for a Mesh. None on a missing
 /// mesh (the IPC surface maps `None` to a "mesh not found" error).
-pub fn get_mesh_harness_overrides(mesh_id: i64) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
+pub fn get_mesh_harness_overrides(
+    mesh_id: i64,
+) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
     let db = read_conn();
-    let mut stmt = db
-        .prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
+    let mut stmt = db.prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
     let result = stmt.query_row(params![mesh_id], |row| {
         let raw: String = row.get(0)?;
         Ok(parse_harness_overrides(&raw))
@@ -2363,11 +2380,7 @@ pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> Sq
 ///
 /// Idempotent per node (`INSERT OR IGNORE` + PRIMARY KEY on node_id), so
 /// a restart that replays the spawn doesn't double-write the iteration.
-pub fn create_autopilot_loop_run(
-    node_id: i64,
-    mesh_id: i64,
-    loop_iteration: i64,
-) -> SqlResult<()> {
+pub fn create_autopilot_loop_run(node_id: i64, mesh_id: i64, loop_iteration: i64) -> SqlResult<()> {
     let db = write_conn();
     db.execute(
         "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number, loop_iteration) \
@@ -2385,7 +2398,11 @@ pub fn create_autopilot_loop_run(
 /// after deterministic wrap-up passes while the optional second-turn
 /// `loop_suffix_prompt` runs on the same node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
-#[ts(export, rename_all = "snake_case", export_to = "AutopilotRunStateKind.ts")]
+#[ts(
+    export,
+    rename_all = "snake_case",
+    export_to = "AutopilotRunStateKind.ts"
+)]
 pub enum AutopilotRunState {
     Implementing,
     Finishing,
@@ -2598,7 +2615,11 @@ pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
         let iteration: i64 = row.get(0)?;
         let state_str: String = row.get(1)?;
         let updated_at: String = row.get(2)?;
-        Ok((iteration, AutopilotRunState::from_db_str(&state_str), updated_at))
+        Ok((
+            iteration,
+            AutopilotRunState::from_db_str(&state_str),
+            updated_at,
+        ))
     })?;
     rows.collect()
 }
@@ -2734,11 +2755,7 @@ pub fn set_mesh_sandbox(id: i64, sandbox: bool) -> SqlResult<()> {
     set_mesh_sandbox_inner(&db, id, sandbox)
 }
 
-pub(crate) fn set_mesh_sandbox_inner(
-    conn: &Connection,
-    id: i64,
-    sandbox: bool,
-) -> SqlResult<()> {
+pub(crate) fn set_mesh_sandbox_inner(conn: &Connection, id: i64, sandbox: bool) -> SqlResult<()> {
     let rows = conn.execute(
         "UPDATE meshes SET sandbox = ?1 WHERE id = ?2",
         params![sandbox as i32, id],
@@ -2779,7 +2796,9 @@ pub(crate) fn set_mesh_worktree_directory_inner(
 }
 
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     let db = write_conn();
     for (id, pos) in updates {
         db.execute(
@@ -2792,9 +2811,10 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", mesh_columns())
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes ORDER BY position ASC, name ASC",
+        mesh_columns()
+    ))?;
     let rows = stmt.query_map([], map_mesh_row)?;
     rows.collect()
 }
@@ -2802,9 +2822,10 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 /// Look up a mesh by its path.
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes WHERE path = ?1", mesh_columns())
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes WHERE path = ?1",
+        mesh_columns()
+    ))?;
     stmt.query_row(params![path], map_mesh_row)
 }
 
@@ -2870,9 +2891,7 @@ pub fn create_agent_node(
     // Normalize blank worktree_path to NULL — a hand-edited empty string
     // must read back as `None` (legacy fallback), not as a bare empty dir
     // (issue #1519).
-    let worktree_path = worktree_path
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let worktree_path = worktree_path.map(str::trim).filter(|s| !s.is_empty());
     db.execute(
         "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url, worktree_path)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
@@ -2903,7 +2922,9 @@ pub fn create_agent_node(
 /// Callers send the full new ordering for the affected mesh so the DB stays in
 /// sync with the frontend's optimistic update. Mirrors `update_mesh_positions_batch`.
 pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     let db = write_conn();
     for (id, pos) in updates {
         db.execute(
@@ -2934,7 +2955,11 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
 /// [`adopt_manual_pool_slug_with_path`], which adds the third half
 /// (`worktree_path`, issue #1519). Test-only, like the pins that call it.
 #[cfg(test)]
-pub(crate) fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
+pub(crate) fn adopt_manual_pool_slug_inner(
+    conn: &Connection,
+    id: i64,
+    slug: &str,
+) -> SqlResult<()> {
     conn.execute(
         "UPDATE agent_nodes SET name = ?1, worktree_name = ?1 WHERE id = ?2",
         params![slug, id],
@@ -2965,9 +2990,7 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
     slug: &str,
     worktree_path: Option<&str>,
 ) -> SqlResult<()> {
-    let worktree_path = worktree_path
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let worktree_path = worktree_path.map(str::trim).filter(|s| !s.is_empty());
     conn.execute(
         "UPDATE agent_nodes SET name = ?1, worktree_name = ?1, worktree_path = ?2 WHERE id = ?3",
         params![slug, worktree_path, id],
@@ -3082,9 +3105,10 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC", AGENT_NODE_COLUMNS)
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC",
+        AGENT_NODE_COLUMNS
+    ))?;
     let rows = stmt.query_map(params![mesh_id], map_agent_node_row)?;
     rows.collect()
 }
@@ -3236,7 +3260,10 @@ pub(crate) fn update_agent_node_signal_health_inner(
 /// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     let db = write_conn();
-    db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
+    db.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2",
+        params![cli_id, id],
+    )?;
     Ok(())
 }
 
@@ -3258,9 +3285,12 @@ pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResul
 pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
     use rusqlite::OptionalExtension;
     let conn = read_conn();
-    conn.query_row("SELECT session_started_at FROM agent_nodes WHERE id = ?1",
-        params![id], |row| row.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// Persist a provider-assigned session id without overwriting an id captured
@@ -3274,12 +3304,15 @@ pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
 /// Identity of the process and its last lifecycle transition. Continuations
 /// observed before user input/regeneration must not write into the new turn.
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
-    read_conn().query_row("SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
-        params![id], |row| {
+    read_conn().query_row(
+        "SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
+        params![id],
+        |row| {
             let generation: Option<i64> = row.get(0)?;
             let changed: Option<String> = row.get(1)?;
             Ok(generation.map(|g| format!("{g}:{}", changed.unwrap_or_default())))
-        })
+        },
+    )
 }
 
 fn set_cli_session_id_if_missing_inner(
@@ -3326,51 +3359,86 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
 }
 
 pub(crate) fn list_suspended_nodes_inner(db: &Connection) -> SqlResult<Vec<AgentNode>> {
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended'", AGENT_NODE_COLUMNS)
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE status = 'suspended'",
+        AGENT_NODE_COLUMNS
+    ))?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
 }
 
-pub fn recover_suspended_cli_session_id(node: &AgentNode, cli_id: &str, generation: Option<i64>) -> SqlResult<bool> {
+pub fn recover_suspended_cli_session_id(
+    node: &AgentNode,
+    cli_id: &str,
+    generation: Option<i64>,
+) -> SqlResult<bool> {
     let conn = write_conn();
     recover_suspended_cli_session_id_inner(&conn, node, cli_id, generation)
 }
 
 pub(crate) fn recover_suspended_cli_session_id_inner(
-    conn: &Connection, node: &AgentNode, cli_id: &str, generation: Option<i64>,
+    conn: &Connection,
+    node: &AgentNode,
+    cli_id: &str,
+    generation: Option<i64>,
 ) -> SqlResult<bool> {
     // The disk scan runs without a DB lock. A user may have launched,
     // regenerated, or deleted the node meanwhile; never write into that run.
-    let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1
         WHERE id = ?2 AND status = 'suspended' AND provider = ?3 AND path = ?4
         AND worktree_name IS ?5 AND worktree_path IS ?6
         AND session_started_at IS ?7
         AND (cli_session_id IS NULL OR cli_session_id = '')
         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
-        params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
-            generation])?;
+        params![
+            cli_id,
+            node.id,
+            node.provider,
+            node.path,
+            node.worktree_name,
+            node.worktree_path,
+            generation
+        ],
+    )?;
     Ok(changed > 0)
 }
 
 /// Live discovery uses the durable process generation, not the time of the
 /// recovery probe. A delayed disk scan must never claim a replacement session.
-pub(crate) fn recover_live_cli_session_id(node: &AgentNode, cli_id: &str, generation: i64) -> SqlResult<bool> {
+pub(crate) fn recover_live_cli_session_id(
+    node: &AgentNode,
+    cli_id: &str,
+    generation: i64,
+) -> SqlResult<bool> {
     recover_live_cli_session_id_inner(&write_conn(), node, cli_id, generation)
 }
 
 pub(crate) fn recover_live_cli_session_id_inner(
-    conn: &Connection, node: &AgentNode, cli_id: &str, generation: i64,
+    conn: &Connection,
+    node: &AgentNode,
+    cli_id: &str,
+    generation: i64,
 ) -> SqlResult<bool> {
-    let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1
         WHERE id = ?2 AND status IN ('running', 'ready', 'awaiting_input', 'completed', 'spawning')
         AND provider = ?3 AND path = ?4 AND worktree_name IS ?5 AND worktree_path IS ?6
         AND session_started_at = ?7 AND use_worktree = ?8 AND env = ?9
         AND (cli_session_id IS NULL OR cli_session_id = '')
         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
-        params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
-            generation, node.use_worktree, node.env.to_string()])?;
+        params![
+            cli_id,
+            node.id,
+            node.provider,
+            node.path,
+            node.worktree_name,
+            node.worktree_path,
+            generation,
+            node.use_worktree,
+            node.env.to_string()
+        ],
+    )?;
     Ok(changed > 0)
 }
 
@@ -3410,10 +3478,11 @@ fn enqueue_worktree_removal_inner(conn: &Connection, path: &str, node_name: &str
     Ok(())
 }
 
-fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let mut stmt = conn.prepare(
-        "SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id",
-    )?;
+fn list_pending_worktree_removals_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<PendingWorktreeRemoval>> {
+    let mut stmt =
+        conn.prepare("SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id")?;
     let rows = stmt.query_map([], |row| {
         Ok(PendingWorktreeRemoval {
             worktree_path: row.get(0)?,
@@ -3423,7 +3492,10 @@ fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResult<Vec<Pend
     rows.collect()
 }
 
-pub(crate) fn delete_pending_worktree_removal_inner(conn: &Connection, path: &str) -> SqlResult<()> {
+pub(crate) fn delete_pending_worktree_removal_inner(
+    conn: &Connection,
+    path: &str,
+) -> SqlResult<()> {
     conn.execute(
         "DELETE FROM pending_worktree_removals WHERE worktree_path = ?1",
         params![path],
@@ -3437,7 +3509,10 @@ fn delete_agent_node_enqueueing_removal_inner(
     removal: Option<(&str, &str)>,
 ) -> SqlResult<()> {
     conn.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
-    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![format!("{SEMANTIC_TURN_KEY_PREFIX}{id}")])?;
+    conn.execute(
+        "DELETE FROM app_settings WHERE key = ?1",
+        params![format!("{SEMANTIC_TURN_KEY_PREFIX}{id}")],
+    )?;
     if let Some((path, node_name)) = removal {
         enqueue_worktree_removal_inner(conn, path, node_name)?;
     }
@@ -3538,13 +3613,7 @@ pub(crate) fn insert_warm_worktree_inner(
     conn.execute(
         "INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status, base_sha)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            mesh_id,
-            path,
-            preassigned_name,
-            status.as_str(),
-            base_sha,
-        ],
+        params![mesh_id, path, preassigned_name, status.as_str(), base_sha,],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -3712,7 +3781,10 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     conn: &Connection,
     mesh_id: i64,
 ) -> SqlResult<usize> {
-    let n = conn.execute("DELETE FROM warm_worktrees WHERE mesh_id = ?1", params![mesh_id])?;
+    let n = conn.execute(
+        "DELETE FROM warm_worktrees WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
     Ok(n)
 }
 
@@ -3764,9 +3836,8 @@ pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
     conn: &Connection,
     mesh_id: i64,
 ) -> SqlResult<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'")?;
     let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -4008,9 +4079,8 @@ fn plan_orphan_cleanup(
     // Read the full set of claimed rows up front, then drop the prepared
     // statement so the loop below doesn't keep a statement handle alive
     // across the FS phase (which runs lock-free after we return).
-    let mut stmt = conn.prepare(
-        "SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'")?;
     let claimed: Vec<(i64, i64, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -4105,10 +4175,7 @@ fn batch_delete_warm_worktrees_by_id(conn: &Connection, ids: &[i64]) -> SqlResul
 /// cap (999 by default) is generous compared to realistic session
 /// counts; a future scale-up switch to a temp-table join would survive
 /// this limit transparently.
-fn live_mesh_ids_for(
-    conn: &Connection,
-    live_session_ids: &[i64],
-) -> Option<HashSet<i64>> {
+fn live_mesh_ids_for(conn: &Connection, live_session_ids: &[i64]) -> Option<HashSet<i64>> {
     if live_session_ids.is_empty() {
         // An empty PROCESS_REGISTRY snapshot IS a known fact (not an
         // error): no agents are currently running. Returning `Some(empty)`
@@ -4123,10 +4190,9 @@ fn live_mesh_ids_for(
     );
     let mut stmt = conn.prepare(&sql).ok()?;
     let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(live_session_ids.iter()),
-            |row| row.get::<_, i64>(0),
-        )
+        .query_map(rusqlite::params_from_iter(live_session_ids.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
         .ok()?;
     let mesh_ids: HashSet<i64> = rows.filter_map(Result::ok).collect();
     Some(mesh_ids)
@@ -4227,9 +4293,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 /// drains stale-location inventory regardless of count, so it needs the
 /// full droppable set, not just the oldest-N excess window
 /// `list_oldest_warm_entries_for_mesh` serves.
-pub fn list_all_droppable_warm_entries_for_mesh(
-    mesh_id: i64,
-) -> SqlResult<Vec<(i64, String)>> {
+pub fn list_all_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<Vec<(i64, String)>> {
     let db = read_conn();
     list_all_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
@@ -4259,10 +4323,7 @@ pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
     is_warm_pool_path_inner(&db, path)
 }
 
-pub(crate) fn is_warm_pool_path_inner(
-    conn: &Connection,
-    path: &str,
-) -> SqlResult<bool> {
+pub(crate) fn is_warm_pool_path_inner(conn: &Connection, path: &str) -> SqlResult<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1)",
         params![path],
@@ -4302,10 +4363,7 @@ pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
     warm_pool_claims_path_inner(&db, path)
 }
 
-pub(crate) fn warm_pool_claims_path_inner(
-    conn: &Connection,
-    path: &str,
-) -> SqlResult<bool> {
+pub(crate) fn warm_pool_claims_path_inner(conn: &Connection, path: &str) -> SqlResult<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1 AND status = 'claimed')",
         params![path],

@@ -2,9 +2,7 @@
 //! proxied-provider ordering, attach-form defaults.
 
 use super::with_temp_dir;
-use crate::preferences::{
-    AppPreferences, ModelTiers, ProviderPairing, ApiSurface,
-};
+use crate::preferences::{ApiSurface, AppPreferences, ModelTiers, ProviderPairing};
 
 #[test]
 fn upsert_and_remove_provider_pairing_by_harness_provider_key() {
@@ -45,7 +43,9 @@ fn set_proxied_provider_order_round_trips() {
             vec!["minimax".to_string(), "kimi".to_string()],
         )
         .unwrap();
-        let stored = super::super::storage::load().unwrap().proxied_provider_order;
+        let stored = super::super::storage::load()
+            .unwrap()
+            .proxied_provider_order;
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].harness_id, "claude");
         assert_eq!(
@@ -64,7 +64,9 @@ fn set_proxied_provider_order_normalises_empty_to_drop_entry() {
         )
         .unwrap();
         crate::preferences::set_proxied_provider_order("claude".to_string(), vec![]).unwrap();
-        let stored = super::super::storage::load().unwrap().proxied_provider_order;
+        let stored = super::super::storage::load()
+            .unwrap()
+            .proxied_provider_order;
         assert!(stored.is_empty());
     });
 }

@@ -35,7 +35,10 @@ use tauri::command;
 /// `provider_id`, `is_proxied = false`. `harness_id == profile.id` is the
 /// grouping key the frontend uses to bucket rows under their harness header
 /// (issue #575 / ADR-0016).
-pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
+pub(super) fn provider_info_for(
+    profile: &crate::preferences::HarnessProfile,
+    host: Platform,
+) -> Option<ProviderInfo> {
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     if !adapter.available_on().contains(&host) {
         return None;
@@ -195,13 +198,12 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
                         account,
                         crate::models::EnvType::Windows,
                         native_codex.as_ref(),
+                    ) || crate::services::provider_verification::launchable_on_runtime(
+                        pairing,
+                        account,
+                        crate::models::EnvType::Wsl,
+                        wsl_codex.as_ref(),
                     )
-                        || crate::services::provider_verification::launchable_on_runtime(
-                            pairing,
-                            account,
-                            crate::models::EnvType::Wsl,
-                            wsl_codex.as_ref(),
-                        )
                 })
         })
         .collect();
@@ -287,7 +289,10 @@ pub(super) fn order_proxied_children(
 /// distinct ranks so the tiebreak is moot for them; Proxied rows share their
 /// parent's `harness_id` and the stable sort keeps the native header ahead
 /// of its children (the native row is built first in `compose_provider_menu`).
-pub(super) fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
+pub(super) fn order_providers(
+    mut providers: Vec<ProviderInfo>,
+    order: &[String],
+) -> Vec<ProviderInfo> {
     providers.sort_by(|a, b| {
         let key_a = (
             a.harness_id == "terminal",
@@ -409,7 +414,11 @@ mod tests {
         // With no stored order, the two real harnesses keep their input order
         // and Terminal sorts last.
         let ordered = order_providers(
-            vec![row_native("terminal"), row_native("claude"), row_native("codex")],
+            vec![
+                row_native("terminal"),
+                row_native("claude"),
+                row_native("codex"),
+            ],
             &[],
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -420,9 +429,17 @@ mod tests {
     /// pinned last even if it appears mid-list in the stored order.
     #[test]
     fn order_providers_applies_stored_order() {
-        let order = vec!["codex".to_string(), "terminal".to_string(), "claude".to_string()];
+        let order = vec![
+            "codex".to_string(),
+            "terminal".to_string(),
+            "claude".to_string(),
+        ];
         let ordered = order_providers(
-            vec![row_native("claude"), row_native("terminal"), row_native("codex")],
+            vec![
+                row_native("claude"),
+                row_native("terminal"),
+                row_native("codex"),
+            ],
             &order,
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -537,7 +554,10 @@ mod tests {
             .expect("claude profile is available on Windows");
         assert_eq!(info.id, "claude");
         assert_eq!(info.harness_id, "claude");
-        assert!(info.provider_id.is_none(), "native row must have no provider_id");
+        assert!(
+            info.provider_id.is_none(),
+            "native row must have no provider_id"
+        );
         assert!(!info.is_proxied);
         assert_eq!(info.group_key, "claude");
     }
@@ -746,7 +766,15 @@ mod tests {
         let ordered = order_proxied_children(rows, &order);
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // Native header first, then children in stored order.
-        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:openrouter", "claude:minimax"]);
+        assert_eq!(
+            ids,
+            vec![
+                "claude",
+                "claude:kimi",
+                "claude:openrouter",
+                "claude:minimax"
+            ]
+        );
     }
 
     /// A stored order applies ONLY to the children of the named harness.
@@ -802,7 +830,10 @@ mod tests {
         let ordered = order_proxied_children(rows, &order);
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // kimi first (listed), then minimax and deepseek in input order.
-        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:minimax", "claude:deepseek"]);
+        assert_eq!(
+            ids,
+            vec!["claude", "claude:kimi", "claude:minimax", "claude:deepseek"]
+        );
     }
 
     /// Native harness rows are never reordered — they're not proxied
@@ -837,7 +868,10 @@ mod tests {
     #[test]
     fn compose_provider_menu_propagates_proxied_order() {
         let menu = compose_provider_menu(
-            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
+            vec![
+                profile("claude", "anthropic"),
+                profile("terminal", "terminal"),
+            ],
             vec![
                 acct("minimax", true, Some("sk-mm")),
                 // `"moonshot"` stands in for the (no-longer-first-class) Kimi
@@ -876,16 +910,14 @@ mod tests {
 
     #[test]
     fn parse_spawn_option_id_splits_bare_into_native() {
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude");
+        let (harness, provider) = crate::agent::provider::parse_spawn_option_id("claude");
         assert_eq!(harness, "claude");
         assert!(provider.is_none());
     }
 
     #[test]
     fn parse_spawn_option_id_splits_composite_into_harness_and_provider() {
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude:minimax");
+        let (harness, provider) = crate::agent::provider::parse_spawn_option_id("claude:minimax");
         assert_eq!(harness, "claude");
         assert_eq!(provider, Some("minimax"));
     }
@@ -895,8 +927,7 @@ mod tests {
         // A provider id with its own `:` (theoretical today, but the
         // id is user-chosen so we can't rule it out) lands entirely in
         // the provider slot. The first `:` is the split, not the last.
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude:weird:id");
+        let (harness, provider) = crate::agent::provider::parse_spawn_option_id("claude:weird:id");
         assert_eq!(harness, "claude");
         assert_eq!(provider, Some("weird:id"));
     }
@@ -1012,7 +1043,10 @@ mod tests {
         // ADR-0025: a keyed account surfaces as a Proxied Provider row only
         // when a stored pairing exists (no auto-derived default on key alone).
         let menu = compose_provider_menu(
-            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
+            vec![
+                profile("claude", "anthropic"),
+                profile("terminal", "terminal"),
+            ],
             vec![
                 acct("minimax", true, Some("sk-mm")),
                 acct("moonshot", true, Some("sk-moon")),
@@ -1146,8 +1180,8 @@ mod tests {
             name: "Cursor Agent".to_string(),
             harness: "cursor".to_string(),
         };
-        let info = provider_info_for(&cursor, Platform::Windows)
-            .expect("Cursor is available on Windows");
+        let info =
+            provider_info_for(&cursor, Platform::Windows).expect("Cursor is available on Windows");
         assert!(
             info.resumable,
             "Cursor's workspace JSONL transcript must enable archive resume"

@@ -15,7 +15,9 @@ impl std::fmt::Display for MeshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MeshError::Db(e) => write!(f, "{}", e),
-            MeshError::InvalidLayout(l) => write!(f, "layout must be 'grid' or 'single', got '{}'", l),
+            MeshError::InvalidLayout(l) => {
+                write!(f, "layout must be 'grid' or 'single', got '{}'", l)
+            }
             MeshError::Io(e) => write!(f, "{}", e),
         }
     }
@@ -42,11 +44,7 @@ pub fn name_from_path(path: &str) -> String {
         .unwrap_or_else(|| {
             let sep = if path.contains('\\') { '\\' } else { '/' };
             #[allow(clippy::manual_pattern_char_comparison)]
-            let result = path
-                .rsplit(|c| c == sep)
-                .next()
-                .unwrap_or(path)
-                .to_string();
+            let result = path.rsplit(|c| c == sep).next().unwrap_or(path).to_string();
             result
         })
 }
@@ -58,7 +56,11 @@ pub fn create_test(name: &str) -> Result<Mesh, MeshError> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let mesh_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
+    let mesh_path = temp_dir.join(format!(
+        "buildmesh_test_{}_{}",
+        name.replace(' ', "_"),
+        timestamp
+    ));
     std::fs::create_dir_all(&mesh_path)?;
     let mesh = db::create_mesh(name, &mesh_path.to_string_lossy())?;
     Ok(mesh)

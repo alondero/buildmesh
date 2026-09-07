@@ -102,7 +102,11 @@ pub fn spawn_sandboxed(
         Ok((child, pty)) => {
             CLEANUP.lock().unwrap().insert(
                 session_id,
-                Cleanup { profile_name: name, sid, granted },
+                Cleanup {
+                    profile_name: name,
+                    sid,
+                    granted,
+                },
             );
             // The SID is no longer needed now the process exists; the on-disk
             // profile persists and is removed in `cleanup`.
@@ -370,7 +374,10 @@ mod tests {
         assert_eq!(quote_arg(OsStr::new("plain")), "plain");
         assert_eq!(quote_arg(OsStr::new("a b")), "\"a b\"");
         // base64 EncodedCommand payloads never contain spaces/quotes.
-        assert_eq!(quote_arg(OsStr::new("AGMAdwByAGEAcA==")), "AGMAdwByAGEAcA==");
+        assert_eq!(
+            quote_arg(OsStr::new("AGMAdwByAGEAcA==")),
+            "AGMAdwByAGEAcA=="
+        );
     }
 
     #[test]
@@ -415,16 +422,15 @@ mod tests {
 
         // A throwaway dir stands in for the node's worktree — granted Full to the
         // container SID exactly like a real node, so the grant surface matches.
-        let worktree =
-            std::env::temp_dir().join(format!("bm-repro-spawn-{}", std::process::id()));
+        let worktree = std::env::temp_dir().join(format!("bm-repro-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&worktree).unwrap();
 
         // Default: the current production claude.exe direct path (post-#531).
         // Override via BM_REPRO_ARGS to probe other launchers on PATH. The
         // original #498 reproduction targeted `cwrap.cmd`, which was archived
         // when cwrap was absorbed into buildmesh — see the doc above.
-        let args_str =
-            std::env::var("BM_REPRO_ARGS").unwrap_or_else(|_| "claude.exe --dangerously-skip-permissions".to_string());
+        let args_str = std::env::var("BM_REPRO_ARGS")
+            .unwrap_or_else(|_| "claude.exe --dangerously-skip-permissions".to_string());
         let extra: Vec<String> = args_str.split_whitespace().map(String::from).collect();
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.arg("/c");
@@ -446,14 +452,9 @@ mod tests {
 
         // Negative id so it can never collide with a real node row.
         let session_id: i64 = -987_654;
-        let (mut child, pty) = spawn_sandboxed(
-            &cmd,
-            session_id,
-            &worktree.to_string_lossy(),
-            40,
-            120,
-        )
-        .expect("spawn_sandboxed");
+        let (mut child, pty) =
+            spawn_sandboxed(&cmd, session_id, &worktree.to_string_lossy(), 40, 120)
+                .expect("spawn_sandboxed");
 
         let mut reader = pty.try_clone_reader().expect("reader");
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -472,7 +473,10 @@ mod tests {
             }
         });
 
-        let secs: u64 = std::env::var("BM_REPRO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(12);
+        let secs: u64 = std::env::var("BM_REPRO_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12);
         let mut out = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(secs);
         let mut exit_code: Option<u32> = None;
@@ -534,8 +538,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
-        let worktree =
-            std::env::temp_dir().join(format!("bm-repro-direct-{}", std::process::id()));
+        let worktree = std::env::temp_dir().join(format!("bm-repro-direct-{}", std::process::id()));
         std::fs::create_dir_all(&worktree).unwrap();
         let wt = worktree.to_string_lossy().into_owned();
 
@@ -646,12 +649,16 @@ mod tests {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
-        let worktree =
-            std::env::temp_dir().join(format!("bm-control-{}", std::process::id()));
+        let worktree = std::env::temp_dir().join(format!("bm-control-{}", std::process::id()));
         std::fs::create_dir_all(&worktree).unwrap();
 
         let pty = native_pty_system()
-            .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty");
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.args(["/c", "claude.exe", "--dangerously-skip-permissions"]);
@@ -670,7 +677,10 @@ mod tests {
             }
         });
 
-        let secs: u64 = std::env::var("BM_REPRO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(15);
+        let secs: u64 = std::env::var("BM_REPRO_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15);
         let mut out = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(secs);
         let mut exit_code: Option<u32> = None;
@@ -692,7 +702,9 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         eprintln!(
             "\n===== CONTROL (no sandbox) — still_alive={}, exit_code={:?}, {} bytes =====",
-            still_alive, exit_code, out.len()
+            still_alive,
+            exit_code,
+            out.len()
         );
         eprintln!("{}", text);
         eprintln!("===== END CONTROL =====\n");
@@ -749,7 +761,11 @@ mod tests {
         drop(pty);
         let _ = child.wait();
         reader_thread.join().ok();
-        (still_alive, exit_code, String::from_utf8_lossy(&out).into_owned())
+        (
+            still_alive,
+            exit_code,
+            String::from_utf8_lossy(&out).into_owned(),
+        )
     }
 
     /// §4 SPIKE (ignored) — the decisive feasibility test. It proves that the
@@ -817,32 +833,55 @@ mod tests {
         let up = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
         let secret = up.join(format!("bm-spike-secret-{}.txt", pid));
         std::fs::write(&secret, "TOPSECRET_MARKER\n").unwrap();
-        let read_cmd = format!("{cmd} /c \"type {} & echo READ_DONE & pause\"", secret.display());
+        let read_cmd = format!(
+            "{cmd} /c \"type {} & echo READ_DONE & pause\"",
+            secret.display()
+        );
         let bash_cmd = format!("{cmd} /c \"bash --version & echo BASH_DONE & pause\"");
 
         // (b) child spawn works regardless of the SID set.
-        let b = run(&strict, &format!("{cmd} /c \"echo CHILD_OK & pause\""), 8, "CHILD_OK");
+        let b = run(
+            &strict,
+            &format!("{cmd} /c \"echo CHILD_OK & pause\""),
+            8,
+            "CHILD_OK",
+        );
         eprintln!("[b child-spawn]\n{b}\n");
         assert!(b.contains("CHILD_OK"), "(b) child spawn failed: {b:?}");
 
         // ---- STRICT (no user SID): reads denied, but bash can't init ----
         let d_strict = run(&strict, &read_cmd, 8, "READ_DONE");
         eprintln!("[strict d read-deny]\n{d_strict}\n");
-        assert!(!d_strict.contains("TOPSECRET_MARKER"), "(d) strict: home read LEAKED: {d_strict:?}");
-        assert!(d_strict.to_lowercase().contains("denied"), "(d) strict: expected access-denied: {d_strict:?}");
+        assert!(
+            !d_strict.contains("TOPSECRET_MARKER"),
+            "(d) strict: home read LEAKED: {d_strict:?}"
+        );
+        assert!(
+            d_strict.to_lowercase().contains("denied"),
+            "(d) strict: expected access-denied: {d_strict:?}"
+        );
 
         let c_strict = run(&strict, &bash_cmd, 12, "BASH_DONE");
         eprintln!("[strict c bash-init]\n{c_strict}\n");
-        assert!(!c_strict.contains("GNU bash"), "(c) strict: bash UNEXPECTEDLY inited — tension may be resolvable: {c_strict:?}");
+        assert!(
+            !c_strict.contains("GNU bash"),
+            "(c) strict: bash UNEXPECTEDLY inited — tension may be resolvable: {c_strict:?}"
+        );
 
         // ---- PERMISSIVE (user SID): bash inits, but reads leak ----
         let c_perm = run(&permissive, &bash_cmd, 12, "BASH_DONE");
         eprintln!("[permissive c bash-init]\n{c_perm}\n");
-        assert!(c_perm.contains("GNU bash"), "(c) permissive: bash should init with the user SID: {c_perm:?}");
+        assert!(
+            c_perm.contains("GNU bash"),
+            "(c) permissive: bash should init with the user SID: {c_perm:?}"
+        );
 
         let d_perm = run(&permissive, &read_cmd, 8, "READ_DONE");
         eprintln!("[permissive d read-deny]\n{d_perm}\n");
-        assert!(d_perm.contains("TOPSECRET_MARKER"), "(d) permissive: home read should leak (the trade-off): {d_perm:?}");
+        assert!(
+            d_perm.contains("TOPSECRET_MARKER"),
+            "(d) permissive: home read should leak (the trade-off): {d_perm:?}"
+        );
 
         let _ = std::fs::remove_file(&secret);
 
@@ -858,10 +897,16 @@ mod tests {
             "F_DONE",
         );
         eprintln!("[f network]\n{f}\n");
-        assert!(f.contains("API_EXIT=0"), "(f) outbound api.anthropic.com unreachable: {f:?}");
+        assert!(
+            f.contains("API_EXIT=0"),
+            "(f) outbound api.anthropic.com unreachable: {f:?}"
+        );
         // Loopback: any curl exit but 28 (timeout = SYN dropped) proves loopback
         // isn't WFP-blocked. 0 = hub answered, 7 = refused (works, nothing up).
-        assert!(!f.contains("LB_EXIT=28"), "(f) loopback to 127.0.0.1:{port} BLOCKED (timeout): {f:?}");
+        assert!(
+            !f.contains("LB_EXIT=28"),
+            "(f) loopback to 127.0.0.1:{port} BLOCKED (timeout): {f:?}"
+        );
 
         acl::revoke_dir(&worktree, &sid).ok();
         let _ = std::fs::remove_dir_all(&worktree);
@@ -916,14 +961,20 @@ mod tests {
         );
         eprintln!(
             "SPIKE claude argv: {:?}",
-            cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+            cmd.get_argv()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
         );
 
         let (child, pty) = spawn_sandboxed_restricted(&cmd, session_id, &wt, 40, 120, true, true)
             .expect("spawn_sandboxed_restricted");
         eprintln!("SPIKE_CLAUDE_PID={:?}", child.process_id());
 
-        let secs: u64 = std::env::var("BM_REPRO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        let secs: u64 = std::env::var("BM_REPRO_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
         let (still_alive, exit_code, text) = observe(child, pty, secs, "\u{0}NEVER\u{0}");
         cleanup_restricted(session_id);
         let _ = std::fs::remove_dir_all(&worktree);
@@ -937,8 +988,15 @@ mod tests {
 
         // (a)+(g): claude survived its early child-spawn (named pipe created) and
         // rendered beyond the bare ConPTY handshake (16 bytes).
-        assert!(still_alive, "(g) claude exited early (exit={exit_code:?}); should stay alive rendering its prompt");
-        assert!(text.len() > 16, "(a)+(g) claude rendered only the {}-byte handshake — likely hung in early init", text.len());
+        assert!(
+            still_alive,
+            "(g) claude exited early (exit={exit_code:?}); should stay alive rendering its prompt"
+        );
+        assert!(
+            text.len() > 16,
+            "(a)+(g) claude rendered only the {}-byte handshake — likely hung in early init",
+            text.len()
+        );
     }
 
     #[test]
@@ -949,15 +1007,30 @@ mod tests {
         cmd.env("TMPDIR", r"C:\Users\me\AppData\Local\Temp");
         let env = curated_env(&cmd, r"C:\wt\.bm-sandbox-tmp");
 
-        let path = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("path")).unwrap();
-        assert!(path.1.starts_with(GIT_CMD), "Git must win on PATH: {}", path.1);
-        assert!(path.1.contains(r"C:\msys64\usr\bin"), "original PATH preserved");
+        let path = env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("path"))
+            .unwrap();
+        assert!(
+            path.1.starts_with(GIT_CMD),
+            "Git must win on PATH: {}",
+            path.1
+        );
+        assert!(
+            path.1.contains(r"C:\msys64\usr\bin"),
+            "original PATH preserved"
+        );
 
         // Every temp var points at the sandbox dir.
         for key in ["TEMP", "TMP", "TMPDIR"] {
-            let var = env.iter().find(|(k, _)| k == key)
+            let var = env
+                .iter()
+                .find(|(k, _)| k == key)
                 .unwrap_or_else(|| panic!("{key} must be set"));
-            assert_eq!(var.1, r"C:\wt\.bm-sandbox-tmp", "{key} redirected to sandbox tmp");
+            assert_eq!(
+                var.1, r"C:\wt\.bm-sandbox-tmp",
+                "{key} redirected to sandbox tmp"
+            );
         }
         // The host temp must not survive under any var (TEMP/TMP/TMPDIR or other).
         assert!(!env.iter().any(|(_, v)| v.contains(r"AppData\Local\Temp")));

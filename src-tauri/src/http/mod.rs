@@ -22,9 +22,9 @@ pub use stream::MaybeTls;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -33,9 +33,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::WebSocketStream;
 use ts_rs::TS;
 
 /// Wire type — payload of the `serialize-terminal-request` Tauri event (issue
@@ -90,7 +90,11 @@ pub const HTTP_PORT_DEFAULT: u16 = HTTP_PORT_START;
 /// run side-by-side with the stable hub without contending on 1991/1992.
 /// Stable → 0, dev → 1000 (test 2991, HTTP 2992-2994).
 pub fn port_offset(identifier: &str) -> u16 {
-    if identifier.ends_with(".dev") { 1000 } else { 0 }
+    if identifier.ends_with(".dev") {
+        1000
+    } else {
+        0
+    }
 }
 
 /// Short profile label for surface filenames that the user can see
@@ -352,7 +356,10 @@ async fn apply_binding(port_offset: u16) {
             None => {
                 if lan_enabled {
                     if let Err(e) = crate::db::set_lan_exposure_enabled(false) {
-                        tracing::warn!("Failed to revert LAN exposure flag after bind failure: {}", e);
+                        tracing::warn!(
+                            "Failed to revert LAN exposure flag after bind failure: {}",
+                            e
+                        );
                     }
                 }
                 realized_binds_store().write().clear();
@@ -362,7 +369,10 @@ async fn apply_binding(port_offset: u16) {
         };
     RESOLVED_HTTP_PORT.store(skeleton_port, Ordering::SeqCst);
     if let Some(app) = app_handle() {
-        let _ = app.emit("remote-access-port", serde_json::json!({ "port": skeleton_port }));
+        let _ = app.emit(
+            "remote-access-port",
+            serde_json::json!({ "port": skeleton_port }),
+        );
     }
 
     // Bind the interface listeners on top of the skeleton (best-effort per
@@ -406,7 +416,11 @@ async fn apply_binding(port_offset: u16) {
     } else {
         "loopback only"
     };
-    tracing::info!("HTTP server listening on port {} ({})", skeleton_port, scope);
+    tracing::info!(
+        "HTTP server listening on port {} ({})",
+        skeleton_port,
+        scope
+    );
 }
 
 /// One listener the server should open.
@@ -480,7 +494,11 @@ fn realized_binds_from_specs(specs: &[BindSpec], bound_indices: &[usize]) -> Vec
 /// Folding the acceptor into the spec (issue #587) is what lets the bind
 /// loop treat TLS/plain uniformly: every TLS-intended listener carries
 /// `Some(acceptor)` and the runtime "no acceptor" check disappears.
-pub fn bind_specs(port: u16, interface_ips: &[IpAddr], acceptor: Option<&TlsAcceptor>) -> Vec<BindSpec> {
+pub fn bind_specs(
+    port: u16,
+    interface_ips: &[IpAddr],
+    acceptor: Option<&TlsAcceptor>,
+) -> Vec<BindSpec> {
     let mut specs = vec![
         BindSpec {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -554,9 +572,8 @@ async fn get_or_build_acceptor(interface_ips: &[IpAddr]) -> std::io::Result<Opti
     // Vec clone into the blocking task is negligible.
     let ips = interface_ips.to_vec();
     let acceptor = tokio::task::spawn_blocking(move || -> std::io::Result<TlsAcceptor> {
-        let app = app_handle().ok_or_else(|| {
-            std::io::Error::other("app handle not set; cannot locate cert dir")
-        })?;
+        let app = app_handle()
+            .ok_or_else(|| std::io::Error::other("app handle not set; cannot locate cert dir"))?;
         let dir: PathBuf = app
             .path()
             .app_data_dir()
@@ -917,26 +934,177 @@ struct Route {
 /// that `/admin/devices*` precede the `/admin/*` catch-all, which it does
 /// because the loop runs before that special.
 const ROUTES: &[Route] = &[
-    Route { method: "GET", m: RouteMatch::Exact("/admin/devices"), scope: auth::RequiredScope::Admin, handler: Handler::AdminDevices },
-    Route { method: "POST", m: RouteMatch::OneId { prefix: "/admin/devices/", suffix: "/revoke" }, scope: auth::RequiredScope::Admin, handler: Handler::AdminRevoke },
-    Route { method: "GET", m: RouteMatch::Exact("/nodes"), scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorNodes },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/log" }, scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorLog },
-    Route { method: "POST", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/prompt" }, scope: auth::RequiredScope::CoordinatorWrite, handler: Handler::CoordinatorPrompt },
-    Route { method: "POST", m: RouteMatch::Exact("/api/nodes/create"), scope: auth::RequiredScope::Admin, handler: Handler::NodesCreate },
-    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/nodes/", suffix: "/input" }, scope: auth::RequiredScope::Admin, handler: Handler::NodesInput },
-    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pr" }, scope: auth::RequiredScope::Admin, handler: Handler::PrCreate },
-    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/merge" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMerge },
-    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/import-and-resume" }, scope: auth::RequiredScope::Admin, handler: Handler::ImportResume },
-    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/issues/", suffix: "/spawn" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesSpawn },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/status" }, scope: auth::RequiredScope::Admin, handler: Handler::GitStatus },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/summary" }, scope: auth::RequiredScope::Admin, handler: Handler::GitSummary },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/branch" }, scope: auth::RequiredScope::Admin, handler: Handler::GitBranch },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/diff" }, scope: auth::RequiredScope::Admin, handler: Handler::GitDiff },
-    Route { method: "GET", m: RouteMatch::Exact("/api/gh/auth"), scope: auth::RequiredScope::Admin, handler: Handler::GhAuth },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/discover" }, scope: auth::RequiredScope::Admin, handler: Handler::AgentNodesDiscover },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/issues" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesList },
-    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pulls" }, scope: auth::RequiredScope::Admin, handler: Handler::PullsList },
-    Route { method: "GET", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/mergeability" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMergeability },
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/admin/devices"),
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::AdminDevices,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/admin/devices/",
+            suffix: "/revoke",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::AdminRevoke,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/nodes"),
+        scope: auth::RequiredScope::CoordinatorRead,
+        handler: Handler::CoordinatorNodes,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/nodes/",
+            suffix: "/log",
+        },
+        scope: auth::RequiredScope::CoordinatorRead,
+        handler: Handler::CoordinatorLog,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/nodes/",
+            suffix: "/prompt",
+        },
+        scope: auth::RequiredScope::CoordinatorWrite,
+        handler: Handler::CoordinatorPrompt,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::Exact("/api/nodes/create"),
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::NodesCreate,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/nodes/",
+            suffix: "/input",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::NodesInput,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/pr",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::PrCreate,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::TwoId {
+            prefix: "/api/meshes/",
+            mid: "/pulls/",
+            suffix: "/merge",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::PrMerge,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/agent-nodes/import-and-resume",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::ImportResume,
+    },
+    Route {
+        method: "POST",
+        m: RouteMatch::TwoId {
+            prefix: "/api/meshes/",
+            mid: "/issues/",
+            suffix: "/spawn",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::IssuesSpawn,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/agents/",
+            suffix: "/git/status",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::GitStatus,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/agents/",
+            suffix: "/git/summary",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::GitSummary,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/agents/",
+            suffix: "/git/branch",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::GitBranch,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/agents/",
+            suffix: "/diff",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::GitDiff,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::Exact("/api/gh/auth"),
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::GhAuth,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/agent-nodes/discover",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::AgentNodesDiscover,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/issues",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::IssuesList,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/pulls",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::PullsList,
+    },
+    Route {
+        method: "GET",
+        m: RouteMatch::TwoId {
+            prefix: "/api/meshes/",
+            mid: "/pulls/",
+            suffix: "/mergeability",
+        },
+        scope: auth::RequiredScope::Admin,
+        handler: Handler::PrMergeability,
+    },
 ];
 
 /// Run a homogeneous route's handler. The dispatch loop has already enforced
@@ -961,7 +1129,8 @@ async fn dispatch_route(
         }
         Handler::AdminRevoke => routes::admin::revoke(lines, id0).await,
         Handler::CoordinatorNodes => {
-            let _ = request::write_json(lines, "200 OK", &routes::coordinator::list_nodes_json()).await;
+            let _ =
+                request::write_json(lines, "200 OK", &routes::coordinator::list_nodes_json()).await;
         }
         Handler::CoordinatorLog => {
             let tail = tail_param(path_with_query);
@@ -1053,9 +1222,7 @@ impl Drop for TestEnumeratorGuard {
 /// guard whose `Drop` restores the prior value — bind it to `let _g = ...`
 /// so test runs are isolated regardless of panic or test ordering.
 #[cfg(test)]
-pub(crate) fn set_interface_enumerator_for_testing(
-    ips: Vec<IpAddr>,
-) -> TestEnumeratorGuard {
+pub(crate) fn set_interface_enumerator_for_testing(ips: Vec<IpAddr>) -> TestEnumeratorGuard {
     let prev = INTERFACE_SNAPSHOT_OVERRIDE
         .lock()
         .expect("interface snapshot override lock poisoned")
@@ -1088,9 +1255,8 @@ fn enumerate_interfaces() -> Vec<IpAddr> {
 /// the `list_afinet_netifas` IP list with an empty classes map. The bind path
 /// can still proceed with range-heuristic ranking; LAN exposure degrades to
 /// "no gateway awareness" but stays functional (#630 review).
-pub(crate) fn enumerate_interfaces_with_classes_fallback()
--> (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>)
-{
+pub(crate) fn enumerate_interfaces_with_classes_fallback(
+) -> (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>) {
     (enumerate_interfaces(), HashMap::new())
 }
 
@@ -1117,9 +1283,7 @@ fn local_snapshot_lock() -> &'static parking_lot::RwLock<LocalSnapshot> {
 /// `walk_adapters` succeeded — non-empty map) or the fallback path (non-Windows
 /// or `walk_adapters` failed — empty map). The QR fallback uses both signals
 /// to short-circuit on a prior bind without re-walking (#630 review).
-pub(crate) fn local_classes_if_populated()
-    -> Option<HashMap<IpAddr, interface_rank::IfaceClass>>
-{
+pub(crate) fn local_classes_if_populated() -> Option<HashMap<IpAddr, interface_rank::IfaceClass>> {
     let snapshot = local_snapshot_lock().read();
     Some(snapshot.1.clone())
 }
@@ -1259,10 +1423,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     }
 
     let request_line = request_line.trim().to_string();
-    let parts: Vec<String> = request_line
-        .split_whitespace()
-        .map(String::from)
-        .collect();
+    let parts: Vec<String> = request_line.split_whitespace().map(String::from).collect();
     if parts.len() < 2 {
         return;
     }
@@ -1374,8 +1535,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // files, WebSocket upgrades, debug logs, /api routes) routes
     // through this block; allocating a String just to re-borrow
     // it as `&str` cost ~1 µs and a heap block per request.
-    let query_string: Option<&str> =
-        path_with_query.split_once('?').map(|(_, q)| q);
+    let query_string: Option<&str> = path_with_query.split_once('?').map(|(_, q)| q);
 
     // POST /__debug/log — diagnostic endpoint. The mobile SPA injects an
     // error-catcher <script> (see assets::serve_spa_shell) that POSTs any
@@ -1829,7 +1989,10 @@ mod tests {
         assert_eq!(port_offset("com.alond.buildmesh"), 0);
         assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
         // Dev offset shifts the HTTP range clear of the stable hub: 1992 → 2992.
-        assert_eq!(HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"), 2992);
+        assert_eq!(
+            HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"),
+            2992
+        );
         assert_eq!(HTTP_PORT_END + port_offset("com.alond.buildmesh.dev"), 2994);
     }
 
@@ -1864,13 +2027,10 @@ mod tests {
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .expect("attention webhook hung")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("attention webhook hung")
+            .expect("read failed");
 
         buf.truncate(n);
         let status_line = String::from_utf8_lossy(&buf);
@@ -1890,7 +2050,10 @@ mod tests {
         // a refactor that drops the path-parsing or short-circuit would
         // surface as a different status code or a hang.
         let status = attention_post("/api/attention/42").await;
-        assert_eq!(status, 503, "expected 503 when APP_HANDLE is not set in tests");
+        assert_eq!(
+            status, 503,
+            "expected 503 when APP_HANDLE is not set in tests"
+        );
     }
 
     #[tokio::test]
@@ -1916,13 +2079,10 @@ mod tests {
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .expect("request hung")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
 
         buf.truncate(n);
         String::from_utf8_lossy(&buf)
@@ -1984,9 +2144,7 @@ mod tests {
         // Header value alone exceeds the cap; line + name is well over 64 KB.
         // No terminating CRLFCRLF so the cap is the only thing that triggers.
         let huge = "x".repeat(70 * 1024);
-        let request = format!(
-            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {huge}\r\n\r\n"
-        );
+        let request = format!("GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {huge}\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 512];
@@ -2050,11 +2208,8 @@ mod tests {
         let mut received = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                stream.read(&mut buf),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+                .await
             {
                 Ok(Ok(0)) => break, // EOF
                 Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
@@ -2127,11 +2282,8 @@ mod tests {
         let mut received = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                stream.read(&mut buf),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+                .await
             {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
@@ -2239,11 +2391,8 @@ mod tests {
         let mut received = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                stream.read(&mut buf),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+                .await
             {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
@@ -2424,13 +2573,13 @@ mod tests {
     #[ignore = "mutates process-global HOME/USERPROFILE; conflicts with parallel env-purity tests — run manually"]
     async fn coordinator_node_log_happy_path_returns_transcript_envelope() {
         let (node_id, token) = ensure_log_happy_fixture();
-        let (status, body) = get_request_body(
-            &format!("/nodes/{node_id}/log?tail=10"),
-            Some(&token),
-        )
-        .await;
+        let (status, body) =
+            get_request_body(&format!("/nodes/{node_id}/log?tail=10"), Some(&token)).await;
 
-        assert_eq!(status, 200, "auth + DB + dispatcher must yield 200, body: {body}");
+        assert_eq!(
+            status, 200,
+            "auth + DB + dispatcher must yield 200, body: {body}"
+        );
 
         let json: serde_json::Value = serde_json::from_str(&body)
             .unwrap_or_else(|e| panic!("body must be JSON, parse error {e}, body: {body}"));
@@ -2469,8 +2618,7 @@ mod tests {
     #[ignore = "shares the env-var-mutating fixture setup; run via --ignored or --include-ignored"]
     async fn coordinator_node_log_returns_404_for_unknown_node() {
         let (_id, token) = ensure_log_happy_fixture();
-        let (status, body) =
-            get_request_body("/nodes/9999999/log?tail=10", Some(&token)).await;
+        let (status, body) = get_request_body("/nodes/9999999/log?tail=10", Some(&token)).await;
         assert_eq!(status, 404, "unknown node id → 404, body: {body}");
         assert!(body.is_empty(), "404 carries no body, got: {body}");
     }
@@ -2489,13 +2637,20 @@ mod tests {
 
     #[test]
     fn path_segment_id_rejects_wrong_prefix_or_suffix() {
-        assert_eq!(path_segment_id("/api/x/42/foo", "/api/agents/", "/foo"), None);
+        assert_eq!(
+            path_segment_id("/api/x/42/foo", "/api/agents/", "/foo"),
+            None
+        );
         assert_eq!(
             path_segment_id("/api/agents/42/other", "/api/agents/", "/git/status"),
             None
         );
         assert_eq!(
-            path_segment_id("/api/agents/not-an-int/git/status", "/api/agents/", "/git/status"),
+            path_segment_id(
+                "/api/agents/not-an-int/git/status",
+                "/api/agents/",
+                "/git/status"
+            ),
             None
         );
     }
@@ -2580,10 +2735,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_nodes_discover_requires_token() {
-        assert_eq!(
-            get_request("/api/meshes/1/agent-nodes/discover").await,
-            401
-        );
+        assert_eq!(get_request("/api/meshes/1/agent-nodes/discover").await, 401);
     }
 
     #[tokio::test]
@@ -2619,10 +2771,7 @@ mod tests {
         // malformed body. We use a GET helper which still parses status
         // codes from the response line (the server returns 401 regardless
         // of method on an unauthenticated request).
-        assert_eq!(
-            get_request("/api/meshes/1/pulls/42/merge").await,
-            401
-        );
+        assert_eq!(get_request("/api/meshes/1/pulls/42/merge").await, 401);
     }
 
     /// Drive one request with an explicit method and no credentials, returning
@@ -2661,7 +2810,11 @@ mod tests {
         match m {
             RouteMatch::Exact(p) => p.to_string(),
             RouteMatch::OneId { prefix, suffix } => format!("{}1{}", prefix, suffix),
-            RouteMatch::TwoId { prefix, mid, suffix } => format!("{}1{}2{}", prefix, mid, suffix),
+            RouteMatch::TwoId {
+                prefix,
+                mid,
+                suffix,
+            } => format!("{}1{}2{}", prefix, mid, suffix),
         }
     }
 
@@ -2674,7 +2827,11 @@ mod tests {
         match m {
             RouteMatch::Exact(p) => p.to_string(),
             RouteMatch::OneId { prefix, suffix } => format!("{}{{id}}{}", prefix, suffix),
-            RouteMatch::TwoId { prefix, mid, suffix } => {
+            RouteMatch::TwoId {
+                prefix,
+                mid,
+                suffix,
+            } => {
                 let (left, right) = if *mid == "/pulls/" {
                     ("{mesh_id}", "{pr_number}")
                 } else {
@@ -2854,13 +3011,10 @@ ANY / -> Public (SPA shell)";
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .expect("handle_connection hung on WebSocket upgrade (regression)")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("handle_connection hung on WebSocket upgrade (regression)")
+            .expect("read failed");
 
         buf.truncate(n);
         String::from_utf8_lossy(&buf)
@@ -2993,8 +3147,13 @@ ANY / -> Public (SPA shell)";
     #[tokio::test]
     async fn get_or_build_acceptor_short_circuits_on_empty_san_key() {
         // No interfaces at all → no TLS needed.
-        let result = get_or_build_acceptor(&[]).await.expect("empty list is a no-op");
-        assert!(result.is_none(), "empty interface set must yield no acceptor");
+        let result = get_or_build_acceptor(&[])
+            .await
+            .expect("empty list is a no-op");
+        assert!(
+            result.is_none(),
+            "empty interface set must yield no acceptor"
+        );
 
         // A list of only loopback IPs also yields an empty SAN key (the key
         // filters loopback) and the same short-circuit.
@@ -3004,7 +3163,10 @@ ANY / -> Public (SPA shell)";
         ])
         .await
         .expect("loopback-only is a no-op");
-        assert!(result.is_none(), "loopback-only interface set must yield no acceptor");
+        assert!(
+            result.is_none(),
+            "loopback-only interface set must yield no acceptor"
+        );
     }
 
     #[test]
@@ -3016,12 +3178,19 @@ ANY / -> Public (SPA shell)";
         let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
         let specs = bind_specs(1992, &[lan_ip], None);
         assert_eq!(specs.len(), 2, "default binds IPv4 + IPv6 loopback");
-        assert!(specs[0].addr.is_ipv4() && specs[0].addr.ip().is_loopback(),
-            "IPv4 loopback must be primary (the attention hook posts to 127.0.0.1)");
+        assert!(
+            specs[0].addr.is_ipv4() && specs[0].addr.ip().is_loopback(),
+            "IPv4 loopback must be primary (the attention hook posts to 127.0.0.1)"
+        );
         assert!(specs[1].addr.is_ipv6() && specs[1].addr.ip().is_loopback());
-        assert!(specs.iter().all(|s| s.addr.ip().is_loopback()),
-            "the default must never expose beyond loopback");
-        assert!(specs.iter().all(|s| s.tls.is_none()), "the default is plain HTTP");
+        assert!(
+            specs.iter().all(|s| s.addr.ip().is_loopback()),
+            "the default must never expose beyond loopback"
+        );
+        assert!(
+            specs.iter().all(|s| s.tls.is_none()),
+            "the default is plain HTTP"
+        );
     }
 
     #[test]
@@ -3034,7 +3203,11 @@ ANY / -> Public (SPA shell)";
         // so the accept loop can never observe "want TLS but no acceptor".
         let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
         let acceptor = test_acceptor();
-        let specs = bind_specs(1992, &[IpAddr::V4(Ipv4Addr::LOCALHOST), lan_ip], Some(&acceptor));
+        let specs = bind_specs(
+            1992,
+            &[IpAddr::V4(Ipv4Addr::LOCALHOST), lan_ip],
+            Some(&acceptor),
+        );
         // 2 loopback (plain) + 1 interface (TLS).
         assert_eq!(specs.len(), 3);
         let loopback_plain = specs
@@ -3043,7 +3216,11 @@ ANY / -> Public (SPA shell)";
             .count();
         assert_eq!(loopback_plain, 2, "both loopback listeners stay plain HTTP");
         let tls_iface: Vec<_> = specs.iter().filter(|s| s.tls.is_some()).collect();
-        assert_eq!(tls_iface.len(), 1, "exactly the one non-loopback interface gets TLS");
+        assert_eq!(
+            tls_iface.len(),
+            1,
+            "exactly the one non-loopback interface gets TLS"
+        );
         assert_eq!(tls_iface[0].addr.ip(), lan_ip);
         assert!(!tls_iface[0].addr.ip().is_loopback());
     }
@@ -3055,7 +3232,9 @@ ANY / -> Public (SPA shell)";
         let acceptor = test_acceptor();
         let specs = bind_specs(1992, &[], Some(&acceptor));
         assert_eq!(specs.len(), 2);
-        assert!(specs.iter().all(|s| s.addr.ip().is_loopback() && s.tls.is_none()));
+        assert!(specs
+            .iter()
+            .all(|s| s.addr.ip().is_loopback() && s.tls.is_none()));
     }
 
     #[test]
@@ -3083,8 +3262,9 @@ ANY / -> Public (SPA shell)";
         );
         assert_eq!(tls_iface[0].addr.ip(), routable);
         assert!(
-            !specs.iter().any(|s| s.addr.ip() == v6_link_local
-                || s.addr.ip() == v4_link_local),
+            !specs
+                .iter()
+                .any(|s| s.addr.ip() == v6_link_local || s.addr.ip() == v4_link_local),
             "link-local addresses must not be bound at all"
         );
     }
@@ -3112,13 +3292,27 @@ ANY / -> Public (SPA shell)";
         let specs = bind_specs(1992, &[lan_ip], None);
         // Only the two loopback specs were ever produced; the interface spec
         // is structurally absent, not "skipped at bind time".
-        assert_eq!(specs.len(), 2, "no interface spec is emitted when acceptor is None");
+        assert_eq!(
+            specs.len(),
+            2,
+            "no interface spec is emitted when acceptor is None"
+        );
         let realized = realized_binds_from_specs(&specs, &[0, 1]);
-        assert_eq!(realized.len(), 2, "interface listener must NOT appear when acceptor is missing");
-        assert!(realized.iter().all(|b| !b.tls),
-            "no TLS realized bind can exist without an interface spec");
-        assert!(realized.iter().all(|b| b.address.parse::<SocketAddr>().unwrap().ip().is_loopback()),
-            "only loopback listeners survived");
+        assert_eq!(
+            realized.len(),
+            2,
+            "interface listener must NOT appear when acceptor is missing"
+        );
+        assert!(
+            realized.iter().all(|b| !b.tls),
+            "no TLS realized bind can exist without an interface spec"
+        );
+        assert!(
+            realized
+                .iter()
+                .all(|b| b.address.parse::<SocketAddr>().unwrap().ip().is_loopback()),
+            "only loopback listeners survived"
+        );
     }
 
     #[test]
@@ -3131,8 +3325,10 @@ ANY / -> Public (SPA shell)";
         assert_eq!(realized.len(), 3);
         let tls: Vec<_> = realized.iter().filter(|b| b.tls).collect();
         assert_eq!(tls.len(), 1, "exactly one TLS listener (the interface)");
-        assert!(tls[0].address.contains("192.168.1.5"),
-            "TLS listener address must carry the interface IP");
+        assert!(
+            tls[0].address.contains("192.168.1.5"),
+            "TLS listener address must carry the interface IP"
+        );
         assert!(tls[0].address.ends_with(":1992"));
         let plain: Vec<_> = realized.iter().filter(|b| !b.tls).collect();
         assert_eq!(plain.len(), 2, "both loopback listeners stay plain");
@@ -3174,13 +3370,10 @@ ANY / -> Public (SPA shell)";
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .expect("request hung")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
 
         buf.truncate(n);
         String::from_utf8_lossy(&buf)
@@ -3196,14 +3389,20 @@ ANY / -> Public (SPA shell)";
         // DNS-rebinding attempt: the attacker's domain rides in `Host` even
         // when re-resolved to loopback. Rejected with 400 before any routing.
         assert_eq!(get_request_with_host("/api/nodes", "evil.com").await, 400);
-        assert_eq!(get_request_with_host("/", "attacker.example:1992").await, 400);
+        assert_eq!(
+            get_request_with_host("/", "attacker.example:1992").await,
+            400
+        );
     }
 
     #[tokio::test]
     async fn host_header_loopback_passes_validation() {
         // A loopback Host clears the rebinding guard; the request then fails the
         // normal auth gate (401), proving the 400 is specific to bad Hosts.
-        assert_eq!(get_request_with_host("/api/nodes", "127.0.0.1:1992").await, 401);
+        assert_eq!(
+            get_request_with_host("/api/nodes", "127.0.0.1:1992").await,
+            401
+        );
         assert_eq!(get_request_with_host("/api/nodes", "localhost").await, 401);
         assert_eq!(get_request_with_host("/api/nodes", "[::1]:1992").await, 401);
     }
@@ -3221,13 +3420,10 @@ ANY / -> Public (SPA shell)";
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
-        )
-        .await
-        .expect("attention webhook hung")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("attention webhook hung")
+            .expect("read failed");
 
         buf.truncate(n);
         String::from_utf8_lossy(&buf)
@@ -3243,7 +3439,10 @@ ANY / -> Public (SPA shell)";
         // An external machine reaching the unauthenticated webhook is refused
         // with 403 before the Node Turn is published.
         let external: SocketAddr = "203.0.113.5:54321".parse().unwrap();
-        assert_eq!(attention_post_with_peer("/api/attention/42", external).await, 403);
+        assert_eq!(
+            attention_post_with_peer("/api/attention/42", external).await,
+            403
+        );
     }
 
     #[tokio::test]
@@ -3251,7 +3450,10 @@ ANY / -> Public (SPA shell)";
         // A loopback peer clears the 403 gate and proceeds (503 here because
         // APP_HANDLE is unset in tests), proving the gate is peer-specific.
         let local: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        assert_eq!(attention_post_with_peer("/api/attention/42", local).await, 503);
+        assert_eq!(
+            attention_post_with_peer("/api/attention/42", local).await,
+            503
+        );
     }
 
     // --- RBAC dispatcher gates (issue #500) ---
@@ -3345,11 +3547,7 @@ ANY / -> Public (SPA shell)";
     /// rate-limit tests can assert `Retry-After` is present). Bodyless on
     /// purpose — every rate-limit test calls this 30+ times and an empty body
     /// keeps the loop free of a per-call allocation.
-    async fn post_status_and_headers(
-        method: &str,
-        path: &str,
-        headers: &str,
-    ) -> (u16, String) {
+    async fn post_status_and_headers(method: &str, path: &str, headers: &str) -> (u16, String) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -3402,8 +3600,7 @@ ANY / -> Public (SPA shell)";
         let mut saw_429 = false;
         let mut last_response = String::new();
         for _ in 0..31 {
-            let (status, raw) =
-                post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
+            let (status, raw) = post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
             last_status = status;
             last_response = raw;
             if status == 429 {
@@ -3456,8 +3653,7 @@ ANY / -> Public (SPA shell)";
         for _ in 0..31 {
             let _ = post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
         }
-        let (status, raw) =
-            post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
+        let (status, raw) = post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
         assert_eq!(status, 429, "must be over the cap by now");
         // The body must be empty: Content-Length: 0 means no body bytes.
         assert!(
@@ -3492,12 +3688,10 @@ ANY / -> Public (SPA shell)";
             let _ = post_status_and_headers("POST", "/api/ws-ticket", &headers_a).await;
         }
         // One more A → must be 429 (cap reached).
-        let (a_status, _) =
-            post_status_and_headers("POST", "/api/ws-ticket", &headers_a).await;
+        let (a_status, _) = post_status_and_headers("POST", "/api/ws-ticket", &headers_a).await;
         assert_eq!(a_status, 429, "token A must hit 429 after the cap");
         // B's first request must NOT be 429 — it has its own counter.
-        let (b_status, _) =
-            post_status_and_headers("POST", "/api/ws-ticket", &headers_b).await;
+        let (b_status, _) = post_status_and_headers("POST", "/api/ws-ticket", &headers_b).await;
         assert_ne!(
             b_status, 429,
             "token B must not be rate-limited by token A's flood"
@@ -3547,7 +3741,10 @@ ANY / -> Public (SPA shell)";
         assert!(!sanitized.contains('\x1b'), "ANSI ESC must be stripped");
         assert!(!sanitized.contains('\r'), "CR must be stripped");
         assert!(sanitized.contains("red text"), "content must survive");
-        assert!(sanitized.contains(" more"), "remaining content must survive");
+        assert!(
+            sanitized.contains(" more"),
+            "remaining content must survive"
+        );
     }
 
     #[test]
@@ -3591,8 +3788,7 @@ ANY / -> Public (SPA shell)";
         let mut last_response = String::new();
         let mut last_status = 0;
         for _ in 0..(rate_limit::DEFAULT_MAX_PER_WINDOW + 1) {
-            let (status, raw) =
-                post_status_and_headers("POST", "/__debug/log", "").await;
+            let (status, raw) = post_status_and_headers("POST", "/__debug/log", "").await;
             last_status = status;
             last_response = raw;
             if status == 429 {

@@ -250,8 +250,7 @@ static MARKDOWN_LINK_RE: Lazy<Regex> = Lazy::new(|| {
 /// backticks) is also consumed. Newlines inside the span aren't
 /// supported (real inline code is single-line).
 static MARKDOWN_CODE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"`+[^`\n]*`+")
-        .expect("MARKDOWN_CODE_RE is a static literal — must compile")
+    Regex::new(r"`+[^`\n]*`+").expect("MARKDOWN_CODE_RE is a static literal — must compile")
 });
 
 /// Extract the list of GitHub issue numbers referenced under the issue
@@ -716,7 +715,8 @@ impl GitHubClient {
     /// Verify the token is valid by calling GET /user.
     pub fn check_auth(&self) -> bool {
         let url = self.rest_url("/user");
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -751,7 +751,8 @@ impl GitHubClient {
         let url = self.rest_url(&format!(
             "/repos/{owner}/{repo}/collaborators/{username}/permission"
         ));
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -783,7 +784,8 @@ impl GitHubClient {
             "/search/issues?q=repo:{}/{}+is:issue+state:open&per_page=100",
             owner, repo
         ));
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -849,11 +851,9 @@ impl GitHubClient {
                 other => other.to_string(),
             })
             .collect();
-        let url = self.rest_url(&format!(
-            "/search/issues?q={}&per_page=100",
-            encoded
-        ));
-        let resp = self.client
+        let url = self.rest_url(&format!("/search/issues?q={}&per_page=100", encoded));
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -895,12 +895,18 @@ impl GitHubClient {
             base: &'a str,
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&CreatePr { title, body, head, base })
+            .json(&CreatePr {
+                title,
+                body,
+                head,
+                base,
+            })
             .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
@@ -943,7 +949,8 @@ impl GitHubClient {
         let url = self.rest_url(&format!(
             "/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open&per_page=1"
         ));
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -978,7 +985,8 @@ impl GitHubClient {
             "/repos/{}/{}/pulls/{}/merge",
             owner, repo, pr_number
         ));
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1008,11 +1016,9 @@ impl GitHubClient {
         repo: &str,
         pr_number: i64,
     ) -> Result<(Option<bool>, String), GitHubError> {
-        let url = self.rest_url(&format!(
-            "/repos/{}/{}/pulls/{}",
-            owner, repo, pr_number
-        ));
-        let resp = self.client
+        let url = self.rest_url(&format!("/repos/{}/{}/pulls/{}", owner, repo, pr_number));
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1052,7 +1058,8 @@ impl GitHubClient {
             "/repos/{}/{}/pulls/{}/files?per_page=100",
             owner, repo, pr_number
         ));
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1087,12 +1094,15 @@ impl GitHubClient {
             merge_method: &'static str,
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .put(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&MergePr { merge_method: "squash" })
+            .json(&MergePr {
+                merge_method: "squash",
+            })
             .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
@@ -1112,16 +1122,14 @@ impl GitHubClient {
         let result: MergeResult = resp.json()?;
 
         // Now delete the branch. First, get the PR to find the head ref.
-        let pr_url = self.rest_url(&format!(
-            "/repos/{}/{}/pulls/{}",
-            owner, repo, pr_number
-        ));
+        let pr_url = self.rest_url(&format!("/repos/{}/{}/pulls/{}", owner, repo, pr_number));
         // Post-merge read: the merge already succeeded, so this GET is
         // best-effort. The 30s default would otherwise abort the function
         // with `Err` even though GitHub confirms the merge — use the write
         // timeout so a slow followup can't undo a successful merge in the
         // caller's view (issue #762 review).
-        let pr_resp = self.client
+        let pr_resp = self
+            .client
             .get(&pr_url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1145,7 +1153,8 @@ impl GitHubClient {
                     owner, repo, detail.head.ref_name
                 ));
                 // Best-effort branch deletion; ignore errors.
-                let _ = self.client
+                let _ = self
+                    .client
                     .delete(&delete_url)
                     .header(AUTHORIZATION, format!("Bearer {}", self.token))
                     .header(USER_AGENT, "buildmesh")
@@ -1154,7 +1163,10 @@ impl GitHubClient {
             }
         }
 
-        Ok(format!("Merged (squash) via {} — {}", result.sha, result.message))
+        Ok(format!(
+            "Merged (squash) via {} — {}",
+            result.sha, result.message
+        ))
     }
 
     /// Percent-encode a label name for safe inclusion in a URL path component.
@@ -1208,12 +1220,15 @@ impl GitHubClient {
             labels: Vec<&'a str>,
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&AddLabels { labels: vec![label] })
+            .json(&AddLabels {
+                labels: vec![label],
+            })
             .send()?;
 
         let status = resp.status();
@@ -1281,7 +1296,8 @@ impl GitHubClient {
             owner, repo, issue_number, encoded
         ));
 
-        let resp = self.client
+        let resp = self
+            .client
             .delete(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1330,7 +1346,8 @@ impl GitHubClient {
             body: &'a str,
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1367,7 +1384,8 @@ impl GitHubClient {
             state: &'static str,
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .patch(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
@@ -1788,10 +1806,7 @@ impl PullRequestSummary {
     fn from_graphql_node(node: GraphQLPrNode) -> Self {
         let (head_owner, head_clone_url) = match node.head_repository {
             Some(repo) => {
-                let owner = repo
-                    .owner
-                    .and_then(|o| o.login)
-                    .unwrap_or_default();
+                let owner = repo.owner.and_then(|o| o.login).unwrap_or_default();
                 let clone_url = repo.url.map(|u| format!("{}.git", u)).unwrap_or_default();
                 (owner, clone_url)
             }
@@ -1802,13 +1817,20 @@ impl PullRequestSummary {
             title: node.title.unwrap_or_default(),
             body: node.body.unwrap_or_default(),
             html_url: node.url.unwrap_or_default(),
-            state: node.state.map(|s| map_graphql_state(&s)).unwrap_or_else(|| "open".to_string()),
+            state: node
+                .state
+                .map(|s| map_graphql_state(&s))
+                .unwrap_or_else(|| "open".to_string()),
             draft: node.is_draft.unwrap_or(false),
             head_ref: node.head_ref_name.unwrap_or_default(),
             head_repo_owner: head_owner,
             head_repo_clone_url: head_clone_url,
             head_sha: node.head_ref_oid.unwrap_or_default(),
-            mergeable: node.mergeable.as_deref().map(map_graphql_mergeable).unwrap_or(None),
+            mergeable: node
+                .mergeable
+                .as_deref()
+                .map(map_graphql_mergeable)
+                .unwrap_or(None),
             mergeable_state: node
                 .merge_state_status
                 .as_deref()
@@ -1865,12 +1887,9 @@ const GH_AUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
 fn run_gh_auth_token() -> Option<String> {
     let mut cmd = command_no_window("gh");
     cmd.args(["auth", "token"]);
-    let output = crate::process_util::run_command_with_timeout(
-        cmd,
-        "gh auth token",
-        GH_AUTH_TOKEN_TIMEOUT,
-    )
-    .ok()?;
+    let output =
+        crate::process_util::run_command_with_timeout(cmd, "gh auth token", GH_AUTH_TOKEN_TIMEOUT)
+            .ok()?;
 
     if !output.status.success() {
         return None;
@@ -1918,7 +1937,12 @@ fn gh_config_paths() -> Vec<PathBuf> {
 
     // HOME-based (macOS / Linux)
     if let Ok(home) = std::env::var("HOME") {
-        paths.push(PathBuf::from(&home).join(".config").join("gh").join("hosts.yml"));
+        paths.push(
+            PathBuf::from(&home)
+                .join(".config")
+                .join("gh")
+                .join("hosts.yml"),
+        );
     }
 
     // Windows: %APPDATA%
@@ -1944,7 +1968,11 @@ fn parse_gh_hosts_yaml(content: &str) -> Option<String> {
         }
 
         // If we hit another top-level key (not indented), exit the section
-        if in_github_section && !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty() {
+        if in_github_section
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !trimmed.is_empty()
+        {
             break;
         }
 
@@ -1964,7 +1992,8 @@ fn parse_gh_hosts_yaml(content: &str) -> Option<String> {
 /// Parse owner/repo from a GitHub remote URL.
 /// Handles both HTTPS (https://github.com/owner/repo) and SSH (git@github.com:owner/repo) formats.
 pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
-    let rest = url.strip_prefix("https://github.com/")
+    let rest = url
+        .strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("git@github.com:"))?;
 
     let parts: Vec<&str> = rest.split('/').collect();
@@ -2037,13 +2066,19 @@ pub(crate) mod tests {
     #[test]
     fn test_parse_owner_repo_https() {
         let result = parse_owner_repo("https://github.com/alondero/buildmesh.git");
-        assert_eq!(result, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            result,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
     fn test_parse_owner_repo_ssh() {
         let result = parse_owner_repo("git@github.com:alondero/buildmesh.git");
-        assert_eq!(result, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            result,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
@@ -2064,7 +2099,10 @@ pub(crate) mod tests {
     oauth_token: gho_abc123def456
     git_protocol: ssh
 "#;
-        assert_eq!(parse_gh_hosts_yaml(content), Some("gho_abc123def456".to_string()));
+        assert_eq!(
+            parse_gh_hosts_yaml(content),
+            Some("gho_abc123def456".to_string())
+        );
     }
 
     #[test]
@@ -2072,7 +2110,10 @@ pub(crate) mod tests {
         let content = r#""github.com":
     oauth_token: "gho_quoted_token"
 "#;
-        assert_eq!(parse_gh_hosts_yaml(content), Some("gho_quoted_token".to_string()));
+        assert_eq!(
+            parse_gh_hosts_yaml(content),
+            Some("gho_quoted_token".to_string())
+        );
     }
 
     #[test]
@@ -2111,11 +2152,17 @@ pub(crate) mod tests {
         assert_eq!(issue.number, 358);
         assert_eq!(issue.title, "Widen Rust GitHubIssue");
         assert_eq!(issue.body, "Expose url/labels/state on the wire");
-        assert_eq!(issue.html_url, "https://github.com/alondero/buildmesh/issues/358");
+        assert_eq!(
+            issue.html_url,
+            "https://github.com/alondero/buildmesh/issues/358"
+        );
         assert_eq!(issue.state, "open");
         // The collaborator gate (ADR-0012 §5) reads `author` from `user.login`.
         assert_eq!(issue.author, "alondero");
-        assert_eq!(issue.labels, vec!["bug".to_string(), "good first issue".to_string()]);
+        assert_eq!(
+            issue.labels,
+            vec!["bug".to_string(), "good first issue".to_string()]
+        );
     }
 
     #[test]
@@ -2149,10 +2196,22 @@ pub(crate) mod tests {
 
     #[test]
     fn collaborator_permission_maps_legacy_values() {
-        assert_eq!(CollaboratorPermission::from_api_str("admin"), CollaboratorPermission::Admin);
-        assert_eq!(CollaboratorPermission::from_api_str("write"), CollaboratorPermission::Write);
-        assert_eq!(CollaboratorPermission::from_api_str("read"), CollaboratorPermission::Read);
-        assert_eq!(CollaboratorPermission::from_api_str("none"), CollaboratorPermission::None);
+        assert_eq!(
+            CollaboratorPermission::from_api_str("admin"),
+            CollaboratorPermission::Admin
+        );
+        assert_eq!(
+            CollaboratorPermission::from_api_str("write"),
+            CollaboratorPermission::Write
+        );
+        assert_eq!(
+            CollaboratorPermission::from_api_str("read"),
+            CollaboratorPermission::Read
+        );
+        assert_eq!(
+            CollaboratorPermission::from_api_str("none"),
+            CollaboratorPermission::None
+        );
     }
 
     #[test]
@@ -2163,7 +2222,10 @@ pub(crate) mod tests {
             CollaboratorPermission::from_api_str("  Maintain "),
             CollaboratorPermission::Write
         );
-        assert_eq!(CollaboratorPermission::from_api_str("TRIAGE"), CollaboratorPermission::Read);
+        assert_eq!(
+            CollaboratorPermission::from_api_str("TRIAGE"),
+            CollaboratorPermission::Read
+        );
     }
 
     #[test]
@@ -2173,7 +2235,10 @@ pub(crate) mod tests {
             CollaboratorPermission::from_api_str("superadmin"),
             CollaboratorPermission::None
         );
-        assert_eq!(CollaboratorPermission::from_api_str(""), CollaboratorPermission::None);
+        assert_eq!(
+            CollaboratorPermission::from_api_str(""),
+            CollaboratorPermission::None
+        );
     }
 
     #[test]
@@ -2217,7 +2282,10 @@ pub(crate) mod tests {
         assert_eq!(issue.body, "", "body is #[serde(default)]");
         assert_eq!(issue.html_url, "", "missing html_url defaults to empty");
         assert_eq!(issue.state, "", "missing state defaults to empty");
-        assert!(issue.labels.is_empty(), "missing labels defaults to empty vec");
+        assert!(
+            issue.labels.is_empty(),
+            "missing labels defaults to empty vec"
+        );
     }
 
     #[test]
@@ -2250,7 +2318,10 @@ pub(crate) mod tests {
             "labels": [{"id": 1, "color": "d73a4a"}]
         }"#;
         let result: Result<Issue, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "label entry without `name` must fail to parse");
+        assert!(
+            result.is_err(),
+            "label entry without `name` must fail to parse"
+        );
     }
 
     #[test]
@@ -2313,8 +2384,11 @@ pub(crate) mod tests {
             ]
         }"#;
         #[derive(Deserialize)]
-        struct SearchResult { items: Vec<Issue> }
-        let result: SearchResult = serde_json::from_str(json).expect("search result with null body must parse");
+        struct SearchResult {
+            items: Vec<Issue>,
+        }
+        let result: SearchResult =
+            serde_json::from_str(json).expect("search result with null body must parse");
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].body, "Follow-ups from #1206");
         assert_eq!(result.items[1].body, "");
@@ -2346,7 +2420,9 @@ pub(crate) mod tests {
             ]
         }"#;
         #[derive(Deserialize)]
-        struct SearchResult { items: Vec<Issue> }
+        struct SearchResult {
+            items: Vec<Issue>,
+        }
         let result: SearchResult = serde_json::from_str(json).expect("search result must parse");
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].labels, vec!["bug".to_string()]);
@@ -2381,7 +2457,10 @@ pub(crate) mod tests {
         }"#;
         let pr: PullRequest = serde_json::from_str(json).expect("full PR shape must parse");
         assert_eq!(pr.number, 412);
-        assert_eq!(pr.html_url, "https://github.com/alondero/buildmesh/pull/412");
+        assert_eq!(
+            pr.html_url,
+            "https://github.com/alondero/buildmesh/pull/412"
+        );
         assert_eq!(pr.title, "Add PR probe panel");
         assert_eq!(pr.body, "Lists open/closed PRs and merges mergeable ones");
         assert!(!pr.draft);
@@ -2540,22 +2619,19 @@ pub(crate) mod tests {
             mergeable_state: String,
         }
 
-        let clean: Detail = serde_json::from_str(
-            r#"{"mergeable": true, "mergeable_state": "clean"}"#,
-        ).unwrap();
+        let clean: Detail =
+            serde_json::from_str(r#"{"mergeable": true, "mergeable_state": "clean"}"#).unwrap();
         assert_eq!(clean.mergeable, Some(true));
         assert_eq!(clean.mergeable_state, "clean");
 
-        let dirty: Detail = serde_json::from_str(
-            r#"{"mergeable": false, "mergeable_state": "dirty"}"#,
-        ).unwrap();
+        let dirty: Detail =
+            serde_json::from_str(r#"{"mergeable": false, "mergeable_state": "dirty"}"#).unwrap();
         assert_eq!(dirty.mergeable, Some(false));
         assert_eq!(dirty.mergeable_state, "dirty");
 
         // `null` (still computing) must stay `None`, not become `false`.
-        let computing: Detail = serde_json::from_str(
-            r#"{"mergeable": null, "mergeable_state": "unknown"}"#,
-        ).unwrap();
+        let computing: Detail =
+            serde_json::from_str(r#"{"mergeable": null, "mergeable_state": "unknown"}"#).unwrap();
         assert_eq!(computing.mergeable, None);
         assert_eq!(computing.mergeable_state, "unknown");
 
@@ -2597,8 +2673,14 @@ pub(crate) mod tests {
         assert_eq!(file.status, "modified");
         assert_eq!(file.additions, 3);
         assert_eq!(file.deletions, 1);
-        assert!(file.patch.starts_with("@@"), "patch should round-trip verbatim");
-        assert!(file.previous_filename.is_none(), "no rename → no previous_filename");
+        assert!(
+            file.patch.starts_with("@@"),
+            "patch should round-trip verbatim"
+        );
+        assert!(
+            file.previous_filename.is_none(),
+            "no rename → no previous_filename"
+        );
     }
 
     #[test]
@@ -2981,7 +3063,9 @@ This issue is related to #481 in a narrative sense.
         // important property is "doesn't panic".
         let mut body = "x".repeat(65_534);
         body.push('🐛'); // 4 bytes — straddles byte 65,534 / 65,535 / 65,536 / 65,537
-        body.push_str("\n**Blocked by**\n----------\n\n* [Issue #481](https://github.com/x/y/issues/481)\n");
+        body.push_str(
+            "\n**Blocked by**\n----------\n\n* [Issue #481](https://github.com/x/y/issues/481)\n",
+        );
         // Just verify it doesn't panic. The exact return value depends on
         // where the floor_char_boundary snaps the index, but for a body
         // this size the Blocked-by section sits inside the floored region.
@@ -3119,7 +3203,10 @@ This issue is related to #481 in a narrative sense.
         let err = GitHubError::LabelNotFound("foo".to_string());
         match err {
             GitHubError::LabelNotFound(name) => assert_eq!(name, "foo"),
-            other => panic!("LabelNotFound must remain a distinct variant; got {:?}", other),
+            other => panic!(
+                "LabelNotFound must remain a distinct variant; got {:?}",
+                other
+            ),
         }
     }
 
@@ -3151,7 +3238,10 @@ This issue is related to #481 in a narrative sense.
         );
         match result {
             Err(GitHubError::LabelNotFound(name)) => assert_eq!(name, "buildmesh:run"),
-            other => panic!("422 with 'Label does not exist' must map to LabelNotFound; got {:?}", other),
+            other => panic!(
+                "422 with 'Label does not exist' must map to LabelNotFound; got {:?}",
+                other
+            ),
         }
     }
 
@@ -3176,7 +3266,10 @@ This issue is related to #481 in a narrative sense.
                 assert_eq!(status, 422);
                 assert_eq!(msg, body, "raw body must be preserved for non-magic 422s");
             }
-            other => panic!("422 without magic string must map to Api, not LabelNotFound; got {:?}", other),
+            other => panic!(
+                "422 without magic string must map to Api, not LabelNotFound; got {:?}",
+                other
+            ),
         }
     }
 
@@ -3193,7 +3286,10 @@ This issue is related to #481 in a narrative sense.
         );
         match result {
             Err(GitHubError::LabelNotFound(name)) => assert_eq!(name, "buildmesh:run"),
-            other => panic!("empty-body 422 must collapse to LabelNotFound; got {:?}", other),
+            other => panic!(
+                "empty-body 422 must collapse to LabelNotFound; got {:?}",
+                other
+            ),
         }
     }
 
@@ -3210,7 +3306,10 @@ This issue is related to #481 in a narrative sense.
         );
         match result {
             Err(GitHubError::Api(403, msg)) => assert!(msg.contains("Resource not accessible")),
-            other => panic!("403 must map to Api(403, ...), not LabelNotFound; got {:?}", other),
+            other => panic!(
+                "403 must map to Api(403, ...), not LabelNotFound; got {:?}",
+                other
+            ),
         }
     }
 
@@ -3219,23 +3318,22 @@ This issue is related to #481 in a narrative sense.
         // 200 / 201 with any body (including empty) → Ok(()). We don't
         // parse the success body — just need to confirm the classifier
         // doesn't accidentally treat it as an error.
-        for status in [
-            reqwest::StatusCode::OK,
-            reqwest::StatusCode::CREATED,
-        ] {
+        for status in [reqwest::StatusCode::OK, reqwest::StatusCode::CREATED] {
             let result = GitHubClient::classify_add_label_response(
                 status,
                 r#"[{"id":1,"name":"buildmesh:run"}]"#,
                 "buildmesh:run",
             );
-            assert!(result.is_ok(), "status {} must succeed; got {:?}", status, result);
+            assert!(
+                result.is_ok(),
+                "status {} must succeed; got {:?}",
+                status,
+                result
+            );
         }
         // Empty body on success is also fine.
-        let result = GitHubClient::classify_add_label_response(
-            reqwest::StatusCode::OK,
-            "",
-            "buildmesh:run",
-        );
+        let result =
+            GitHubClient::classify_add_label_response(reqwest::StatusCode::OK, "", "buildmesh:run");
         assert!(result.is_ok());
     }
 
@@ -3272,7 +3370,12 @@ This issue is related to #481 in a narrative sense.
         // applied. Requires a real fixture issue + token.
         let client = GitHubClient::new().expect("GITHUB_TOKEN must be set");
         client
-            .remove_issue_label("alondero", "buildmesh", 1, "definitely-not-on-this-issue-xyz")
+            .remove_issue_label(
+                "alondero",
+                "buildmesh",
+                1,
+                "definitely-not-on-this-issue-xyz",
+            )
             .expect("removing a missing label must collapse to Ok(())");
     }
 
@@ -3390,7 +3493,10 @@ This issue is related to #481 in a narrative sense.
         let s = PullRequestSummary::from_graphql_node(node);
         assert_eq!(s.mergeable, None);
         assert_eq!(s.mergeable_state, "unknown");
-        assert_eq!(s.head_ref, "", "missing head degrades to empty, not failure");
+        assert_eq!(
+            s.head_ref, "",
+            "missing head degrades to empty, not failure"
+        );
         assert_eq!(s.head_repo_owner, "");
     }
 
@@ -3446,14 +3552,27 @@ This issue is related to #481 in a narrative sense.
     ///   vice versa) panics the guard with the request line, failing loudly.
     fn fake_graphql_server(
         pages: Vec<(serde_json::Value, bool, Option<String>)>,
-    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
-        fake_server(pages.into_iter().map(|(n, h, c)| Scripted::Page(n, h, c)).collect())
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        fake_server(
+            pages
+                .into_iter()
+                .map(|(n, h, c)| Scripted::Page(n, h, c))
+                .collect(),
+        )
     }
 
     /// Same fake with an explicit script (pages + REST details in order).
     pub(crate) fn fake_server(
         script: Vec<Scripted>,
-    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3470,7 +3589,9 @@ This issue is related to #481 in a narrative sense.
                 // Read request line + headers, then body per Content-Length.
                 let mut reader = BufReader::new(sock.try_clone().expect("clone"));
                 let mut request_line = String::new();
-                reader.read_line(&mut request_line).expect("read request line");
+                reader
+                    .read_line(&mut request_line)
+                    .expect("read request line");
                 let mut content_length: usize = 0;
                 loop {
                     let mut line = String::new();
@@ -3578,8 +3699,7 @@ This issue is related to #481 in a narrative sense.
     #[test]
     fn list_pr_summaries_costs_one_request_for_twenty_prs() {
         use std::sync::atomic::Ordering;
-        let nodes =
-            serde_json::Value::Array((1..=20).map(fake_node).collect::<Vec<_>>());
+        let nodes = serde_json::Value::Array((1..=20).map(fake_node).collect::<Vec<_>>());
         let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
         let out = client
@@ -3597,8 +3717,7 @@ This issue is related to #481 in a narrative sense.
     #[test]
     fn list_pr_summaries_costs_one_request_for_one_hundred_prs() {
         use std::sync::atomic::Ordering;
-        let nodes =
-            serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let nodes = serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
         let (base, count, handle) = fake_graphql_server(vec![(nodes, false, None)]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
         let out = client
@@ -3771,10 +3890,8 @@ This issue is related to #481 in a narrative sense.
         // The 404 is reserved for a genuinely absent repository: null with
         // an EMPTY errors array. (No errors key at all parses the same way
         // via #[serde(default)].)
-        let (base, handle) = fake_graphql_raw_server(
-            "200 OK",
-            r#"{"data": {"repository": null}, "errors": []}"#,
-        );
+        let (base, handle) =
+            fake_graphql_raw_server("200 OK", r#"{"data": {"repository": null}, "errors": []}"#);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
         let err = client
             .list_pr_summaries("acme", "demo", "open")

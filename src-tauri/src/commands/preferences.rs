@@ -216,10 +216,7 @@ pub fn get_pairing_defaults(
 /// JS wrapper, but that only helps callers within the same component — other
 /// components with their own `providerData` state need an explicit signal.
 #[command]
-pub fn upsert_provider_account(
-    app: AppHandle,
-    account: ProviderAccount,
-) -> Result<(), String> {
+pub fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
     let account_id = account.id.clone();
     let codex_harnesses = {
         let mut prefs = preferences::load()?;
@@ -278,7 +275,9 @@ pub fn get_pairing_verifications(
     env_type: Option<crate::models::EnvType>,
 ) -> Result<Vec<PairingVerification>, String> {
     let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
-    Ok(crate::services::provider_verification::current_statuses(env_type))
+    Ok(crate::services::provider_verification::current_statuses(
+        env_type,
+    ))
 }
 
 #[command]
@@ -368,10 +367,9 @@ pub fn attach_proxied_provider(
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
     let should_verify = {
-        let surface =
-            preferences::harness_surface(&harness_id).ok_or_else(|| {
-                format!("harness '{harness_id}' does not speak a proxy-capable surface")
-            })?;
+        let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
+            format!("harness '{harness_id}' does not speak a proxy-capable surface")
+        })?;
         let mut pairing =
             preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
                 ProviderPairing {
@@ -406,16 +404,20 @@ pub fn attach_proxied_provider(
         if let Some(tiers) = model_tiers {
             pairing.model_tiers = tiers;
         }
-        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        if pairing
+            .base_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
             return Err(format!(
                 "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
             ));
         }
         let compatibility = preferences::pairing_compatibility(&pairing);
         if !compatibility.compatible {
-            return Err(compatibility
-                .reason
-                .unwrap_or_else(|| "pairing does not satisfy the harness capability contract".into()));
+            return Err(compatibility.reason.unwrap_or_else(|| {
+                "pairing does not satisfy the harness capability contract".into()
+            }));
         }
         let mut prefs = preferences::load()?;
         if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
@@ -464,7 +466,11 @@ pub fn update_provider_pairing(
         if let Some(tiers) = model_tiers {
             pairing.model_tiers = tiers;
         }
-        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        if pairing
+            .base_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
             return Err("base_url must be non-empty".to_string());
         }
         let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;

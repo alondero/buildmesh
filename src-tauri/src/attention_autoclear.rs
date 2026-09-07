@@ -275,7 +275,10 @@ mod tests {
         assert_eq!(bytes, 160, "tied chunks within window accumulate");
         // Now a gap wider than the reset window: the next chunk starts fresh.
         assert!(!accumulate(&mut bytes, GRACE_MS + 12_000, 12_000, 80));
-        assert_eq!(bytes, 80, "stale gap → accumulator reset to just the new chunk");
+        assert_eq!(
+            bytes, 80,
+            "stale gap → accumulator reset to just the new chunk"
+        );
     }
 
     #[test]
@@ -324,11 +327,29 @@ mod tests {
         // does NOT reset. Useful so a slow continuous producer (with gaps
         // hovering at the boundary) still accumulates.
         let mut bytes = 0;
-        assert!(!accumulate(&mut bytes, GRACE_MS + BURST_GAP_RESET_MS, BURST_GAP_RESET_MS, 100));
-        assert!(!accumulate(&mut bytes, GRACE_MS + 2 * BURST_GAP_RESET_MS, BURST_GAP_RESET_MS, 100));
-        assert_eq!(bytes, 200, "boundary gap == reset window keeps accumulating");
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + BURST_GAP_RESET_MS,
+            BURST_GAP_RESET_MS,
+            100
+        ));
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + 2 * BURST_GAP_RESET_MS,
+            BURST_GAP_RESET_MS,
+            100
+        ));
+        assert_eq!(
+            bytes, 200,
+            "boundary gap == reset window keeps accumulating"
+        );
         // A gap strictly larger: resets.
-        assert!(!accumulate(&mut bytes, GRACE_MS + 2 * BURST_GAP_RESET_MS + 1, BURST_GAP_RESET_MS + 1, 100));
+        assert!(!accumulate(
+            &mut bytes,
+            GRACE_MS + 2 * BURST_GAP_RESET_MS + 1,
+            BURST_GAP_RESET_MS + 1,
+            100
+        ));
         assert_eq!(bytes, 100, "gap strictly > reset window starts fresh");
     }
 }

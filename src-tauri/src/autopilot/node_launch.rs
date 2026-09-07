@@ -176,8 +176,7 @@ pub(crate) fn launch_autopilot_node(
     // (with `issue_number = 0`).
     match plan.run {
         AutopilotRunIdentity::Issue { issue_number } => {
-            db::create_autopilot_run(node.id, mesh_id, issue_number)
-                .map_err(|e| e.to_string())?;
+            db::create_autopilot_run(node.id, mesh_id, issue_number).map_err(|e| e.to_string())?;
         }
         AutopilotRunIdentity::Loop { iteration } => {
             db::create_autopilot_loop_run(node.id, mesh_id, iteration)
@@ -189,10 +188,7 @@ pub(crate) fn launch_autopilot_node(
     // launch re-registers cleanly.
     crate::autopilot::evaluator::register(node.id);
 
-    let _ = app.emit(
-        "node-created",
-        NodeCreatedPayload { id: node.id },
-    );
+    let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
     match plan.run {
         AutopilotRunIdentity::Issue { issue_number } => {
             tracing::info!(
@@ -235,11 +231,7 @@ pub(crate) fn launch_autopilot_node(
         )
         .await
         {
-            tracing::error!(
-                "autopilot: node {} failed: {}",
-                node_id_for_spawn,
-                error
-            );
+            tracing::error!("autopilot: node {} failed: {}", node_id_for_spawn, error);
             return;
         }
         if prompt_delivery == crate::autopilot::launch::InitialPromptDelivery::InjectAfterSpawn {

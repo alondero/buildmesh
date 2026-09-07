@@ -133,7 +133,11 @@ fn native_codex_home_from(
 }
 
 fn native_codex_home() -> Result<std::path::PathBuf, String> {
-    let user_home_key = if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" };
+    let user_home_key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
     native_codex_home_from(
         std::env::var_os("CODEX_HOME"),
         std::env::var_os(user_home_key),
@@ -150,7 +154,11 @@ fn is_owned_legacy_profile(path: &Path, content: &str) -> bool {
     let Some(hash) = profile_name.strip_prefix("bm") else {
         return false;
     };
-    if hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+    if hash.len() != 16
+        || !hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
         return false;
     }
 
@@ -182,7 +190,10 @@ fn cleanup_owned_legacy_profiles(home: &Path) {
         };
         if is_owned_legacy_profile(&path, &content) {
             if let Err(error) = std::fs::remove_file(&path) {
-                tracing::warn!("failed to remove owned legacy Codex profile {:?}: {error}", path);
+                tracing::warn!(
+                    "failed to remove owned legacy Codex profile {:?}: {error}",
+                    path
+                );
             }
         }
     }
@@ -214,8 +225,13 @@ fn materialize_native_profile_at(
             .set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("failed to restrict Codex profile permissions: {e}"))?;
     }
-    temp.persist(&target)
-        .map_err(|e| format!("failed to atomically replace {}: {}", target.display(), e.error))?;
+    temp.persist(&target).map_err(|e| {
+        format!(
+            "failed to atomically replace {}: {}",
+            target.display(),
+            e.error
+        )
+    })?;
     cleanup_owned_legacy_profiles(home);
     Ok(())
 }
@@ -286,7 +302,9 @@ fn materialize_wsl_profile(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("WSL Codex profile materialization exited with {status}"))
+        Err(format!(
+            "WSL Codex profile materialization exited with {status}"
+        ))
     }
 }
 
@@ -350,10 +368,7 @@ fn wsl_read_files(distro: &str, paths: &[&Path]) -> Result<Vec<String>, String> 
         .output()
         .map_err(|e| format!("failed to read WSL Codex files: {e}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "WSL Codex file read exited with {}",
-            output.status
-        ));
+        return Err(format!("WSL Codex file read exited with {}", output.status));
     }
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| format!("WSL Codex file read was not UTF-8: {e}"))?;
@@ -400,12 +415,8 @@ fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> 
         payload.push('\n');
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut command = wsl_command_with_values(
-        distro,
-        WSL_ATOMIC_WRITE_FILES_SCRIPT,
-        &[],
-        &arg_refs,
-    );
+    let mut command =
+        wsl_command_with_values(distro, WSL_ATOMIC_WRITE_FILES_SCRIPT, &[], &arg_refs);
     command.stdin(std::process::Stdio::piped());
     let mut child = command
         .spawn()
@@ -424,9 +435,7 @@ fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> 
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "WSL Codex file write exited with {status}"
-        ))
+        Err(format!("WSL Codex file write exited with {status}"))
     }
 }
 
@@ -438,7 +447,10 @@ fn read_runtime_files(paths: &[&Path], distro: Option<&str>) -> Result<Vec<Strin
             .map(|path| match std::fs::read_to_string(path) {
                 Ok(content) => Ok(content),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-                Err(error) => Err(format!("failed to read Codex file {}: {error}", path.display())),
+                Err(error) => Err(format!(
+                    "failed to read Codex file {}: {error}",
+                    path.display()
+                )),
             })
             .collect(),
     }
@@ -488,14 +500,7 @@ fn runtime_codex_home(
     }
 
     let mut command = crate::process_util::command_no_window("wsl.exe");
-    command.args([
-        "-d",
-        &distro,
-        "--exec",
-        "sh",
-        "-c",
-        WSL_CODEX_HOME_SCRIPT,
-    ]);
+    command.args(["-d", &distro, "--exec", "sh", "-c", WSL_CODEX_HOME_SCRIPT]);
     if std::env::var_os("CODEX_HOME").is_some() {
         let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
         crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
@@ -565,7 +570,12 @@ fn ensure_codex_project_trusted(
     let (config_path, distro) = codex_trust_config_path(resolved.env_type, runtime)?;
     let project_path = trust_project_path(resolved);
     let existing = read_runtime_files(&[&config_path], distro.as_deref())
-        .map_err(|error| format!("failed to read Codex trust config {}: {error}", config_path.display()))?
+        .map_err(|error| {
+            format!(
+                "failed to read Codex trust config {}: {error}",
+                config_path.display()
+            )
+        })?
         .into_iter()
         .next()
         .expect("one Codex trust file was requested");
@@ -573,8 +583,12 @@ fn ensure_codex_project_trusted(
     if updated == existing {
         return Ok(());
     }
-    write_runtime_files(&[(&config_path, &updated)], distro.as_deref())
-        .map_err(|e| format!("failed to write Codex trust config {}: {e}", config_path.display()))
+    write_runtime_files(&[(&config_path, &updated)], distro.as_deref()).map_err(|e| {
+        format!(
+            "failed to write Codex trust config {}: {e}",
+            config_path.display()
+        )
+    })
 }
 
 /// Parse and edit Codex's TOML document with `toml_edit`. This keeps comments,
@@ -769,7 +783,9 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
         let out = crate::process_util::command_no_window("wsl.exe")
             .args([
                 "-d",
-                wsl_distro.as_deref().expect("WSL distribution was resolved"),
+                wsl_distro
+                    .as_deref()
+                    .expect("WSL distribution was resolved"),
                 "--exec",
                 "sh",
                 "-c",
@@ -801,7 +817,12 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
                 .unwrap_or_default()
                 .to_string()
         } else {
-            candidates.lines().next().unwrap_or_default().trim().to_string()
+            candidates
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         }
     };
     if executable.is_empty() {
@@ -809,14 +830,7 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
     }
     let codex_home = if let Some(distro) = wsl_distro.as_deref() {
         let mut command = crate::process_util::command_no_window("wsl.exe");
-        command.args([
-            "-d",
-            distro,
-            "--exec",
-            "sh",
-            "-c",
-            WSL_CODEX_HOME_SCRIPT,
-        ]);
+        command.args(["-d", distro, "--exec", "sh", "-c", WSL_CODEX_HOME_SCRIPT]);
         if std::env::var_os("CODEX_HOME").is_some() {
             let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
             crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
@@ -838,10 +852,7 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
     } else {
         runtime_identity(env_type).to_string()
     };
-    let capability_key = format!(
-        "{}\0{}\0{}",
-        runtime, executable, version
-    );
+    let capability_key = format!("{}\0{}\0{}", runtime, executable, version);
     let capabilities_are_cached = CLI_CAPABILITY_CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -949,9 +960,7 @@ fn ensure_hooks_json_content(
 
     let mut changed = false;
     for event in ["SessionStart", "Stop", "PermissionRequest"] {
-        let groups = events
-            .entry(event)
-            .or_insert_with(|| serde_json::json!([]));
+        let groups = events.entry(event).or_insert_with(|| serde_json::json!([]));
         let Some(groups) = groups.as_array_mut() else {
             return Err(format!("hooks.json event '{event}' must be an array"));
         };
@@ -1001,9 +1010,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content.as_bytes())?;
     temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map(|_| ())
-        .map_err(|error| error.error)
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 fn ensure_codex_project_files(
@@ -1039,7 +1046,8 @@ fn ensure_codex_project_files(
     let config_existing = &existing[0];
     let config_updated = ensure_hooks_feature_content(config_existing)?;
     let hooks_existing = &existing[1];
-    let hooks_updated = ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
+    let hooks_updated =
+        ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
     if config_updated != *config_existing {
@@ -1073,11 +1081,7 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
-    fn spawn_recipe_for_resume(
-        &self,
-        platform: Platform,
-        session_id: &str,
-    ) -> Option<SpawnRecipe> {
+    fn spawn_recipe_for_resume(&self, platform: Platform, session_id: &str) -> Option<SpawnRecipe> {
         // `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. Options after the
         // UUID are the prompt, so a restart would "resume" into a garbage turn.
         // Keep the id in trailing_args; default_prepare and Codex proxy
@@ -1197,7 +1201,10 @@ impl AgentProvider for CodexAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::codex_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -1213,10 +1220,7 @@ impl AgentProvider for CodexAdapter {
         // Codex has no dedicated --effort flag, but exposes the same setting
         // as a stable per-invocation config override. Rust's debug string
         // representation supplies the quoted/escaped TOML string value.
-        vec![
-            "-c".into(),
-            format!("model_reasoning_effort={effort:?}"),
-        ]
+        vec!["-c".into(), format!("model_reasoning_effort={effort:?}")]
     }
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
@@ -1259,11 +1263,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit, std::path::PathBuf::from("/custom/codex"));
-        let default = native_codex_home_from(
-            None,
-            Some(std::ffi::OsString::from("/home/user")),
-        )
-        .unwrap();
+        let default =
+            native_codex_home_from(None, Some(std::ffi::OsString::from("/home/user"))).unwrap();
         assert_eq!(default, std::path::PathBuf::from("/home/user/.codex"));
         assert!(native_codex_home_from(None, None).is_err());
     }
@@ -1275,18 +1276,10 @@ mod tests {
         crate::agent::spawn_environment::append_to_wslenv(&mut empty, "CODEX_HOME", "/u");
         assert_eq!(empty, "CODEX_HOME/u");
         let mut existing = "SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut existing,
-            "CODEX_HOME",
-            "/u",
-        );
+        crate::agent::spawn_environment::append_to_wslenv(&mut existing, "CODEX_HOME", "/u");
         assert_eq!(existing, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
         let mut already_present = "CODEX_HOME/u:SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut already_present,
-            "CODEX_HOME",
-            "/u",
-        );
+        crate::agent::spawn_environment::append_to_wslenv(&mut already_present, "CODEX_HOME", "/u");
         assert_eq!(already_present, "CODEX_HOME/u:SSH_AUTH_SOCK/up");
         assert_ne!(
             wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
@@ -1309,11 +1302,16 @@ mod tests {
             .output()
             .unwrap();
         assert!(default_home.status.success());
-        let default_home = String::from_utf8_lossy(&default_home.stdout).trim().to_string();
+        let default_home = String::from_utf8_lossy(&default_home.stdout)
+            .trim()
+            .to_string();
         assert!(!default_home.is_empty());
         let explicit_home = format!("/tmp/buildmesh-codex-profile-test-{}", std::process::id());
 
-        for (index, home) in [default_home, explicit_home.clone()].into_iter().enumerate() {
+        for (index, home) in [default_home, explicit_home.clone()]
+            .into_iter()
+            .enumerate()
+        {
             let profile = format!("buildmesh_wsl_contract_{}_{}", std::process::id(), index);
             let install = CodexInstall {
                 executable: "/usr/bin/codex".into(),
@@ -1322,7 +1320,8 @@ mod tests {
                 codex_home: home.clone(),
                 wsl_distro: Some(distro.clone()),
             };
-            let expected = render_proxy_profile(&profile, "WSL contract", "https://example.invalid/v1");
+            let expected =
+                render_proxy_profile(&profile, "WSL contract", "https://example.invalid/v1");
             materialize_proxy_profile(
                 EnvType::Wsl,
                 &install,
@@ -1333,8 +1332,15 @@ mod tests {
             .unwrap();
             let output = crate::process_util::command_no_window("wsl.exe")
                 .args([
-                    "-d", &distro, "--exec", "sh", "-c", "cat \"$1/$2.config.toml\"",
-                    "buildmesh-test", &home, &profile,
+                    "-d",
+                    &distro,
+                    "--exec",
+                    "sh",
+                    "-c",
+                    "cat \"$1/$2.config.toml\"",
+                    "buildmesh-test",
+                    &home,
+                    &profile,
                 ])
                 .output()
                 .unwrap();
@@ -1342,8 +1348,15 @@ mod tests {
             assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
             let _ = crate::process_util::command_no_window("wsl.exe")
                 .args([
-                    "-d", &distro, "--exec", "sh", "-c",
-                    "rm -f \"$1/$2.config.toml\"", "buildmesh-test", &home, &profile,
+                    "-d",
+                    &distro,
+                    "--exec",
+                    "sh",
+                    "-c",
+                    "rm -f \"$1/$2.config.toml\"",
+                    "buildmesh-test",
+                    &home,
+                    &profile,
                 ])
                 .status();
         }
@@ -1410,17 +1423,30 @@ mod tests {
                     let read = stream.read(&mut chunk).unwrap();
                     request.extend_from_slice(&chunk[..read]);
                     let text = String::from_utf8_lossy(&request);
-                    let Some(header_end) = text.find("\r\n\r\n") else { continue };
+                    let Some(header_end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
                     let length = text[..header_end]
                         .lines()
-                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_string))
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_string)
+                        })
                         .and_then(|value| value.trim().parse::<usize>().ok())
                         .unwrap_or(0);
-                    if request.len() >= header_end + 4 + length { break; }
+                    if request.len() >= header_end + 4 + length {
+                        break;
+                    }
                 }
                 let request = String::from_utf8(request).unwrap();
-                assert!(request.starts_with("POST /v1/responses HTTP/1.1"), "{request}");
-                assert!(request.to_ascii_lowercase().contains("authorization: bearer pinned-secret"));
+                assert!(
+                    request.starts_with("POST /v1/responses HTTP/1.1"),
+                    "{request}"
+                );
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer pinned-secret"));
                 assert!(request.contains("\"model\":\"MiniMax-M3\""));
                 let response_id = format!("resp_{}", index + 1);
                 let message_id = format!("msg_{}", index + 1);
@@ -1497,15 +1523,35 @@ mod tests {
                 .unwrap()
         };
         let fresh = run(&[
-            "--profile", profile, "--model", "MiniMax-M3", "exec",
-            "--skip-git-repo-check", "reply with verified",
+            "--profile",
+            profile,
+            "--model",
+            "MiniMax-M3",
+            "exec",
+            "--skip-git-repo-check",
+            "reply with verified",
         ]);
-        assert!(fresh.status.success(), "{}", String::from_utf8_lossy(&fresh.stderr));
+        assert!(
+            fresh.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fresh.stderr)
+        );
         let resume = run(&[
-            "--profile", profile, "--model", "MiniMax-M3", "exec", "resume",
-            "--last", "--skip-git-repo-check", "reply with verified again",
+            "--profile",
+            profile,
+            "--model",
+            "MiniMax-M3",
+            "exec",
+            "resume",
+            "--last",
+            "--skip-git-repo-check",
+            "reply with verified again",
         ]);
-        assert!(resume.status.success(), "{}", String::from_utf8_lossy(&resume.stderr));
+        assert!(
+            resume.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resume.stderr)
+        );
         server.join().unwrap();
     }
 
@@ -1521,7 +1567,10 @@ mod tests {
 
         materialize_native_profile_at(home.path(), profile, &expected).unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), expected);
-        assert_eq!(std::fs::read_to_string(user_config).unwrap(), "model = \"user-choice\"\n");
+        assert_eq!(
+            std::fs::read_to_string(user_config).unwrap(),
+            "model = \"user-choice\"\n"
+        );
     }
 
     #[test]
@@ -1595,22 +1644,38 @@ mod tests {
     fn spawn_recipes_carry_the_hook_trust_bypass() {
         let bypass = "--dangerously-bypass-hook-trust".to_string();
         let fresh = CODEX.spawn_recipe(Platform::Windows, EnvType::Windows);
-        assert!(fresh.base_args.contains(&bypass), "fresh: {:?}", fresh.base_args);
+        assert!(
+            fresh.base_args.contains(&bypass),
+            "fresh: {:?}",
+            fresh.base_args
+        );
         let resume = CODEX
             .spawn_recipe_for_resume(Platform::Windows, "sid-123")
             .expect("codex has a resume recipe");
-        assert!(resume.base_args.contains(&bypass), "resume: {:?}", resume.base_args);
+        assert!(
+            resume.base_args.contains(&bypass),
+            "resume: {:?}",
+            resume.base_args
+        );
     }
 
     #[test]
     fn spawn_recipes_preserve_buildmesh_terminal_scrollback() {
         let inline = "--no-alt-screen".to_string();
         let fresh = CODEX.spawn_recipe(Platform::Linux, EnvType::Wsl);
-        assert!(fresh.base_args.contains(&inline), "fresh: {:?}", fresh.base_args);
+        assert!(
+            fresh.base_args.contains(&inline),
+            "fresh: {:?}",
+            fresh.base_args
+        );
         let resume = CODEX
             .spawn_recipe_for_resume(Platform::Linux, "sid-123")
             .expect("codex has a resume recipe");
-        assert!(resume.base_args.contains(&inline), "resume: {:?}", resume.base_args);
+        assert!(
+            resume.base_args.contains(&inline),
+            "resume: {:?}",
+            resume.base_args
+        );
     }
 
     #[test]
@@ -1716,7 +1781,10 @@ mod tests {
         provision_codex(temp.path());
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
-        assert!(config.contains("model = \"gpt-5.2-codex\""), "config: {config}");
+        assert!(
+            config.contains("model = \"gpt-5.2-codex\""),
+            "config: {config}"
+        );
         assert!(config.contains("web_search = true"), "config: {config}");
         assert!(config.contains("hooks = true"), "config: {config}");
         assert_eq!(
@@ -1739,7 +1807,10 @@ mod tests {
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(config.contains("model = \"gpt-5.2-codex\""));
-        assert!(config.contains("[features]\nhooks = true"), "config: {config}");
+        assert!(
+            config.contains("[features]\nhooks = true"),
+            "config: {config}"
+        );
     }
 
     /// Injection only owns the `hooks` key of hooks.json — unrelated keys the
@@ -1780,19 +1851,32 @@ mod tests {
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["description"], "user config");
         assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(hooks["hooks"]["PermissionRequest"].as_array().unwrap().len(), 2);
-        assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "user-stop");
+        assert_eq!(
+            hooks["hooks"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "user-stop"
+        );
         assert_eq!(
             hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             "user-permission"
         );
-        assert!(hooks["hooks"]["Stop"].as_array().unwrap().iter().any(|group| {
-            group["hooks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(is_buildmesh_hook_handler)
-        }));
+        assert!(hooks["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| {
+                group["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(is_buildmesh_hook_handler)
+            }));
     }
 
     #[test]
@@ -1814,7 +1898,8 @@ mod tests {
 
     #[test]
     fn config_feature_merge_replaces_false_without_duplicate_keys() {
-        let existing = "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
+        let existing =
+            "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
         let updated = ensure_hooks_feature_content(existing).unwrap();
         assert_eq!(updated.matches("hooks =").count(), 1);
         assert!(updated.contains("hooks = true"));
@@ -1872,7 +1957,11 @@ trust_level = "untrusted" # preserve this explanation
         let updated = ensure_project_trust_content(existing, project, EnvType::Windows).unwrap();
         let document = updated.parse::<DocumentMut>().unwrap();
         let projects = document["projects"].as_table_like().unwrap();
-        assert_eq!(projects.iter().count(), 1, "must not create a duplicate table");
+        assert_eq!(
+            projects.iter().count(),
+            1,
+            "must not create a duplicate table"
+        );
         let (_, project_table) = projects.iter().next().unwrap();
         assert_eq!(
             project_table["trust_level"].as_str(),
@@ -2039,5 +2128,4 @@ web_search = true
             resume.trailing_args
         );
     }
-
 }

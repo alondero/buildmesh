@@ -1,9 +1,9 @@
 //! Agent Node management commands
 
 use crate::db;
+use crate::git::worktree::WorktreeCloseSafety;
 use crate::models::AgentNode;
 use crate::services;
-use crate::git::worktree::WorktreeCloseSafety;
 use serde::Serialize;
 use tauri::{command, Emitter};
 use ts_rs::TS;
@@ -203,13 +203,9 @@ pub async fn rename_agent_node(
 /// error string rather than silently no-op'ing — matches the
 /// `set_agent_node_provider` and `update_mesh_layout` zero-rows contract.
 #[command]
-pub async fn set_node_pinned(
-    node_id: i64,
-    pinned: bool,
-) -> Result<AgentNode, String> {
+pub async fn set_node_pinned(node_id: i64, pinned: bool) -> Result<AgentNode, String> {
     crate::commands::run_blocking("set_node_pinned", move || {
-        let updated = db::set_agent_node_pinned(node_id, pinned)
-            .map_err(|e| e.to_string())?;
+        let updated = db::set_agent_node_pinned(node_id, pinned).map_err(|e| e.to_string())?;
         if updated == 0 {
             return Err(format!("set_node_pinned: node {node_id} not found"));
         }
@@ -284,11 +280,11 @@ pub async fn regenerate_agent_node(
     // the inner `AgentNodeError` to a `String` so `run_blocking`'s
     // `Result<T, String>` signature matches; `T` is inferred as the
     // helper's return tuple, so `.await?` unwraps once.
-    let (old_provider, skip_kill) = crate::commands::run_blocking(
-        "regenerate_agent_node_load",
-        move || regenerate_load_blocking(node_id).map_err(|e| e.to_string()),
-    )
-    .await?;
+    let (old_provider, skip_kill) =
+        crate::commands::run_blocking("regenerate_agent_node_load", move || {
+            regenerate_load_blocking(node_id).map_err(|e| e.to_string())
+        })
+        .await?;
 
     // 3. Kill the live process ONLY when one is registered. See
     // `services::agent_node::regenerate` (the removed orchestrator)
@@ -304,13 +300,10 @@ pub async fn regenerate_agent_node(
     // and preflight (spawn.rs:1399), so the write must land BEFORE
     // `spawn_with_intent`.
     let new_provider_for_apply = new_provider_id;
-    let resume = crate::commands::run_blocking(
-        "regenerate_agent_node_apply",
-        move || {
-            regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
-                .map_err(|e| e.to_string())
-        },
-    )
+    let resume = crate::commands::run_blocking("regenerate_agent_node_apply", move || {
+        regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
+            .map_err(|e| e.to_string())
+    })
     .await?;
 
     let intent = if resume {
@@ -331,10 +324,9 @@ pub async fn regenerate_agent_node(
     // 7. Final reload off-thread — returns the post-spawn row state
     // (the spawn pipeline may have updated `cli_session_id` /
     // `status_changed_at`).
-    crate::commands::run_blocking(
-        "regenerate_agent_node_reload",
-        move || regenerate_reload_blocking(node_id).map_err(|e| e.to_string()),
-    )
+    crate::commands::run_blocking("regenerate_agent_node_reload", move || {
+        regenerate_reload_blocking(node_id).map_err(|e| e.to_string())
+    })
     .await
 }
 
@@ -344,7 +336,10 @@ mod tests {
 
     #[test]
     fn validate_accepts_trimmed_name() {
-        assert_eq!(validate_rename_name("Fix OAuth callback").unwrap(), "Fix OAuth callback");
+        assert_eq!(
+            validate_rename_name("Fix OAuth callback").unwrap(),
+            "Fix OAuth callback"
+        );
     }
 
     #[test]

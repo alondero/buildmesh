@@ -464,7 +464,11 @@ pub(crate) fn do_fetch_only(
         // All-refs fetch: honour the remote's own refspec config when it
         // has one (it may deliberately narrow or remap); supply the
         // standard glob only when the config is missing entirely.
-        None if remote_handle.fetch_refspecs().map(|r| r.is_empty()).unwrap_or(true) => {
+        None if remote_handle
+            .fetch_refspecs()
+            .map(|r| r.is_empty())
+            .unwrap_or(true) =>
+        {
             format!("+refs/heads/*:refs/remotes/{}/*", remote)
         }
         None => String::new(),
@@ -479,7 +483,11 @@ pub(crate) fn do_fetch_only(
     tracing::info!(
         "do_fetch_only: running git fetch {} {} in {}",
         remote,
-        if refspec.is_empty() { "(configured refspecs)" } else { &refspec },
+        if refspec.is_empty() {
+            "(configured refspecs)"
+        } else {
+            &refspec
+        },
         host_path
     );
     let mut fetch_builder = git_command();
@@ -488,11 +496,7 @@ pub(crate) fn do_fetch_only(
         fetch_builder.arg(&refspec);
     }
     fetch_builder.current_dir(host_path);
-    let fetch_output = match run_command_with_timeout(
-        fetch_builder,
-        "git fetch",
-        timeout,
-    ) {
+    let fetch_output = match run_command_with_timeout(fetch_builder, "git fetch", timeout) {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("do_fetch_only: {}", e);
@@ -505,7 +509,11 @@ pub(crate) fn do_fetch_only(
         tracing::warn!(
             "do_fetch_only: git fetch {} {} failed: {}",
             remote,
-            if refspec.is_empty() { "(configured refspecs)" } else { &refspec },
+            if refspec.is_empty() {
+                "(configured refspecs)"
+            } else {
+                &refspec
+            },
             trimmed
         );
         return Err(SyncOutcome::FetchFailed {
@@ -608,9 +616,7 @@ fn parse_remote_for_base_ref(base_ref: &str) -> Option<String> {
 }
 
 fn is_valid_remote_segment(s: &str) -> bool {
-    !s.is_empty()
-        && !s.eq_ignore_ascii_case("HEAD")
-        && !s.eq_ignore_ascii_case("FETCH_HEAD")
+    !s.is_empty() && !s.eq_ignore_ascii_case("HEAD") && !s.eq_ignore_ascii_case("FETCH_HEAD")
 }
 
 /// Derive the *branch* portion of a configured `base_ref`, so the fetch can
@@ -798,16 +804,26 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
         SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },
-        SyncOutcome::FetchedButDiverged { new_commits, reason } => {
-            FetchOutcome::FetchedButDiverged { new_commits, reason }
-        }
-        SyncOutcome::PullTimedOut { new_commits, reason } => {
+        SyncOutcome::FetchedButDiverged {
+            new_commits,
+            reason,
+        } => FetchOutcome::FetchedButDiverged {
+            new_commits,
+            reason,
+        },
+        SyncOutcome::PullTimedOut {
+            new_commits,
+            reason,
+        } => {
             // Treat the spawn-time pull timeout as a soft divergence:
             // commits ARE on the remote-tracking ref but the working tree
             // didn't fast-forward. The spawn proceeds from local HEAD
             // (same as a real divergence) and the caller surfaces a
             // warning toast.
-            FetchOutcome::FetchedButDiverged { new_commits, reason }
+            FetchOutcome::FetchedButDiverged {
+                new_commits,
+                reason,
+            }
         }
         SyncOutcome::FetchFailed { reason } => return Err(FetchError::FetchFailed(reason)),
         SyncOutcome::RepoUnusable { reason } => return Err(FetchError::RepoUnusable(reason)),
@@ -930,7 +946,10 @@ pub async fn locked_fetch_origin(
             // wait's outcome (ADR 0020): a spawn that won the lock and ran
             // the fetch must record both attempt + (when reached) success,
             // matching the policy `stamp_fetch_freshness` enforces.
-            stamp_fetch_freshness(&mesh_path, &inner.as_ref().map(|o| o.fetched_ok()).unwrap_or(false));
+            stamp_fetch_freshness(
+                &mesh_path,
+                &inner.as_ref().map(|o| o.fetched_ok()).unwrap_or(false),
+            );
         })
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -980,7 +999,10 @@ pub fn locked_fetch_origin_blocking(
     let result = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
         fetch_origin(mesh_path, base_ref)
     });
-    stamp_fetch_freshness(mesh_path, &result.as_ref().map(|o| o.fetched_ok()).unwrap_or(false));
+    stamp_fetch_freshness(
+        mesh_path,
+        &result.as_ref().map(|o| o.fetched_ok()).unwrap_or(false),
+    );
     result
 }
 
@@ -1049,10 +1071,7 @@ mod tests {
         // `refs/heads/<branch>` never names a remote in the string;
         // the caller must look up `branch.<name>.remote`.
         assert_eq!(parse_remote_for_base_ref("refs/heads/main"), None);
-        assert_eq!(
-            parse_remote_for_base_ref("refs/heads/feature/auth"),
-            None
-        );
+        assert_eq!(parse_remote_for_base_ref("refs/heads/feature/auth"), None);
     }
 
     #[test]

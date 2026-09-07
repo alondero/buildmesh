@@ -149,8 +149,8 @@ pub fn create_with_source_pr_fork(
         mesh.worktree_directory.as_deref(),
         app_dir.as_deref(),
     );
-    let worktree_path_owned: Option<String> = worktree_db_name
-        .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
+    let worktree_path_owned: Option<String> =
+        worktree_db_name.map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
     let resolved = env::resolve_agent_path_in_dir(path, &effective_dir, worktree_db_name);
     let env_type = resolved.env_type;
     // Store the harness/profile id verbatim (issue #535) — no premature parse
@@ -483,14 +483,16 @@ fn process_removals(
                     if let Err(e) = dequeue(&removal.worktree_path) {
                         tracing::error!(
                             "removed worktree {} but failed to dequeue it: {}",
-                            removal.worktree_path, e
+                            removal.worktree_path,
+                            e
                         );
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
                         "worktree removal for {} failed, will retry: {}",
-                        removal.node_name, e
+                        removal.node_name,
+                        e
                     );
                     failures.push((removal, e));
                 }
@@ -633,9 +635,7 @@ pub fn decide_resume(
 /// crossed a thread-pool boundary. Round-2 review caught it. The
 /// orchestrator is now inline in the command, where each helper
 /// call IS wrapped in `run_blocking`.
-pub fn regenerate_load_blocking(
-    node_id: i64,
-) -> Result<(String, bool), AgentNodeError> {
+pub fn regenerate_load_blocking(node_id: i64) -> Result<(String, bool), AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
     validate_status_eligible(node.status).map_err(AgentNodeError::Status)?;
     Ok((
@@ -778,13 +778,20 @@ mod tests {
             |_path| Ok(false),
         );
 
-        assert!(!good.exists(), "the real worktree directory must be removed");
+        assert!(
+            !good.exists(),
+            "the real worktree directory must be removed"
+        );
         assert_eq!(
             dequeued.into_inner(),
             vec![good.to_string_lossy().to_string()],
             "only the successful removal is dequeued"
         );
-        assert_eq!(failures.len(), 1, "the failed removal is returned for warning");
+        assert_eq!(
+            failures.len(),
+            1,
+            "the failed removal is returned for warning"
+        );
         assert_eq!(failures[0].0.node_name, "wt-bad");
     }
 
@@ -1332,8 +1339,8 @@ mod tests {
 
         db::set_agent_node_provider(node.id, "claude:minimax")
             .expect("set_agent_node_provider should succeed");
-        let reloaded = db::get_agent_node_by_id(node.id)
-            .expect("get_agent_node_by_id should succeed");
+        let reloaded =
+            db::get_agent_node_by_id(node.id).expect("get_agent_node_by_id should succeed");
         assert_eq!(
             reloaded.provider, "claude:minimax",
             "provider column must round-trip through the UPDATE",
@@ -1448,8 +1455,7 @@ mod tests {
             None,
         )
         .expect("seed node");
-        db::update_cli_session_id(node.id, "sess-abc")
-            .expect("set cli_session_id");
+        db::update_cli_session_id(node.id, "sess-abc").expect("set cli_session_id");
 
         let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "claude:minimax")
             .expect("apply should succeed");
@@ -1484,8 +1490,7 @@ mod tests {
             None,
         )
         .expect("seed node");
-        db::update_cli_session_id(node.id, "claude-uuid")
-            .expect("set cli_session_id");
+        db::update_cli_session_id(node.id, "claude-uuid").expect("set cli_session_id");
 
         let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "codex")
             .expect("apply should succeed");

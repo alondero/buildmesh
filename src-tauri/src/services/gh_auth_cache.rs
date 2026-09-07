@@ -123,7 +123,12 @@ impl Default for GhAuthCache {
 
 impl std::fmt::Debug for GhAuthCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.0.slot.lock().map(|g| *g).unwrap_or((Instant::now(), false));
+        let guard = self
+            .0
+            .slot
+            .lock()
+            .map(|g| *g)
+            .unwrap_or((Instant::now(), false));
         f.debug_struct("GhAuthCache")
             .field("cached_at", &guard.0)
             .field("value", &guard.1)

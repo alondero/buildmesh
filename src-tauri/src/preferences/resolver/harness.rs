@@ -32,7 +32,10 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
     let stored = match load() {
         Ok(prefs) => prefs.harness_profiles,
         Err(e) => {
-            tracing::warn!("preferences::harness_profiles load failed, using defaults: {}", e);
+            tracing::warn!(
+                "preferences::harness_profiles load failed, using defaults: {}",
+                e
+            );
             Vec::new()
         }
     };
@@ -54,7 +57,10 @@ pub fn harness_order() -> Vec<String> {
     match load() {
         Ok(prefs) => prefs.harness_order,
         Err(e) => {
-            tracing::warn!("preferences::harness_order load failed, using natural order: {}", e);
+            tracing::warn!(
+                "preferences::harness_order load failed, using natural order: {}",
+                e
+            );
             Vec::new()
         }
     }
@@ -159,8 +165,7 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// migration composite ids (`"claude:minimax"`) resolve to the same
 /// Anthropic executor as the bare form did.
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    let (harness_id, _provider_id) =
-        crate::agent::provider::parse_spawn_option_id(profile_id);
+    let (harness_id, _provider_id) = crate::agent::provider::parse_spawn_option_id(profile_id);
     match harness_profiles().into_iter().find(|p| p.id == harness_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
         None => Provider::from_db_str(harness_id),
@@ -184,7 +189,9 @@ pub fn harness_capabilities_for(profile_id: &str) -> Option<HarnessCapabilities>
     if !is_known_harness_id(profile_id) {
         return None;
     }
-    Some(capabilities_for(resolve_harness_provider(profile_id).adapter()))
+    Some(capabilities_for(
+        resolve_harness_provider(profile_id).adapter(),
+    ))
 }
 
 /// True iff `profile_id` names a known Agent Harness — a built-in adapter id
@@ -206,9 +213,7 @@ pub fn is_known_harness_id(profile_id: &str) -> bool {
     // Built-ins (`BUILTIN_HARNESS_IDS` covers every adapter id plus the
     // legacy `"anthropic"` alias). `contains` short-circuits on the first
     // hit — same semantics as `iter().any()` but cheaper to read.
-    if crate::agent::provider::BUILTIN_HARNESS_IDS
-        .contains(&normalized.as_str())
-    {
+    if crate::agent::provider::BUILTIN_HARNESS_IDS.contains(&normalized.as_str()) {
         return true;
     }
     // User-stored profiles (custom Claude-compatible profiles like

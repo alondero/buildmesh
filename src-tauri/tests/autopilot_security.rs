@@ -35,13 +35,20 @@ fn collaborator_pr_auto_runs() {
     let decision = evaluate(&t, CollaboratorPermission::Write);
     assert_eq!(decision, GateDecision::AutoRun);
     assert!(!decision.requires_approval());
-    assert_eq!(decision.initial_status(), None, "auto-run imposes no status override");
+    assert_eq!(
+        decision.initial_status(),
+        None,
+        "auto-run imposes no status override"
+    );
 }
 
 #[test]
 fn admin_issue_auto_runs() {
     let t = trigger("owner-olive", TriggerKind::Issue);
-    assert_eq!(evaluate(&t, CollaboratorPermission::Admin), GateDecision::AutoRun);
+    assert_eq!(
+        evaluate(&t, CollaboratorPermission::Admin),
+        GateDecision::AutoRun
+    );
 }
 
 #[test]
@@ -70,7 +77,10 @@ fn read_only_collaborator_is_gated() {
 fn unknown_author_is_gated_even_with_push_permission() {
     // Defensive: an empty author login (partial payload) never auto-runs.
     let t = trigger("", TriggerKind::PullRequest);
-    assert_eq!(evaluate(&t, CollaboratorPermission::Admin), GateDecision::RequireApproval);
+    assert_eq!(
+        evaluate(&t, CollaboratorPermission::Admin),
+        GateDecision::RequireApproval
+    );
 }
 
 // --- Secret masking --------------------------------------------------------
@@ -78,13 +88,22 @@ fn unknown_author_is_gated_even_with_push_permission() {
 #[test]
 fn scrubber_masks_representative_secrets() {
     let cases = [
-        ("export DB_PASSWORD=hunter2", "export DB_PASSWORD=[REDACTED]"),
+        (
+            "export DB_PASSWORD=hunter2",
+            "export DB_PASSWORD=[REDACTED]",
+        ),
         (
             r#"{"api_token": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}"#,
             r#"{"api_token": "[REDACTED]"}"#,
         ),
-        ("Authorization: Bearer abc123def456ghi789", "Authorization: Bearer [REDACTED]"),
-        ("aws key AKIAIOSFODNN7EXAMPLE here", "aws key [REDACTED] here"),
+        (
+            "Authorization: Bearer abc123def456ghi789",
+            "Authorization: Bearer [REDACTED]",
+        ),
+        (
+            "aws key AKIAIOSFODNN7EXAMPLE here",
+            "aws key [REDACTED] here",
+        ),
     ];
     for (raw, expected) in cases {
         assert_eq!(SecretScrubber::scrub(raw), expected, "scrubbing: {raw}");
@@ -108,5 +127,8 @@ fn scrubber_masks_private_key_block_whole() {
     );
     let scrubbed = SecretScrubber::scrub(pem);
     assert!(scrubbed.contains("[REDACTED PRIVATE KEY]"));
-    assert!(!scrubbed.contains("b3BlbnNzaC1rZXktdjEA"), "key body must not survive");
+    assert!(
+        !scrubbed.contains("b3BlbnNzaC1rZXktdjEA"),
+        "key body must not survive"
+    );
 }

@@ -67,10 +67,7 @@ pub(crate) mod test_helpers {
 
     /// Init a repo with one initial commit containing the given files.
     /// `path` is expected to exist (callers pass a `TestDir`).
-    pub(crate) fn init_repo_with_commit(
-        path: &Path,
-        files: &[(&str, &str)],
-    ) -> git2::Repository {
+    pub(crate) fn init_repo_with_commit(path: &Path, files: &[(&str, &str)]) -> git2::Repository {
         let repo = git2::Repository::init(path).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
 
@@ -244,10 +241,16 @@ mod tests {
         let resolved = resolve_agent_path(base, None);
 
         // Should NOT contain worktrees subdirectory
-        assert!(!resolved.host_path.contains("worktrees"),
-            "Expected base path without worktree subdir, got: {}", resolved.host_path);
-        assert!(!resolved.spawn_path.contains("worktrees"),
-            "Expected base path without worktree subdir, got: {}", resolved.spawn_path);
+        assert!(
+            !resolved.host_path.contains("worktrees"),
+            "Expected base path without worktree subdir, got: {}",
+            resolved.host_path
+        );
+        assert!(
+            !resolved.spawn_path.contains("worktrees"),
+            "Expected base path without worktree subdir, got: {}",
+            resolved.spawn_path
+        );
     }
 
     /// Test: when worktree_name is Some("foo"), resolve_agent_path returns
@@ -258,10 +261,16 @@ mod tests {
         let resolved = resolve_agent_path(base, Some("foo"));
 
         // Path should contain worktrees subdirectory and the specific worktree name
-        assert!(resolved.host_path.contains("worktrees") && resolved.host_path.contains("foo"),
-            "Expected worktree subdir, got: {}", resolved.host_path);
-        assert!(resolved.spawn_path.contains("worktrees") && resolved.spawn_path.contains("foo"),
-            "Expected worktree subdir, got: {}", resolved.spawn_path);
+        assert!(
+            resolved.host_path.contains("worktrees") && resolved.host_path.contains("foo"),
+            "Expected worktree subdir, got: {}",
+            resolved.host_path
+        );
+        assert!(
+            resolved.spawn_path.contains("worktrees") && resolved.spawn_path.contains("foo"),
+            "Expected worktree subdir, got: {}",
+            resolved.spawn_path
+        );
     }
 
     /// Test: when worktree_name is Some(""), it's treated as no worktree
@@ -270,8 +279,11 @@ mod tests {
         let base = "/home/user/my-repo";
         let resolved = resolve_agent_path(base, Some(""));
 
-        assert!(!resolved.host_path.contains(".claude/worktrees"),
-            "Expected base path without worktree subdir, got: {}", resolved.host_path);
+        assert!(
+            !resolved.host_path.contains(".claude/worktrees"),
+            "Expected base path without worktree subdir, got: {}",
+            resolved.host_path
+        );
     }
 
     /// Test: resolve_agent_path works with Windows paths too
@@ -502,7 +514,10 @@ mod tests {
     fn raw_path_is_effective_path_not_host_or_spawn_form() {
         let n = node(true, Some("gentle-fox"));
         let resolved = node_working_path(&n);
-        assert_eq!(resolved.raw_path, "/home/user/my-repo/.claude/worktrees/gentle-fox");
+        assert_eq!(
+            resolved.raw_path,
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
     }
 
     // ----- wsl_login_shell helper (issue #548) -----
@@ -579,7 +594,10 @@ mod tests {
     fn parse_login_shell_rejects_too_few_fields() {
         assert_eq!(parse_login_shell_from_passwd(""), None);
         assert_eq!(parse_login_shell_from_passwd("user"), None);
-        assert_eq!(parse_login_shell_from_passwd("user:x:1000:1000::/home/user"), None);
+        assert_eq!(
+            parse_login_shell_from_passwd("user:x:1000:1000::/home/user"),
+            None
+        );
     }
 
     /// The cached lookup must be safe to call and must return an `Option<&'static str>`

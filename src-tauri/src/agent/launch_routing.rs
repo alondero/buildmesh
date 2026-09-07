@@ -111,7 +111,8 @@ pub fn prepare(
                 &account,
                 resolved.env_type,
             )?;
-            let profile_name = codex::stable_profile_name(&pairing.harness_id, &pairing.provider_id);
+            let profile_name =
+                codex::stable_profile_name(&pairing.harness_id, &pairing.provider_id);
             codex::materialize_proxy_profile(
                 resolved.env_type,
                 &verified.install,

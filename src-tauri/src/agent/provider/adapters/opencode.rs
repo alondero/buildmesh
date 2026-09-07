@@ -68,7 +68,9 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 
@@ -162,7 +164,10 @@ fn inject_opencode_attention_plugin(project_path: &Path) -> Result<(), String> {
 
     atomic_write(&plugin_path, OPENCODE_ATTENTION_PLUGIN)
         .map_err(|e| format!("failed to write OpenCode attention plugin: {e}"))?;
-    tracing::info!("inject_opencode_attention_plugin: wrote plugin at {:?}", plugin_path);
+    tracing::info!(
+        "inject_opencode_attention_plugin: wrote plugin at {:?}",
+        plugin_path
+    );
     Ok(())
 }
 
@@ -302,7 +307,10 @@ impl AgentProvider for OpenCodeAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::opencode_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -401,7 +409,11 @@ mod tests {
             "available_on should pin to exactly {{Windows, Linux, Macos}} — got {:?}",
             platforms
         );
-        assert!(platforms.contains(&Platform::Macos), "OpenCode must be available on macOS (issue #827); got {:?}", platforms);
+        assert!(
+            platforms.contains(&Platform::Macos),
+            "OpenCode must be available on macOS (issue #827); got {:?}",
+            platforms
+        );
         assert!(platforms.contains(&Platform::Linux));
         assert!(platforms.contains(&Platform::Windows));
     }
@@ -623,7 +635,10 @@ mod tests {
         OPENCODE
             .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
             .expect("third provision");
-        assert!(plugin_path.exists(), "plugin file must be re-created after removal");
+        assert!(
+            plugin_path.exists(),
+            "plugin file must be re-created after removal"
+        );
     }
 
     /// Provision must surface a real filesystem error (a leaf file used
@@ -641,8 +656,7 @@ mod tests {
             raw_path: blocker.to_string_lossy().into_owned(),
             env_type: EnvType::Windows,
         };
-        let result =
-            OPENCODE.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0);
+        let result = OPENCODE.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0);
         assert!(
             result.is_err(),
             "provision must surface a filesystem error when project path is a leaf file; got Ok"
@@ -684,10 +698,7 @@ mod tests {
             .expect("read dir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name())
-            .filter(|name| {
-                name.to_string_lossy()
-                    .ends_with(".tmp")
-            })
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(
             residue.is_empty(),
@@ -727,7 +738,10 @@ mod tests {
         static NODE: OnceLock<Option<String>> = OnceLock::new();
         NODE.get_or_init(|| {
             for candidate in ["node", "node.exe"] {
-                if let Ok(out) = std::process::Command::new(candidate).arg("--version").output() {
+                if let Ok(out) = std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                {
                     if out.status.success() {
                         return Some(candidate.to_string());
                     }
@@ -735,7 +749,7 @@ mod tests {
             }
             None
         })
-            .as_deref()
+        .as_deref()
     }
 
     /// Resume recipe is `opencode --auto --session <id>` — the base
@@ -806,9 +820,11 @@ mod tests {
             ]
         );
         assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--session"
-                || a == "--session-id"
-                || a == "--prefill"),
+            !prepared
+                .recipe
+                .base_args
+                .iter()
+                .any(|a| a == "--session" || a == "--session-id" || a == "--prefill"),
             "fresh spawn must not assign a session id or emit --prefill; got {:?}",
             prepared.recipe.base_args
         );

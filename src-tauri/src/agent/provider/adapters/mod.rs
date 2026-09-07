@@ -20,8 +20,8 @@
 pub mod agy;
 pub mod anthropic;
 pub mod codex;
-pub mod cursor;
 pub mod commandcode;
+pub mod cursor;
 pub mod dsh;
 pub mod freebuff;
 pub mod grok;
@@ -42,5 +42,3 @@ pub use kimi::KIMI;
 pub use mcode::MCODE;
 pub use opencode::OPENCODE;
 pub use terminal::TERMINAL;
-
-

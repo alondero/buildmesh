@@ -20,14 +20,17 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("buildmesh_harness_overrides_{}_{}.db", tag, test_id))
+        std::env::temp_dir().join(format!(
+            "buildmesh_harness_overrides_{}_{}.db",
+            tag, test_id
+        ))
     }
 
     fn create_test_mesh(tag: &str) -> (i64, std::path::PathBuf) {
         let path = fresh_db_path(tag);
         db::init(&path).unwrap();
-        let mesh = db::create_mesh(&format!("Mesh-{}", tag), &format!("/tmp/harness-{}", tag))
-            .unwrap();
+        let mesh =
+            db::create_mesh(&format!("Mesh-{}", tag), &format!("/tmp/harness-{}", tag)).unwrap();
         (mesh.id, path)
     }
 
@@ -120,13 +123,19 @@ mod tests {
         db::upsert_mesh_harness_override(
             mesh_id,
             "claude",
-            HarnessConfigValue { model: Some("opus".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
         )
         .unwrap();
         db::upsert_mesh_harness_override(
             mesh_id,
             "codex",
-            HarnessConfigValue { model: Some("gpt-5".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("gpt-5".into()),
+                effort: None,
+            },
         )
         .unwrap();
 
@@ -145,7 +154,10 @@ mod tests {
     fn remove_one_is_idempotent() {
         let (mesh_id, path) = create_test_mesh("remove_idem");
         let rows = db::remove_mesh_harness_override(mesh_id, "claude").unwrap();
-        assert_eq!(rows, 1, "mesh is touched even on no-op so the row-count catches missing mesh");
+        assert_eq!(
+            rows, 1,
+            "mesh is touched even on no-op so the row-count catches missing mesh"
+        );
         let path_inner = path;
         std::fs::remove_file(&path_inner).ok();
     }
@@ -158,13 +170,19 @@ mod tests {
         db::upsert_mesh_harness_override(
             mesh_id,
             "claude",
-            HarnessConfigValue { model: Some("opus".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
         )
         .unwrap();
         db::upsert_mesh_harness_override(
             mesh_id,
             "codex",
-            HarnessConfigValue { model: Some("gpt-5".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("gpt-5".into()),
+                effort: None,
+            },
         )
         .unwrap();
 
@@ -184,7 +202,10 @@ mod tests {
         let rows = db::upsert_mesh_harness_override(
             99999,
             "claude",
-            HarnessConfigValue { model: Some("opus".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
         )
         .unwrap();
         assert_eq!(rows, 0);
@@ -217,19 +238,27 @@ mod tests {
             [],
         )
         .unwrap();
-        let mesh_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |row| row.get(0)).unwrap();
+        let mesh_id: i64 = conn
+            .query_row("SELECT last_insert_rowid()", [], |row| row.get(0))
+            .unwrap();
         let rows = db::upsert_mesh_harness_override_inner(
             &conn,
             mesh_id,
             "claude",
-            HarnessConfigValue { model: Some("opus".into()), effort: None },
+            HarnessConfigValue {
+                model: Some("opus".into()),
+                effort: None,
+            },
         )
         .unwrap();
         assert_eq!(rows, 1);
         let read = db::get_mesh_harness_overrides_inner(&conn, mesh_id)
             .unwrap()
             .unwrap();
-        assert_eq!(read.get("claude").and_then(|v| v.model.as_deref()), Some("opus"));
+        assert_eq!(
+            read.get("claude").and_then(|v| v.model.as_deref()),
+            Some("opus")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -296,7 +325,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let mesh_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |row| row.get(0)).unwrap();
+        let mesh_id: i64 = conn
+            .query_row("SELECT last_insert_rowid()", [], |row| row.get(0))
+            .unwrap();
         (conn, mesh_id)
     }
 
@@ -323,7 +354,9 @@ mod tests {
             .unwrap();
 
         let raw: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let parsed: HashMap<String, HarnessConfigValue> = serde_json::from_str(&raw).unwrap();
         let claude = parsed.get("claude").expect("claude override created");
@@ -345,7 +378,9 @@ mod tests {
             .unwrap();
 
         let raw: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let parsed: HashMap<String, HarnessConfigValue> = serde_json::from_str(&raw).unwrap();
         assert!(
@@ -359,7 +394,8 @@ mod tests {
     /// override before the migration runs keeps its authored values.
     #[test]
     fn v33_migration_does_not_overwrite_existing_claude_override() {
-        let (conn, _mesh_id) = build_v32_mesh_fixture(Some("legacy-ignored"), Some("high"), "preserve");
+        let (conn, _mesh_id) =
+            build_v32_mesh_fixture(Some("legacy-ignored"), Some("high"), "preserve");
 
         conn.execute_batch(
             "ALTER TABLE meshes ADD COLUMN harness_overrides TEXT NOT NULL DEFAULT '{}';",
@@ -375,7 +411,9 @@ mod tests {
             .unwrap();
 
         let raw: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let parsed: HashMap<String, HarnessConfigValue> = serde_json::from_str(&raw).unwrap();
         let claude = parsed.get("claude").expect("claude override preserved");
@@ -414,11 +452,15 @@ mod tests {
         // Run twice.
         conn.execute(sql, []).unwrap();
         let after_first: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         conn.execute(sql, []).unwrap();
         let after_second: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(after_first, after_second, "repeat-safe migration");
     }
@@ -438,9 +480,14 @@ mod tests {
             .unwrap();
 
         let raw: String = conn
-            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT harness_overrides FROM meshes LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let parsed: HashMap<String, HarnessConfigValue> = serde_json::from_str(&raw).unwrap();
-        assert!(parsed.is_empty(), "whitespace-only legacy does not create an entry");
+        assert!(
+            parsed.is_empty(),
+            "whitespace-only legacy does not create an entry"
+        );
     }
 }

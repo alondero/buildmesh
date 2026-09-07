@@ -27,13 +27,17 @@ fn responses_url(base_url: &str) -> Result<String, String> {
 
 fn classified_http_error(status: reqwest::StatusCode, host: &str) -> String {
     match status.as_u16() {
-        401 | 403 => "authentication failed; update the provider credential and verify again".into(),
+        401 | 403 => {
+            "authentication failed; update the provider credential and verify again".into()
+        }
         400 | 404 | 422 => "endpoint rejected the configured model or Responses request".into(),
         _ => format!("provider endpoint {host} returned HTTP {status}"),
     }
 }
 
-fn read_sse_events(response: reqwest::blocking::Response) -> Result<Vec<serde_json::Value>, String> {
+fn read_sse_events(
+    response: reqwest::blocking::Response,
+) -> Result<Vec<serde_json::Value>, String> {
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -155,7 +159,12 @@ fn verify_responses_agent_loop(
     };
     let sentinel_is_valid = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
-        .and_then(|value| value.get("value").and_then(|value| value.as_str()).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .get("value")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
         .is_some_and(|value| value == "ready");
     if !sentinel_is_valid {
         return Err("Responses tool call did not return the sentinel arguments".into());
@@ -205,7 +214,9 @@ fn verify_responses_agent_loop(
         return Err("Responses stream did not complete after the tool result".into());
     }
     if !produced_completion {
-        return Err("Responses stream did not produce text or reasoning after the tool result".into());
+        return Err(
+            "Responses stream did not produce text or reasoning after the tool result".into(),
+        );
     }
     Ok(())
 }
@@ -442,8 +453,7 @@ fn verified_codex_pairing_with_install(
     let verification = matching_verification(pairing, account, install).ok_or_else(|| {
         format!(
             "pairing '{}' is unverified for {}; use Verify pairing in Settings",
-            account.name,
-            install.runtime_identity
+            account.name, install.runtime_identity
         )
     })?;
     if verification.status != PairingVerificationStatus::Verified {
@@ -490,7 +500,9 @@ pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
         .provider_pairings
         .iter()
         .filter_map(|pairing| {
-            let account = accounts.iter().find(|account| account.id == pairing.provider_id)?;
+            let account = accounts
+                .iter()
+                .find(|account| account.id == pairing.provider_id)?;
             let descriptor = preferences::endpoint_model_descriptor(pairing);
             let decision = preferences::pairing_compatibility(pairing);
             let base = || PairingVerification {
@@ -521,8 +533,9 @@ pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
                 return Some(record);
             }
             match &install {
-                Ok(install) => matching_verification(pairing, account, install)
-                    .or_else(|| Some(base())),
+                Ok(install) => {
+                    matching_verification(pairing, account, install).or_else(|| Some(base()))
+                }
                 Err(reason) => {
                     let mut record = base();
                     record.status = PairingVerificationStatus::Failed;
@@ -640,12 +653,17 @@ mod tests {
                     // replayed as explicit input items (the documented
                     // multi-turn pattern, also valid OpenAI Responses).
                     assert!(
-                        !request.to_ascii_lowercase().contains("previous_response_id"),
+                        !request
+                            .to_ascii_lowercase()
+                            .contains("previous_response_id"),
                         "{request}"
                     );
                     assert!(request.contains("function_call_output"));
                     assert!(request.contains("call_1"));
-                    assert!(request.contains("\"name\":\"buildmesh_verification\""), "{request}");
+                    assert!(
+                        request.contains("\"name\":\"buildmesh_verification\""),
+                        "{request}"
+                    );
                     assert!(request.contains("\"type\":\"function_call\""), "{request}");
                     assert!(request.contains("\"type\":\"message\""), "{request}");
                     respond(
@@ -737,8 +755,14 @@ mod tests {
         let got = matching_verification(&pairing, &account, &new_install).unwrap();
         assert_eq!(got.status, PairingVerificationStatus::Stale);
         let reason = got.reason.unwrap();
-        assert!(reason.contains("Codex"), "reason should name the CLI change: {reason}");
-        assert!(!reason.contains("routing inputs"), "reason must not blame routing: {reason}");
+        assert!(
+            reason.contains("Codex"),
+            "reason should name the CLI change: {reason}"
+        );
+        assert!(
+            !reason.contains("routing inputs"),
+            "reason must not blame routing: {reason}"
+        );
 
         // A changed endpoint/model is the genuine routing-change case and must
         // keep the original message.
@@ -869,8 +893,13 @@ mod tests {
             .err()
             .expect("Chat Completions pairing must fail closed");
         assert!(error.contains("unsupported"), "{error}");
-        assert_eq!(incompatible_status(&pairing), PairingVerificationStatus::Unsupported);
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        assert_eq!(
+            incompatible_status(&pairing),
+            PairingVerificationStatus::Unsupported
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -885,12 +914,13 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(incompatible_status(&pairing), PairingVerificationStatus::Failed);
-        assert!(
-            preferences::pairing_compatibility(&pairing)
-                .reason
-                .unwrap()
-                .contains("MiniMax-M3")
+        assert_eq!(
+            incompatible_status(&pairing),
+            PairingVerificationStatus::Failed
         );
+        assert!(preferences::pairing_compatibility(&pairing)
+            .reason
+            .unwrap()
+            .contains("MiniMax-M3"));
     }
 }

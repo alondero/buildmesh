@@ -149,8 +149,14 @@ mod tests {
     #[test]
     fn generation_path_appends_suffix() {
         let p = Path::new("C:/logs/diagnostics.log");
-        assert_eq!(generation_path(p, 1), PathBuf::from("C:/logs/diagnostics.log.1"));
-        assert_eq!(generation_path(p, 3), PathBuf::from("C:/logs/diagnostics.log.3"));
+        assert_eq!(
+            generation_path(p, 1),
+            PathBuf::from("C:/logs/diagnostics.log.1")
+        );
+        assert_eq!(
+            generation_path(p, 3),
+            PathBuf::from("C:/logs/diagnostics.log.3")
+        );
     }
 
     #[test]
@@ -190,7 +196,10 @@ mod tests {
             w.write_line("DIAG second=1").unwrap();
         }
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("first=1"), "prior session must survive reopen");
+        assert!(
+            contents.contains("first=1"),
+            "prior session must survive reopen"
+        );
         assert!(contents.contains("second=1"));
         cleanup(&path, 1);
     }

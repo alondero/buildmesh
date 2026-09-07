@@ -414,9 +414,7 @@ pub(super) async fn prepare_context(
     let mut node = node;
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         node.worktree_name = Some(entry.preassigned_name.clone());
-        node.worktree_path = Some(
-            crate::env::normalize_unc_to_wsl(&entry.path).into_owned(),
-        );
+        node.worktree_path = Some(crate::env::normalize_unc_to_wsl(&entry.path).into_owned());
     }
 
     // Issue #1519: the node row is now authoritative for every spawn kind —

@@ -19,33 +19,33 @@
 pub(crate) use crate::blocking::run_blocking;
 
 pub mod agent;
-pub mod app;
-pub mod clipboard;
-#[cfg(test)]
-pub mod agent_tests;
 pub mod agent_node;
 pub mod agent_node_discovery;
+#[cfg(test)]
+pub mod agent_tests;
 pub mod ai_context;
 pub mod ai_context_gitignore;
+pub mod app;
 pub mod attention;
 pub mod build_run;
 pub mod circuit;
+pub mod clipboard;
 pub mod coordinator;
 pub mod devices;
 pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;
 pub mod frontend_log;
-pub mod github;
 pub mod git;
 #[cfg(test)]
 pub mod git_tests;
+pub mod github;
 pub mod mesh;
 pub mod mesh_properties;
 pub mod network;
 pub mod opencode_oauth;
-pub mod preferences;
 pub mod pr;
+pub mod preferences;
 pub mod project_detect;
 pub mod prune;
 pub mod remote;

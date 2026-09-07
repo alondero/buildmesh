@@ -355,7 +355,7 @@ pub struct Mesh {
     #[ts(as = "i32")]
     pub id: i64,
     pub name: String,
-    pub path: String, // absolute path to mesh root
+    pub path: String,   // absolute path to mesh root
     pub layout: String, // 'grid' or 'single'
     #[ts(as = "i32")]
     pub position: i64, // sort order in sidebar
@@ -594,7 +594,7 @@ pub struct AgentNode {
     #[ts(as = "i32")]
     pub mesh_id: i64,
     pub name: String,
-    pub path: String,         // absolute path to node directory
+    pub path: String, // absolute path to node directory
     /// Branch the worktree was cut from — **overloaded** based on spawn source.
     ///
     /// For issue-spawned, hand-spawned, and handover-spawned nodes, this holds
@@ -611,7 +611,7 @@ pub struct AgentNode {
     /// `worktree_base_ref` derivation around `if node.source_pr.is_some()`);
     /// new readers should not reimplement the overload decision.
     pub branch: String,
-    pub env: EnvType,         // windows or wsl
+    pub env: EnvType, // windows or wsl
     /// Stored harness/profile id (e.g. "anthropic", "minimax", "terminal", or a
     /// user-defined profile id). Kept as an opaque `String` rather than the
     /// legacy [`Provider`] enum so user-defined harness profiles survive the
@@ -623,8 +623,8 @@ pub struct AgentNode {
     pub provider: String,
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
-    pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
-    pub use_worktree: bool,  // true = commands run in worktree, false = repo root
+    pub worktree_name: Option<String>, // git worktree name (same as name for claude-backed providers)
+    pub use_worktree: bool,            // true = commands run in worktree, false = repo root
     /// Whether the user has pinned this node for the Pinned Grid view
     /// (wayfinder #982). Persisted so a pinned node survives app restarts
     /// and stays in the user's focus set across sessions. Independent of
@@ -635,7 +635,7 @@ pub struct AgentNode {
     /// reads back as unpinned).
     pub is_pinned: bool,
     #[ts(as = "Option<i32>")]
-    pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
+    pub source_issue: Option<i64>, // GitHub issue number that triggered this node
     /// GitHub PR number that triggered this node (issue #420). `None` for
     /// issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
     /// fetches `origin/<head_ref>` and uses it as the worktree's `base_ref`
@@ -678,7 +678,7 @@ pub struct AgentNode {
     /// hook is broken".
     pub signal_health: Option<crate::agent::session_lifecycle::SignalHealth>,
     #[ts(as = "i32")]
-    pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
+    pub position: i64, // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
     /// Exact resolved Worktree Node directory for this node (issue #1519).
     /// `Some(raw_path)` for Worktree Nodes created after the configurable
@@ -707,7 +707,7 @@ pub struct PendingWorktreeRemoval {
 pub struct ChatMessage {
     pub id: i64,
     pub session_id: i64,
-    pub role: String,         // "user" or "assistant"
+    pub role: String, // "user" or "assistant"
     pub content: String,
     pub tool_calls: Option<String>, // JSON array of tool calls if any
     pub created_at: DateTime<Utc>,
@@ -718,7 +718,7 @@ pub struct ChatMessage {
 pub struct SessionScript {
     pub id: i64,
     pub session_id: i64,
-    pub script_type: String,  // "setup" | "run" | "archive"
+    pub script_type: String, // "setup" | "run" | "archive"
     pub content: String,
 }
 
@@ -804,7 +804,7 @@ pub struct DiffHunk {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "DiffLine.ts")]
 pub struct DiffLine {
-    pub line_type: String,   // "context" | "add" | "remove"
+    pub line_type: String, // "context" | "add" | "remove"
     pub content: String,
     #[ts(as = "Option<i32>")]
     pub old_num: Option<usize>,
@@ -980,7 +980,11 @@ pub struct MeshRow {
 impl From<&Mesh> for MeshRow {
     fn from(mesh: &Mesh) -> Self {
         Self {
-            name: if mesh.name.is_empty() { None } else { Some(mesh.name.clone()) },
+            name: if mesh.name.is_empty() {
+                None
+            } else {
+                Some(mesh.name.clone())
+            },
             build_command: mesh.build_command.clone(),
             run_command: mesh.run_command.clone(),
             model: mesh.model.clone(),
@@ -1209,7 +1213,10 @@ mod tests {
         mesh.root_build_command = Some("cargo build --workspace".to_string());
         mesh.root_run_command = Some("cargo run -p app".to_string());
         let cfg = MeshRow::from(&mesh);
-        assert_eq!(cfg.root_build_command.as_deref(), Some("cargo build --workspace"));
+        assert_eq!(
+            cfg.root_build_command.as_deref(),
+            Some("cargo build --workspace")
+        );
         assert_eq!(cfg.root_run_command.as_deref(), Some("cargo run -p app"));
     }
 
@@ -1233,7 +1240,10 @@ mod tests {
         mesh.loop_consecutive_failures = 2;
         let cfg = MeshRow::from(&mesh);
         assert_eq!(cfg.autopilot_mode, AutopilotMode::Looping);
-        assert_eq!(cfg.loop_initial_prompt.as_deref(), Some("iterate the planner"));
+        assert_eq!(
+            cfg.loop_initial_prompt.as_deref(),
+            Some("iterate the planner")
+        );
         assert_eq!(cfg.loop_suffix_prompt.as_deref(), Some("now write tests"));
         assert_eq!(cfg.loop_max_iterations, Some(7));
         assert_eq!(cfg.loop_interval_seconds, 60);
@@ -1271,7 +1281,10 @@ mod tests {
         assert_eq!(n.position, 0);
         // DateTime<Utc>::default() == UNIX epoch — not "now", but a
         // well-defined placeholder that won't accidentally match a real row.
-        assert_eq!(n.created_at, chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap());
+        assert_eq!(
+            n.created_at,
+            chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
+        );
     }
 
     /// Companion to the above: a partially-overridden literal must compile
@@ -1461,9 +1474,15 @@ mod tests {
         // string degrades to IssueDriven (the pre-v30 behaviour), so the
         // poller keeps working — the alternative (degrading to Looping)
         // would silently spin up a configured-but-failed Looping mesh.
-        assert_eq!(AutopilotMode::from_db_str("garbage"), AutopilotMode::IssueDriven);
+        assert_eq!(
+            AutopilotMode::from_db_str("garbage"),
+            AutopilotMode::IssueDriven
+        );
         assert_eq!(AutopilotMode::from_db_str(""), AutopilotMode::IssueDriven);
-        assert_eq!(AutopilotMode::from_db_str("Looping"), AutopilotMode::IssueDriven);
+        assert_eq!(
+            AutopilotMode::from_db_str("Looping"),
+            AutopilotMode::IssueDriven
+        );
     }
 
     #[test]
@@ -1472,19 +1491,55 @@ mod tests {
         // MiniMax and Kimi were retired from the legacy enum (#538) — Claude-compatible
         // endpoints are now harness profiles whose per-account env is injected separately
         // by the unified `anthropic` adapter via `claude_direct_recipe`.
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "claude.exe");
-        assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "agy");
-        assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "opencode");
-        assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "codex");
+        assert_eq!(
+            Provider::Anthropic
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "claude.exe"
+        );
+        assert_eq!(
+            Provider::Agy
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "agy"
+        );
+        assert_eq!(
+            Provider::OpenCode
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "opencode"
+        );
+        assert_eq!(
+            Provider::Codex
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "codex"
+        );
         // Plain terminal spawns the OS-preferred shell directly — powershell.exe on Windows
         // host, routed through wsl.exe by spawn_environment::wrap when env_type is WSL.
-        assert_eq!(Provider::Terminal.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "powershell.exe");
+        assert_eq!(
+            Provider::Terminal
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "powershell.exe"
+        );
     }
 
     #[test]
     fn provider_adapter_recipe_macos_anthropic_uses_claude() {
         use crate::agent::provider::Platform;
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Macos, EnvType::Windows).binary, "claude");
+        assert_eq!(
+            Provider::Anthropic
+                .adapter()
+                .spawn_recipe(Platform::Macos, EnvType::Windows)
+                .binary,
+            "claude"
+        );
     }
 
     #[test]

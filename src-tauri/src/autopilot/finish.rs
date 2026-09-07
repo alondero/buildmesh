@@ -68,14 +68,18 @@ pub(crate) fn render(template: &str, issue_number: Option<i64>, action_on_succes
         None => String::new(),
     };
     let pr_step = match action_on_success {
-        "none" => "5. Do NOT open a pull request — pushing the branch is the final step."
-            .to_string(),
+        "none" => {
+            "5. Do NOT open a pull request — pushing the branch is the final step.".to_string()
+        }
         action => {
             let draft_flag = if action == "pr" { "" } else { " --draft" };
             let link = if issue_ref.is_empty() {
                 String::new()
             } else {
-                format!(" Include \"{}\" in the PR body so the ticket auto-links.", issue_ref)
+                format!(
+                    " Include \"{}\" in the PR body so the ticket auto-links.",
+                    issue_ref
+                )
             };
             format!(
                 "5. Open a pull request: `gh pr create --fill{}`.{}",

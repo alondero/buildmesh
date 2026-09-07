@@ -39,8 +39,7 @@ fn failed_update_does_not_publish_candidate_to_cache() {
     init_for_tests(app_data_file.clone());
 
     assert_eq!(load().unwrap().default_provider, None);
-    let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
-        .unwrap_err();
+    let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into())).unwrap_err();
     assert!(error.contains("app data dir") || error.contains("temporary preferences"));
     assert_eq!(load().unwrap().default_provider, None);
 

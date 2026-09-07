@@ -183,7 +183,10 @@ fn merge_buildmesh_handler(
     for (key, value) in extra_fields {
         group.insert((*key).to_string(), (*value).clone());
     }
-    group.insert("hooks".to_string(), serde_json::json!([new_handler.clone()]));
+    group.insert(
+        "hooks".to_string(),
+        serde_json::json!([new_handler.clone()]),
+    );
     groups.push(serde_json::Value::Object(group));
     true
 }
@@ -224,9 +227,7 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
         Err(e) => return Err(format!("failed to read {path:?}: {e}")),
     };
     if !settings.is_object() {
-        return Err(format!(
-            "{path:?}: top-level value must be a JSON object"
-        ));
+        return Err(format!("{path:?}: top-level value must be a JSON object"));
     }
 
     let settings_obj = settings
@@ -252,9 +253,11 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
     let notification_groups_array = notification_groups
         .as_array_mut()
         .ok_or_else(|| "settings.local.json event `Notification` must be an array".to_string())?;
-    changed =
-        merge_buildmesh_handler(notification_groups_array, new_handler, &[("matcher", &matcher_all)])
-            || changed;
+    changed = merge_buildmesh_handler(
+        notification_groups_array,
+        new_handler,
+        &[("matcher", &matcher_all)],
+    ) || changed;
 
     let stop_groups = hooks_obj
         .entry("Stop")
@@ -270,7 +273,8 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
 
     let content =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("serialize failed: {e}"))?;
-    write_atomic(path, &content).map_err(|e| format!("failed to write settings.local.json: {e}"))?;
+    write_atomic(path, &content)
+        .map_err(|e| format!("failed to write settings.local.json: {e}"))?;
     tracing::info!("inject_attention_hook: wrote hook at {:?}", path);
     Ok(())
 }

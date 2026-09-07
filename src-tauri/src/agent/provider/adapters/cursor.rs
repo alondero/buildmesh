@@ -33,7 +33,9 @@
 //! is idempotent (issue #886).
 
 use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
@@ -222,9 +224,7 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     if settings.get("hooks").is_none() {
         settings["hooks"] = serde_json::json!({});
     }
-    let hooks = settings
-        .get_mut("hooks")
-        .expect("hooks key inserted above");
+    let hooks = settings.get_mut("hooks").expect("hooks key inserted above");
     if !hooks.is_object() {
         return Err(format!(
             "cursor hooks.json `hooks` must be a JSON object; got {}",
@@ -241,15 +241,10 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
             settings_kind(stop)
         ));
     }
-    let stop_array = stop
-        .as_array_mut()
-        .expect("verified is_array above");
+    let stop_array = stop.as_array_mut().expect("verified is_array above");
     let new_handler = serde_json::json!({ "command": command });
     let mut changed = false;
-    if let Some(existing) = stop_array
-        .iter_mut()
-        .find(|h| is_buildmesh_handler(h))
-    {
+    if let Some(existing) = stop_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
         if *existing != new_handler {
             *existing = new_handler;
             changed = true;
@@ -345,7 +340,10 @@ impl AgentProvider for CursorAdapter {
         // step we never take and trip a future caller that assumes
         // the descriptor's promise (issue #1368 review point 2).
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::BackgroundRunning,
+            ],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: None,
             // Issue #1368: pin the validated Cursor release (1.0.0) so
@@ -559,7 +557,10 @@ mod tests {
         assert!(hooks.is_object(), "top-level must be an object: {hooks}");
         assert_eq!(hooks["version"], serde_json::json!(1));
         let hooks_obj = hooks.get("hooks").expect("hooks key missing");
-        assert!(hooks_obj.is_object(), "`hooks` must be an object: {hooks_obj}");
+        assert!(
+            hooks_obj.is_object(),
+            "`hooks` must be an object: {hooks_obj}"
+        );
 
         // stop is an array; the Buildmesh handler lives at index 0.
         let stop_array = hooks_obj["stop"]
@@ -685,11 +686,10 @@ mod tests {
             "sibling handler must be preserved alongside Buildmesh: {stop:?}"
         );
         assert!(
-            stop.iter()
-                .any(|h| h["command"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("/api/attention/")),
+            stop.iter().any(|h| h["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("/api/attention/")),
             "Buildmesh handler must be present: {stop:?}"
         );
         assert!(
@@ -912,11 +912,7 @@ mod tests {
         let cursor_dir = temp.path().join(".cursor");
         std::fs::create_dir_all(&cursor_dir).unwrap();
         let path = cursor_dir.join("hooks.json");
-        std::fs::write(
-            &path,
-            r#"{ "version": 2, "hooks": { "stop": [] } }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "version": 2, "hooks": { "stop": [] } }"#).unwrap();
 
         let path_str = project_to_string(temp.path());
         let resolved = ResolvedPath {

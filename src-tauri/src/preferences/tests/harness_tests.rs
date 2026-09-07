@@ -33,7 +33,9 @@ fn harness_profiles_round_trips_a_stored_user_profile() {
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
-        assert!(profiles.iter().any(|p| p.id == "claude" && p.name == "Claude Code"));
+        assert!(profiles
+            .iter()
+            .any(|p| p.id == "claude" && p.name == "Claude Code"));
     });
 }
 

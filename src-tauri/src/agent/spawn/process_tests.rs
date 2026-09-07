@@ -231,13 +231,11 @@ fn attention_hook_preserves_unrelated_events() {
 
     let settings = read_injected_settings(temp.path());
     assert_eq!(
-        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "echo blocked",
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo blocked",
         "user-authored PreToolUse hook must survive"
     );
     assert_eq!(
-        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-        "/opt/user-prompt.sh",
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "/opt/user-prompt.sh",
         "user-authored UserPromptSubmit hook must survive"
     );
     // Notification / Stop are now populated by the merge.

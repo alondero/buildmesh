@@ -4,10 +4,10 @@
 //! returns a structured preset suggestion the frontend can surface in
 //! Mesh Properties. Pure read — no state mutation.
 
-use std::path::Path;
-use serde::{Deserialize, Serialize};
-use tauri::command;
 use crate::env;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use tauri::command;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeScripts {
@@ -25,7 +25,11 @@ pub struct DetectedProject {
 
 impl DetectedProject {
     fn empty() -> Self {
-        Self { preset_id: None, label: None, node_scripts: None }
+        Self {
+            preset_id: None,
+            label: None,
+            node_scripts: None,
+        }
     }
 
     fn from(preset_id: &str, label: &str) -> Self {
@@ -39,28 +43,37 @@ impl DetectedProject {
 
 fn parse_node_scripts(package_json_path: &Path) -> NodeScripts {
     let Ok(content) = std::fs::read_to_string(package_json_path) else {
-        return NodeScripts { build: None, run: None, has_tauri_cli: false };
+        return NodeScripts {
+            build: None,
+            run: None,
+            has_tauri_cli: false,
+        };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return NodeScripts { build: None, run: None, has_tauri_cli: false };
+        return NodeScripts {
+            build: None,
+            run: None,
+            has_tauri_cli: false,
+        };
     };
 
     let scripts = v.get("scripts").and_then(|s| s.as_object());
 
-    let has_script = |name: &str| -> bool {
-        scripts.map(|m| m.contains_key(name)).unwrap_or(false)
+    let has_script =
+        |name: &str| -> bool { scripts.map(|m| m.contains_key(name)).unwrap_or(false) };
+
+    let has_tauri_cli = ["dependencies", "devDependencies"].iter().any(|k| {
+        v.get(k)
+            .and_then(|d| d.as_object())
+            .map(|m| m.contains_key("@tauri-apps/cli"))
+            .unwrap_or(false)
+    });
+
+    let build = if has_script("build") {
+        Some("build".to_string())
+    } else {
+        None
     };
-
-    let has_tauri_cli = ["dependencies", "devDependencies"]
-        .iter()
-        .any(|k| {
-            v.get(k)
-                .and_then(|d| d.as_object())
-                .map(|m| m.contains_key("@tauri-apps/cli"))
-                .unwrap_or(false)
-        });
-
-    let build = if has_script("build") { Some("build".to_string()) } else { None };
 
     let run = if has_script("dev") {
         Some("dev".to_string())
@@ -72,7 +85,11 @@ fn parse_node_scripts(package_json_path: &Path) -> NodeScripts {
         None
     };
 
-    NodeScripts { build, run, has_tauri_cli }
+    NodeScripts {
+        build,
+        run,
+        has_tauri_cli,
+    }
 }
 
 fn detect_in_dir(dir: &Path) -> DetectedProject {
@@ -173,7 +190,11 @@ mod tests {
     #[test]
     fn package_json_detects_node() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{ "scripts": { "build": "tsc", "dev": "vite" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "scripts": { "build": "tsc", "dev": "vite" } }"#,
+        )
+        .unwrap();
         let got = detect_in_dir(tmp.path());
         assert_eq!(got.preset_id.as_deref(), Some("node"));
         let scripts = got.node_scripts.expect("node_scripts populated");
@@ -185,7 +206,11 @@ mod tests {
     #[test]
     fn package_json_plus_src_tauri_cargo_detects_tauri() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("package.json"), r#"{ "scripts": { "tauri": "tauri" } }"#).unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "scripts": { "tauri": "tauri" } }"#,
+        )
+        .unwrap();
         touch(tmp.path(), "src-tauri/Cargo.toml");
         let got = detect_in_dir(tmp.path());
         assert_eq!(got.preset_id.as_deref(), Some("node-tauri"));
@@ -197,7 +222,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{ "devDependencies": { "@tauri-apps/cli": "^2" } }"#,
-        ).unwrap();
+        )
+        .unwrap();
         let got = detect_in_dir(tmp.path());
         assert_eq!(got.preset_id.as_deref(), Some("node-tauri"));
         assert!(got.node_scripts.unwrap().has_tauri_cli);
@@ -209,7 +235,8 @@ mod tests {
         fs::write(
             tmp.path().join("package.json"),
             r#"{ "scripts": { "serve": "webpack serve" } }"#,
-        ).unwrap();
+        )
+        .unwrap();
         let got = detect_in_dir(tmp.path());
         let scripts = got.node_scripts.expect("node_scripts populated");
         assert_eq!(scripts.run.as_deref(), Some("serve"));

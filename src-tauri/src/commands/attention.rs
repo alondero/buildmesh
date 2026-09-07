@@ -49,7 +49,12 @@ use tauri::{command, AppHandle};
 /// running on the Tokio worker pool must wrap this in
 /// `crate::commands::run_blocking` (see `http/routes/attention.rs`).
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
-    mark_attention_with_signal(node_id, app, None, &crate::agent::session_lifecycle::HookSignalDetail::default());
+    mark_attention_with_signal(
+        node_id,
+        app,
+        None,
+        &crate::agent::session_lifecycle::HookSignalDetail::default(),
+    );
 }
 
 /// [`mark_attention`] with a full provider envelope (issue #1364). One call
@@ -62,7 +67,12 @@ pub fn mark_attention_with_signal(
     detail: &crate::agent::session_lifecycle::HookSignalDetail,
 ) {
     let sink = AppSessionLifecycleSink { app };
-    let _ = crate::agent::session_lifecycle::on_attention_with_signal(&sink, node_id, semantic_turn, detail);
+    let _ = crate::agent::session_lifecycle::on_attention_with_signal(
+        &sink,
+        node_id,
+        semantic_turn,
+        detail,
+    );
     // Arm the resume-detection safety net (issue #878): if the agent starts
     // producing output again without user input, the mark was stale and gets
     // auto-cleared.
@@ -104,7 +114,10 @@ pub fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> 
 #[command]
 pub fn list_semantic_turns() -> Result<Vec<SemanticTurnPayload>, String> {
     let rows = db::list_semantic_turns().map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().filter_map(|(_, value)| serde_json::from_str(&value).ok()).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|(_, value)| serde_json::from_str(&value).ok())
+        .collect())
 }
 
 /// Whether a node is currently awaiting user input. Derived from the lifecycle
@@ -171,7 +184,11 @@ mod tests {
         }
         fn emit_attention_cleared(&self, _node_id: i64) {}
         fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
-        fn emit_lifecycle_changed(&self, _payload: crate::agent::session_lifecycle::LifecycleChangedPayload) {}
+        fn emit_lifecycle_changed(
+            &self,
+            _payload: crate::agent::session_lifecycle::LifecycleChangedPayload,
+        ) {
+        }
     }
 
     /// The decoupling payoff: attention marking is now exercisable on its own,

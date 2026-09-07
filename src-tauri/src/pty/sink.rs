@@ -347,7 +347,11 @@ mod tests {
         // bytes of the very first chunks were dropped). We can verify
         // ordering by walking the trailing stamp and asserting the indexes
         // are strictly ascending and contiguous.
-        let stamps: Vec<u8> = got.iter().copied().filter(|b| *b < chunk_count as u8).collect();
+        let stamps: Vec<u8> = got
+            .iter()
+            .copied()
+            .filter(|b| *b < chunk_count as u8)
+            .collect();
         assert!(
             stamps.windows(2).all(|w| w[0] < w[1]),
             "chunk stamps must remain in arrival order after truncation"

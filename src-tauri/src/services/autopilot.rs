@@ -67,9 +67,7 @@ use ts_rs::TS;
 use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
 use crate::db::AutopilotRunState;
-use crate::models::{
-    AutopilotMode, Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL,
-};
+use crate::models::{AutopilotMode, Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
 use crate::process_util::run_worker_pass;
 use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 
@@ -129,8 +127,7 @@ const FINISHING_REDRIVE_STALE_MINUTES: i64 = 5;
 /// Remembered for the app's lifetime so each gated trigger costs exactly one
 /// permission fetch + one log line, not one per pass. Cleared on restart —
 /// cheap to re-derive, and a permission granted meanwhile is picked up then.
-static GATED_TRIGGERS: Lazy<Mutex<HashSet<(i64, i64)>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static GATED_TRIGGERS: Lazy<Mutex<HashSet<(i64, i64)>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// `(mesh_id, issue_number)` pairs whose blocked-by `info` log has already
 /// been emitted this app lifetime (map #976, issue #489's mirror inside the
@@ -139,8 +136,7 @@ static GATED_TRIGGERS: Lazy<Mutex<HashSet<(i64, i64)>>> =
 /// the log from spamming once per 2-minute pass. Cleared on restart —
 /// cheap to re-derive, and a blocker that's since resolved (the blocker
 /// issue closed or its node archived) gets re-evaluated on the next pass.
-static LOGGED_BLOCKS: Lazy<Mutex<HashSet<(i64, i64)>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static LOGGED_BLOCKS: Lazy<Mutex<HashSet<(i64, i64)>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Lock one of the planner's app-lifetime tracking sets, recovering from
 /// a poisoned mutex instead of panicking (issue #1224).
@@ -226,9 +222,7 @@ fn run_poll_pass(app: &AppHandle) {
     // `implementing`, or a red `finishing` stall — gated on the node's PTY
     // output having been quiet long enough that the agent isn't mid-response.
     match db::list_active_autopilot_node_ids() {
-        Ok(active) if !active.is_empty() => {
-            crate::autopilot::pipeline::watchdog_pass(app, &active)
-        }
+        Ok(active) if !active.is_empty() => crate::autopilot::pipeline::watchdog_pass(app, &active),
         Ok(_) => {}
         Err(e) => tracing::warn!("autopilot: active-run listing failed: {}", e),
     }
@@ -263,16 +257,17 @@ fn run_poll_pass(app: &AppHandle) {
     };
     for mesh in meshes {
         if let Err(e) = poll_mesh(app, &mesh, &mut global_budget) {
-            tracing::warn!("autopilot: mesh {} ({}) pass failed: {}", mesh.id, mesh.name, e);
+            tracing::warn!(
+                "autopilot: mesh {} ({}) pass failed: {}",
+                mesh.id,
+                mesh.name,
+                e
+            );
         }
     }
 }
 
-fn poll_mesh(
-    app: &AppHandle,
-    mesh: &Mesh,
-    global_budget: &mut Option<i64>,
-) -> Result<(), String> {
+fn poll_mesh(app: &AppHandle, mesh: &Mesh, global_budget: &mut Option<i64>) -> Result<(), String> {
     // Issue #1152 — revalidate compatibility at the scheduler boundary
     // (acceptance criteria 7: "Revalidate at the scheduler/worker boundary
     // before creating an Agent Node. Stale or externally modified enabled
@@ -318,8 +313,7 @@ fn poll_mesh(
     // `finish.md` and opened a PR (issue #993's flow) ends up in the same
     // ledger state machine as an issue-driven run, so the close-sweep works
     // for both.
-    let sweep_candidates =
-        db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap_or_default();
+    let sweep_candidates = db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap_or_default();
 
     let active = db::count_active_autopilot_nodes(mesh.id).map_err(|e| e.to_string())?;
     let capacity = effective_capacity(
@@ -451,11 +445,7 @@ fn poll_mesh(
 /// by the caller (the polling worker only enters the spawning branch
 /// when an active count of 0 is feasible — handled inside
 /// `evaluate_loop_continuation` via [`LoopSkipReason::ActiveIterationInProgress`]).
-fn poll_mesh_looping(
-    app: &AppHandle,
-    mesh: &Mesh,
-    capacity: i64,
-) -> Result<(), String> {
+fn poll_mesh_looping(app: &AppHandle, mesh: &Mesh, capacity: i64) -> Result<(), String> {
     let initial_prompt = match mesh.loop_initial_prompt.as_deref() {
         Some(p) if !p.trim().is_empty() => p.to_string(),
         // "Loop not configured" — the docstring on
@@ -746,8 +736,8 @@ fn parse_sqlite_datetime(s: &str) -> Option<SystemTime> {
     let hour: u32 = time_parts.next()?.parse().ok()?;
     let minute: u32 = time_parts.next()?.parse().ok()?;
     let second: u32 = time_parts.next()?.parse().ok()?;
-    let naive = chrono::NaiveDate::from_ymd_opt(year, month, day)?
-        .and_hms_opt(hour, minute, second)?;
+    let naive =
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
     let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
     Some(SystemTime::from(dt))
 }
@@ -804,11 +794,8 @@ fn spawn_loop_node(
             intent: crate::agent::spawn::SpawnIntent::Loop {
                 initial_prompt: initial_prompt.to_string(),
             },
-            run: crate::autopilot::node_launch::AutopilotRunIdentity::Loop {
-                iteration,
-            },
-            worktree_policy:
-                crate::autopilot::node_launch::AutopilotWorktreePolicy::RespectMesh,
+            run: crate::autopilot::node_launch::AutopilotRunIdentity::Loop { iteration },
+            worktree_policy: crate::autopilot::node_launch::AutopilotWorktreePolicy::RespectMesh,
             watcher_issue_number: 0,
         },
     )
@@ -836,18 +823,11 @@ fn close_merged_nodes(
                     continue;
                 }
                 // Terminal ledger state so the sweep never re-checks this PR.
-                let _ = db::set_autopilot_run_state(
-                    node_id,
-                    db::AutopilotRunState::Merged,
-                    None,
-                );
+                let _ = db::set_autopilot_run_state(node_id, db::AutopilotRunState::Merged, None);
                 crate::autopilot::evaluator::unregister(node_id);
                 let _ = app.emit(
                     "autopilot-node-closed",
-                    AutopilotNodeClosedPayload {
-                        node_id,
-                        pr_number,
-                    },
+                    AutopilotNodeClosedPayload { node_id, pr_number },
                 );
                 tracing::info!(
                     "autopilot: PR #{} merged — node {} archived (slot freed)",
@@ -1026,14 +1006,12 @@ fn spawn_autopilot_node(
     // anyone changed the wording in one but not the others; the launch
     // module derives the watcher's prefill from this same `intent`, so
     // we pass the intent (not a separately-formatted string).
-    let intent = crate::agent::spawn::SpawnIntent::Issue(
-        crate::agent::spawn::IssueContext {
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-            number: issue.number,
-            title: issue.title.clone(),
-        },
-    );
+    let intent = crate::agent::spawn::SpawnIntent::Issue(crate::agent::spawn::IssueContext {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number: issue.number,
+        title: issue.title.clone(),
+    });
     let initial_name = crate::session_naming::issue_node_name(issue.number, &issue.title);
     let provider = mesh.autopilot_provider.clone().unwrap_or_else(|| {
         crate::preferences::resolve_default_provider(
@@ -1194,16 +1172,17 @@ mod tests {
         //
         // `open_numbers` must include the blockers of #27 — the labelled-open
         // page and the blockers-of-issue set are the same shape.
-        let head_blocked = issue_with_blocked_by(27, &[
-            "- #15", "- #18", "- #20", "- #21", "- #22", "- #23", "- #24", "- #25", "- #26",
-        ]);
+        let head_blocked = issue_with_blocked_by(
+            27,
+            &[
+                "- #15", "- #18", "- #20", "- #21", "- #22", "- #23", "- #24", "- #25", "- #26",
+            ],
+        );
         let tail_unblocked = issue_with_blocked_by(14, &["- #13"]);
         let issues = vec![head_blocked, tail_unblocked];
-        let open_numbers: HashSet<i64> = [
-            27, 14, 15, 18, 20, 21, 22, 23, 24, 25, 26,
-        ]
-        .into_iter()
-        .collect();
+        let open_numbers: HashSet<i64> = [27, 14, 15, 18, 20, 21, 22, 23, 24, 25, 26]
+            .into_iter()
+            .collect();
         let known: Vec<i64> = Vec::new();
 
         let planned = plan_spawns_with_blockers(
@@ -1357,7 +1336,11 @@ mod tests {
     #[test]
     fn effective_capacity_caps_at_remaining_global_budget() {
         assert_eq!(effective_capacity(3, Some(1)), 1);
-        assert_eq!(effective_capacity(1, Some(3)), 1, "per-mesh limit still binds");
+        assert_eq!(
+            effective_capacity(1, Some(3)),
+            1,
+            "per-mesh limit still binds"
+        );
     }
 
     #[test]
@@ -1366,7 +1349,11 @@ mod tests {
         // negative capacity must not flow onward (it would corrupt the
         // `capacity as usize` take in plan_spawns).
         assert_eq!(effective_capacity(2, Some(-3)), 0);
-        assert_eq!(effective_capacity(2, Some(0)), 0, "pool size 0 pauses spawns");
+        assert_eq!(
+            effective_capacity(2, Some(0)),
+            0,
+            "pool size 0 pauses spawns"
+        );
     }
 
     // -- map #976: `**Blocked by**` planner filter -----------------------------
@@ -1579,10 +1566,8 @@ mod tests {
             .expect("captured log buffer is utf-8");
         // Tidy: don't leave our bytes around for the next test on this OS thread.
         INFO_BUFFER.with(|cell| cell.borrow_mut().clear());
-        let autopilot_lines: Vec<&str> = logs
-            .lines()
-            .filter(|l| l.contains("autopilot:"))
-            .collect();
+        let autopilot_lines: Vec<&str> =
+            logs.lines().filter(|l| l.contains("autopilot:")).collect();
         assert_eq!(
             autopilot_lines.len(),
             1,
@@ -1906,9 +1891,21 @@ mod tests {
     #[test]
     fn derive_loop_history_trailing_failures_stops_at_completed() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Completed, "2026-07-22 10:05:00".to_string()),
-            (3, AutopilotRunState::Failed, "2026-07-22 10:10:00".to_string()),
+            (
+                1,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:05:00".to_string(),
+            ),
+            (
+                3,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:10:00".to_string(),
+            ),
         ];
         let h = derive_loop_history(&rows);
         assert_eq!(h.iteration_count, 3);
@@ -1923,9 +1920,21 @@ mod tests {
     #[test]
     fn derive_loop_history_three_consecutive_failures() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (1, AutopilotRunState::Failed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Failed, "2026-07-22 10:05:00".to_string()),
-            (3, AutopilotRunState::Failed, "2026-07-22 10:10:00".to_string()),
+            (
+                1,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:05:00".to_string(),
+            ),
+            (
+                3,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:10:00".to_string(),
+            ),
         ];
         let h = derive_loop_history(&rows);
         assert_eq!(h.trailing_failures, 3);
@@ -1936,8 +1945,16 @@ mod tests {
     #[test]
     fn derive_loop_history_merged_resets_trailing_failures() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (1, AutopilotRunState::Failed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Failed, "2026-07-22 10:05:00".to_string()),
+            (
+                1,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Failed,
+                "2026-07-22 10:05:00".to_string(),
+            ),
             (
                 3,
                 AutopilotRunState::Merged,
@@ -1969,8 +1986,16 @@ mod tests {
     #[test]
     fn derive_loop_status_enabled_all_terminal_is_idle() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Merged, "2026-07-22 10:05:00".to_string()),
+            (
+                1,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Merged,
+                "2026-07-22 10:05:00".to_string(),
+            ),
         ];
         let s = derive_loop_status(true, &rows);
         assert!(s.enabled);
@@ -1986,8 +2011,16 @@ mod tests {
     #[test]
     fn derive_loop_status_active_iteration_from_live_row() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Implementing, "2026-07-22 10:05:00".to_string()),
+            (
+                1,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Implementing,
+                "2026-07-22 10:05:00".to_string(),
+            ),
         ];
         let s = derive_loop_status(true, &rows);
         assert_eq!(s.active_iteration, Some(2), "the implementing row is live");
@@ -1999,7 +2032,10 @@ mod tests {
             AutopilotRunState::Finishing,
             "2026-07-22 10:10:00".to_string(),
         )];
-        assert_eq!(derive_loop_status(true, &finishing).active_iteration, Some(3));
+        assert_eq!(
+            derive_loop_status(true, &finishing).active_iteration,
+            Some(3)
+        );
     }
 
     /// `enabled` is reported verbatim even while an iteration is live — the
@@ -2028,12 +2064,27 @@ mod tests {
     #[test]
     fn derive_loop_status_is_order_independent() {
         let rows: Vec<db::LoopRunSnapshot> = vec![
-            (3, AutopilotRunState::Completed, "2026-07-22 10:10:00".to_string()),
-            (1, AutopilotRunState::Completed, "2026-07-22 10:00:00".to_string()),
-            (2, AutopilotRunState::Implementing, "2026-07-22 10:05:00".to_string()),
+            (
+                3,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:10:00".to_string(),
+            ),
+            (
+                1,
+                AutopilotRunState::Completed,
+                "2026-07-22 10:00:00".to_string(),
+            ),
+            (
+                2,
+                AutopilotRunState::Implementing,
+                "2026-07-22 10:05:00".to_string(),
+            ),
         ];
         let s = derive_loop_status(true, &rows);
-        assert_eq!(s.total_iterations, 3, "max iteration, not the last slice element");
+        assert_eq!(
+            s.total_iterations, 3,
+            "max iteration, not the last slice element"
+        );
         assert_eq!(
             s.active_iteration,
             Some(2),
@@ -2045,8 +2096,7 @@ mod tests {
 
     #[test]
     fn parse_sqlite_datetime_well_formed_string() {
-        let t = parse_sqlite_datetime("2026-07-22 10:30:45")
-            .expect("valid datetime string parses");
+        let t = parse_sqlite_datetime("2026-07-22 10:30:45").expect("valid datetime string parses");
         // Pin via the `chrono::DateTime` round-trip rather than a hard-coded
         // unix timestamp so a chrono version bump doesn't break the test.
         let expected: SystemTime = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
@@ -2076,9 +2126,8 @@ mod tests {
     // function.
     #[test]
     fn spawn_loop_node_signature_uses_prefill_via_marker_hint() {
-        let _marker = crate::autopilot::launch::marker_hint_for_prefill(
-            "Iterate on the failing test cases",
-        );
+        let _marker =
+            crate::autopilot::launch::marker_hint_for_prefill("Iterate on the failing test cases");
     }
 
     // ---- Poison-recovery regression (issue #1224) ----
@@ -2098,7 +2147,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             panic!("intentional planner-static poison for issue #1224 regression test");
         }));
-        assert!(result.is_err(), "test fixture must panic to poison the mutex");
+        assert!(
+            result.is_err(),
+            "test fixture must panic to poison the mutex"
+        );
     }
 
     #[test]

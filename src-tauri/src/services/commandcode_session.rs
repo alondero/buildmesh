@@ -212,12 +212,7 @@ pub(crate) fn find_historic_id_for_directory(
 ) -> Option<String> {
     let sessions_dir =
         crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_directory)?;
-    find_historic_id_for_directory_in(
-        &sessions_dir,
-        spawn_directory,
-        anchor_ms,
-        recorded_start,
-    )
+    find_historic_id_for_directory_in(&sessions_dir, spawn_directory, anchor_ms, recorded_start)
 }
 
 pub(crate) fn find_historic_id_for_directory_in(
@@ -249,9 +244,10 @@ pub fn start_capture_poller(
     let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
     tauri::async_runtime::spawn(async move {
         let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
-        let Some(sessions_dir) =
-            crate::services::transcript_reader::commandcode_sessions_dir(env_type, &spawn_directory)
-        else {
+        let Some(sessions_dir) = crate::services::transcript_reader::commandcode_sessions_dir(
+            env_type,
+            &spawn_directory,
+        ) else {
             tracing::warn!("commandcode session capture: no sessions dir for env {env_type:?}");
             return;
         };
@@ -286,9 +282,8 @@ pub fn start_capture_poller(
                         let watcher_id = id.clone();
                         let watcher_directory = spawn_directory.clone();
                         let watcher_app = app.clone();
-                        let watcher_result = crate::blocking::run_blocking(
-                            "commandcode watcher start",
-                            move || {
+                        let watcher_result =
+                            crate::blocking::run_blocking("commandcode watcher start", move || {
                                 crate::services::commandcode_watcher::start_for_session(
                                     node_id,
                                     &watcher_id,
@@ -296,9 +291,8 @@ pub fn start_capture_poller(
                                     env_type,
                                     &watcher_app,
                                 )
-                            },
-                        )
-                        .await;
+                            })
+                            .await;
                         if let Err(error) = watcher_result {
                             tracing::warn!(
                                 "commandcode watcher: could not start for node {node_id}: {error}"
@@ -313,7 +307,9 @@ pub fn start_capture_poller(
                 return;
             }
         }
-        tracing::warn!("commandcode session capture: gave up for node {node_id} in {spawn_directory}");
+        tracing::warn!(
+            "commandcode session capture: gave up for node {node_id} in {spawn_directory}"
+        );
     });
 }
 
@@ -395,7 +391,11 @@ mod tests {
             "cwd": "F:\\src\\my-repo",
             "timestamp": "2026-08-30T14:30:00Z"
         });
-        fs::write(&file_path, format!("{}\n{{\"type\":\"user_input\"}}", content)).unwrap();
+        fs::write(
+            &file_path,
+            format!("{}\n{{\"type\":\"user_input\"}}", content),
+        )
+        .unwrap();
 
         let c = read_session_file(&file_path).expect("should parse candidate");
         assert_eq!(c.id, "sess_01j6alpha");
@@ -465,9 +465,7 @@ mod tests {
         .unwrap();
         // Checkpoint sidecar carries its own checkpoint UUID — must never be
         // mistaken for a session.
-        let checkpoint_path = temp
-            .path()
-            .join(format!("{session_id}.checkpoints.jsonl"));
+        let checkpoint_path = temp.path().join(format!("{session_id}.checkpoints.jsonl"));
         fs::write(
             &checkpoint_path,
             r#"{"id":"4f729f43-46ed-4721-a885-3f16f26bff5f","messageId":"4f729f43-46ed-4721-a885-3f16f26bff5f","turnNumber":1,"createdAt":"2026-09-02T19:53:40.567Z"}"#,
@@ -475,8 +473,7 @@ mod tests {
         .unwrap();
 
         assert!(read_session_file(&checkpoint_path).is_none());
-        let found =
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
+        let found = find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
         assert_eq!(found, Some(session_id.to_string()));
     }
 
@@ -499,7 +496,9 @@ mod tests {
             );
         }
 
-        let typed = temp.path().join("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl");
+        let typed = temp
+            .path()
+            .join("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl");
         fs::write(
             &typed,
             r#"{"type":"message","id":"3fadada6-e0a3-44a2-ab68-ce1ecf7207a9","cwd":"/tmp/wt","timestamp":"2026-09-02T19:53:20.151Z"}"#,
@@ -507,7 +506,9 @@ mod tests {
         .unwrap();
         assert!(read_session_file(&typed).is_none());
 
-        let mismatched = temp.path().join("aaaaaaaa-1111-2222-3333-444444444444.jsonl");
+        let mismatched = temp
+            .path()
+            .join("aaaaaaaa-1111-2222-3333-444444444444.jsonl");
         fs::write(
             &mismatched,
             r#"{"type":"session","id":"bbbbbbbb-1111-2222-3333-444444444444","cwd":"/tmp/wt","timestamp":"2026-09-02T19:53:20.151Z"}"#,
@@ -535,12 +536,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            find_historic_id_for_directory_in(
-                temp.path(),
-                "F:/repo",
-                CREATED - 30_000,
-                true,
-            ),
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED - 30_000, true,),
             Some(ID.to_string())
         );
     }
@@ -573,12 +569,7 @@ mod tests {
             Some(NEW_ID.to_string())
         );
         assert_eq!(
-            find_historic_id_for_directory_in(
-                temp.path(),
-                "F:/repo",
-                CREATED - 3_600_000,
-                false,
-            ),
+            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED - 3_600_000, false,),
             None,
             "legacy nodes with two historic conversations must not revive one by guessing",
         );

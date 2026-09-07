@@ -75,11 +75,17 @@ mod tests {
         // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
         match second_result {
             Ok(mesh) => {
-                assert_eq!(mesh.name, "First Project", "should return the FIRST (existing) mesh");
+                assert_eq!(
+                    mesh.name, "First Project",
+                    "should return the FIRST (existing) mesh"
+                );
                 assert_eq!(mesh.layout, "grid", "should preserve original layout");
             }
             Err(e) => {
-                panic!("create_mesh with duplicate path should NOT error, but got: {}", e);
+                panic!(
+                    "create_mesh with duplicate path should NOT error, but got: {}",
+                    e
+                );
             }
         }
     }
@@ -149,10 +155,16 @@ mod tests {
         assert_eq!(rows, 1, "one row updated");
         let saved = crate::db::get_mesh_by_id(mesh.id).unwrap();
         assert!(saved.autopilot_enabled);
-        assert_eq!(saved.autopilot_trigger_label.as_deref(), Some("buildmesh:run"));
+        assert_eq!(
+            saved.autopilot_trigger_label.as_deref(),
+            Some("buildmesh:run")
+        );
         assert_eq!(saved.autopilot_concurrency_limit, 3);
         assert_eq!(saved.autopilot_provider.as_deref(), Some("minimax"));
-        assert_eq!(saved.autopilot_action_on_success.as_deref(), Some("draft_pr"));
+        assert_eq!(
+            saved.autopilot_action_on_success.as_deref(),
+            Some("draft_pr")
+        );
 
         // The enabled mesh appears on the poller's work list.
         let enabled = crate::db::list_autopilot_enabled_meshes().unwrap();
@@ -217,7 +229,10 @@ mod tests {
         crate::db::set_mesh_autopilot_enabled(mesh.id, false).unwrap();
         let off = crate::db::get_mesh_by_id(mesh.id).unwrap();
         assert!(!off.autopilot_enabled, "Stop disables the mesh");
-        assert_eq!(off.autopilot_concurrency_limit, 3, "still preserved on Stop");
+        assert_eq!(
+            off.autopilot_concurrency_limit, 3,
+            "still preserved on Stop"
+        );
 
         // Missing mesh → zero rows (drives the command's not-found guard).
         let missing = crate::db::set_mesh_autopilot_enabled(999_999, true).unwrap();
@@ -252,8 +267,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_path =
-            std::env::temp_dir().join(format!("buildmesh_loop_test_{}.db", test_id));
+        let temp_path = std::env::temp_dir().join(format!("buildmesh_loop_test_{}.db", test_id));
         crate::db::init(&temp_path).unwrap();
 
         let path = format!("/tmp/loop-test-{}", test_id);
@@ -281,8 +295,14 @@ mod tests {
         assert_eq!(rows, 1, "one row updated");
         let saved = crate::db::get_mesh_by_id(mesh.id).unwrap();
         assert_eq!(saved.autopilot_mode, AutopilotMode::Looping);
-        assert_eq!(saved.loop_initial_prompt.as_deref(), Some("ship the next iteration of X"));
-        assert_eq!(saved.loop_suffix_prompt.as_deref(), Some("now run the verify suite and report"));
+        assert_eq!(
+            saved.loop_initial_prompt.as_deref(),
+            Some("ship the next iteration of X")
+        );
+        assert_eq!(
+            saved.loop_suffix_prompt.as_deref(),
+            Some("now run the verify suite and report")
+        );
         assert_eq!(saved.loop_max_iterations, Some(5));
         assert_eq!(saved.loop_interval_seconds, 30);
         assert_eq!(saved.loop_consecutive_failures, 3);
@@ -365,9 +385,14 @@ mod tests {
         crate::db::create_autopilot_run(node.id, mesh.id, 42).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
         let (issue, state, attempts, loop_iteration, pr_url) =
-            crate::db::get_autopilot_run(node.id).unwrap().expect("run row exists");
+            crate::db::get_autopilot_run(node.id)
+                .unwrap()
+                .expect("run row exists");
         assert_eq!((issue, state, attempts), (42, S::Implementing, 0));
-        assert_eq!(loop_iteration, None, "issue-driven rows are not loop iterations");
+        assert_eq!(
+            loop_iteration, None,
+            "issue-driven rows are not loop iterations"
+        );
         assert_eq!(pr_url, None);
 
         // The issue number is known → the poller must not respawn it.
@@ -489,8 +514,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_path =
-            std::env::temp_dir().join(format!("buildmesh_autopilot_pr_{}.db", test_id));
+        let temp_path = std::env::temp_dir().join(format!("buildmesh_autopilot_pr_{}.db", test_id));
         crate::db::init(&temp_path).unwrap();
 
         let path = format!("/tmp/autopilot-pr-{}", test_id);
@@ -526,8 +550,7 @@ mod tests {
             .is_empty());
 
         // Recording the wrap-up PR makes it sweepable.
-        crate::db::set_autopilot_run_pr(node.id, 512, "https://github.com/x/y/pull/512")
-            .unwrap();
+        crate::db::set_autopilot_run_pr(node.id, 512, "https://github.com/x/y/pull/512").unwrap();
         assert_eq!(
             crate::db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap(),
             vec![(node.id, 512)]
@@ -640,8 +663,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_path =
-            std::env::temp_dir().join(format!("buildmesh_loop_suffix_{}.db", test_id));
+        let temp_path = std::env::temp_dir().join(format!("buildmesh_loop_suffix_{}.db", test_id));
         crate::db::init(&temp_path).unwrap();
 
         let path = format!("/tmp/loop-suffix-{}", test_id);
@@ -666,17 +688,20 @@ mod tests {
 
         use crate::db::AutopilotRunState as S;
         crate::db::create_autopilot_loop_run(node.id, mesh.id, 4).unwrap();
-        crate::db::set_autopilot_run_pr(node.id, 993, "https://github.com/x/y/pull/993")
-            .unwrap();
+        crate::db::set_autopilot_run_pr(node.id, 993, "https://github.com/x/y/pull/993").unwrap();
         crate::db::set_autopilot_run_state(node.id, S::SuffixPending, Some(2)).unwrap();
 
         assert_eq!(S::SuffixPending.as_db_str(), "suffix_pending");
         assert_eq!(S::from_db_str("suffix_pending"), S::SuffixPending);
-        let (issue, state, attempts, iteration, pr_url) =
-            crate::db::get_autopilot_run(node.id).unwrap().expect("run row exists");
+        let (issue, state, attempts, iteration, pr_url) = crate::db::get_autopilot_run(node.id)
+            .unwrap()
+            .expect("run row exists");
         assert_eq!(issue, 0);
         assert_eq!(state, S::SuffixPending);
-        assert_eq!(attempts, 2, "suffix turn does not consume a wrap-up attempt");
+        assert_eq!(
+            attempts, 2,
+            "suffix turn does not consume a wrap-up attempt"
+        );
         assert_eq!(iteration, Some(4));
         assert_eq!(pr_url.as_deref(), Some("https://github.com/x/y/pull/993"));
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
@@ -704,9 +729,9 @@ mod tests {
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 0);
         assert_global_active_contribution(node.id, 0);
         let rows = crate::db::list_loop_iterations(mesh.id).unwrap();
-        assert!(rows.iter().any(|(iteration, state, _)| {
-            *iteration == 4 && *state == S::Completed
-        }));
+        assert!(rows
+            .iter()
+            .any(|(iteration, state, _)| { *iteration == 4 && *state == S::Completed }));
 
         std::fs::remove_file(&temp_path).ok();
     }

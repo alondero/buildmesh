@@ -20,10 +20,7 @@ use crate::http::MaybeTls;
 /// `GET /api/agents/{id}/git/status` — the file-by-file tree of everything the
 /// node changed since it branched (ADR 0005), so it agrees with the per-file
 /// `/diff` endpoint below. Empty list for a node with no changes since base.
-pub async fn status(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    agent_id: i64,
-) {
+pub async fn status(lines: &mut tokio::io::BufStream<MaybeTls>, agent_id: i64) {
     if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
@@ -42,10 +39,7 @@ pub async fn status(
 /// `GET /api/agents/{id}/git/summary` — `{total, added, modified, deleted}`
 /// counts, folded from the same since-branch list as `/git/status` so the
 /// header and the tree agree.
-pub async fn summary(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    agent_id: i64,
-) {
+pub async fn summary(lines: &mut tokio::io::BufStream<MaybeTls>, agent_id: i64) {
     if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
@@ -62,10 +56,7 @@ pub async fn summary(
 }
 
 /// `GET /api/agents/{id}/git/branch` — current branch name.
-pub async fn branch(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    agent_id: i64,
-) {
+pub async fn branch(lines: &mut tokio::io::BufStream<MaybeTls>, agent_id: i64) {
     match crate::commands::pr::get_current_branch(agent_id).await {
         Ok(name) => {
             let body = serde_json::to_string(&serde_json::json!({ "branch": name }))
@@ -83,11 +74,7 @@ pub async fn branch(
 /// uncommitted agent work both show. Rendered server-side via
 /// `commands::diff::diff_node_file_against_base` so the mobile UI gets
 /// pre-highlighted hunks ready to display.
-pub async fn diff(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    agent_id: i64,
-    file_path: &str,
-) {
+pub async fn diff(lines: &mut tokio::io::BufStream<MaybeTls>, agent_id: i64, file_path: &str) {
     if file_path.is_empty() {
         request::send_json_error(lines, "400 Bad Request", "Missing ?path=").await;
         return;
@@ -106,7 +93,8 @@ pub async fn diff(
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
     }
-    match crate::commands::diff::diff_node_file_against_base(agent_id, file_path.to_string()).await {
+    match crate::commands::diff::diff_node_file_against_base(agent_id, file_path.to_string()).await
+    {
         Ok(diff) => {
             let body = serde_json::to_string(&diff).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;

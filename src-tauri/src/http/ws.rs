@@ -268,9 +268,8 @@ pub(crate) fn write_mobile_input(
         // desktop emit; the mobile broadcast is a separate channel kept
         // below.
         if let Some(app) = super::app_handle() {
-            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink {
-                app: &app.clone(),
-            };
+            let sink =
+                crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app.clone() };
             let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
         } else {
             let _ = crate::agent::session_lifecycle::on_attention_cleared(
@@ -407,7 +406,10 @@ pub fn ensure_pty_channel(node_id: i64) {
     let mut locked = nodes.write();
     locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        NodeChannel { sender: tx, history: VecDeque::new() }
+        NodeChannel {
+            sender: tx,
+            history: VecDeque::new(),
+        }
     });
 }
 
@@ -416,7 +418,10 @@ pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let mut locked = nodes.write();
     let channel = locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        NodeChannel { sender: tx, history: VecDeque::new() }
+        NodeChannel {
+            sender: tx,
+            history: VecDeque::new(),
+        }
     });
     channel.sender.subscribe()
 }
@@ -826,7 +831,10 @@ mod tests {
             }
         }
         fn failing() -> Self {
-            Self { should_fail: true, ..Self::new() }
+            Self {
+                should_fail: true,
+                ..Self::new()
+            }
         }
     }
 
@@ -998,7 +1006,10 @@ mod tests {
     #[test]
     fn parse_resize_returns_none_for_non_resize_messages() {
         // Not a resize message at all → caller forwards as input.
-        assert_eq!(parse_resize_message(r#"{"type":"keystroke","data":"x"}"#), None);
+        assert_eq!(
+            parse_resize_message(r#"{"type":"keystroke","data":"x"}"#),
+            None
+        );
         // No `type` field at all.
         assert_eq!(parse_resize_message(r#"{"cols":80,"rows":24}"#), None);
         // Non-JSON text input.

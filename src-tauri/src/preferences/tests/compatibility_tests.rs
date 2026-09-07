@@ -2,23 +2,20 @@
 //! validation.
 
 use super::super::compatibility::{
-    harness_default_for, normalize_harness_default, preflight_resolve_provider_env, remove_harness_default,
-    resolve_provider_env, upsert_harness_default, validate_harness_default,
+    harness_default_for, normalize_harness_default, preflight_resolve_provider_env,
+    remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
 };
 use super::super::model::{HarnessConfigValue, ModelTiers, ProviderPairing};
 use super::super::storage::{load, save};
 use super::with_temp_dir;
-use crate::preferences::{
-    AppPreferences, ProviderAccount,
-};
 use crate::preferences::ApiSurface;
+use crate::preferences::{AppPreferences, ProviderAccount};
 
 #[test]
 fn preflight_pairing_env_passes_for_no_pairing() {
     // Re-implement the same pure logic via the public surface to keep
     // coverage parity with the original tests module.
-    let result =
-        super::super::compatibility::preflight_resolve_provider_env("claude:minimax");
+    let result = super::super::compatibility::preflight_resolve_provider_env("claude:minimax");
     assert!(result.is_ok());
 }
 
@@ -44,7 +41,10 @@ fn provider_account_env_injects_from_stored_claude_pairing() {
         save(prefs).unwrap();
         let env = resolve_provider_env("minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
-        assert_eq!(env_map.get("ANTHROPIC_AUTH_TOKEN").map(|s| s.as_str()), Some("sk-test"));
+        assert_eq!(
+            env_map.get("ANTHROPIC_AUTH_TOKEN").map(|s| s.as_str()),
+            Some("sk-test")
+        );
         assert_eq!(
             env_map.get("ANTHROPIC_BASE_URL").map(|s| s.as_str()),
             Some("https://api.minimax.io/anthropic")
@@ -112,8 +112,14 @@ fn resolve_provider_env_proxies_minimax_via_codex_with_openai_vars() {
         save(prefs).unwrap();
         let env = resolve_provider_env("codex:minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
-        assert_eq!(env_map.get("OPENAI_BASE_URL").map(|s| s.as_str()), Some("https://api.minimax.io/v1"));
-        assert_eq!(env_map.get("OPENAI_API_KEY").map(|s| s.as_str()), Some("sk-test"));
+        assert_eq!(
+            env_map.get("OPENAI_BASE_URL").map(|s| s.as_str()),
+            Some("https://api.minimax.io/v1")
+        );
+        assert_eq!(
+            env_map.get("OPENAI_API_KEY").map(|s| s.as_str()),
+            Some("sk-test")
+        );
     });
 }
 
@@ -131,7 +137,11 @@ fn resolve_provider_env_composite_without_stored_pairing_is_empty() {
         });
         save(prefs).unwrap();
         let env = resolve_provider_env("codex:minimax");
-        assert!(env.is_empty(), "expected empty env for unstored pairing, got {:?}", env);
+        assert!(
+            env.is_empty(),
+            "expected empty env for unstored pairing, got {:?}",
+            env
+        );
     });
 }
 
@@ -161,8 +171,16 @@ fn resolve_provider_env_composite_uses_stored_pairing_tiers() {
         save(prefs).unwrap();
         let env = resolve_provider_env("claude:minimax");
         let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
-        assert_eq!(env_map.get("ANTHROPIC_MODEL").map(|s| s.as_str()), Some("MiniMax-M3[1m]"));
-        assert_eq!(env_map.get("ANTHROPIC_SMALL_FAST_MODEL").map(|s| s.as_str()), Some("MiniMax-M2.7"));
+        assert_eq!(
+            env_map.get("ANTHROPIC_MODEL").map(|s| s.as_str()),
+            Some("MiniMax-M3[1m]")
+        );
+        assert_eq!(
+            env_map
+                .get("ANTHROPIC_SMALL_FAST_MODEL")
+                .map(|s| s.as_str()),
+            Some("MiniMax-M2.7")
+        );
     });
 }
 
@@ -232,12 +250,13 @@ fn normalize_harness_default_trims_blanks_and_whitespace() {
 #[test]
 fn harness_default_for_reads_back_stored_value() {
     let mut prefs = AppPreferences::default();
-    prefs
-        .harness_defaults
-        .insert("claude".to_string(), HarnessConfigValue {
+    prefs.harness_defaults.insert(
+        "claude".to_string(),
+        HarnessConfigValue {
             model: Some("opus-4-1".to_string()),
             effort: None,
-        });
+        },
+    );
     let read = harness_default_for(&prefs, "claude").unwrap();
     assert_eq!(read.model.as_deref(), Some("opus-4-1"));
 }
@@ -266,7 +285,10 @@ fn upsert_harness_default_persists_then_round_trips() {
         save(prefs).unwrap();
         let stored = load().unwrap();
         assert_eq!(
-            stored.harness_defaults.get("claude").and_then(|v| v.model.clone()),
+            stored
+                .harness_defaults
+                .get("claude")
+                .and_then(|v| v.model.clone()),
             Some("opus-4-1".to_string())
         );
     });
@@ -405,7 +427,10 @@ fn failed_upsert_harness_default_leaves_cache_unchanged() {
         .unwrap_err();
         assert!(err.contains("unknown"));
         assert_eq!(
-            prefs.harness_defaults.get("claude").and_then(|v| v.model.clone()),
+            prefs
+                .harness_defaults
+                .get("claude")
+                .and_then(|v| v.model.clone()),
             Some("opus-4-1".to_string())
         );
     });

@@ -224,7 +224,11 @@ pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
 ///
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list ...@{u}`: the
 /// `@{u}` brace syntax is silently mangled by `Command::args` on Windows.
-pub fn ahead_behind(repo: &Repository, local: Oid, upstream: Oid) -> Result<(u32, u32), git2::Error> {
+pub fn ahead_behind(
+    repo: &Repository,
+    local: Oid,
+    upstream: Oid,
+) -> Result<(u32, u32), git2::Error> {
     let (ahead, behind) = repo.graph_ahead_behind(local, upstream)?;
     Ok((
         ahead.try_into().unwrap_or(u32::MAX),
@@ -292,10 +296,7 @@ mod tests {
 
         // 2. Parent repo.
         let parent = init_repo_with_commit(td.path(), &[("root.txt", "r\n")]);
-        let url = format!(
-            "file://{}",
-            sub_root.to_str().unwrap().replace('\\', "/")
-        );
+        let url = format!("file://{}", sub_root.to_str().unwrap().replace('\\', "/"));
 
         // 3. Register + init + add gitlink to index.
         let mut sm = parent.submodule(&url, Path::new("sub"), true).unwrap();
@@ -472,9 +473,13 @@ mod tests {
         )
         .unwrap();
         let mut cfg = repo.config().unwrap();
-        cfg.set_str(&format!("branch.{}.remote", branch), "origin").unwrap();
-        cfg.set_str(&format!("branch.{}.merge", branch), &format!("refs/heads/{}", branch))
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
             .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
         let local = commit_file(&repo, td.path(), "f.txt", "b\n");
 
         let upstream = upstream_oid_for_branch(&repo, &branch).expect("upstream resolves");
@@ -538,6 +543,9 @@ mod tests {
         let td = TestDir::new("prim_normalize");
         let p = td.path().to_string_lossy().to_string();
         let with_slash = format!("{}/", p.trim_end_matches(['/', '\\']));
-        assert_eq!(normalize_for_compare(&p), normalize_for_compare(&with_slash));
+        assert_eq!(
+            normalize_for_compare(&p),
+            normalize_for_compare(&with_slash)
+        );
     }
 }
