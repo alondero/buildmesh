@@ -615,8 +615,14 @@ function ResultRow({
       onMouseDown={onMouseDown}
       onClick={onClick}
       data-testid="command-omnibar-option"
-      className={`flex items-center gap-3 px-4 py-2 cursor-pointer ${
-        active ? 'bg-bg-card' : ''
+      className={`flex items-center gap-3 px-4 py-2 cursor-pointer border-l-2 transition-colors ${
+        // Keyboard caret uses the semantic selection surface (dark #1a2a3a /
+        // light #cce8ff) so text-accent-cyan match marks stay legible.
+        // Hover is CSS-only — never mutates activeIndex (WAI-ARIA combobox).
+        // Transparent idle border keeps row width stable with the active bar.
+        active
+          ? 'bg-bg-selection border-l-accent-cyan'
+          : 'border-l-transparent hover:bg-bg-card-hover'
       }`}
     >
       <div className="flex-1 min-w-0">

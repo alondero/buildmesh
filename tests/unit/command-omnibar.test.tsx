@@ -235,6 +235,49 @@ describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
     expect(selected).toHaveLength(1);
   });
 
+  it('keeps keyboard caret off the pointer — hover must not mutate activeIndex', () => {
+    // WAI-ARIA combobox: aria-activedescendant is keyboard-owned. Pointer
+    // enter must not call setActiveIndex (scrollIntoView fights the wheel,
+    // and a parked cursor steals the caret during ArrowUp/Down).
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(1);
+    const input = screen.getByRole('combobox');
+    const before = input.getAttribute('aria-activedescendant');
+    expect(before).toBe(rows[0].id);
+
+    fireEvent.mouseEnter(rows[1]);
+    expect(input.getAttribute('aria-activedescendant')).toBe(before);
+    expect(rows[0].getAttribute('aria-selected')).toBe('true');
+    expect(rows[1].getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('paints the keyboard-active row with the selection surface, not bg-card or cyan wash', () => {
+    // Active used bg-bg-card on bg-bg-overlay (~1/255). Must use the
+    // semantic selection token so text-accent-cyan match marks stay legible
+    // (a cyan wash on cyan marks fails contrast).
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(1);
+
+    const active = rows.find((o) => o.getAttribute('aria-selected') === 'true');
+    const idle = rows.find((o) => o.getAttribute('aria-selected') !== 'true');
+    expect(active).toBeTruthy();
+    expect(idle).toBeTruthy();
+
+    // Semantic surface token from App.css — not a one-off cyan fill.
+    expect(active!.className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(active!.className.split(/\s+/)).not.toContain('bg-bg-card');
+    expect(active!.className).not.toMatch(/bg-accent-cyan\//);
+    // Idle hover is CSS-only; keyboard paint stays off idle rows.
+    expect(idle!.className.split(/\s+/)).toContain('hover:bg-bg-card-hover');
+    expect(idle!.className.split(/\s+/)).not.toContain('bg-bg-selection');
+  });
+
   it('reports the discovery grid as the combobox popup for an empty files query', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
