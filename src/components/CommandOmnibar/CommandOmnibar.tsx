@@ -420,6 +420,9 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
                 // mousedown preventDefault keeps the input focused — the
                 // combobox owns focus for the palette's whole lifetime.
                 onMouseDown={(e) => e.preventDefault()}
+                // Hover moves the keyboard caret so Enter and the cyan
+                // highlight always describe the same row.
+                onMouseEnter={() => setActiveIndex(i)}
                 onClick={() => executeItem(result.item)}
               />
             ))}
@@ -579,12 +582,14 @@ function ResultRow({
   active,
   index,
   onMouseDown,
+  onMouseEnter,
   onClick,
 }: {
   result: FuzzyResult;
   active: boolean;
   index: number;
   onMouseDown: (e: ReactMouseEvent) => void;
+  onMouseEnter: () => void;
   onClick: () => void;
 }) {
   const { item } = result;
@@ -613,10 +618,15 @@ function ResultRow({
       role="option"
       aria-selected={active}
       onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
       onClick={onClick}
       data-testid="command-omnibar-option"
-      className={`flex items-center gap-3 px-4 py-2 cursor-pointer ${
-        active ? 'bg-bg-card' : ''
+      className={`flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors ${
+        // Cyan fill + inset accent bar. Plain `bg-bg-card` on the overlay
+        // shell (#16161d on #15151c) was ~1/255 apart and hid ArrowUp/Down.
+        active
+          ? 'bg-accent-cyan/20 shadow-[inset_3px_0_0_0_var(--color-accent-cyan)]'
+          : ''
       }`}
     >
       <div className="flex-1 min-w-0">

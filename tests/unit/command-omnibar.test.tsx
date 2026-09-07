@@ -235,6 +235,39 @@ describe('CommandOmnibar — WAI-ARIA combobox semantics', () => {
     expect(selected).toHaveLength(1);
   });
 
+  it('paints the keyboard-active row with a cyan-tinted selection, not bg-card', () => {
+    // Regression: active used `bg-bg-card` on `bg-bg-overlay` (~1/255 apart),
+    // which hid ArrowUp/Down. Active rows must use the accent fill.
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(1);
+
+    const active = rows.find((o) => o.getAttribute('aria-selected') === 'true');
+    const idle = rows.find((o) => o.getAttribute('aria-selected') !== 'true');
+    expect(active).toBeTruthy();
+    expect(idle).toBeTruthy();
+
+    expect(active!.className).toMatch(/\bbg-accent-cyan\/20\b/);
+    expect(active!.className).toMatch(/shadow-\[inset_3px_0_0_0_var\(--color-accent-cyan\)\]/);
+    expect(active!.className).not.toMatch(/\bbg-bg-card\b/);
+    expect(idle!.className).not.toMatch(/\bbg-accent-cyan\/20\b/);
+  });
+
+  it('moves the keyboard caret when the pointer enters a row', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('commands');
+    type('>view');
+    const rows = options();
+    expect(rows.length).toBeGreaterThan(1);
+    fireEvent.mouseEnter(rows[1]);
+    expect(rows[1].getAttribute('aria-selected')).toBe('true');
+    expect(
+      screen.getByRole('combobox').getAttribute('aria-activedescendant'),
+    ).toBe(rows[1].id);
+  });
+
   it('reports the discovery grid as the combobox popup for an empty files query', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
