@@ -84,7 +84,6 @@ function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership
 export const HEADER_TIER_BREAKPOINTS = {
   compact: 380,
   attentionLabel: 500,
-  pr: 640,
   menuWidth: 240,
 } as const;
 
@@ -177,7 +176,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
-        {width >= HEADER_TIER_BREAKPOINTS.pr && openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />}
+        {openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <AgentReviewButton node={node} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
@@ -189,9 +188,12 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <path d={isSingleMode ? 'M9 3v6H3m12 12v-6h6M9 9 3 3m12 12 6 6' : 'M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7'} />
           </svg>
         </button>
-        <KebabActions key={node.id} isSingleMode={isSingleMode} isPinned={node.is_pinned} toggleShortcutHint={toggleShortcutHint}
-          onToggleSolo={event => { event.stopPropagation(); handleToggleSolo(); }} onTogglePin={handleTogglePin}
-          onClose={handleClose} onOpenInExplorer={handleOpenInExplorer} canResume={canResume} onResume={handleResume}
+        <button type="button" onClick={handleClose} aria-label="Close agent node" title="Close agent node"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-status-error-bg hover:text-status-error">
+          <span aria-hidden="true">×</span>
+        </button>
+        <KebabActions key={node.id} isPinned={node.is_pinned} onTogglePin={handleTogglePin}
+          onOpenInExplorer={handleOpenInExplorer} canResume={canResume} onResume={handleResume}
           node={node} providerList={providerList} isRegenerateDisabled={regen.isRegenerateDisabled}
           hasRegenerateTargets={regen.hasRegenerateTargets} onPickRegenerate={regen.pickRegenerateProvider}
           onDetails={showDetails} onChanges={showChanges}
@@ -249,16 +251,12 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
  * unit because the menu now lives at body level.
  */
 interface KebabActionsProps {
-  isSingleMode: boolean;
   isPinned: boolean;
-  toggleShortcutHint: string;
-  onToggleSolo: (e: React.MouseEvent) => void;
   onTogglePin: (e: React.MouseEvent) => void;
-  onClose: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
   canResume: boolean;
   onResume: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'id' | 'name' | 'provider' | 'status'>;
+  node: Pick<AgentNode, 'id' | 'provider'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -270,7 +268,7 @@ interface KebabActionsProps {
 
 const KEBAB_MIN_WIDTH = 160;
 
-function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, canResume, onResume, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
+function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, canResume, onResume, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -482,29 +480,6 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
             </svg>
             {isPinned ? 'Unpin node' : 'Pin node'}
-          </button>
-          <button
-            role="menuitem" data-aria-menu-item
-            onClick={(e) => { closeAndReturnFocus(); onToggleSolo(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              {isSingleMode ? (
-                <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
-              ) : (
-                <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
-              )}
-            </svg>
-            {isSingleMode ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
-          </button>
-          <button
-            role="menuitem" data-aria-menu-item
-            aria-label={`Close session · ${node.name}`}
-            onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-          >
-            <span className="text-text-muted" aria-hidden="true">×</span>
-            Close session
           </button>
           {canResume && (
             <button

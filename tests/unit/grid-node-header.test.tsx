@@ -118,11 +118,14 @@ describe('GridNodeHeader contextual information and actions', () => {
   it('keeps the task title stable while actions and details target the selected reviewer', async () => {
     const reviewer = { ...NODE, id: 2, name: 'Security reviewer', path: '/review-worktree' };
     seedAgentNodes([NODE, reviewer], NODE.id);
+    const deleteAgentNode = vi.fn().mockResolvedValue(undefined);
+    useAgentNodeStore.setState({ deleteAgentNode });
     render(<GridNodeHeader nodeId={2} titleNodeId={1} onBuildRun={() => {}} />);
     expect(screen.getByTestId('grid-node-header').textContent).toContain('agent-1');
     expect(screen.getByTestId('grid-node-header').textContent).not.toContain('Security reviewer');
+    fireEvent.click(screen.getByRole('button', { name: 'Close agent node' }));
+    await waitFor(() => expect(deleteAgentNode).toHaveBeenCalledWith(2));
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
-    expect(screen.getByRole('menuitem', { name: 'Close session · Security reviewer' })).toBeTruthy();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open in file explorer' }));
     expect(openInFileManagerMock).toHaveBeenCalledWith('/review-worktree');
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
