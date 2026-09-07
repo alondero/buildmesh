@@ -742,14 +742,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     selectedRef.current = selected;
   }, [selected]);
 
-  // Re-read network status after a toggle completes so the realized state
-  // reflects the post-rebind listeners. Without this the user flips the
-  // switch, the optimistic `lanEnabled` flips, but the realized fields stay
-  // stale until the next modal open. We deliberately do NOT re-write
-  // `lanEnabled` here — the optimistic value is the source of truth between
-  // writes; clobbering it from a possibly-stale read would let a rapid
-  // double-toggle race (toggle A's refresh can land after toggle B's
-  // optimistic flip and revert B).
+  // Re-read the realized network fields after a toggle completes so the
+  // realized state (TLS active, exposed interfaces) reflects the
+  // post-rebind listeners. Without this the user flips the switch, the
+  // optimistic `lanEnabled` flips, but the realized fields stay stale
+  // until the next modal open.
+  //
+  // Issue #1534 (review round 4) — this is NOT the same as
+  // `loadNetwork()`. `loadNetwork()` would also overwrite `lanEnabled`
+  // from the network response, racing with the optimistic toggle
+  // value if a second toggle lands before the read resolves (toggle
+  // A's refresh can land after toggle B's optimistic flip and revert
+  // B). The optimistic `lanEnabled` is the source of truth between
+  // writes; this helper deliberately skips it.
   const refreshNetworkStatus = async () => {
     try {
       const network = await api.getNetworkStatus();
@@ -810,19 +815,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // references the real function rather than a TDZ-bound identifier
   // (issue #1534 review round 2 — exhaustive-deps).
   const loadPairings = useCallback(async (providerList: ProviderInfo[]) => {
-    // Issue #1534 (review round 2) — pairings need at least one
-    // provider to know which harnesses to query. Retrying with an
-    // empty list used to succeed with zero harnesses + zero compatible
-    // entries, lying to the user that there was nothing to attach.
-    // Now we mark pairings as `failed` with an explicit message so
-    // the user retries providers first.
-    if (providerList.length === 0) {
-      setResource('pairings', {
-        status: 'failed',
-        error: 'Awaiting providers list — retry providers first.',
-      });
-      return;
-    }
+    // Note: pairings no longer treats an empty `providerList` as a
+    // failure. Issue #1534 (review round 4) — in an environment with
+    // genuinely zero non-terminal harnesses (only `terminal` is
+    // installed), an empty list is the *correct* answer, not a
+    // recoverable error. We just succeed with empty effective
+    // pairings / verifications / compatibility. The "providers must
+    // load before pairings can retry" guard lives in `retryResource`
+    // (the boundary that knows the dependency).
     await withResourceLoad(
       (next) => setResource('pairings', next),
       async () => {
@@ -881,30 +881,46 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setProviders(list);
       },
     );
-    // Pairings derive their `compatibleByHarness` map from the providers
-    // list, so a successful providers load is the trigger for loading
-    // pairings — and a failed one means pairings must stay idle until
-    // providers succeeds (via retry). `loadPairings` is also responsible
-    // for refusing to run with empty providers, so we never pass the
-    // empty-array-of-zero-harnesses shortcut.
+    // Pairings derive their `compatibleByHarness` map from the
+    // providers list, so a successful providers load is the trigger
+    // for loading pairings — and a failed one means pairings must
+    // stay idle until providers succeeds (via retry).
+    //
+    // Issue #1534 (review round 4) — `await` (not `void`) the chain:
+    // a `void` here left callers resuming before pairings settled,
+    // which produced a brief "Loading pairings…" flash after every
+    // mutation that routes through `loadProviders` (attach / detach /
+    // reorder). Awaiting restores the ordering guarantee without
+    // changing the error surface (pairings failures still surface
+    // via `pairingsState` through `withResourceLoad`).
     if (result) {
-      void loadPairings(result);
+      await loadPairings(result);
     }
-    // Issue #1534 (review round 2) — exhaustive-deps: `loadPairings`
-    // is referenced inside the callback. Including it here means the
-    // callback re-binds when `loadPairings` identity changes (it
-    // does, every render via `setResource`), so a stale closure
-    // can't pin the wrong `loadPairings` reference.
   }, [setResource, loadPairings]);
 
   const loadAccounts = useCallback(async () => {
     await withResourceLoad(
       (next) => setResource('accounts', next),
       async () => {
-        const [accountList, catalog] = await Promise.all([
-          api.getProviderAccounts(),
-          api.getKeyedFirstClassCatalog(),
-        ]);
+        // Issue #1534 (review round 4) — accounts is the primary
+        // read; its failure flips the resource to `failed`. The
+        // catalog is auxiliary (it drives the "+ Add provider"
+        // picker, NOT the existing-accounts display). Bundling the
+        // two with `Promise.all` previously meant a transient
+        // catalog rejection hid the user's real accounts behind an
+        // error banner. Now we fetch accounts first, then catalog
+        // best-effort — a catalog failure is logged and degrades
+        // the add-picker to "empty" without affecting the accounts
+        // card list.
+        const accountList = await api.getProviderAccounts();
+        let catalog: Awaited<ReturnType<typeof api.getKeyedFirstClassCatalog>> = [];
+        try {
+          catalog = await api.getKeyedFirstClassCatalog();
+        } catch {
+          // Non-fatal: account cards still render correctly without
+          // the catalog. Log so a backend issue is debuggable.
+          console.warn('[AppSettings] Failed to load keyed-first-class catalog; add-picker will be empty.');
+        }
         return { accountList, catalog } as const;
       },
       ({ accountList, catalog }) => {
@@ -952,6 +968,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // status flips to `loading`, then back to `loaded` | `failed` based
   // on the read outcome. Other resources are untouched — the user
   // clicking Retry should rehydrate only what they asked for.
+  //
+  // Issue #1534 (review round 4) — pairings has a hard dependency
+  // on providers: it queries `compatible_providers_for_harness` for
+  // each non-terminal harness in the providers list. If providers
+  // isn't loaded, retrying pairings would either fabricate a clean
+  // state (the bug round 2 caught) or stay permanently failed (the
+  // trap round 4 caught). The boundary check belongs here, not in
+  // the core loader.
   const retryResource = useCallback((key: ResourceKey) => {
     switch (key) {
       case 'preferences':
@@ -964,11 +988,18 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         void loadAccounts();
         return;
       case 'pairings':
-        // Pairings need a providers snapshot to know which harnesses to
-        // query. If providers failed we can't load pairings either —
-        // fall back to whatever is currently in state, even if empty,
-        // so the retry button still does something visible.
-        void loadPairings(providersRef.current);
+        if (resources.providers.status !== 'loaded') {
+          // Providers must load successfully before pairings can
+          // be re-queried. Surface a clear "retry providers first"
+          // message rather than fabricating success or trapping
+          // the resource in a permanent failure state.
+          setResource('pairings', {
+            status: 'failed',
+            error: 'Awaiting providers list — retry providers first.',
+          });
+          return;
+        }
+        void loadPairings(providers);
         return;
       case 'coordinator':
         void loadCoordinator();
@@ -980,12 +1011,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         void loadNetwork();
         return;
     }
-  }, [loadPreferences, loadProviders, loadAccounts, loadPairings, loadCoordinator, loadDevices, loadNetwork]);
+  }, [
+    resources.providers.status,
+    providers,
+    loadPreferences,
+    loadProviders,
+    loadAccounts,
+    loadPairings,
+    loadCoordinator,
+    loadDevices,
+    loadNetwork,
+    setResource,
+  ]);
 
   useEffect(() => {
-    // Fan out the six independent initial loads concurrently. allSettled
-    // (not all) so a single rejection doesn't short-circuit the others —
-    // that's the whole point of the refactor.
+    // Fan out the six independent initial loads concurrently.
+    // `Promise.allSettled` here is *defensive*: each `loadX` already
+    // swallows its own errors via `withResourceLoad` and updates
+    // `resources[key]` independently, so a rejection in one loader
+    // doesn't affect the others. `allSettled` just makes the
+    // intent explicit and protects against a loader that escapes
+    // its catch in the future.
     void Promise.allSettled([
       loadPreferences(),
       loadProviders(),
@@ -1013,11 +1059,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setDevices(prev => prev.filter(d => d.id !== id));
     try {
       await api.revokeDeviceSession(id);
-      try {
-        setDevices(await api.listDeviceSessions());
-      } catch (refreshErr) {
-        console.error('Failed to refresh device list after revoke:', refreshErr);
-      }
+      // Issue #1534 (review round 4) — route the post-revoke
+      // refresh through the named loader. A `listDeviceSessions`
+      // failure now flips `devicesState` to `failed` and surfaces
+      // the banner instead of silently leaving the post-revoke
+      // list stale (the revoke DID happen — the loader just
+      // rehydrates the metadata). The mutation itself still uses
+      // `setError` on the optimistic-rollback path because that's
+      // a transient write-failure surface, not a load failure.
+      await loadDevices();
     } catch (e) {
       setDevices(previous);
       setError(formatError(e));
@@ -1116,11 +1166,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.verifyProviderPairing(harnessId, providerId, envType);
-      // Verifications are a small auxiliary read that pairings
-      // *uses* but the modal tracks separately. Re-fetching it
-      // here mirrors the previous "best-effort" behaviour — a
-      // failure falls back to an empty list (the modal still
-      // renders pairings via the resource state machine).
+      // Issue #1534 (review round 4) — verifications aren't a
+      // tracked resource (they live in `pairingVerifications`
+      // alongside pairings, but the modal doesn't surface them
+      // independently). The full `loadPairings()` would also
+      // re-query pairings + compatibility, which is wasteful for
+      // a verify-only operation. We keep this as a focused,
+      // best-effort side-channel refresh — a failure here falls
+      // back to an empty list and the modal continues rendering
+      // pairings via the resource state machine.
       setPairingVerifications(await getHostPairingVerifications());
     } catch (e) {
       setError(formatError(e));
@@ -1268,8 +1322,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setHarnessDefault(profileId, value);
-      const prefs = await api.getAppPreferences();
-      setHarnessDefaults(prefs.harness_defaults ?? {});
+      // Issue #1534 (review round 4) — route the post-write
+      // preferences refresh through the loader so a
+      // `get_app_preferences` rejection flips `prefsState` to
+      // `failed` and surfaces the banner, instead of leaving the
+      // optimistic `harness_defaults` commit silently stale.
+      // `loadPreferences` updates the modal-wide drafts (pool size,
+      // worktree dir, etc.) from the canonical preferences and
+      // re-reads `harness_defaults` on success.
+      await loadPreferences();
       return true;
     } catch (e) {
       setError(formatError(e));
@@ -1313,10 +1374,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setAppWorktreeDirectory(canonical === '' ? null : canonical);
-      const prefs = await api.getAppPreferences();
-      const stored = prefs.worktree_directory?.trim() ?? '';
-      setWorktreeDirDraft(stored);
-      worktreeDirSavedRef.current = stored;
+      // Issue #1534 (review round 4) — route the post-write
+      // preferences refresh through the loader so a rejection
+      // surfaces in the preferences banner rather than leaving
+      // the optimistic draft silently stale.
+      await loadPreferences();
     } catch (e) {
       worktreeDirSavedRef.current = previous;
       setWorktreeDirDraft(previous);
