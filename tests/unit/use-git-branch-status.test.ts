@@ -83,7 +83,7 @@ describe('useGitBranchStatus', () => {
     // window (minRefetchIntervalMs) — inside it, events are absorbed into a
     // trailing refetch. Jump Date.now() past the window so this test keeps
     // asserting the immediate-refetch path (same pattern as use-open-pr).
-    const _nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', { path: MESH_PATH });
@@ -119,7 +119,7 @@ describe('useGitBranchStatus', () => {
     // window (minRefetchIntervalMs) — inside it, events are absorbed into a
     // trailing refetch. Jump Date.now() past the window so this test keeps
     // asserting the immediate-refetch path (same pattern as use-open-pr).
-    const _nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', {
@@ -144,7 +144,7 @@ describe('useGitBranchStatus', () => {
     // window (minRefetchIntervalMs) — inside it, events are absorbed into a
     // trailing refetch. Jump Date.now() past the window so this test keeps
     // asserting the immediate-refetch path (same pattern as use-open-pr).
-    const _nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', {

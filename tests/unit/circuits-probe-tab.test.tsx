@@ -841,7 +841,6 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       ],
     };
     mockBackend({ runs: [RUN_FAILED] });
-    const _user = userEvent.setup();
     openProbeDestination('circuits');
 
     // Failed runs open by default, and a failure is never hidden.

@@ -216,7 +216,10 @@ function Invoke-Rust {
 Write-Host '== agent infrastructure and diff rules ==' -ForegroundColor Cyan
 Push-Location $repo
 try {
-  & node --test tests/agent-infra/check-agent-diff.test.mjs
+  # PR #1635 review feedback — the previous hardcoded `check-agent-diff.test.mjs`
+  # silently skipped the new eslint-config-gate.test.mjs. Globbing the whole
+  # directory means future agent-infra tests get picked up automatically.
+  & node --test tests/agent-infra/*.test.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-tests' }
   & node scripts/check-agent-diff.mjs
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }

@@ -257,18 +257,18 @@ export function MeshPropertiesTab() {
   // as the form below them. The hook clears the prior error before
   // each save and surfaces the rejection's `.message` on fail.
   const saveStatus = useSaveStatus();
+  // Destructured so the deps array can include the stable reset
+  // callback without an eslint-disable directive (PR #1635 review
+  // feedback).
+  const { reset: resetSaveStatus } = saveStatus;
 
   // Reset the indicator on mesh-switch so a stale "Save failed" from
   // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
   // bare useEffect that tracks `activeMeshId` is sufficient — the
   // hook's own reset() cancels the pending saved→idle timer cleanly.
   useEffect(() => {
-    saveStatus.reset();
-    // `saveStatus.reset` is a stable closure from the SaveIndicator
-    // hook; see the matching comment in AutopilotProbeTab.tsx.
-    // Issue #1542.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- saveStatus.reset is a stable closure from the SaveIndicator hook; tracking it in deps adds noise without changing when the effect fires.
-  }, [activeMeshId]);
+    resetSaveStatus();
+  }, [activeMeshId, resetSaveStatus]);
 
   // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
   // `wrappedSave` can read the CURRENT mesh id at resolve time, not

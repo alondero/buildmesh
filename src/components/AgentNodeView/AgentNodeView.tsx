@@ -401,7 +401,7 @@ export function AgentNodeView() {
     // `terminalManager` is a stable singleton identity (issue #1542);
     // depending on the whole `activeNode` object would re-fit on every
     // unrelated field change (status, title, …).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- terminalManager is a stable singleton; depending on activeNode would re-fit on unrelated field changes.
   }, [activeNode?.id]);
 
   // Escape exits Single mode. Only bound while single is active so we don't

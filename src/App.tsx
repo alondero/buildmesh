@@ -429,17 +429,17 @@ function App() {
       addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
-    // `addToast` is a stable function reference from the toast store;
-    // re-binding the listener on every render churns unlisten/relisten
-    // for no functional gain. Issue #1542 — exhaustive-deps.
+    // `addToast` is a module-level export (not a hook return value) —
+    // module-level exports do not belong in React dependency arrays
+    // because they don't change identity. PR #1635 review feedback.
   }, []);
 
   useEffect(() => {
     if (storeError) {
       addToast('System', storeError, 'error');
     }
-    // `addToast` is a stable function reference; see the comment on the
-    // effect above. Issue #1542 — exhaustive-deps.
+    // Same rationale as the effect above — `addToast` is a module-level
+    // export, not part of the dep contract.
   }, [storeError]);
 
   // Issue #1250 — extract init into a callback so the BootErrorPanel's

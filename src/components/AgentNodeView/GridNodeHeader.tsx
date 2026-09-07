@@ -222,9 +222,12 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
     if (!node) return '';
     const m = meshesById.get(node.mesh_id);
     return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
-    // `node` is intentionally read via its identity — `meshesById` is
-    // the only thing that can change the rendered output. Issue #1542.
-  }, [meshesById, node]);
+    // Deps key on `meshesById` + the identity fields read out of
+    // `node`. Depending on the whole `node` object would bust the memo
+    // on every parent re-render that re-creates the node reference
+    // (PR #1635 review feedback).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- depending on `node` directly would bust the memo on every parent re-render that re-creates the node ref; identity-field deps are the canonical stable signal.
+  }, [meshesById, node?.mesh_id, node?.id]);
 
   if (!node) return null;
   const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);

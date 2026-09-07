@@ -283,7 +283,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('numeric loop fields parse to integers; blank max iterations means continuous', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
-    const _user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
@@ -324,7 +323,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('rejects invalid numeric input with a SaveIndicator error and skips the IPC', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }));
-    const _user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);
@@ -509,7 +507,6 @@ describe('AutopilotProbeTab (wayfinder #990 ticket #994)', () => {
 
   it('surfaces a backend rejection in the SaveIndicator', async () => {
     mockBackend(meshRow({ autopilot_mode: 'looping' }), { rejectLoopConfig: true });
-    const _user = userEvent.setup();
     openProbeDestination('autopilot');
 
     const max = await screen.findByLabelText(/^Max iterations/i);

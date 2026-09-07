@@ -15,7 +15,7 @@
     "lint": "eslint . --max-warnings 0",
     "check:agent": "node scripts/check-agent-diff.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs --dist dist",
-    "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs",
+    "test:agent": "node --test tests/agent-infra/*.test.mjs",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
