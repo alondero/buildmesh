@@ -212,6 +212,21 @@ pub async fn write_status_only(
     write_full(lines, response.as_bytes()).await
 }
 
+/// Write a `503 Service Unavailable` whose **`Retry-After` header**
+/// hints a 1-second backoff. Used by the pool-exhaustion / DB-busy paths
+/// in `http::auth::guard` and the ws-ticket mint path in `http/mod.rs`
+/// (issue #1533 review: a bare 503 invites client stampedes — the
+/// `Retry-After: 1` header tells well-behaved clients to back off one
+/// checkout-deadline before retrying).
+pub async fn write_service_unavailable_with_retry(
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+) -> std::io::Result<()> {
+    let response = "HTTP/1.1 503 Service Unavailable\r\n\
+                    Retry-After: 1\r\n\
+                    Content-Length: 0\r\n\r\n";
+    write_full(lines, response.as_bytes()).await
+}
+
 /// Write a `429 Too Many Requests` whose **body** is uniform with the
 /// auth-failure shapes (empty) and whose **`Retry-After` header** carries
 /// the pacing hint. The body uniformity is the load-bearing security

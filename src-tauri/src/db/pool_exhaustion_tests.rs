@@ -191,6 +191,18 @@ mod tests {
             matches!(err, DbError::ReaderPoolExhausted { .. }),
             "expected ReaderPoolExhausted under spurious wakes, got {err:?}"
         );
+        // Lower bound: the checkout must actually have waited the full
+        // deadline. Without this assertion, an early-return bug (e.g.
+        // returning Err on the first spurious wake) would still satisfy the
+        // upper-bound check below — review finding #6.
+        assert!(
+            elapsed >= READER_CHECKOUT_TIMEOUT.saturating_sub(Duration::from_millis(100)),
+            "elapsed {elapsed:?} finished before the deadline elapsed — \
+             checkout returned early under sustained spurious wakes"
+        );
+        // Upper bound: the absolute-deadline loop must not let spurious
+        // wakes re-arm the timer past the nominal timeout (the bug this
+        // whole test exists to pin).
         assert!(
             elapsed < READER_CHECKOUT_TIMEOUT + Duration::from_millis(500),
             "elapsed {elapsed:?} materially exceeded the deadline ({READER_CHECKOUT_TIMEOUT:?}) \
@@ -255,14 +267,25 @@ mod tests {
     /// age of a lease still in flight at the moment of timeout. This pins
     /// the fix for the review's "blind to currently hung or deadlocked
     /// leases" finding (issue #1533 review).
+    ///
+    /// The assertion is `>= 1200ms`, NOT `>= 250ms` as in the v2 version.
+    /// The 1-second checkout timeout means every fresh lease is also
+    /// ≥1000ms at the moment of failure, so the v2 `>= 250` was vacuously
+    /// satisfied by any timeout — even one with a buggy field that
+    /// returned just the timeout duration. The tightened bound asserts
+    /// the field reflects the slow lease's age (~1250ms: 250ms sleep +
+    /// ~1000ms timeout wait), proving the field isn't just echoing the
+    /// nominal timeout (review finding #6).
     #[test]
     fn current_longest_lease_age_is_actionable() {
         let (_dir, pool) = fresh_pool();
 
-        // Hold one lease for ~250ms (well under the timeout but clearly
-        // observable). The remaining 7 are checked out later so the
-        // in-flight map at timeout has 8 entries whose ages all exceed the
-        // wait time.
+        // Hold one lease for ~250ms. The remaining 7 are checked out
+        // immediately after, then the 9th times out after 1s. At the moment
+        // of failure:
+        //   * the slow lease has been held for ~1250ms (250ms sleep + ~1s timeout)
+        //   * the 7 fresh leases have been held for ~1000ms (just the timeout)
+        // `current_longest_lease_ms` must be ≥ the slow lease's age.
         let slow = pool.checkout().expect("first lease");
         thread::sleep(Duration::from_millis(250));
 
@@ -279,9 +302,10 @@ mod tests {
                 ..
             } => {
                 assert!(
-                    current_longest_lease_ms >= 250,
-                    "current_longest_lease_ms ({current_longest_lease_ms}ms) must reflect \
-                     the 250ms-sleep lease — the actionable 'what's hung' signal"
+                    current_longest_lease_ms >= 1200,
+                    "current_longest_lease_ms ({current_longest_lease_ms}ms) must reflect the \
+                     slow lease's ~1250ms age, NOT just the 1000ms timeout — vacuous assertion \
+                     means the field is buggy"
                 );
             }
             other => panic!("expected DbError::ReaderPoolExhausted, got {other:?}"),

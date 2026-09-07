@@ -185,6 +185,11 @@ pub fn authorize(headers: &str, required: RequiredScope) -> AuthOutcome {
         Ok(Some(role)) if satisfies(role, required) => AuthOutcome::Ok(role),
         Ok(Some(_)) => AuthOutcome::Forbidden,
         Err(db::DbError::ReaderPoolExhausted { .. }) => AuthOutcome::ServiceUnavailable,
+        // `NotInitialized` is a transient startup condition, not a
+        // credential failure. Returning 503 lets the client retry once
+        // `init()` has completed; returning 401 would log them out for
+        // what's actually a server-side boot state.
+        Err(db::DbError::NotInitialized) => AuthOutcome::ServiceUnavailable,
         // Other DB errors (e.g. SQLITE_BUSY from the writer) propagate as
         // 503 — the dispatcher treats them as retryable too. A real
         // `Sqlite(...)` failure here would be a deeper bug (the resolver
@@ -223,7 +228,9 @@ pub async fn guard(
             None
         }
         AuthOutcome::ServiceUnavailable => {
-            let _ = request::write_status_only(lines, "503 Service Unavailable").await;
+            // 503 + `Retry-After: 1` (issue #1533 review: a bare 503 invites
+            // a client stampede on transient pool exhaustion).
+            let _ = request::write_service_unavailable_with_retry(lines).await;
             None
         }
     }

@@ -1588,7 +1588,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                 let _ = request::write_status_only(&mut lines, "403 Forbidden").await;
             }
             auth::AuthOutcome::ServiceUnavailable => {
-                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                // 503 + `Retry-After: 1` (issue #1533 review: a bare 503
+                // invites a client stampede on transient pool exhaustion).
+                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
             }
         }
         return;
@@ -1721,12 +1723,16 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         let device_id = match auth::resolve_device_session(&headers) {
             Ok(id) => id,
             Err(db::DbError::ReaderPoolExhausted { .. }) => {
-                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
+                return;
+            }
+            Err(db::DbError::NotInitialized) => {
+                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
                 return;
             }
             Err(db::DbError::Sqlite(error)) => {
                 tracing::warn!(%error, "ws ticket mint failed to resolve device session");
-                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
                 return;
             }
         };
