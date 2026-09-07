@@ -87,7 +87,15 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
-    setActiveNode: vi.fn(),
+    // Issue #1631 renamed the prop `setActiveNode` → `onActivateNode` to
+    // match the click-handler naming used elsewhere in the sidebar (see
+    // `MeshItem.tsx:63`). The old name no longer exists on the component,
+    // so passing it here is a silent no-op — the NodeItem's onSelect
+    // then throws `onActivateNode is not a function` when the user
+    // (or this test) clicks the node row. Pin the new name so the
+    // click assertion below actually fires `onActivateNode(10)` and
+    // the row lands the mesh+node selection.
+    onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
@@ -165,7 +173,7 @@ describe('MeshItem', () => {
   it('renders a NodeItem per mesh node and selects it on click', async () => {
     const { props } = renderMeshItem({ meshNodes: [makeNode()] });
     await userEvent.click(screen.getByText('node-a'));
-    expect(props.setActiveNode).toHaveBeenCalledWith(10);
+    expect(props.onActivateNode).toHaveBeenCalledWith(10);
     expect(props.selectMesh).toHaveBeenCalledWith(3);
   });
 
@@ -788,7 +796,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
                 onOpenSessionHistoryProbe={vi.fn()}
                 meshNodes={[]}
                 activeNodeId={null}
-                setActiveNode={vi.fn()}
+                onActivateNode={vi.fn()}
                 selectMesh={vi.fn()}
                 onDeleteNode={vi.fn()}
                 getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
