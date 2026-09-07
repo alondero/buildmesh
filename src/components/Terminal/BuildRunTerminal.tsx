@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { buildRunTerminalManager } from './BuildRunTerminalRegistry';
@@ -7,12 +7,7 @@ interface BuildRunTerminalProps {
   sessionId: number;
   mode?: 'build' | 'run' | 'terminal';
   useWorktree?: boolean;
-  onClose?: () => void;
-}
-
-function modeLabel(mode: 'build' | 'run' | 'terminal'): string {
-  if (mode === 'terminal') return 'Terminal';
-  return mode === 'build' ? 'Build' : 'Run';
+  focusOnAttach?: boolean;
 }
 
 /**
@@ -21,8 +16,8 @@ function modeLabel(mode: 'build' | 'run' | 'terminal'): string {
  * The component no longer owns the xterm Terminal, the PTY lifecycle, or the
  * event listener — those live in the singleton registry so they survive React
  * unmounts. This component is just a DOM host: it attaches the xterm into its
- * container on mount, detaches it on unmount, and disposes the whole session
- * (xterm + PTY) only when the user explicitly clicks the X.
+ * container on mount and detaches it on unmount. The card owns explicit tab
+ * closing; switching panels preserves the process and scrollback.
  *
  * The detached-on-unmount lifecycle is what fixes the "terminal resets on
  * mesh navigation" bug: when a `NodeCard` unmounts because the user switched
@@ -32,13 +27,17 @@ function modeLabel(mode: 'build' | 'run' | 'terminal'): string {
  * the effect runs `attach`, and the same xterm + scrollback is re-parented
  * into the new container without respawning the PTY.
  */
-export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, onClose }: BuildRunTerminalProps) {
+export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, focusOnAttach = true }: BuildRunTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const focusOnAttachRef = useRef(focusOnAttach);
+  focusOnAttachRef.current = focusOnAttach;
 
   useAsyncEffect((signal) => {
     if (!containerRef.current) return;
     const container = containerRef.current;
-    buildRunTerminalManager.attach(sessionId, mode, useWorktree, container, signal);
+    buildRunTerminalManager.attach(sessionId, mode, useWorktree, container, signal).then(instance => {
+      if (!signal.aborted && focusOnAttachRef.current) instance?.term.focus();
+    });
     return () => {
       // DOM-only teardown — the registry preserves the xterm + PTY. The
       // next mount's `attach` will re-parent the existing `.xterm` element
@@ -50,35 +49,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     };
   }, [sessionId, mode, useWorktree]);
 
-  // X button: full teardown (kills PTY + disposes xterm + clears parent state).
-  // We must run `dispose` BEFORE `onClose` so the PTY is killed before the
-  // parent's `setBuildRunOpen(null)` causes this component to unmount —
-  // otherwise the React effect cleanup's `detach` would race with our intent
-  // to close. Order matters.
-  const handleClose = useCallback(() => {
-    buildRunTerminalManager.dispose(sessionId, mode, useWorktree); // allow-dispose — explicit X-button close; the equivalent of "node deleted" for the agent terminal
-    onClose?.();
-  }, [sessionId, mode, useWorktree, onClose]);
-
   return (
-    <div className="flex flex-col flex-1 overflow-hidden bg-bg-overlay border-t border-border-default">
-      <div className="flex items-center justify-between px-2 py-1 bg-bg-base border-b border-border-default">
-        <span className="text-2xs font-mono text-text-muted">
-          {modeLabel(mode)}{useWorktree ? ': worktree' : ''}
-        </span>
-        <button
-          onClick={handleClose}
-          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs" type="button" aria-label="Close build/run terminal"
-          title="Close build/run terminal"
-        >
-          ×
-        </button>
-      </div>
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-hidden"
-        style={{ padding: '4px' }}
-      />
-    </div>
+    <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-bg-overlay p-1" />
   );
 }

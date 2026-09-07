@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 
 // jsdom doesn't ship ResizeObserver. Keep each observer instance so the
 // resize scheduler can be driven without a module-level callback singleton.
@@ -276,6 +276,91 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(buildRunCalls[0]).toEqual(['build_run', { nodeId: 8, mode: 'terminal' }]);
   });
 
+  it('closes a PTY when explicit dispose races the build_run resolution', async () => {
+    let resolveBuildRun!: () => void;
+    const buildRunPending = new Promise<void>((resolve) => { resolveBuildRun = resolve; });
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === 'build_run' ? buildRunPending : Promise.resolve({}),
+    );
+
+    const container = document.createElement('div');
+    const attachPromise = buildRunTerminalManager.attach(81, 'terminal', true, container);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(true);
+
+    // The instance is removed while the Rust command is still in flight.
+    // The eventual resolution must close the PTY instead of reviving the
+    // removed instance or leaving an unreachable child process behind.
+    buildRunTerminalManager.dispose(81, 'terminal', true);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'close_build_run')).toBe(false);
+
+    resolveBuildRun();
+    expect(await attachPromise).toBeNull();
+    expect(vi.mocked(invoke).mock.calls).toEqual(expect.arrayContaining([
+      ['close_build_run', { nodeId: 81 }],
+    ]));
+    expect(buildRunTerminalManager.getInstance(81, 'terminal', true)).toBeUndefined();
+  });
+
+  it('awaits deferred PTY close and output unsubscribe before a replacement spawn', async () => {
+    let resolveClose!: () => void;
+    let resolveUnsubscribe!: () => void;
+    const closePending = new Promise<void>((resolve) => { resolveClose = resolve; });
+    const unsubscribePending = new Promise<void>((resolve) => { resolveUnsubscribe = resolve; });
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === 'close_build_run') return closePending;
+      if (command === 'unsubscribe_build_run_output') return unsubscribePending;
+      return Promise.resolve({});
+    });
+
+    const container = document.createElement('div');
+    await buildRunTerminalManager.attach(83, 'build', true, container);
+
+    // The mode switch must wait for both teardown IPC calls. If it spawned
+    // immediately, the replacement's build_run/subscribe calls could be
+    // removed by the old close/unsubscribe resolutions.
+    const replacement = buildRunTerminalManager.attach(83, 'run', true, container);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls).toEqual(expect.arrayContaining([
+      ['close_build_run', { nodeId: 83 }],
+      ['unsubscribe_build_run_output', { sessionId: 83 }],
+    ]));
+
+    resolveClose();
+    resolveUnsubscribe();
+    await expect(replacement).resolves.toBeDefined();
+
+    const calls = vi.mocked(invoke).mock.calls.map(([command]) => command);
+    const closeIndex = calls.indexOf('close_build_run');
+    const unsubscribeIndex = calls.indexOf('unsubscribe_build_run_output');
+    const replacementBuildIndex = calls.lastIndexOf('build_run');
+    expect(replacementBuildIndex).toBeGreaterThan(closeIndex);
+    expect(replacementBuildIndex).toBeGreaterThan(unsubscribeIndex);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(2);
+  });
+
+  it('does not retain a registry instance when attach is aborted before lazy creation finishes', async () => {
+    let resolveOutputListener!: (unlisten: () => void) => void;
+    const outputListenerPending = new Promise<() => void>((resolve) => { resolveOutputListener = resolve; });
+    vi.mocked(listen).mockImplementationOnce(() => outputListenerPending as never);
+
+    const controller = new AbortController();
+    const container = document.createElement('div');
+    const attachPromise = buildRunTerminalManager.attach(82, 'terminal', true, container, controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(listen)).toHaveBeenCalled();
+
+    controller.abort();
+    buildRunTerminalManager.dispose(82, 'terminal', true);
+    resolveOutputListener(() => {});
+
+    expect(await attachPromise).toBeNull();
+    expect(buildRunTerminalManager.getInstance(82, 'terminal', true)).toBeUndefined();
+    expect(terminalInstances[0].dispose).toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(false);
+  });
+
   it('D: deduplicates concurrent attach() calls into one doCreate + one build_run', async () => {
     // Three concurrent attaches on the same sessionId — e.g. a fast
     // React Strict-Mode double-render, or two NodeCards mounting at the
@@ -473,6 +558,40 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
     const written = term.write.mock.calls.map((c) => c[0]).join('');
     expect(written).toContain('[process exited]');
+  });
+
+  it('ignores a delayed exit from a disposed PTY after reopening the same session', async () => {
+    const delayedExitHandlers: Array<(event: { payload: unknown }) => void> = [];
+    const defaultListen = vi.mocked(listen).getMockImplementation();
+    vi.mocked(listen).mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'build-run-exited-84') delayedExitHandlers.push(handler);
+      // Keep the old exit callback registered so this test models a late
+      // backend event whose frontend unlisten has not taken effect yet.
+      return Promise.resolve(() => {});
+    });
+
+    try {
+      const container = document.createElement('div');
+      const first = await buildRunTerminalManager.attach(84, 'terminal', true, container);
+      const firstGeneration = first!.generation;
+      await buildRunTerminalManager.dispose(84, 'terminal', true);
+
+      const replacement = await buildRunTerminalManager.attach(84, 'terminal', true, container);
+      expect(replacement!.generation).toBeGreaterThan(firstGeneration);
+      expect(delayedExitHandlers).toHaveLength(2);
+      replacement!.term.write.mockClear();
+
+      // The old PTY's event must be rejected by both the tombstoned
+      // generation and the current-instance identity check. The replacement
+      // remains alive and does not show a false process-exited banner.
+      delayedExitHandlers[0]({ payload: {} });
+      expect(replacement!.ptyAlive).toBe(true);
+      expect(replacement!.term.write).not.toHaveBeenCalledWith(
+        expect.stringContaining('[process exited]'),
+      );
+    } finally {
+      if (defaultListen) vi.mocked(listen).mockImplementation(defaultListen);
+    }
   });
 
   it('H: subscribes to the binary Channel on create and unsubscribes only on dispose', async () => {

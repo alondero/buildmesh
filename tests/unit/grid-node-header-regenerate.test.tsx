@@ -213,13 +213,14 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
 });
 
 describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
-  it('renders an inline Regenerate button at wide tier whose picker includes the current provider', async () => {
+  it('offers Regenerate in the action menu at wide tier whose picker includes the current provider', async () => {
     mockProviders();
     setupState();
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     const root = screen.getByTestId('grid-node-header');
     fireResize(root, 600);
-    const btn = await screen.findByTestId('grid-regenerate-button');
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    const btn = await screen.findByTestId('grid-regenerate-trigger');
     expect(btn.hasAttribute('disabled')).toBe(false);
     await userEvent.click(btn);
     const submenu = await screen.findByTestId('grid-regenerate-submenu');
@@ -233,7 +234,8 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     setupState();
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireResize(screen.getByTestId('grid-node-header'), 600);
-    await userEvent.click(await screen.findByTestId('grid-regenerate-button'));
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    await userEvent.click(await screen.findByTestId('grid-regenerate-trigger'));
     await userEvent.click(await screen.findByTestId('grid-regenerate-submenu-current'));
     await waitFor(() => {
       expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(NODE.id, 'claude');
@@ -245,7 +247,8 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     setupState({ ...NODE, status: 'running' });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireResize(screen.getByTestId('grid-node-header'), 600);
-    await userEvent.click(await screen.findByTestId('grid-regenerate-button'));
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    await userEvent.click(await screen.findByTestId('grid-regenerate-trigger'));
     await userEvent.click(await screen.findByTestId('grid-regenerate-submenu-current'));
     // Dialog appears instead of immediate IPC.
     expect(await screen.findByText(/Regenerate this node\?/)).toBeTruthy();
@@ -285,12 +288,13 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     });
   });
 
-  it('disables the inline button while spawning', async () => {
+  it('disables Regenerate while spawning', async () => {
     mockProviders();
     setupState({ ...NODE, status: 'spawning' });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireResize(screen.getByTestId('grid-node-header'), 600);
-    const btn = await screen.findByTestId('grid-regenerate-button');
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    const btn = await screen.findByTestId('grid-regenerate-trigger');
     expect(btn.hasAttribute('disabled')).toBe(true);
   });
 
@@ -326,7 +330,8 @@ describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
     setupState();
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireResize(screen.getByTestId('grid-node-header'), 600);
-    const btn = await screen.findByTestId('grid-regenerate-button');
+    fireEvent.click(screen.getByLabelText('Agent node actions'));
+    const btn = await screen.findByTestId('grid-regenerate-trigger');
     await waitFor(() => expect(btn.hasAttribute('disabled')).toBe(true));
     mockProviders();
     await act(async () => {
