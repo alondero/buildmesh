@@ -342,7 +342,7 @@ fn set_reader_handle(process: &Arc<BuildRunProcess>, handle: JoinHandle<()>) {
 static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<BuildRunRegistry> =
     once_cell::sync::Lazy::new(BuildRunRegistry::new);
 
-/// Per-node spawn locks (round-5 review finding #1).
+/// Per-node spawn locks (round-5 review finding #1; round-6 polish).
 ///
 /// `build_run_blocking` calls into `BUILD_RUN_REGISTRY.insert` to
 /// reap any previous incarnation, then opens a PTY and spawns the
@@ -356,53 +356,39 @@ static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<BuildRunRegistry> =
 /// worktree CWD indefinitely.
 ///
 /// The fix: serialize the entire `build_run` start path per node.
-/// `acquire_node_lock` returns a guard whose Drop releases the lock
-/// at the end of the `build_run` command. A second `build_run` on
-/// the same node blocks on the guard until the first finishes, so
-/// the reaping → opening PTY → spawning child → publishing entry
-/// sequence is atomic from the registry's perspective.
+/// Callers acquire the per-node lock with
+/// `get_node_spawn_lock(node_id).lock()`; the lock is held for the
+/// rest of the function and dropped at function exit. A second
+/// `build_run` (or `close_build_run`) on the same node blocks
+/// until the first finishes, so the reaping → opening PTY →
+/// spawning child → publishing entry sequence is atomic from the
+/// registry's perspective.
 ///
-/// Implementation: a global `Mutex<HashMap<i64, Arc<Mutex<()>>>>`
-/// map. Acquiring the per-node mutex is the slow path (it contends),
-/// so we cache the per-node `Arc<Mutex<()>>` lookup under the outer
-/// mutex, then drop the outer mutex before acquiring the inner one
-/// (so other nodes are not blocked on the outer lock while one
-/// node is mid-spawn). The per-node Arc is leaked to give it a
-/// `'static` lifetime so the returned `NodeSpawnGuard` doesn't need
-/// a lifetime parameter; one tiny `Mutex` per node over the
-/// process lifetime is acceptable (bounded by user-initiated spawns).
+/// Implementation: a global `Mutex<HashMap<i64, Arc<parking_lot
+/// ::Mutex<()>>>>` map. The outer map lock is held only for the
+/// lookup / insert of the per-node `Arc`; the per-node `Mutex` is
+/// acquired after dropping the outer lock so other nodes are not
+/// blocked while one node is mid-spawn. `parking_lot::Mutex::lock`
+/// returns an owned guard that does NOT borrow from the Mutex, so
+/// callers can hold the guard in a plain local without lifetime
+/// parameters or `Box::leak` (round-6 review finding: the previous
+/// version used `Box::leak(Box::new(inner))` per call, leaking one
+/// Box allocation per spawn).
 static NODE_SPAWN_LOCKS: once_cell::sync::Lazy<
     std::sync::Mutex<std::collections::HashMap<i64, Arc<parking_lot::Mutex<()>>>>,
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// RAII guard for a per-node spawn lock. Holds the `parking_lot`
-/// guard directly; `parking_lot::MutexGuard` is an owned guard
-/// (doesn't borrow from the Mutex), so we don't need unsafe raw
-/// pointers. The inner Arc keeps the per-node Mutex alive.
-struct NodeSpawnGuard {
-    _inner: Arc<parking_lot::Mutex<()>>,
-    _guard: parking_lot::MutexGuard<'static, ()>,
-}
-
-fn acquire_node_lock(node_id: i64) -> NodeSpawnGuard {
-    let inner: Arc<parking_lot::Mutex<()>> = {
-        let mut map = NODE_SPAWN_LOCKS.lock().unwrap();
-        map.entry(node_id)
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
-            .clone()
-    };
-    // `parking_lot::Mutex::lock` returns an owned guard whose lifetime
-    // is tied to the Mutex. We need a 'static guard so we can hold it
-    // in the NodeSpawnGuard struct returned from this function without
-    // parameterising the return type with a lifetime. Box::leak the
-    // Arc to get a 'static reference; the per-node Mutex lives for the
-    // process lifetime (one Mutex per node ever spawned, ~64 bytes).
-    let leaked_arc: &'static Arc<parking_lot::Mutex<()>> = Box::leak(Box::new(inner));
-    let guard: parking_lot::MutexGuard<'static, ()> = leaked_arc.lock();
-    NodeSpawnGuard {
-        _inner: Arc::clone(leaked_arc),
-        _guard: guard,
-    }
+/// Get-or-create the per-node spawn lock. Caller holds the returned
+/// `Arc` (keeps the Mutex alive for the caller's scope) and
+/// acquires the lock with `.lock()`. Drop on function exit releases
+/// the lock and decrements the `Arc` strong count, freeing the
+/// per-node Mutex when the last user of this node has dropped
+/// their handle. No `Box::leak`, no `'static` contortions.
+fn get_node_spawn_lock(node_id: i64) -> Arc<parking_lot::Mutex<()>> {
+    let mut map = NODE_SPAWN_LOCKS.lock().unwrap();
+    map.entry(node_id)
+        .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+        .clone()
 }
 
 /// Shared teardown for a build/run process incarnation (issue #1532).
@@ -637,7 +623,8 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
     //    `spawn_command` ran for ~20 ms while a concurrent
     //    `kill_session` saw `child: None` and tore down nothing,
     //    leaving the live child orphaned.
-    let _node_lock = acquire_node_lock(node_id);
+    let node_lock = get_node_spawn_lock(node_id);
+    let _node_guard = node_lock.lock();
 
     // 8. Reap any previous incarnation FIRST — while holding the
     //    per-node lock, so a concurrent `close_build_run` cannot
@@ -824,6 +811,17 @@ pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
 /// reader with a 2 s timeout so a wedged reader cannot hang the UI
 /// thread. Issue #1532.
 ///
+/// **Per-node spawn lock** (round-6 review polish). Without acquiring
+/// the same per-node lock `build_run` holds during its start path,
+/// `close_build_run` would race against an in-flight spawn: between
+/// `build_run`'s "reap previous" and "publish new entry" steps the
+/// registry is briefly empty, so a concurrent `close_build_run`
+/// would find nothing to kill and return `Ok`, while `build_run`
+/// then inserts the new entry — the user's click is silently lost.
+/// Acquiring the lock here serialises close vs. spawn so close sees
+/// the live entry (or waits for the spawn to finish, then sees an
+/// empty registry which is the expected end-state).
+///
 /// **Command Threading.** The body is sync and may take up to ~2 s
 /// (kill_process_tree + the join watchdog). It MUST NOT run on a tokio
 /// worker — that park stalls every other async command. Routed through
@@ -831,6 +829,8 @@ pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
 #[tauri::command]
 pub async fn close_build_run(node_id: i64) -> Result<(), String> {
     crate::commands::run_blocking("close_build_run", move || {
+        let node_lock = get_node_spawn_lock(node_id);
+        let _node_guard = node_lock.lock();
         let _ = BUILD_RUN_REGISTRY.kill_session(node_id);
         Ok(())
     })
