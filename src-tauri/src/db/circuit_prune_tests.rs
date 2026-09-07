@@ -69,11 +69,27 @@ fn circuit_retention_preserves_unfinished_cleanup_intent() {
     let manual = insert_run(&conn, "manual:old", "failed", 40, r#"{"cleanup.pending":"1"}"#);
     let issue = insert_run(&conn, "issue:cleanup", "failed", 40, r#"{"cleanup.pending":"1"}"#);
     insert_run(&conn, "manual:new", "completed", 0, "{}");
+    conn.execute(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (1, 1, 'cleanup', '/tmp/cleanup')",
+        [],
+    ).unwrap();
+    for run_id in [manual, issue] {
+        insert_step(&conn, run_id, "cleanup");
+        conn.execute(
+            "UPDATE autopilot_circuit_run_steps SET agent_node_id = 1 WHERE run_id = ?1",
+            [run_id],
+        ).unwrap();
+    }
+    conn.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested) VALUES (1, 1)",
+        [],
+    ).unwrap();
     assert_eq!(prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap(), (0, 0));
     for id in [manual, issue] {
         let body: String = conn.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1", [id], |r| r.get(0)).unwrap();
         assert!(body.contains("cleanup.pending"));
     }
+    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id = 1", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
 }
 
 fn insert_run_for(

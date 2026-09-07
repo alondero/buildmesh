@@ -149,7 +149,9 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// `autopilot_circuit_run_steps.parent_agent_node_id`. The circuit domain
 /// resolves upstream agent relationships when a step is attached; the
 /// persistence read path remains independent of blueprint JSON and step IDs.
-pub(crate) const SCHEMA_VERSION: u32 = 42;
+/// v43 adds the durable node lifecycle lease table. Cleanup intent and
+/// transient spawn/cleanup ownership no longer live in historical run JSON.
+pub(crate) const SCHEMA_VERSION: u32 = 43;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -277,6 +279,7 @@ pub(crate) enum AlwaysStep {
     /// persisted first-turn injections are no longer needed, and backfill
     /// the explicit OpenPr policy on stored review graphs.
     UpgradeIssueReviewFirstTurns,
+    UpgradeIssueReviewVerdicts,
     /// Remove the temporary per-node session-generation keys written by the
     /// pre-v39 recovery implementation after their values have been copied to
     /// `agent_nodes.session_started_at`.
@@ -284,6 +287,8 @@ pub(crate) enum AlwaysStep {
     /// Collapse duplicate built-in review preset rows left by pre-v40 builds,
     /// preserving their run history on the oldest row for each mesh.
     DeduplicateReviewPresets,
+    /// Materialise node lifecycle leases and import legacy cleanup intents.
+    EnsureAgentNodeLifecycleLeases,
 }
 
 // ---------------------------------------------------------------------------
@@ -653,11 +658,13 @@ pub(crate) const V33_BACKFILL_SQL: &str = "UPDATE meshes \
 const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
     AlwaysStep::UpgradeIssueReviewFirstTurns,
+    AlwaysStep::UpgradeIssueReviewVerdicts,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
     AlwaysStep::DeduplicateReviewPresets,
+    AlwaysStep::EnsureAgentNodeLifecycleLeases,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1039,15 +1046,51 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             )?;
             tx.commit()?;
         }
-        AlwaysStep::UpgradeIssueReviewFirstTurns => {
+        AlwaysStep::EnsureAgentNodeLifecycleLeases => {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS agent_node_lifecycle_leases (
+                    node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+                    cleanup_requested INTEGER NOT NULL DEFAULT 0,
+                    cleanup_generation TEXT,
+                    cleanup_expires_at INTEGER,
+                    spawn_generation TEXT,
+                    spawn_expires_at INTEGER,
+                    retired INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                );",
+            )?;
+            // Pre-v43 builds stored only the durable cleanup intent in a
+            // terminal run's context. Import that intent once; lease tokens
+            // themselves were transient and are intentionally discarded.
+            if table_present(conn, "autopilot_circuit_runs")?
+                && table_present(conn, "autopilot_circuit_run_steps")?
+            {
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+                     SELECT DISTINCT s.agent_node_id, 1
+                     FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
+                     JOIN agent_nodes a ON a.id = s.agent_node_id
+                     WHERE s.agent_node_id IS NOT NULL
+                       AND a.status != 'archived'
+                       AND s.agent_node_id IS NOT r.source_agent_node_id
+                       AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'",
+                    [],
+                )?;
+            }
+        }
+        AlwaysStep::UpgradeIssueReviewFirstTurns | AlwaysStep::UpgradeIssueReviewVerdicts => {
             // v2 also backfills the explicit OpenPr policy on persisted
             // review graphs, so the migration must run once after v1 has
             // already been recorded.
-            const FLAG: &str = "issue_review_first_turn_upgrade_v2";
+            let flag = match step {
+                AlwaysStep::UpgradeIssueReviewVerdicts => "issue_review_verdict_upgrade_v1",
+                _ => "issue_review_first_turn_upgrade_v2",
+            };
             let already_done: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
-                    params![FLAG],
+                    params![flag],
                     |row| row.get::<_, i64>(0).map(|count| count > 0),
                 )
                 .unwrap_or(false);
@@ -1077,7 +1120,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     }
                 };
                 let legacy_shape = graph.has_legacy_issue_review_shape();
-                let changed = graph.upgrade_legacy_issue_review_first_turns();
+                let changed = match step {
+                    AlwaysStep::UpgradeIssueReviewVerdicts => graph.upgrade_issue_review_verdict(),
+                    _ => graph.upgrade_legacy_issue_review_first_turns(),
+                };
                 let retained_legacy_prompt = graph.node("implementation_prompt").is_some()
                     || graph.node("review_prompt").is_some();
                 if legacy_shape && retained_legacy_prompt {
@@ -1100,7 +1146,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             }
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![FLAG],
+                params![flag],
             )?;
         }
     }
