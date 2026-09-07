@@ -112,7 +112,7 @@ export async function attachAgentNodeListeners(
 
   unlistens.push(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
-      if (['pending', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
+      if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
         void surface.fetchAgentNodes();
       }
     }),

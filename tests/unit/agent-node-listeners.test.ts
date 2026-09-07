@@ -126,6 +126,31 @@ describe('attachAgentNodeListeners', () => {
     expect(unlistenFns).toHaveLength(12);
   });
 
+  it('reconciles Circuit ownership for every live and terminal run transition', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'circuit-run-updated') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    for (const state of ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled']) {
+      capturedHandler!({ payload: { run_id: 9, state } });
+    }
+    capturedHandler!({ payload: { run_id: 9, state: 'unknown' } });
+    await Promise.resolve();
+
+    expect(surface.__calls).toEqual(
+      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(() => ({
+        method: 'fetchAgentNodes',
+        args: [],
+      })),
+    );
+  });
+
   // The narrow surface contract: every handler must dispatch to the
   // store via the surface, not via some other path. We test this by
   // calling the handler we registered (the second arg to listen) and

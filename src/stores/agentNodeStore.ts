@@ -361,6 +361,11 @@ export function useAllAgentNodes(): AgentNode[] {
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
+  // Only the newest full refresh may reconcile the normalized cache. Circuit
+  // events can arrive in bursts (running -> paused -> completed), and an
+  // older IPC response must never put a stale ownership snapshot back on top
+  // of the newest one.
+  let fetchGeneration = 0;
   // Issue #1054 — shared `OptimisticSurface` for the three sites
   // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
   // route through `withOptimistic`. Built once per `create()` call so
@@ -412,6 +417,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   fetchAgentNodes: async () => {
+    const requestGeneration = ++fetchGeneration;
     set({ loading: true, error: null });
     try {
       // Autopilot states ride along with every node refresh, but their
@@ -422,6 +428,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         api.listCircuitAgentOwnerships().catch(() => Object.values(get().circuitOwnerships)),
         api.listSemanticTurns().catch(() => []),
       ]);
+      if (requestGeneration !== fetchGeneration) return;
       const autopilotStates = Object.fromEntries(
         (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
       );
@@ -483,7 +490,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         ...(schedulesChanged && { schedules: keptSchedules }),
       });
     } catch (e) {
-      set({ error: formatError(e), loading: false });
+      if (requestGeneration === fetchGeneration) {
+        set({ error: formatError(e), loading: false });
+      }
     }
   },
 
