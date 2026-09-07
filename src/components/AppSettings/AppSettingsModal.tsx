@@ -59,6 +59,31 @@ function paneForDirtySite(site: string): SettingsTabId {
   return 'providers';
 }
 
+/** Per-field editable overlays. Each field is independently tracked:
+ *  - key absent from the object → user hasn't touched this field; the
+ *    card renders the value from `account`.
+ *  - key present → the user's override for that field. `null` for
+ *    `api_key` means "user explicitly cleared the key"; the absence of
+ *    the key means "field is pristine, follow account".
+ *
+ *  Per-field tracking (not a monolithic snapshot) is what fixes the
+ *  field-shadowing bug from the round-3 review (Finding 2): editing only
+ *  `api_key` no longer freezes a snapshot of `billing_mode`, so a
+ *  concurrent server-side billing change rides through to the IPC payload
+ *  instead of being clobbered by the user's stale snapshot. */
+type EditOverrides = {
+  api_key?: string | null;
+  billing_mode?: ProviderAccount['billing_mode'];
+};
+
+/** Normalise empty-string api_key to null on the way in. The Rust side
+ *  sometimes serialises empty keys as `""` rather than `null`; treating
+ *  those as the same value lets the smart collapse actually collapse
+ *  when the user backspaces to empty. */
+function normalizeApiKey(value: string | null | undefined): string | null {
+  return value ? value : null;
+}
+
 export function AccountCard({
   account,
   onSave,
@@ -69,29 +94,88 @@ export function AccountCard({
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
   /**
-   * Fires with `true` when the editable draft diverges from the saved
-   * `account`, and `false` when they match again (or when the card
-   * unmounts). The parent aggregates these signals across the modal so a
-   * stray backdrop click can prompt before destroying half-typed credentials
-   * (issue #730).
+   * Fires with `true` when the card has uncommitted edits, `false` when
+   * it returns to pristine, AND `false` on unmount so the modal's discard
+   * banner doesn't leak a stale dirty site. The parent aggregates these
+   * signals across the modal so a stray backdrop click can prompt before
+   * destroying half-typed credentials (issue #730). The unmount cleanup
+   * is a documented contract — the round-3 review flagged that omitting
+   * it trapped users with the discard banner after removing a dirty card.
    */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [draft, setDraft] = useState<ProviderAccount>(account);
+  // Issue #1535 (round 4, PR #1636 review round 3): per-field overrides
+  // replace the round-3 nullable snapshot. isDirty is derived purely from
+  // `Object.keys(overrides).length > 0` — no ref, no imperative flag, no
+  // nullable-snapshot distinction to manage. The display reads the
+  // override if present, otherwise `account.*` directly. The toggle does
+  // not touch overrides, so it cannot erase typed edits (Finding 1).
+  const [overrides, setOverrides] = useState<EditOverrides>({});
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setDraft(account), [account]);
-  useEffect(() => setConfirmingRemove(false), [account.id]);
+  // Baseline = the latest `account` prop's editable values, normalised
+  // (empty-string api_key collapses to null). Display values fall through
+  // the override first, then the baseline. The fall-through chain means
+  // prop changes are reflected automatically with no useEffect — the bug
+  // round-1/2/3 all danced around is gone by construction.
+  const baselineApiKey = normalizeApiKey(account.api_key);
+  const baselineBillingMode = account.billing_mode;
+  const apiKeyDisplay =
+    overrides.api_key !== undefined ? overrides.api_key : baselineApiKey;
+  const billingDisplay =
+    overrides.billing_mode !== undefined
+      ? overrides.billing_mode
+      : baselineBillingMode;
+  // Pure derivation: isDirty is the count of touched fields. No ref, no
+  // imperative flag.
+  const isDirty = Object.keys(overrides).length > 0;
 
-  // Dirty = editable fields diverge from the saved account (API key + billing).
-  const isDirty = useMemo(() => {
-    if (draft.api_key !== account.api_key) return true;
-    if (draft.billing_mode !== account.billing_mode) return true;
-    if (draft.enabled !== account.enabled) return true;
-    return false;
-  }, [draft, account]);
+  // Per-field setters that remove the override when the user's edit
+  // matches the baseline (round-3 Finding 3 — backspacing to the
+  // original value automatically reverts). Editing one field never
+  // touches the other's override (round-4 Finding 2 — field-shadowing
+  // fix).
+  const editApiKey = useCallback(
+    (rawValue: string) => {
+      const next = normalizeApiKey(rawValue);
+      setOverrides(prev => {
+        if (next === baselineApiKey) {
+          // Revert: drop the api_key override. Preserve other overrides.
+          const { api_key: _dropped, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, api_key: next };
+      });
+      setError(null);
+    },
+    [baselineApiKey],
+  );
+
+  const editBillingMode = useCallback(
+    (value: ProviderAccount['billing_mode']) => {
+      setOverrides(prev => {
+        if (value === baselineBillingMode) {
+          const { billing_mode: _dropped, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, billing_mode: value };
+      });
+      setError(null);
+    },
+    [baselineBillingMode],
+  );
+
+  // account.id drives the confirmingRemove reset on row identity change
+  // (the account was removed and re-added with a different id).
+  useEffect(() => {
+    setConfirmingRemove(false);
+  }, [account.id]);
+
+  // Dirty notification (issue #730). Compare to `lastReportedDirtyRef` so
+  // we don't re-fire the parent's `setDirtySites` for every keystroke.
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -99,14 +183,38 @@ export function AccountCard({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
+  // Unmount cleanup: per the JSDoc on `onDirtyChange` (and issue #730's
+  // contract), fire `false` when the card unmounts so the modal's
+  // `dirtySites` set doesn't retain a stale site. Without this, removing
+  // a dirty card (or any unmount path) traps the user with the discard
+  // banner forever.
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.(false);
+    };
+    // The initial onDirtyChange closes over this card's account.id; the
+    // parent uses stable useCallback chains, so the captured reference
+    // is still valid at unmount time even though we don't list it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const removable = !isSelfAuthId(account.id);
   // Keyed providers show API key; self-auth hold no Buildmesh credentials.
   const showApiKey = account.claude_compatible;
   // Billing mode is first-class only (self-auth + keyed catalog).
   const showBilling = isFirstClassId(account.id);
 
+  // Toggle commits ONLY the enabled flag. The form draft is never touched
+  // — the typed API key (if any) survives the parent re-render that
+  // follows the IPC, because nothing in the toggle path sets `draft`. On
+  // failure the parent's existing top-level toast handles reporting; we
+  // do NOT set a card-local error because the inline alert's Retry button
+  // is wired to `saveDraft` (Finding 4). A toggle retry would need its
+  // own affordance — out of scope for this issue.
   const toggleEnabled = async (enabled: boolean) => {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
       await onSave({ ...account, enabled });
     } finally {
@@ -114,10 +222,32 @@ export function AccountCard({
     }
   };
 
+  // Save composes the IPC payload from the latest `account` prop + the
+  // user's overrides. Server-side renames (`account.name`) ride along
+  // via the spread. Fields the user DIDN'T touch come from `account.*`
+  // — that's the field-shadowing fix (round-4 Finding 2): a server-side
+  // billing change is never clobbered by a stale snapshot from when the
+  // user started editing.
   const saveDraft = async () => {
+    if (busy) return;
     setBusy(true);
+    setError(null);
     try {
-      await onSave(draft);
+      const ok = await onSave({
+        ...account,
+        api_key: apiKeyDisplay,
+        billing_mode: billingDisplay,
+      });
+      if (ok) {
+        setOverrides({});
+      } else {
+        // Inline alert is the navigation affordance for the Retry button.
+        // The backend's actual error already surfaces in the parent's top-
+        // level toast, so we deliberately don't echo it here.
+        setError('Save failed');
+      }
+    } catch (e) {
+      setError(formatError(e));
     } finally {
       setBusy(false);
     }
@@ -203,10 +333,11 @@ export function AccountCard({
               <label className="block text-sm text-text-muted mb-1">API key</label>
               <input
                 type="password"
-                value={draft.api_key ?? ''}
-                onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
+                value={apiKeyDisplay ?? ''}
+                disabled={busy}
+                onChange={e => editApiKey(e.target.value)}
                 placeholder="Enter API key..."
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} API key`}
               />
               <p className="mt-1 text-sm text-text-muted">
@@ -218,9 +349,10 @@ export function AccountCard({
             <div>
               <label className="block text-sm text-text-muted mb-1">Billing</label>
               <select
-                value={draft.billing_mode}
-                onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                value={billingDisplay}
+                disabled={busy}
+                onChange={e => editBillingMode(e.target.value as ProviderAccount['billing_mode'])}
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} billing mode`}
               >
                 <option value="plan">Plan / subscription (percentage)</option>
@@ -228,7 +360,7 @@ export function AccountCard({
               </select>
             </div>
           )}
-          <div className="flex gap-3">
+          <div className="flex gap-3 items-center">
             <button
               onClick={saveDraft}
               disabled={busy}
@@ -237,6 +369,23 @@ export function AccountCard({
               {busy ? 'Saving...' : 'Save'}
             </button>
           </div>
+          {error && (
+            <div
+              role="alert"
+              data-testid="account-card-error"
+              className="flex items-center gap-2 text-sm text-status-error"
+            >
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={saveDraft}
+                disabled={busy}
+                className="underline hover:no-underline disabled:opacity-50"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
