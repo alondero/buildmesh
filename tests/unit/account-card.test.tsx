@@ -273,9 +273,12 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
   // -----------------------------------------------------------------
   // Issue #1535: preserve dirty provider credentials across the
   // prop-synchronisation race the parent causes. The card must keep
-  // a typed API key when (a) the user toggles Enabled on a draft,
-  // (b) a save IPC rejects and the parent rolls the prop back, and
+  // a typed API key when (a) the user toggles Enabled while editing,
+  // (b) a save IPC fails and the parent rolls the prop back, and
   // (c) an unrelated prop refresh fires while the draft is dirty.
+  // PR #1636 review fixes: non-atomic toggle policy, no
+  // `committedAccount` snapshot, save composes from the latest prop,
+  // mock `return false` (production path), defensive catch for throws.
   // -----------------------------------------------------------------
   describe('dirty credentials survive prop churn (issue #1535)', () => {
     function claudeCompatibleAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
@@ -289,10 +292,11 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       });
     }
 
-    it('toggle commits the typed API key along with the enabled flip', async () => {
-      // The toggle currently calls `onSave({ ...account, enabled })`, dropping
-      // any typed-but-unsaved `api_key`. With #1535, the toggle must commit
-      // whatever is in the draft (atomic save policy).
+    it('toggle commits ONLY enabled; typed draft stays for explicit Save', async () => {
+      // Non-atomic toggle policy: the toggle's IPC payload must NOT include
+      // any typed-but-unsaved api_key. The user's draft is preserved so
+      // explicit Save commits it. This avoids the toggle-failure zombie
+      // state where an optimistic draft.enabled was never rolled back.
       const onSave = vi.fn().mockResolvedValue(true);
       const user = userEvent.setup();
       render(
@@ -304,26 +308,30 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
 
       await user.click(screen.getByRole('button', { name: /edit credentials/i }));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-typed');
-      // Toggle Enabled off — the typed key must travel through the IPC.
+      // Toggle Enabled off — must NOT commit the typed api_key.
       await user.click(screen.getByRole('checkbox', { name: /enable kimi/i }));
 
       await waitFor(() => expect(onSave).toHaveBeenCalled());
       const payload = onSave.mock.calls[0][0];
-      expect(payload).toMatchObject({
-        id: 'kimi',
-        enabled: false,
-        api_key: 'sk-typed',
-      });
+      // The toggle commits enabled only. The typed api_key is NOT in the
+      // IPC payload — it stays in the draft for explicit Save. The payload
+      // carries the account's pre-existing api_key (null in this fixture),
+      // not the user's typed value.
+      expect(payload).toMatchObject({ id: 'kimi', enabled: false });
+      expect(payload.api_key).not.toBe('sk-typed');
+      // The card stays dirty (api_key typed, not yet saved).
+      expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-typed');
     });
 
-    it('rejected save preserves the typed key, dirty state, and inline retryable error', async () => {
-      // Parent's optimistic prop replace + rollback races against the card's
-      // draft. After a rejection, the input must still hold the typed key,
-      // the credentials section must remain open, and a Retry button must
-      // re-attempt without re-paste.
+    it('rejected save (return false, production path) preserves typed key, dirty state, and inline retry', async () => {
+      // Production's handleSaveAccount catches IPC throws and returns
+      // `false` (the inline alert shows `'Save failed'`, and the parent
+      // toast carries the underlying message). We pin THAT path — a
+      // throw-only mock would be a paper-tiger test that wouldn't survive
+      // a future adapter change.
       const onSave = vi
         .fn()
-        .mockRejectedValueOnce(new Error('backend says nope'))
+        .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(true);
       const user = userEvent.setup();
       render(
@@ -336,28 +344,81 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       await user.click(screen.getByRole('button', { name: /edit credentials/i }));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-precious');
 
-      // First Save rejects.
+      // First Save returns false.
       await user.click(screen.getByRole('button', { name: /^save$/i }));
       await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
 
-      // The typed key is still in the input — the prop-synchronisation race
-      // did not eat it.
-      const apiKeyInput = screen.getByLabelText(/kimi api key/i) as HTMLInputElement;
-      expect(apiKeyInput.value).toBe('sk-precious');
-
-      // The credentials editor stays open so the user can see what happened.
+      // Typed key survives the parent-side rollback.
+      expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-precious');
+      // The credentials editor stays open.
       expect(screen.getByLabelText(/kimi api key/i)).toBeTruthy();
-
-      // The inline error carries the failure message and offers Retry.
+      // Inline error offers Retry.
       const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toMatch(/backend says nope/);
+      expect(alert.textContent).toMatch(/save failed/i);
       const retry = screen.getByRole('button', { name: /^retry$/i });
       expect(retry).toBeTruthy();
-
-      // Retry re-sends the SAME draft (no re-typing required).
+      // Retry re-sends the SAME draft.
       await user.click(retry);
       await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
       expect(onSave.mock.calls[1][0].api_key).toBe('sk-precious');
+    });
+
+    it('rejected save (throw, defensive path) surfaces the backend message inline', async () => {
+      // Defensive catch: if a future onSave adapter forgets to wrap its
+      // IPC throws and they propagate, the inline alert should still carry
+      // the backend's message so the user has a clue what went wrong.
+      const onSave = vi.fn().mockRejectedValueOnce(new Error('backend says nope'));
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={claudeCompatibleAccount()}
+          onSave={onSave}
+        />,
+      );
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-precious');
+      await user.click(screen.getByRole('button', { name: /^save$/i }));
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toMatch(/backend says nope/);
+    });
+
+    it('save payload includes the LATEST account fields (server-side rename preserved)', async () => {
+      // Finding 2 regression: the previous design stored a frozen copy of
+      // `account` inside the card's draft, so a server-side rename that
+      // happened while the user was typing would be clobbered on save
+      // (the IPC sent the stale name). The current design composes
+      // `{ ...account, api_key, billing_mode }` so the latest `account.name`
+      // rides along.
+      const onSave = vi.fn().mockResolvedValue(true);
+      const user = userEvent.setup();
+      const { rerender } = render(
+        <AccountCard
+          account={claudeCompatibleAccount({ name: 'Kimi' })}
+          onSave={onSave}
+        />,
+      );
+
+      // Server renames the account while the card is mounted.
+      rerender(
+        <AccountCard
+          account={claudeCompatibleAccount({ name: 'Kimi (renamed)' })}
+          onSave={onSave}
+        />,
+      );
+      // Header refreshes from the prop — sanity check.
+      expect(screen.getByText('Kimi (renamed)')).toBeTruthy();
+
+      // User types a new api_key (different from server).
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.type(screen.getByLabelText(/kimi \(renamed\) api key/i), 'sk-new');
+      await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      const payload = onSave.mock.calls[0][0];
+      // Server-side rename is preserved (latest account.name).
+      expect(payload.name).toBe('Kimi (renamed)');
+      // User's typed delta is committed.
+      expect(payload.api_key).toBe('sk-new');
     });
 
     it('external prop refresh updates a pristine card but does not overwrite a dirty one', async () => {
@@ -397,9 +458,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
             api_key: 'sk-from-server',
             enabled: true,
             // Display-only refresh: a rename on the parent must reach the
-            // header even while the user is editing. The bug (#1535) would
-            // clobber the typed key on the way through; the fix must keep
-            // both — typed key untouched, header label refreshed.
+            // header even while the user is editing.
             name: 'Kimi (renamed)',
           })}
           onSave={vi.fn().mockResolvedValue(true)}
