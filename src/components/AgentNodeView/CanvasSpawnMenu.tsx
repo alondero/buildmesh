@@ -36,7 +36,7 @@
  * click-outside scope.
  */
 import { useEffect } from 'react';
-import { Modal } from '../shared/Modal';
+import { Modal, ModalCloseButton } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { useMeshStore } from '../../stores/meshStore';
@@ -84,6 +84,13 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
 
   const handleSelect = async (providerId: string, altKey: boolean) => {
     close();
+    // The `altKey` modifier on a spawn pick toggles the worktree
+    // override — Alt+click inverts the mesh's configured default,
+    // plain click honours it. Passing `altKey` directly would
+    // force every non-alt spawn to `useWorktree: false`, which
+    // silently spawns in the mesh root regardless of the user's
+    // repository configuration. Senior-review finding.
+    const useWorktree = altKey ? !targetMesh.use_worktree : targetMesh.use_worktree;
     // The create→activate→select-mesh invariant (issue #283) lives
     // entirely inside `selectProviderForMesh`: it creates the node,
     // sets it active, then selects the mesh. The canvas surface
@@ -97,14 +104,14 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         targetMesh.name,
         targetMesh.path,
         providerId,
-        altKey,
+        useWorktree,
       );
     } catch (error) {
       // The agentNodeStore selector swallows errors and surfaces
       // them via `state.error` (per the IPC wrapper contract), but
       // an awaited rejection here would still bubble as an
-      // unhandled promise — re-throw via console.error so a test
-      // or a dev-tools surface can catch the failure mode without
+      // unhandled promise — log via console.error so a test or a
+      // dev-tools surface can catch the failure mode without
       // crashing the modal (it's already closed by the `close()`
       // call above).
       console.error('[CanvasSpawnMenu] selectProviderForMesh failed:', error);
@@ -123,6 +130,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         <h2 id="canvas-spawn-menu-title" className="text-sm font-semibold text-text-primary">
           Spawn agent in {targetMesh.name}
         </h2>
+        <ModalCloseButton onClose={close} />
       </div>
       <p className="text-2xs text-text-muted mb-3">
         Pick a harness to launch. Native CLIs run when the binary is on PATH; proxied providers use a keyed account.

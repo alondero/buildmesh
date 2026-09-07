@@ -81,8 +81,7 @@ export type CanvasEmptyDecision =
   | { branch: 'selected-empty'; meshId: number }
   | { branch: 'all-empty' }
   | { branch: 'filters-exclude-all' }
-  | { branch: 'pinned-empty' }
-  | { branch: 'single-no-candidate' };
+  | { branch: 'pinned-empty' };
 
 /** Callbacks the empty state's CTAs fire. Owners wire these to the
  *  appropriate store action / modal opener:
@@ -138,17 +137,6 @@ interface CanvasEmptyStateProps {
  */
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
   if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
-  // Single mode with no candidate. `visibleNodes.length === 0` is
-  // always true in single mode (the grid helpers don't list
-  // single-mode candidates), so `filteredCount === 0` here does NOT
-  // imply a filter is excluding everything. Routing to
-  // `filters-exclude-all` would render a misleading "Clear filters"
-  // CTA when the user just soloed a node that's gone. Surface a
-  // dedicated no-candidate branch with the same "View All Nodes"
-  // escape as Pinned-empty.
-  if (input.viewMode === 'single' && input.filteredCount === 0 && input.scopedCount > 0) {
-    return { branch: 'single-no-candidate' };
-  }
   if (input.meshCount === 0) return { branch: 'no-meshes' };
   // Mesh view with `scopedCount === 0` and an explicit sidebar
   // selection is the canonical "selected empty mesh" — the user
@@ -171,10 +159,10 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDe
   return { branch: 'filters-exclude-all' };
 }
 
-// Legacy string-literal branch alias — kept so the test surface that
-// asserted `classifyCanvasEmpty(input) === 'pinned-empty'` keeps
-// working without rewriting the assertions. New code should match on
-// the structured `CanvasEmptyDecision` instead.
+// String-literal branch alias so callers can pattern-match by
+// branch name without reaching through `.branch`. Mirrors
+// `CanvasEmptyDecision['branch']` — any future branch must add
+// itself here too.
 export type CanvasEmptyBranch = CanvasEmptyDecision['branch'];
 
 /** The shared shell — centered, max-w-sm, heading + body + accent-cyan
@@ -478,12 +466,6 @@ export function CanvasEmptyState({
     case 'filters-exclude-all':
       return <FiltersExcludeAllBranch onClearFilters={callbacks.onClearFilters} />;
     case 'pinned-empty':
-      return <PinnedEmptyBranch onViewAll={callbacks.onViewAll} />;
-    case 'single-no-candidate':
-      // Same UX as Pinned-empty: the user is in a "scope has content
-      // but I can't show anything" state (Solo'd a deleted node, or
-      // the fallback scope resolved to nothing). The escape is the
-      // same: go back to All Nodes.
       return <PinnedEmptyBranch onViewAll={callbacks.onViewAll} />;
   }
 }

@@ -118,34 +118,12 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     ).toBe('filters-exclude-all');
   });
 
-  it('returns single-no-candidate when viewMode=single with no solo node but scope has nodes', () => {
-    // Senior-review finding: filteredCount in single mode is the
-    // count of nodes the canvas ACTUALLY shows (singleNode ? 1 : 0),
-    // not visibleNodes.length (always 0 in single mode). With a
-    // scopedCount > 0 and no soloable node, the classifier routes
-    // to a dedicated branch that reuses the Pinned-empty UX
-    // instead of falsely suggesting "Clear filters".
-    const decision = classifyCanvasEmpty(
-      input({ viewMode: 'single', scopedCount: 3, filteredCount: 0, totalNodeCount: 3, selectedMeshId: 1 }),
-    );
-    expect(decision.branch).toBe('single-no-candidate');
-  });
-
   it('returns pinned-empty even when scope has nodes in pinned mode', () => {
     // Pinned branch wins first regardless of node counts.
     const decision = classifyCanvasEmpty(
       input({ viewMode: 'pinned', scopedCount: 5, filteredCount: 0, totalNodeCount: 5 }),
     );
     expect(decision.branch).toBe('pinned-empty');
-  });
-
-  it('does NOT route to single-no-candidate when scopedCount is also 0 (no fallback scope)', () => {
-    // Single mode with no solo node AND no fallback scope — the
-    // user genuinely has nothing. Fall through to other branches.
-    const decision = classifyCanvasEmpty(
-      input({ viewMode: 'single', scopedCount: 0, filteredCount: 0, totalNodeCount: 0, meshCount: 0 }),
-    );
-    expect(decision.branch).toBe('no-meshes');
   });
 });
 
@@ -261,35 +239,5 @@ describe('CanvasEmptyState (issue #1536)', () => {
     fireEvent.click(screen.getByTestId('canvas-empty-open-setup'));
     expect(cbs.onOpenSetup).toHaveBeenCalledTimes(1);
     expect(cbs.onOpenSpawnMenu).not.toHaveBeenCalled();
-  });
-
-  // Senior-review finding: Single mode with no soloable node but
-  // scope has content used to falsely route to `filters-exclude-all`
-  // (because `visibleNodes.length === 0` always in single mode).
-  // The classifier now has a dedicated branch; the renderer reuses
-  // the PinnedEmptyBranch UX (a "View All Nodes" CTA is the right
-  // escape — the user just needs to back out of Solo).
-  it('single-no-candidate branch: View All Nodes CTA fires onViewAll (NOT filters-exclude-all)', () => {
-    const cbs = { ...noopCallbacks, onViewAll: vi.fn(), onClearFilters: vi.fn() };
-    render(
-      <CanvasEmptyState
-        input={input({
-          viewMode: 'single',
-          meshCount: 1,
-          totalNodeCount: 3,
-          scopedCount: 3,
-          filteredCount: 0,
-          selectedMeshId: 1,
-        })}
-        callbacks={cbs}
-      />,
-    );
-
-    expect(screen.getByText('No pinned nodes')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
-    expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
-    // The misleading "Clear filters" CTA must NOT appear — no filter
-    // is active in Single mode.
-    expect(cbs.onClearFilters).not.toHaveBeenCalled();
   });
 });

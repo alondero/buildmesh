@@ -385,6 +385,7 @@ export function AgentNodeView() {
   // are derived from the same sources as `visibleNodes`, but the
   // distinction between "scope is empty" and "filters excluded
   // everything" demands we read the pre-filter scope count separately.
+  //
   // `scopeNodesForMode` ignores `controls` for non-'filtered' modes,
   // and for 'filtered' it gives the unfiltered pool (because we pass
   // NO_FILTERS-shaped controls by omitting the arg — `controls` is
@@ -395,23 +396,15 @@ export function AgentNodeView() {
   // non-Single mode.
   //
   // Single mode is special: `visibleNodes` is `[]` because the grid
-  // helpers don't list single-mode candidates. The empty state
-  // rendered in Single mode (when `singleNode === null`) describes
-  // the SCOPE the user fell back from — `lastNonSingleMode` (the
-  // grid mode that Esc will return to). Computing `scopedCount`
-  // against that scope (rather than hardcoded 0) means the empty
-  // CTA reads "No agents in this mesh" instead of "No nodes match"
-  // when the user Soloed a Mesh that's empty.
-  //
-  // `filteredCount` is the count of nodes the canvas ACTUALLY shows.
-  // In Single mode that's `singleNode ? 1 : 0` (not `visibleNodes.length`,
-  // which is always 0 in single mode because the grid helpers
-  // bypass single-mode candidates). Reading `visibleNodes.length`
-  // would falsely trip the `filters-exclude-all` branch on a
-  // Soloed empty mesh — no filter is active, but the count says
-  // 0. Senior-review finding.
+  // helpers don't list single-mode candidates. The empty state is
+  // rendered in Single mode only when `singleNode === null`, which
+  // by `resolveSingleNode`'s contract means there are no nodes
+  // anywhere — so the classifier routes to `no-meshes` or `all-empty`
+  // without ever needing a separate single-no-candidate branch.
+  // Computing `scopedCount` against the `lastNonSingleMode` fallback
+  // scope (rather than hardcoded 0) preserves the "scoped" signal in
+  // case that invariant ever loosens.
   const meshesCount = useMeshStore((s) => s.meshes.length);
-  const firstMeshId = useMeshStore((s) => s.meshes[0]?.id ?? null);
   const providerList = useProviderList();
   const harnessReady = useMemo(() => hasSpawnableAgent(providerList), [providerList]);
   const effectiveViewMode: NonSingleViewMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
@@ -419,7 +412,6 @@ export function AgentNodeView() {
     () => scopeNodesForMode(effectiveViewMode, agentNodes, selectedMeshId, activeNodeId).length,
     [effectiveViewMode, agentNodes, selectedMeshId, activeNodeId],
   );
-  const filteredCount = viewMode === 'single' ? (singleNode ? 1 : 0) : visibleNodes.length;
 
   // Issue #1536 — the canvas empty-state callbacks. Each one is a
   // thin store-action shim so the empty-state component stays pure
@@ -432,12 +424,7 @@ export function AgentNodeView() {
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount,
-      filteredCount,
-      // Pass the ACTUAL viewMode (including 'single') so the
-      // classifier can route single-no-candidate properly. Earlier
-      // iterations collapsed single → lastNonSingleMode, which made
-      // `filteredCount === 0` always true and tripped the
-      // filters-exclude-all branch even with no filter active.
+      filteredCount: visibleNodes.length,
       viewMode,
       selectedMeshId,
       harnessReady,
@@ -446,42 +433,45 @@ export function AgentNodeView() {
       meshesCount,
       agentNodes.length,
       scopedCount,
-      filteredCount,
+      visibleNodes.length,
       viewMode,
       selectedMeshId,
       harnessReady,
     ],
   );
-  const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
+  const openCreateMesh = useUIStore((s) => s.openCreateMesh);
   const openCanvasSpawnMenu = useUIStore((s) => s.openCanvasSpawnMenu);
   const resetGridControls = useUIStore((s) => s.resetGridControls);
   const openAppSettings = useUIStore((s) => s.openAppSettings);
   const setViewMode = useUIStore((s) => s.setViewMode);
+  // Issue #1536 senior review (#3): resolve the target mesh lazily
+  // inside the click handler instead of subscribing to `meshes[0].id`
+  // at the root. The first-mesh id is read once at click time and
+  // the handler runs only when the user actually clicks "Spawn", so
+  // a subscription here is wasted work for the 99.9% of renders
+  // that don't click anything.
   const emptyStateCallbacks = useMemo(
     () => ({
-      onCreateMesh: openCanvasCreateMesh,
+      onCreateMesh: openCreateMesh,
       onOpenSpawnMenu: (meshId: number | null) => {
         // Resolve the target mesh HERE so the modal never has to
         // fall back to "any mesh" — that fallback was the UI lockout
         // trap an earlier iteration of `CanvasSpawnMenu` hit. The
         // order matches the sidebar's `+ ▾` default: the caller-
         // supplied id wins, else the sidebar's selection, else the
-        // active node's mesh (via `selectedMeshId` in single mode
-        // falling back to the active node's mesh is already covered
-        // by `selectedMeshId` because `useMeshStore.selectedMeshId`
-        // and the canvas are kept in sync via the existing
-        // `useUIStore` subscription), else the first mesh.
+        // first mesh in the list.
         const target =
           meshId
-          ?? selectedMeshId
-          ?? firstMeshId;
+          ?? useMeshStore.getState().selectedMeshId
+          ?? useMeshStore.getState().meshes[0]?.id
+          ?? null;
         if (target !== null) openCanvasSpawnMenu(target);
       },
       onClearFilters: resetGridControls,
       onOpenSetup: openAppSettings,
       onViewAll: () => setViewMode('all'),
     }),
-    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId, firstMeshId],
+    [openCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId],
   );
 
   return (

@@ -61,10 +61,10 @@ export function Sidebar() {
   // single source of truth.
   const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
   // Both Sidebar `+ New mesh` buttons call the shared
-  // `openCanvasCreateMesh` action — the modal itself is mounted at
-  // App.tsx (gated on `uiStore.canvasCreateMeshOpen`), not here.
+  // `openCreateMesh` action — the modal itself is mounted at
+  // App.tsx (gated on `uiStore.createMeshOpen`), not here.
   // The canvas empty state hits the same action.
-  const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
+  const openCreateMesh = useUIStore((s) => s.openCreateMesh);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
   // round-trip that includes worktree setup — seconds on a large repo).
@@ -190,9 +190,9 @@ export function Sidebar() {
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
         {/* Meshes list — the Mesh Create modal itself is mounted at App.tsx
-            scope (driven by `uiStore.canvasCreateMeshOpen`); both Sidebar
+            scope (driven by `uiStore.createMeshOpen`); both Sidebar
             buttons and the canvas empty state's "New mesh" CTA hit the
-            same `openCanvasCreateMesh` action. */}
+            same `openCreateMesh` action. */}
         <div className="flex-1 overflow-y-auto">
           <div className="p-2">
             {meshes.length === 0 ? (
@@ -202,7 +202,7 @@ export function Sidebar() {
                 </p>
                 <button
                   type="button"
-                  onClick={openCanvasCreateMesh}
+                  onClick={openCreateMesh}
                   className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors"
                 >
                   + New mesh
@@ -246,7 +246,7 @@ export function Sidebar() {
 
         {/* Add mesh */}
         <button
-          onClick={openCanvasCreateMesh}
+          onClick={openCreateMesh}
           className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

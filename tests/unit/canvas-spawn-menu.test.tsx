@@ -26,12 +26,26 @@ import type { Mesh } from '../../src/types/generated/Mesh';
 
 // `GroupedProviderMenu` is the real spawn surface; mock it so the
 // tests don't drag the IPC layer into a render that only exercises
-// mount/unmount.
+// mount/unmount. The mock exposes BOTH a plain click and an
+// alt-click so the worktree-toggle path can be exercised.
 vi.mock('../../src/components/Providers/GroupedProviderMenu', () => ({
   GroupedProviderMenu: ({ onSelect }: { onSelect: (id: string, alt: boolean) => void }) => (
-    <button type="button" data-testid="fake-spawn-pick" onClick={() => onSelect('claude', false)}>
-      Pick Claude
-    </button>
+    <div>
+      <button
+        type="button"
+        data-testid="fake-spawn-pick"
+        onClick={() => onSelect('claude', false)}
+      >
+        Pick Claude
+      </button>
+      <button
+        type="button"
+        data-testid="fake-spawn-pick-alt"
+        onClick={() => onSelect('claude', true)}
+      >
+        Alt+Pick Claude
+      </button>
+    </div>
   ),
 }));
 
@@ -46,7 +60,10 @@ const MESH: Mesh = {
   run_command: null,
   model: null,
   effort: null,
-  use_worktree: false,
+  // use_worktree=true so the alt-toggle test has something to invert
+  // against (the inverting behavior is only meaningful when the mesh
+  // has a non-default worktree setting).
+  use_worktree: true,
   worktree_mode: null,
   default_provider: null,
   base_ref: 'main',
@@ -122,6 +139,29 @@ describe('CanvasSpawnMenu mount lifecycle (issue #1536)', () => {
 
     expect(useUIStore.getState().canvasSpawnMenuMeshId).toBeNull();
     await Promise.resolve();
+    // useWorktree is the 5th arg. With MESH.use_worktree=true and
+    // altKey=false, the call forwards the mesh's configured default
+    // (the senior-review fix: passing `altKey` directly would force
+    // every plain spawn to `useWorktree: false`, ignoring the mesh
+    // configuration).
+    expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', true);
+  });
+
+  it('alt+click toggles the worktree override against the mesh default', async () => {
+    // Senior-review finding: altKey must TOGGLE the mesh's configured
+    // `use_worktree`, not be passed through as the literal flag.
+    useMeshStore.setState({ meshes: [MESH], meshesById: new Map([[MESH.id, MESH]]) });
+    useUIStore.setState({ canvasSpawnMenuMeshId: MESH.id });
+    const selectSpy = vi.fn().mockResolvedValue(undefined);
+    useAgentNodeStore.setState({
+      selectProviderForMesh: selectSpy as unknown as ReturnType<typeof useAgentNodeStore.getState>['selectProviderForMesh'],
+    });
+
+    render(<CanvasSpawnMenu meshId={MESH.id} />);
+
+    screen.getByTestId('fake-spawn-pick-alt').click();
+    await Promise.resolve();
+    // MESH.use_worktree = true; altKey = true → invert → false
     expect(selectSpy).toHaveBeenCalledWith(7, 'Repo Seven', '/r7', 'claude', false);
   });
 });

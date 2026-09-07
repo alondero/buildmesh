@@ -364,20 +364,21 @@ interface UIState extends GridControls {
   openRemoteAccess: () => void;
   closeRemoteAccess: () => void;
 
-  // ---- Canvas empty-state modals (issue #1536) ----
+  // ---- Application-level modals (issue #1536) ----
   // Both the Mesh Create modal and the canvas Spawn Menu dialog
-  // mount at App scope (App.tsx), gated on these flags. Mounting at
-  // App scope — rather than inside Sidebar — keeps the canvas empty
-  // state's open requests independent of the Sidebar's render
-  // tree. The earlier `meshStore.addMesh()` direct-call path is
-  // gone; both call sites (Sidebar's `+ New mesh` buttons and the
-  // canvas empty state's CTA) hit `openCanvasCreateMesh` directly.
-  // Mirrors the existing `appSettingsOpen` / `openAppSettings`
-  // discipline — state + idempotent actions, rendering decided by
-  // the owning component.
-  canvasCreateMeshOpen: boolean;
-  openCanvasCreateMesh: () => void;
-  closeCanvasCreateMesh: () => void;
+  // mount at App scope (App.tsx), gated on these flags. The
+  // "createMesh" action name dropped its "canvas" prefix because
+  // mesh creation is an application-level concern, not a
+  // canvas-specific one — Sidebar's `+ New mesh` buttons and the
+  // canvas empty state's CTA both summon the same modal. (Senior
+  // review caught the leaky "canvas" prefix.) The earlier
+  // `meshStore.addMesh()` direct-call path is gone; both call
+  // sites hit `openCreateMesh` directly. Mirrors the existing
+  // `appSettingsOpen` / `openAppSettings` discipline — state +
+  // idempotent actions, rendering decided by the owning component.
+  createMeshOpen: boolean;
+  openCreateMesh: () => void;
+  closeCreateMesh: () => void;
   // The mesh whose spawn menu the canvas is requesting, or null
   // when closed. `null` STRICTLY means "closed" — an earlier
   // iteration had the modal fall back to the first mesh when the
@@ -584,12 +585,13 @@ export const useUIStore = create<UIState>((set, get) => {
       set({ remoteAccessOpen: false });
     },
 
-    canvasCreateMeshOpen: false,
-    openCanvasCreateMesh: () => set({ canvasCreateMeshOpen: true }),
-    closeCanvasCreateMesh: () => set({ canvasCreateMeshOpen: false }),
     canvasSpawnMenuMeshId: null,
     openCanvasSpawnMenu: (meshId) => set({ canvasSpawnMenuMeshId: meshId }),
     closeCanvasSpawnMenu: () => set({ canvasSpawnMenuMeshId: null }),
+
+    createMeshOpen: false,
+    openCreateMesh: () => set({ createMeshOpen: true }),
+    closeCreateMesh: () => set({ createMeshOpen: false }),
 
     // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
     // probeOpen = true`. Call sites stay one-liners; the inspector's close

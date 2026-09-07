@@ -106,16 +106,9 @@ function App() {
   // `useUIStore.getState()` inside the render body) keeps the mounts
   // reactive to external opens from the canvas empty state without a
   // round-trip through the Sidebar.
-  const canvasCreateMeshOpen = useUIStore((s) => s.canvasCreateMeshOpen);
-  const closeCanvasCreateMesh = useUIStore((s) => s.closeCanvasCreateMesh);
+  const createMeshOpen = useUIStore((s) => s.createMeshOpen);
+  const closeCreateMesh = useUIStore((s) => s.closeCreateMesh);
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
-  // The Mesh Create modal's `defaultColor` is a function of
-  // `meshes.length` (per-mesh palette index). Read lazily: only when
-  // the modal is actually open. Subscribing to `meshes` here would
-  // re-render the entire App shell on every mesh add / delete /
-  // reorder, which is 99.9% of the time wasted — the modal is closed
-  // for nearly every render. Senior-review perf finding.
-  const meshCountForColor = useMeshStore((s) => s.meshes.length);
 
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
@@ -728,14 +721,19 @@ function App() {
       {/* Issue #1536 — the canvas empty state needs to summon this
           modal from outside the Sidebar's render tree. Both call sites
           (Sidebar's "+ New mesh" buttons + the canvas empty state's
-          "New mesh" CTA) hit `useUIStore.openCanvasCreateMesh`. The
+          "New mesh" CTA) hit `useUIStore.openCreateMesh`. The
           modal mounts only when explicitly opened — the flag stays
           false on startup so a fresh app boot never flashes the
           dialog. */}
-      {canvasCreateMeshOpen && (
+      {createMeshOpen && (
         <MeshCreateModal
-          onClose={closeCanvasCreateMesh}
-          defaultColor={defaultMeshColor(meshCountForColor)}
+          onClose={closeCreateMesh}
+          // Read `meshes.length` lazily at the conditional mount
+          // — the modal is closed 99.9% of the time, so subscribing
+          // here would re-render the entire App shell on every
+          // mesh add / delete / reorder for a defaultColor that's
+          // never observed. Senior-review perf finding.
+          defaultColor={defaultMeshColor(useMeshStore.getState().meshes.length)}
         />
       )}
       {/* `canvasSpawnMenuMeshId !== null` is the ONLY mount trigger.
