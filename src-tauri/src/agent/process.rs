@@ -346,8 +346,11 @@ pub struct AgentProcessRegistry {
 /// literal `generation: 0` is visibly "not yet inserted".
 static NEXT_PROCESS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Whether teardown should join the PTY reader thread. Natural-exit reaping
-/// runs *on* the reader, so it must not join itself.
+/// Whether teardown should join the reader/writer threads. `WriterOnly` is
+/// the natural-exit reaping path (runs on the reader, must not join itself);
+/// `Both` is `kill_session`. Reuses [`crate::pty::lifecycle::JoinPolicy`] —
+/// this module adds a third variant because agent has separate reader and
+/// writer workers, but the reader-handle half maps directly.
 enum JoinPolicy {
     Both,
     WriterOnly,
@@ -628,7 +631,10 @@ fn teardown_incarnation(
     match join {
         JoinPolicy::Both => {
             if let Some(handle) = agent.reader_handle.lock().unwrap().take() {
-                join_with_timeout(handle, std::time::Duration::from_secs(2));
+                crate::pty::lifecycle::join_with_timeout(
+                    handle,
+                    std::time::Duration::from_secs(2),
+                );
             }
         }
         JoinPolicy::WriterOnly => {
@@ -639,45 +645,12 @@ fn teardown_incarnation(
     }
 
     if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
-        join_with_timeout(handle, std::time::Duration::from_secs(2));
+        crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2));
     }
 
     if cleanup_sandbox {
         sandbox_cleanup(session_id);
     }
-}
-
-/// Join a thread, detaching it (via the watchdog) if it hasn't returned in
-/// `timeout`. Used by `kill_session` so the close path can never hang the UI
-/// on a stuck reader thread.
-///
-/// We can't `JoinHandle::join_timeout` (the method doesn't exist on stable),
-/// so we run the join on a watchdog thread and wait on a oneshot channel.
-/// The watchdog outlives the timeout only if the reader is genuinely stuck;
-/// the thread itself is cheap (it's idle in `join`) and exits as soon as the
-/// reader does. The inner `JoinHandle` is dropped at the end of the
-/// watchdog's closure, which detaches the reader per `JoinHandle::drop` docs.
-fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
-    if handle.is_finished() {
-        let _ = handle.join();
-        return;
-    }
-    let watch_name = match handle.thread().name() {
-        Some(name) => format!("join-watch-{name}"),
-        None => "join-watch-pty-worker".to_string(),
-    };
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let _watchdog = std::thread::Builder::new()
-        .name(watch_name)
-        .spawn(move || {
-            let _ = handle.join();
-            // If the receiver is gone (we timed out), the send errors silently;
-            // the `JoinHandle` is still dropped on closure exit, detaching the
-            // reader thread.
-            let _ = tx.send(());
-        })
-        .expect("failed to spawn join watchdog");
-    let _ = rx.recv_timeout(timeout);
 }
 
 impl Default for AgentProcessRegistry {

@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod lifecycle;
 mod registry;
 pub mod sink;
 pub use registry::PtyRegistry;
