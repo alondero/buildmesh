@@ -302,6 +302,44 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(buildRunTerminalManager.getInstance(81, 'terminal', true)).toBeUndefined();
   });
 
+  it('awaits deferred PTY close and output unsubscribe before a replacement spawn', async () => {
+    let resolveClose!: () => void;
+    let resolveUnsubscribe!: () => void;
+    const closePending = new Promise<void>((resolve) => { resolveClose = resolve; });
+    const unsubscribePending = new Promise<void>((resolve) => { resolveUnsubscribe = resolve; });
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === 'close_build_run') return closePending;
+      if (command === 'unsubscribe_build_run_output') return unsubscribePending;
+      return Promise.resolve({});
+    });
+
+    const container = document.createElement('div');
+    await buildRunTerminalManager.attach(83, 'build', true, container);
+
+    // The mode switch must wait for both teardown IPC calls. If it spawned
+    // immediately, the replacement's build_run/subscribe calls could be
+    // removed by the old close/unsubscribe resolutions.
+    const replacement = buildRunTerminalManager.attach(83, 'run', true, container);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls).toEqual(expect.arrayContaining([
+      ['close_build_run', { nodeId: 83 }],
+      ['unsubscribe_build_run_output', { sessionId: 83 }],
+    ]));
+
+    resolveClose();
+    resolveUnsubscribe();
+    await expect(replacement).resolves.toBeDefined();
+
+    const calls = vi.mocked(invoke).mock.calls.map(([command]) => command);
+    const closeIndex = calls.indexOf('close_build_run');
+    const unsubscribeIndex = calls.indexOf('unsubscribe_build_run_output');
+    const replacementBuildIndex = calls.lastIndexOf('build_run');
+    expect(replacementBuildIndex).toBeGreaterThan(closeIndex);
+    expect(replacementBuildIndex).toBeGreaterThan(unsubscribeIndex);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(2);
+  });
+
   it('does not retain a registry instance when attach is aborted before lazy creation finishes', async () => {
     let resolveOutputListener!: (unlisten: () => void) => void;
     const outputListenerPending = new Promise<() => void>((resolve) => { resolveOutputListener = resolve; });

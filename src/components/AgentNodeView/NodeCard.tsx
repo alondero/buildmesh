@@ -129,7 +129,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     const member = members.find(candidate => candidate.id === id);
     const mode = utilities.get(id);
     if (!member || !mode) return;
-    buildRunTerminalManager.dispose(id, mode, member.use_worktree); // allow-dispose — explicit utility-tab close, never a session switch
+    void buildRunTerminalManager.dispose(id, mode, member.use_worktree); // allow-dispose — explicit utility-tab close, never a session switch
     closeUtility(nodeId, id);
   };
 
