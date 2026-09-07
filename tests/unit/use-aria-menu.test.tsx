@@ -35,7 +35,7 @@ function Harness({
   const rootRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const count = itemCount ?? 3;
-  useAriaMenu({ rootRef, itemCount: count, activeIndex, setActiveIndex, onClose, enabled });
+  useAriaMenu({ rootRef, ...(itemCount === undefined ? {} : { itemCount }), activeIndex, setActiveIndex, onClose, enabled });
   return (
     <>
       <button data-testid="outside">outside</button>
@@ -59,6 +59,13 @@ describe('useAriaMenu — WAI-ARIA keyboard contract', () => {
   it('auto-focuses the first menuitem on mount', () => {
     render(<Harness onClose={() => {}} />);
     expect(document.activeElement).toBe(screen.getByTestId('item-0'));
+  });
+
+  it('falls back to the rendered menuitems when itemCount is omitted', () => {
+    render(<Harness onClose={() => {}} />);
+    const items = screen.getAllByRole('menuitem');
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(document.activeElement).toBe(items[items.length - 1]);
   });
 
   it('ArrowDown moves focus to the next menuitem with wrap-around', () => {

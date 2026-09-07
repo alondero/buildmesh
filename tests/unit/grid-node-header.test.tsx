@@ -149,6 +149,14 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.getByTestId('circuit-run-pill').textContent).toBe('Review workflow · #2');
   });
 
+  it('keeps session and signal health warnings distinct at compact widths', () => {
+    seedAgentNodes([{ ...NODE, status: 'suspended', cli_session_id: null, signal_health: 'unavailable' }], NODE.id);
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+
+    expect(screen.getByText('Missing session ID')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Attention signal unavailable' })).toBeTruthy();
+  });
+
   it.each([
     ['implementing', 'autopilot'],
     ['finishing', 'autopilot · wrap-up'],

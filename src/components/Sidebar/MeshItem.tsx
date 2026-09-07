@@ -60,7 +60,7 @@ interface MeshItemProps {
   onOpenFilesProbe: () => void;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
-  setActiveNode: (id: number) => void;
+  onActivateNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
   // Issue #378: opens the Probe Panel on the 🐙 Git Issues tab for this
@@ -100,7 +100,7 @@ export function MeshItem({
   onOpenFilesProbe,
   meshNodes,
   activeNodeId,
-  setActiveNode,
+  onActivateNode,
   selectMesh,
   onDeleteNode,
   onOpenIssuesProbe,
@@ -389,7 +389,7 @@ export function MeshItem({
           // harness-grouped render, same icons).
           providerList={providerList}
           onSelect={() => {
-            setActiveNode(node.id);
+            onActivateNode(node.id);
             // Single mode stays single (wayfinder #982 / #983): it renders
             // the active node, so the click retargets the solo view
             // automatically — this replaces the old setMaximizedNode

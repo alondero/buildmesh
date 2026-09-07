@@ -23,7 +23,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const tabRefs = useRef<(HTMLDivElement | null)[]>([]);
   // A click event alone cannot reliably distinguish pointer activation from
   // keyboard or assistive-technology activation. Pointer events are explicit
   // for mouse and touch; keyboard activation leaves this at the safe default.
@@ -41,7 +41,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   const closeMenu = () => { setOpen(false); triggerRef.current?.focus({ preventScroll: true }); };
   useClickOutside(open ? menuId : null, () => setOpen(false));
   useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
-  useAriaMenu({ rootRef: menuRef, itemCount: tabs.length, activeIndex, setActiveIndex,
+  useAriaMenu({ rootRef: menuRef, activeIndex, setActiveIndex,
     onClose: closeMenu, enabled: open });
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -55,7 +55,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
       <div role="tablist" aria-label="Node activities" className="flex min-w-0 flex-1 overflow-x-auto">
         {tabs.map((tab, index) => {
           const selected = index === selectedIndex;
-          return <button key={tab.key} ref={el => { tabRefs.current[index] = el; }} type="button" role="tab"
+          return <div key={tab.key} ref={el => { tabRefs.current[index] = el; }} role="tab"
               id={`activity-${rootId}-${tab.key}`} aria-controls={`activity-panel-${rootId}`}
               aria-label={fullLabel(tab)} title={fullLabel(tab)} aria-selected={selected} tabIndex={selected ? 0 : -1}
               onPointerDown={() => { activationRef.current = 'pointer'; }}
@@ -67,7 +67,14 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               }}
               onKeyDown={event => {
                 if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
                   activationRef.current = 'keyboard';
+                  onSelect(tab.member.id, tab.utility, false);
+                  return;
+                }
+                if ((event.key === 'Delete' || event.key === 'Backspace') && selected && tab.utility) {
+                  event.preventDefault();
+                  onClose(tab.member.id);
                   return;
                 }
                 const target = event.key === 'ArrowRight' ? (index + 1) % tabs.length
@@ -82,14 +89,17 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               {!tab.utility && <ProviderIcon providerId={tab.member.provider} className="h-3 w-3 shrink-0" />}
               <span className="truncate">{tab.label}</span>
               {!tab.utility && <span aria-hidden="true" className={`shrink-0 text-2xs ${getStatusConfig(tab.member.status).color}`}>{statusGlyph(tab.member.status)}</span>}
-            </button>;
+              {tab.utility && <button type="button" tabIndex={-1}
+                aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
+                onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault(); event.stopPropagation(); onClose(tab.member.id);
+                  }
+                }}
+                className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-text-muted hover:bg-status-error-bg hover:text-status-error">&times;</button>}
+            </div>;
         })}
-      </div>
-      <div role="group" aria-label="Close utility sessions" className="flex shrink-0 items-center border-b-2 border-transparent">
-        {tabs.filter(tab => tab.utility).map(tab => <button key={`close-${tab.key}`} type="button"
-          aria-label={`Close ${fullLabel(tab)}`} title={`Close ${fullLabel(tab)}`}
-          onClick={event => { event.stopPropagation(); onClose(tab.member.id); }}
-          className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm text-text-muted hover:bg-status-error-bg hover:text-status-error">×</button>)}
       </div>
       <button ref={triggerRef} type="button" data-dropdown-for={menuId} aria-label={`All sessions (${tabs.length})`} title="All sessions"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}

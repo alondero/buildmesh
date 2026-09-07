@@ -8,7 +8,6 @@ import {
 } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
-import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
@@ -98,7 +97,6 @@ describe('useAgentNodeStore', () => {
       closingNodeIds: new Set(),
       schedules: {},
     });
-    useNodeActivityStore.setState({ selections: {}, utilities: {} });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
     // selectProviderForMesh reaches into useMeshStore — keep it clean too so
@@ -509,19 +507,6 @@ describe('useAgentNodeStore', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('commits the activity selection with the active node transition', () => {
-      useAgentNodeStore.getState().setActiveNode(6, 4);
-
-      expect(useAgentNodeStore.getState().activeNodeId).toBe(6);
-      expect(useNodeActivityStore.getState().selections[4]).toEqual({ nodeId: 6, utility: false });
-    });
-
-    it('opens a requested utility in the same transition', () => {
-      useAgentNodeStore.getState().setActiveNode(6, 4, true, 'terminal');
-
-      expect(useNodeActivityStore.getState().utilities[6]).toBe('terminal');
-      expect(useNodeActivityStore.getState().selections[4]).toEqual({ nodeId: 6, utility: true });
-    });
 
     it('clears the active node when setting null', () => {
       useAgentNodeStore.setState({ activeNodeId: 5 });

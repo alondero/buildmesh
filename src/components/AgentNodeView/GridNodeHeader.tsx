@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
@@ -18,6 +19,7 @@ import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
+import { SignalHealthBadge } from '../shared/SignalHealthBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
@@ -107,7 +109,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const titleNode = useAgentNodeStore(s => s.nodesById[titleNodeId]);
   const renameAgentNode = useAgentNodeStore(s => s.renameAgentNode);
-  const setActiveNode = useAgentNodeStore(s => s.setActiveNode);
+  const activateNode = useNodeActivityStore(s => s.activateNode);
   const deleteAgentNode = useAgentNodeStore(s => s.deleteAgentNode);
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
@@ -130,10 +132,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const mesh = meshesById.get(titleNode.mesh_id);
   const meshColor = getMeshColor(titleNode.mesh_id, mesh?.color);
   const canResume = canResumeSuspendedNode(node);
+  const lostConversation = hasLostConversation(node, !!autopilotState || !!circuitOwnership);
+  const signalUnavailable = node.signal_health === 'unavailable';
+  const compactHeader = width < HEADER_TIER_BREAKPOINTS.compact;
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
   const handleToggleSolo = () => {
     if (isSingleMode) exitSingleMode();
-    else { setActiveNode(node.id); setViewMode('single'); }
+    else { activateNode(node.id); setViewMode('single'); }
   };
   const handleClose = async (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -153,8 +158,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     try { await openInFileManager(gitPath); }
     catch (error) { console.error('Failed to open folder in file manager:', error); }
   };
-  const showDetails = () => { setActiveNode(node.id); openProbeTab('properties'); };
-  const showChanges = () => { setActiveNode(node.id); openProbeTab('review'); };
+  const showDetails = () => { activateNode(node.id); openProbeTab('properties'); };
+  const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
   const attentionTone = activity?.tone === 'error' ? 'text-status-error bg-status-error-bg' : 'text-status-warning bg-status-warning/10';
 
   return (
@@ -173,10 +178,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           <InlineEditableText value={titleNode.name} onCommit={next => renameAgentNode(titleNode.id, next)}
             className="text-sm font-semibold text-text-primary" />
         </span>
-        {hasLostConversation(node, !!autopilotState || !!circuitOwnership) && <MissingSessionIdBadge compact={width < HEADER_TIER_BREAKPOINTS.compact} />}
-        {node.signal_health === 'unavailable' && !(hasLostConversation(node, !!autopilotState || !!circuitOwnership) && width < HEADER_TIER_BREAKPOINTS.compact) && <span role="img" aria-label="Attention signal unavailable"
-          title="Attention signal unavailable — watch this session's terminal directly."
-          className="shrink-0 text-xs text-status-warning">⚠</span>}
+        {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
+        {signalUnavailable && <SignalHealthBadge compact={compactHeader} />}
       </div>
         {attentionCount > 0 && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onAttention?.(); }}
@@ -299,8 +302,6 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
   // kebab, so a module-scoped counter is enough.
   const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
   const menuId = menuIdRef.current;
-  // Resume adds one row; navigation wraps over the current set of commands.
-  const itemCount = canResume ? 8 : 7;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     regenSubmenu.closeSubmenu();
@@ -335,7 +336,6 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
 
   useAriaMenu({
     rootRef: menuRef,
-    itemCount,
     activeIndex,
     setActiveIndex,
     onClose: closeAndReturnFocus,

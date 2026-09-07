@@ -1,5 +1,5 @@
 import { useAgentNodeStore, type AgentNode } from '../stores/agentNodeStore';
-import { activityRootId } from './nodeActivities';
+import { useNodeActivityStore } from '../stores/nodeActivityStore';
 
 /**
  * Cycle through agent nodes with `status === 'awaiting_input'` (issue #64).
@@ -81,7 +81,7 @@ export function nextAwaitingNodeId(): number | null {
 
 /**
  * Convenience entry point used by the App.tsx shortcut handler — runs the
- * pure cycle logic and applies the result via `setActiveNode`. Returning
+ * pure cycle logic and applies the result via `activateNode`. Returning
  * the chosen id (or null) keeps the handler's "did anything happen?" branch
  * trivial for future observability hooks (toast, status-line counter, etc.)
  * without coupling this module to a logger.
@@ -89,8 +89,7 @@ export function nextAwaitingNodeId(): number | null {
 export function jumpToNextAwaitingNode(): number | null {
   const nextId = nextAwaitingNodeId();
   if (nextId !== null) {
-    const state = useAgentNodeStore.getState();
-    state.setActiveNode(nextId, activityRootId(nextId, state.nodesById, state.circuitOwnerships));
+    useNodeActivityStore.getState().activateNode(nextId);
   }
   return nextId;
 }

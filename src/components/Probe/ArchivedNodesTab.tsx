@@ -53,6 +53,7 @@ import {
   type ArchivedAgentNode,
 } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
@@ -102,7 +103,7 @@ export function ArchivedNodesTab() {
   const selectMesh = useMeshStore((s) => s.selectMesh);
   const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
-  const setActiveNode = useAgentNodeStore((s) => s.setActiveNode);
+  const activateNode = useNodeActivityStore((s) => s.activateNode);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
   const [sessions, setSessions] = useState<ArchivedAgentNode[]>([]);
@@ -211,7 +212,7 @@ export function ArchivedNodesTab() {
         providerId,
       );
       await fetchAgentNodes();
-      await setActiveNode(node.id);
+      activateNode(node.id);
       // The imported node's mesh_id may differ from the one the probe
       // is showing if the user is in the "global view" fallback
       // (sidebar collapsed, focus follows the active node). Re-select

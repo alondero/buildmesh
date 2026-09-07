@@ -18,7 +18,7 @@ interface NodeCardProps {
   nodeId: number;
   memberIds?: readonly number[];
   isActive: boolean;
-  onActivate: (nodeId: number, rootId?: number, utility?: boolean, utilityMode?: UtilityMode) => void;
+  onActivate: (nodeId: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   /// When false (e.g. the maximized solo view), the card is not a drag target
   /// or handle — there's nothing to reorder against.
   draggable?: boolean;
@@ -108,11 +108,11 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id));
   const choose = (id: number, utility = false, focusTerminal = true) => {
     setKeyboardSelection(focusTerminal ? null : { nodeId: id, utility });
-    // setActiveNode owns the cross-store transition. The terminal receives a
+    // activateNode owns the cross-store transition. The terminal receives a
     // monotonically changing focus request; it focuses itself once mounted,
     // so a cold lazy utility attach cannot lose a request in an animation
     // frame race.
-    onActivate(id, nodeId, utility);
+    onActivate(id, utility);
     if (focusTerminal) setFocusRequest(request => request + 1);
   };
   const status = activityStatus(root, members);
@@ -175,7 +175,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         onAttention={revealAttention}
         onBuildRun={(id, mode) => {
           setKeyboardSelection(null);
-          onActivate(id, nodeId, true, mode);
+          onActivate(id, true, mode);
           setFocusRequest(request => request + 1);
         }}
         dragHandleProps={draggable ? { ...listeners, ...attributes } : undefined}

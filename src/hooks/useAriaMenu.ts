@@ -54,8 +54,8 @@ import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 export interface UseAriaMenuOptions {
   /** Ref to the menu root. The focus-gate reads `rootRef.current.contains(activeElement)`. */
   rootRef: RefObject<HTMLElement | null>;
-  /** Number of menuitems currently rendered. The arrow handler wraps modulo this. */
-  itemCount: number;
+  /** Optional number of menuitems. When omitted, the rendered item selector is authoritative. */
+  itemCount?: number;
   /** Current roving-tabindex position. */
   activeIndex: number;
   /** Setter for the roving-tabindex position. */
@@ -115,7 +115,7 @@ export function useAriaMenu({
       const active = document.activeElement;
       if (!(active instanceof Node) || !root.contains(active)) return;
 
-      const total = itemCountRef.current;
+      const total = itemCountRef.current ?? root.querySelectorAll<HTMLElement>(itemSelector).length;
       if (total === 0) return;
 
       if (e.key === 'Escape') {

@@ -217,9 +217,10 @@ describe('GridNodeHeader width contracts', () => {
   beforeEach(setupCommonState);
 
   it('uses the named compact breakpoint for the narrow warning badge', () => {
-    seedAgentNodes([{ ...NODE, status: 'suspended', cli_session_id: null }], NODE.id);
+    seedAgentNodes([{ ...NODE, status: 'suspended', cli_session_id: null, signal_health: 'unavailable' }], NODE.id);
     const { root } = renderHeader(HEADER_TIER_BREAKPOINTS.compact - 1);
     expect(root.querySelector('[aria-label="Missing session ID"]')).toBeTruthy();
+    expect(root.querySelector('[aria-label="Attention signal unavailable"]')).toBeTruthy();
     fireResize(root, HEADER_TIER_BREAKPOINTS.compact + 1);
     expect(root.textContent).toContain('Missing session ID');
     expect(root.querySelector('[aria-label="Missing session ID"]')).toBeNull();

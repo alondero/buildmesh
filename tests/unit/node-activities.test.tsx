@@ -54,7 +54,7 @@ const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilt
 
 function card() {
   return <NodeCard nodeId={1} memberIds={[1, 2, 4]} isActive
-    onActivate={(id, rootId, utility, utilityMode) => useAgentNodeStore.getState().setActiveNode(id, rootId, utility, utilityMode)} />;
+    onActivate={(id, utility, utilityMode) => useNodeActivityStore.getState().activateNode(id, utility, utilityMode)} />;
 }
 
 beforeEach(() => {
@@ -66,6 +66,21 @@ beforeEach(() => {
 });
 
 describe('node activities', () => {
+  it('coordinates entity focus and activity selection at the UI store boundary', () => {
+    act(() => useNodeActivityStore.getState().activateNode(2));
+
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 2, utility: false });
+  });
+
+  it('opens a utility through the same coordinated transition', () => {
+    act(() => useNodeActivityStore.getState().activateNode(1, true, 'terminal'));
+
+    expect(useNodeActivityStore.getState().utilities[1]).toBe('terminal');
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 1, utility: true });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(1);
+  });
+
   it('groups reviewers in all/mesh grids and keeps child-only filter and pin matches accessible', () => {
     expect(deriveVisibleNodes('all', nodes, 1, 2, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
     expect(deriveVisibleNodes('mesh', nodes, 1, 2, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
@@ -109,6 +124,12 @@ describe('node activities', () => {
     fireEvent.click(screen.getByText('Open terminal'));
     expect(await screen.findByText('terminal output 1')).toBeTruthy();
     expect(screen.queryByLabelText('Agent 1')).toBeNull();
+    const terminalTab = screen.getByRole('tab', { name: /Terminal.*Agent 1/ });
+    expect(terminalTab.contains(screen.getByRole('button', { name: /Close Terminal/ }))).toBe(true);
+    fireEvent.keyDown(terminalTab, { key: 'Delete' });
+    expect(screen.queryByRole('tab', { name: /Terminal/ })).toBeNull();
+    fireEvent.click(screen.getByText('Open terminal'));
+    expect(await screen.findByText('terminal output 1')).toBeTruthy();
     fireEvent.click(screen.getByRole('tab', { name: /^Implementation/ }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
     expect(screen.queryByText('terminal output 1')).toBeNull();
