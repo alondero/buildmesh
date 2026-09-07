@@ -23,7 +23,7 @@
  * over the legacy `meshStore.addMesh()` direct call).
  */
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
-import type { NonSingleViewMode } from '../../stores/uiStore';
+import type { ViewMode } from '../../stores/uiStore';
 
 /** The shape the empty state needs to pick a branch. Each field is
  *  computed by the owning UI from the live stores — `CanvasEmptyState`
@@ -40,30 +40,49 @@ export interface CanvasEmptyStateInput {
    *  Distinguishes "all meshes empty" from "filters excluded every
    *  node". */
   totalNodeCount: number;
-  /** Nodes inside the active scope (mesh/all/filtered) BEFORE the grid
-   *  controls narrow it. 0 means the scope is genuinely empty — the
-   *  "selected empty mesh" branch keys off this for 'mesh' view. */
+  /** Nodes inside the active scope (mesh/all/filtered) BEFORE the
+   *  grid controls narrow it. 0 means the scope is genuinely empty —
+   *  the "selected empty mesh" branch keys off this for 'mesh' view.
+   *  For 'single', this is the resolved scope's size (`lastNonSingleMode`
+   *  fallback) so a soloed empty mesh reports 0 even when other
+   *  meshes have nodes. */
   scopedCount: number;
-  /** Nodes the grid controls left after narrowing (== the rendered
-   *  list length). 0 while `scopedCount` > 0 means "filters exclude
-   *  everything" — the way out is `onClearFilters`, not spawning. */
+  /** Nodes the active scope actually shows. 0 while `scopedCount` > 0
+   *  drives `filters-exclude-all`. For 'single' the count is 0 when
+   *  there's no soloable node AND `scopedCount` > 0 — that case
+   *  routes to a dedicated `single-no-candidate` branch (same UX as
+   *  Pinned-empty) rather than the misleading "Clear filters" CTA. */
   filteredCount: number;
-  /** The active non-single view mode. Pinned keeps its own dedicated
-   *  empty state; the other three feed the four main branches. */
-  viewMode: NonSingleViewMode;
+  /** The active view mode, including 'single'. The input accepts
+   *  'single' so the classifier can route the genuine single-mode
+   *  no-candidate case instead of faking through `lastNonSingleMode`
+   *  — which made `filteredCount === 0` always true and tripped the
+   *  `filters-exclude-all` branch even with no filter active
+   *  (senior-review finding). */
+  viewMode: ViewMode;
   /** The sidebar's selected mesh id, or `null` when none is selected.
-   *  Required (not assumed!) for the `selected-empty` branch — a
-   *  previous iteration cast a nullable prop to `number` via `as`
-   *  and lied in the comment that the classifier "guaranteed" a
-   *  mesh was selected. The classifier now reads this field
-   *  explicitly and re-routes to `all-empty` when viewMode is
-   *  `mesh` but no mesh is actually selected (e.g. the active
-   *  node's mesh fallback wasn't enough). */
+   *  Required (not assumed!) for the `selected-empty` branch. The
+   *  classifier reads this field explicitly and re-routes to
+   *  `all-empty` when viewMode is `mesh` but no mesh is actually
+   *  selected (e.g. the active node's mesh fallback wasn't enough). */
   selectedMeshId: number | null;
   /** Whether ANY non-terminal harness is reachable (issue #822).
    *  Drives the "Setup" routing when the user has no usable agent. */
   harnessReady: boolean;
 }
+
+/** Structured classifier result. Each branch carries the data the
+ *  renderer needs — the `selectedMeshId` for `selected-empty` is
+ *  typed as `number` (non-nullable) so the renderer doesn't need
+ *  any `as` cast. Type safety comes from the discriminator, not
+ *  from a comment that lies. */
+export type CanvasEmptyDecision =
+  | { branch: 'no-meshes' }
+  | { branch: 'selected-empty'; meshId: number }
+  | { branch: 'all-empty' }
+  | { branch: 'filters-exclude-all' }
+  | { branch: 'pinned-empty' }
+  | { branch: 'single-no-candidate' };
 
 /** Callbacks the empty state's CTAs fire. Owners wire these to the
  *  appropriate store action / modal opener:
@@ -96,30 +115,41 @@ interface CanvasEmptyStateProps {
  * Decision order matters (issue #1536):
  *   1. Pinned always wins — its dedicated CTA swaps view mode, which
  *      would be wrong if the user landed here because of a filter.
- *   2. "No meshes" wins next — the canonical Mesh Create CTA must be
+ *   2. Single-mode-with-no-candidate wins next — the solo view has
+ *      no node to display (the active node was deleted or the
+ *      fallback scope is empty), and routing to filters-exclude-all
+ *      would falsely suggest "Clear filters" when no filters are
+ *      active in Single mode. Same UX as Pinned-empty: a "View All
+ *      Nodes" CTA is the natural escape.
+ *   3. "No meshes" wins next — the canonical Mesh Create CTA must be
  *      reachable even when the user has nodes in a mesh that was
  *      deleted out from under them.
- *   3. "Selected mesh is empty" — view mode is mesh AND that mesh has
- *      zero nodes. Distinct from "all meshes empty" because the user
- *      has a place to spawn into (the mesh is selected).
- *   4. "All meshes empty" — meshes exist but zero nodes globally. The
+ *   4. "Selected mesh is empty" — view mode is mesh AND that mesh has
+ *      zero nodes AND the user explicitly picked it (selectedMeshId
+ *      is set). Distinct from "all meshes empty" because the user
+ *      has a place to spawn into.
+ *   5. "All meshes empty" — meshes exist but zero nodes globally. The
  *      CTA still offers a spawn action because at least one mesh is
  *      wired up; it just has no agents yet.
- *   5. "Filters exclude all" — there ARE nodes, just none that match
+ *   6. "Filters exclude all" — there ARE nodes, just none that match
  *      the active controls. The way out is `onClearFilters`, NOT
  *      adding meshes or spawning (issue #1609 mirrors this for the
  *      dedicated Filtered view; #1536 generalises it).
  */
-export type CanvasEmptyBranch =
-  | 'no-meshes'
-  | 'selected-empty'
-  | 'all-empty'
-  | 'filters-exclude-all'
-  | 'pinned-empty';
-
-export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyBranch {
-  if (input.viewMode === 'pinned') return 'pinned-empty';
-  if (input.meshCount === 0) return 'no-meshes';
+export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
+  if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
+  // Single mode with no candidate. `visibleNodes.length === 0` is
+  // always true in single mode (the grid helpers don't list
+  // single-mode candidates), so `filteredCount === 0` here does NOT
+  // imply a filter is excluding everything. Routing to
+  // `filters-exclude-all` would render a misleading "Clear filters"
+  // CTA when the user just soloed a node that's gone. Surface a
+  // dedicated no-candidate branch with the same "View All Nodes"
+  // escape as Pinned-empty.
+  if (input.viewMode === 'single' && input.filteredCount === 0 && input.scopedCount > 0) {
+    return { branch: 'single-no-candidate' };
+  }
+  if (input.meshCount === 0) return { branch: 'no-meshes' };
   // Mesh view with `scopedCount === 0` and an explicit sidebar
   // selection is the canonical "selected empty mesh" — the user
   // picked a mesh and it has no agents. When the selection is null
@@ -129,15 +159,23 @@ export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyBr
   // SPAWN CTA opens the global Spawn Menu — the caller resolves the
   // target mesh id, same fallback the sidebar's `+ ▾` uses.
   if (input.viewMode === 'mesh' && input.scopedCount === 0) {
-    return input.selectedMeshId !== null ? 'selected-empty' : 'all-empty';
+    return input.selectedMeshId !== null
+      ? { branch: 'selected-empty', meshId: input.selectedMeshId }
+      : { branch: 'all-empty' };
   }
-  if (input.totalNodeCount === 0) return 'all-empty';
-  if (input.filteredCount === 0) return 'filters-exclude-all';
+  if (input.totalNodeCount === 0) return { branch: 'all-empty' };
+  if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };
   // Defensive — caller should not render the empty state when both
   // counts are positive. Treat as "no-matches" so the user always sees
   // a clear next step rather than the silent splash.
-  return 'filters-exclude-all';
+  return { branch: 'filters-exclude-all' };
 }
+
+// Legacy string-literal branch alias — kept so the test surface that
+// asserted `classifyCanvasEmpty(input) === 'pinned-empty'` keeps
+// working without rewriting the assertions. New code should match on
+// the structured `CanvasEmptyDecision` instead.
+export type CanvasEmptyBranch = CanvasEmptyDecision['branch'];
 
 /** The shared shell — centered, max-w-sm, heading + body + accent-cyan
  *  CTA. Mirrors the existing splash + Pinned/Filtered empty-state
@@ -415,19 +453,19 @@ export function CanvasEmptyState({
   input,
   callbacks,
 }: CanvasEmptyStateProps) {
-  const branch = classifyCanvasEmpty(input);
-  switch (branch) {
+  const decision = classifyCanvasEmpty(input);
+  switch (decision.branch) {
     case 'no-meshes':
       return <NoMeshesBranch onCreateMesh={callbacks.onCreateMesh} />;
     case 'selected-empty':
-      // Classifier guarantees `input.selectedMeshId !== null` for
-      // this branch (re-routes to `all-empty` otherwise). The
-      // non-null assertion is type-safe without an `as` cast.
+      // The classifier's discriminated union returns `meshId: number`
+      // (non-nullable) on this branch — TypeScript narrows the type
+      // automatically, no `as` cast required.
       return (
         <SelectedEmptyBranch
           harnessReady={input.harnessReady}
           callbacks={callbacks}
-          selectedMeshId={input.selectedMeshId as number}
+          selectedMeshId={decision.meshId}
         />
       );
     case 'all-empty':
@@ -440,6 +478,12 @@ export function CanvasEmptyState({
     case 'filters-exclude-all':
       return <FiltersExcludeAllBranch onClearFilters={callbacks.onClearFilters} />;
     case 'pinned-empty':
+      return <PinnedEmptyBranch onViewAll={callbacks.onViewAll} />;
+    case 'single-no-candidate':
+      // Same UX as Pinned-empty: the user is in a "scope has content
+      // but I can't show anything" state (Solo'd a deleted node, or
+      // the fallback scope resolved to nothing). The escape is the
+      // same: go back to All Nodes.
       return <PinnedEmptyBranch onViewAll={callbacks.onViewAll} />;
   }
 }

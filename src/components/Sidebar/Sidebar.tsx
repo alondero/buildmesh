@@ -60,14 +60,10 @@ export function Sidebar() {
   // for the open/close state but stores the prefixed value as the
   // single source of truth.
   const [openDropdownFor, setOpenDropdownFor] = useState<string | null>(null);
-  // Issue #1536 — the Mesh Create modal is mounted at App.tsx scope
-  // (driven by `uiStore.canvasCreateMeshOpen`) so the canvas empty
-  // state and the Sidebar's "+ New mesh" buttons summon the same
-  // dialog. Sidebar's local `createMeshOpen` state and mirror
-  // `useEffect` (senior-review finding: Zustand abused as an
-  // imperative event bus with a self-clearing flag) are gone —
-  // both call sites now hit the shared `openCanvasCreateMesh`
-  // action directly.
+  // Both Sidebar `+ New mesh` buttons call the shared
+  // `openCanvasCreateMesh` action — the modal itself is mounted at
+  // App.tsx (gated on `uiStore.canvasCreateMeshOpen`), not here.
+  // The canvas empty state hits the same action.
   const openCanvasCreateMesh = useUIStore((s) => s.openCanvasCreateMesh);
   // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
   // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC

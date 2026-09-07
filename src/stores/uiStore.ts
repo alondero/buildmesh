@@ -365,19 +365,27 @@ interface UIState extends GridControls {
   closeRemoteAccess: () => void;
 
   // ---- Canvas empty-state modals (issue #1536) ----
-  // The Mesh Create modal lives in `Sidebar` today (a local `useState`
-  // gates its mount); the canvas empty state needs to summon the same
-  // modal but isn't in the Sidebar's render tree. These two flags are the
-  // shared signal so the Sidebar can react to a canvas-driven open and
-  // the App shell can mount a canvas-level Spawn Menu. Mirrors the
-  // existing `appSettingsOpen` / `openAppSettings` discipline — state +
-  // idempotent actions, rendering decided by the owning component.
+  // Both the Mesh Create modal and the canvas Spawn Menu dialog
+  // mount at App scope (App.tsx), gated on these flags. Mounting at
+  // App scope — rather than inside Sidebar — keeps the canvas empty
+  // state's open requests independent of the Sidebar's render
+  // tree. The earlier `meshStore.addMesh()` direct-call path is
+  // gone; both call sites (Sidebar's `+ New mesh` buttons and the
+  // canvas empty state's CTA) hit `openCanvasCreateMesh` directly.
+  // Mirrors the existing `appSettingsOpen` / `openAppSettings`
+  // discipline — state + idempotent actions, rendering decided by
+  // the owning component.
   canvasCreateMeshOpen: boolean;
   openCanvasCreateMesh: () => void;
   closeCanvasCreateMesh: () => void;
-  // The mesh whose spawn menu the canvas is requesting, or null when
-  // closed. The App shell mounts the canvas Spawn Menu dialog against
-  // this id; passing `null` closes the dialog.
+  // The mesh whose spawn menu the canvas is requesting, or null
+  // when closed. `null` STRICTLY means "closed" — an earlier
+  // iteration had the modal fall back to the first mesh when the
+  // id was null, which created an inescapable modal lockout (close
+  // would reset to null, fallback would re-resolve to a real
+  // mesh, modal would re-render). The caller
+  // (`AgentNodeView.onOpenSpawnMenu`) resolves the target mesh id
+  // before opening; `null` here means "closed" and nothing else.
   canvasSpawnMenuMeshId: number | null;
   openCanvasSpawnMenu: (meshId: number) => void;
   closeCanvasSpawnMenu: () => void;

@@ -35,6 +35,7 @@
  * surfaces can be open independently and the panel needs its own
  * click-outside scope.
  */
+import { useEffect } from 'react';
 import { Modal } from '../shared/Modal';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
@@ -64,31 +65,50 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
   // row mutates between open and render (senior-review finding).
   const targetMesh = useMeshStore((s) => s.meshesById.get(meshId) ?? null);
   const selectProviderForMesh = useAgentNodeStore((s) => s.selectProviderForMesh);
-  const selectMesh = useMeshStore((s) => s.selectMesh);
   const providerList = useProviderList();
 
   // The mesh disappeared between open request and render (delete /
   // refetch race). Reset the store flag and bail — the next open
   // call from the canvas empty state will re-resolve the mesh.
-  if (targetMesh === null) {
-    close();
-    return null;
-  }
+  // MUST run in an effect: calling `close()` synchronously inside
+  // the render body is a store write during render, which React 19
+  // flags as a side-effect (and warns under StrictMode). Effect
+  // runs after commit, so the first paint still shows nothing
+  // (the early return below) and the close happens before the
+  // next render.
+  useEffect(() => {
+    if (targetMesh === null) close();
+  }, [targetMesh, close]);
+
+  if (targetMesh === null) return null;
 
   const handleSelect = async (providerId: string, altKey: boolean) => {
     close();
-    // The create→activate→select-mesh invariant (issue #283) lives in
-    // the store action; the canvas surface delegates so the same
-    // ordering holds whether the spawn came from the sidebar's `+ ▾`
-    // or the canvas empty state.
-    await selectProviderForMesh(
-      targetMesh.id,
-      targetMesh.name,
-      targetMesh.path,
-      providerId,
-      altKey,
-    );
-    selectMesh(targetMesh.id);
+    // The create→activate→select-mesh invariant (issue #283) lives
+    // entirely inside `selectProviderForMesh`: it creates the node,
+    // sets it active, then selects the mesh. The canvas surface
+    // delegates so the same ordering holds whether the spawn came
+    // from the sidebar's `+ ▾` or the canvas empty state. No
+    // separate `selectMesh` here — that would re-enter the
+    // invariant and race the action's own ordering.
+    try {
+      await selectProviderForMesh(
+        targetMesh.id,
+        targetMesh.name,
+        targetMesh.path,
+        providerId,
+        altKey,
+      );
+    } catch (error) {
+      // The agentNodeStore selector swallows errors and surfaces
+      // them via `state.error` (per the IPC wrapper contract), but
+      // an awaited rejection here would still bubble as an
+      // unhandled promise — re-throw via console.error so a test
+      // or a dev-tools surface can catch the failure mode without
+      // crashing the modal (it's already closed by the `close()`
+      // call above).
+      console.error('[CanvasSpawnMenu] selectProviderForMesh failed:', error);
+    }
   };
 
   const noAgent = !hasSpawnableAgent(providerList);

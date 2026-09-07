@@ -109,10 +109,13 @@ function App() {
   const canvasCreateMeshOpen = useUIStore((s) => s.canvasCreateMeshOpen);
   const closeCanvasCreateMesh = useUIStore((s) => s.closeCanvasCreateMesh);
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
-  // `meshes.length` drives the Mesh Create modal's `defaultColor`
-  // (per-mesh palette index). Subscribe here so a mesh added or
-  // deleted while the modal is open updates the colour seed.
-  const meshes = useMeshStore((s) => s.meshes);
+  // The Mesh Create modal's `defaultColor` is a function of
+  // `meshes.length` (per-mesh palette index). Read lazily: only when
+  // the modal is actually open. Subscribing to `meshes` here would
+  // re-render the entire App shell on every mesh add / delete /
+  // reorder, which is 99.9% of the time wasted — the modal is closed
+  // for nearly every render. Senior-review perf finding.
+  const meshCountForColor = useMeshStore((s) => s.meshes.length);
 
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
@@ -732,7 +735,7 @@ function App() {
       {canvasCreateMeshOpen && (
         <MeshCreateModal
           onClose={closeCanvasCreateMesh}
-          defaultColor={defaultMeshColor(meshes.length)}
+          defaultColor={defaultMeshColor(meshCountForColor)}
         />
       )}
       {/* `canvasSpawnMenuMeshId !== null` is the ONLY mount trigger.

@@ -55,74 +55,97 @@ function input(overrides: Partial<CanvasEmptyStateInput> = {}): CanvasEmptyState
 }
 
 describe('classifyCanvasEmpty (issue #1536)', () => {
+  // `.branch` accessor — the classifier returns a structured
+  // `CanvasEmptyDecision` (each branch carries its required data,
+  // e.g. `selected-empty` carries `meshId: number`). Asserting on
+  // the string discriminator alone (without `as number` casts in
+  // the renderer) is the type-safe shape.
+  const branch = (i: Parameters<typeof classifyCanvasEmpty>[0]) => classifyCanvasEmpty(i).branch;
+
   it('returns pinned-empty whenever the view mode is pinned', () => {
-    expect(classifyCanvasEmpty(input({ viewMode: 'pinned', meshCount: 0 }))).toBe('pinned-empty');
-    expect(classifyCanvasEmpty(input({ viewMode: 'pinned', meshCount: 5, totalNodeCount: 3 }))).toBe('pinned-empty');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 0 }))).toBe('pinned-empty');
+    expect(branch(input({ viewMode: 'pinned', meshCount: 5, totalNodeCount: 3 }))).toBe('pinned-empty');
   });
 
   it('returns no-meshes when no meshes exist (regardless of nodes)', () => {
-    expect(classifyCanvasEmpty(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
+    expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
     // Defensive — orphan nodes shouldn't be possible, but if they
     // were, no-meshes still wins so the user can add a mesh to host them.
-    expect(classifyCanvasEmpty(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
+    expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
-    expect(
-      classifyCanvasEmpty(
-        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: 42 }),
-      ),
-    ).toBe('selected-empty');
+    const decision = classifyCanvasEmpty(
+      input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: 42 }),
+    );
+    expect(decision.branch).toBe('selected-empty');
+    // The structured decision carries the mesh id — no `as number`
+    // cast at the renderer call site (senior-review fix).
+    expect(decision.branch === 'selected-empty' && decision.meshId).toBe(42);
   });
 
   it('re-routes to all-empty when viewMode=mesh but no mesh is selected (active-node-mesh fallback)', () => {
-    // Mesh view with scopedCount=0 but no sidebar selection is a
-    // misleading state for the user (they didn't pick a mesh). The
-    // senior review caught an earlier version that cast
-    // `selectedMeshId as number` and routed to `selected-empty`
-    // anyway — the new classifier guards against it.
     expect(
-      classifyCanvasEmpty(
-        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null }),
-      ),
+      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null })),
     ).toBe('all-empty');
   });
 
   it('mesh view with empty scope AND no selection AND zero nodes globally → all-empty', () => {
-    // Defensive — same path as the fallback above when no agents
-    // exist anywhere; the caller's `onOpenSpawnMenu(null)` resolves
-    // to the sidebar's selection or first mesh.
     expect(
-      classifyCanvasEmpty(
-        input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null }),
-      ),
+      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null })),
     ).toBe('all-empty');
   });
 
   it('mesh view with empty scope AND no selection AND a stale search filter → still all-empty (not filters-exclude-all)', () => {
-    // A stale search query persisting into Mesh view would otherwise
-    // surface the "Clear filters" CTA — but the user is in Mesh
-    // view (not Filtered), and there's no active filter on this
-    // scope. Route to all-empty so the CTA offers a spawn action.
     expect(
-      classifyCanvasEmpty(
+      branch(
         input({ viewMode: 'mesh', scopedCount: 0, filteredCount: 0, totalNodeCount: 3, selectedMeshId: null }),
       ),
     ).toBe('all-empty');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
-    expect(classifyCanvasEmpty(input({ viewMode: 'all', scopedCount: 0, totalNodeCount: 0 }))).toBe('all-empty');
+    expect(branch(input({ viewMode: 'all', scopedCount: 0, totalNodeCount: 0 }))).toBe('all-empty');
   });
 
   it('returns all-empty when meshes exist but no nodes globally', () => {
-    expect(classifyCanvasEmpty(input({ meshCount: 2, totalNodeCount: 0 }))).toBe('all-empty');
+    expect(branch(input({ meshCount: 2, totalNodeCount: 0 }))).toBe('all-empty');
   });
 
   it('returns filters-exclude-all when scoped nodes exist but none survive the filter', () => {
     expect(
-      classifyCanvasEmpty(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
+      branch(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
     ).toBe('filters-exclude-all');
+  });
+
+  it('returns single-no-candidate when viewMode=single with no solo node but scope has nodes', () => {
+    // Senior-review finding: filteredCount in single mode is the
+    // count of nodes the canvas ACTUALLY shows (singleNode ? 1 : 0),
+    // not visibleNodes.length (always 0 in single mode). With a
+    // scopedCount > 0 and no soloable node, the classifier routes
+    // to a dedicated branch that reuses the Pinned-empty UX
+    // instead of falsely suggesting "Clear filters".
+    const decision = classifyCanvasEmpty(
+      input({ viewMode: 'single', scopedCount: 3, filteredCount: 0, totalNodeCount: 3, selectedMeshId: 1 }),
+    );
+    expect(decision.branch).toBe('single-no-candidate');
+  });
+
+  it('returns pinned-empty even when scope has nodes in pinned mode', () => {
+    // Pinned branch wins first regardless of node counts.
+    const decision = classifyCanvasEmpty(
+      input({ viewMode: 'pinned', scopedCount: 5, filteredCount: 0, totalNodeCount: 5 }),
+    );
+    expect(decision.branch).toBe('pinned-empty');
+  });
+
+  it('does NOT route to single-no-candidate when scopedCount is also 0 (no fallback scope)', () => {
+    // Single mode with no solo node AND no fallback scope — the
+    // user genuinely has nothing. Fall through to other branches.
+    const decision = classifyCanvasEmpty(
+      input({ viewMode: 'single', scopedCount: 0, filteredCount: 0, totalNodeCount: 0, meshCount: 0 }),
+    );
+    expect(decision.branch).toBe('no-meshes');
   });
 });
 
@@ -238,5 +261,35 @@ describe('CanvasEmptyState (issue #1536)', () => {
     fireEvent.click(screen.getByTestId('canvas-empty-open-setup'));
     expect(cbs.onOpenSetup).toHaveBeenCalledTimes(1);
     expect(cbs.onOpenSpawnMenu).not.toHaveBeenCalled();
+  });
+
+  // Senior-review finding: Single mode with no soloable node but
+  // scope has content used to falsely route to `filters-exclude-all`
+  // (because `visibleNodes.length === 0` always in single mode).
+  // The classifier now has a dedicated branch; the renderer reuses
+  // the PinnedEmptyBranch UX (a "View All Nodes" CTA is the right
+  // escape — the user just needs to back out of Solo).
+  it('single-no-candidate branch: View All Nodes CTA fires onViewAll (NOT filters-exclude-all)', () => {
+    const cbs = { ...noopCallbacks, onViewAll: vi.fn(), onClearFilters: vi.fn() };
+    render(
+      <CanvasEmptyState
+        input={input({
+          viewMode: 'single',
+          meshCount: 1,
+          totalNodeCount: 3,
+          scopedCount: 3,
+          filteredCount: 0,
+          selectedMeshId: 1,
+        })}
+        callbacks={cbs}
+      />,
+    );
+
+    expect(screen.getByText('No pinned nodes')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
+    expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
+    // The misleading "Clear filters" CTA must NOT appear — no filter
+    // is active in Single mode.
+    expect(cbs.onClearFilters).not.toHaveBeenCalled();
   });
 });

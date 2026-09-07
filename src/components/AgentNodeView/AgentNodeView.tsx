@@ -402,9 +402,16 @@ export function AgentNodeView() {
   // against that scope (rather than hardcoded 0) means the empty
   // CTA reads "No agents in this mesh" instead of "No nodes match"
   // when the user Soloed a Mesh that's empty.
+  //
+  // `filteredCount` is the count of nodes the canvas ACTUALLY shows.
+  // In Single mode that's `singleNode ? 1 : 0` (not `visibleNodes.length`,
+  // which is always 0 in single mode because the grid helpers
+  // bypass single-mode candidates). Reading `visibleNodes.length`
+  // would falsely trip the `filters-exclude-all` branch on a
+  // Soloed empty mesh — no filter is active, but the count says
+  // 0. Senior-review finding.
   const meshesCount = useMeshStore((s) => s.meshes.length);
   const firstMeshId = useMeshStore((s) => s.meshes[0]?.id ?? null);
-  const sidebarSelectedMeshId = useMeshStore((s) => s.selectedMeshId);
   const providerList = useProviderList();
   const harnessReady = useMemo(() => hasSpawnableAgent(providerList), [providerList]);
   const effectiveViewMode: NonSingleViewMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
@@ -412,6 +419,7 @@ export function AgentNodeView() {
     () => scopeNodesForMode(effectiveViewMode, agentNodes, selectedMeshId, activeNodeId).length,
     [effectiveViewMode, agentNodes, selectedMeshId, activeNodeId],
   );
+  const filteredCount = viewMode === 'single' ? (singleNode ? 1 : 0) : visibleNodes.length;
 
   // Issue #1536 — the canvas empty-state callbacks. Each one is a
   // thin store-action shim so the empty-state component stays pure
@@ -424,8 +432,13 @@ export function AgentNodeView() {
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount,
-      filteredCount: visibleNodes.length,
-      viewMode: effectiveViewMode,
+      filteredCount,
+      // Pass the ACTUAL viewMode (including 'single') so the
+      // classifier can route single-no-candidate properly. Earlier
+      // iterations collapsed single → lastNonSingleMode, which made
+      // `filteredCount === 0` always true and tripped the
+      // filters-exclude-all branch even with no filter active.
+      viewMode,
       selectedMeshId,
       harnessReady,
     }),
@@ -433,8 +446,8 @@ export function AgentNodeView() {
       meshesCount,
       agentNodes.length,
       scopedCount,
-      visibleNodes.length,
-      effectiveViewMode,
+      filteredCount,
+      viewMode,
       selectedMeshId,
       harnessReady,
     ],
@@ -460,7 +473,7 @@ export function AgentNodeView() {
         // `useUIStore` subscription), else the first mesh.
         const target =
           meshId
-          ?? sidebarSelectedMeshId
+          ?? selectedMeshId
           ?? firstMeshId;
         if (target !== null) openCanvasSpawnMenu(target);
       },
@@ -468,7 +481,7 @@ export function AgentNodeView() {
       onOpenSetup: openAppSettings,
       onViewAll: () => setViewMode('all'),
     }),
-    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, sidebarSelectedMeshId, firstMeshId],
+    [openCanvasCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId, firstMeshId],
   );
 
   return (
