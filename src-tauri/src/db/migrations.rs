@@ -277,6 +277,7 @@ pub(crate) enum AlwaysStep {
     /// persisted first-turn injections are no longer needed, and backfill
     /// the explicit OpenPr policy on stored review graphs.
     UpgradeIssueReviewFirstTurns,
+    UpgradeIssueReviewVerdicts,
     /// Remove the temporary per-node session-generation keys written by the
     /// pre-v39 recovery implementation after their values have been copied to
     /// `agent_nodes.session_started_at`.
@@ -653,6 +654,7 @@ pub(crate) const V33_BACKFILL_SQL: &str = "UPDATE meshes \
 const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
     AlwaysStep::UpgradeIssueReviewFirstTurns,
+    AlwaysStep::UpgradeIssueReviewVerdicts,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
@@ -1039,15 +1041,18 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             )?;
             tx.commit()?;
         }
-        AlwaysStep::UpgradeIssueReviewFirstTurns => {
+        AlwaysStep::UpgradeIssueReviewFirstTurns | AlwaysStep::UpgradeIssueReviewVerdicts => {
             // v2 also backfills the explicit OpenPr policy on persisted
             // review graphs, so the migration must run once after v1 has
             // already been recorded.
-            const FLAG: &str = "issue_review_first_turn_upgrade_v2";
+            let flag = match step {
+                AlwaysStep::UpgradeIssueReviewVerdicts => "issue_review_verdict_upgrade_v1",
+                _ => "issue_review_first_turn_upgrade_v2",
+            };
             let already_done: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM app_settings WHERE key = ?1",
-                    params![FLAG],
+                    params![flag],
                     |row| row.get::<_, i64>(0).map(|count| count > 0),
                 )
                 .unwrap_or(false);
@@ -1077,7 +1082,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     }
                 };
                 let legacy_shape = graph.has_legacy_issue_review_shape();
-                let changed = graph.upgrade_legacy_issue_review_first_turns();
+                let changed = match step {
+                    AlwaysStep::UpgradeIssueReviewVerdicts => graph.upgrade_issue_review_verdict(),
+                    _ => graph.upgrade_legacy_issue_review_first_turns(),
+                };
                 let retained_legacy_prompt = graph.node("implementation_prompt").is_some()
                     || graph.node("review_prompt").is_some();
                 if legacy_shape && retained_legacy_prompt {
@@ -1100,7 +1108,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             }
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![FLAG],
+                params![flag],
             )?;
         }
     }

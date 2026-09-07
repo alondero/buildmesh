@@ -123,6 +123,10 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::Skipped(node));
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if db::circuit_agent_cleanup_claim(node_id).map_err(|e| e.to_string())?.is_some() {
+        tracing::info!("spawn_with_intent: cleanup generation owns node {}, deferring resume", node_id);
+        return Ok(SpawnOutcome::Skipped(node));
+    }
     if matches!(intent, SpawnIntent::Resume { cause: ResumeCause::Startup })
         && node.status != crate::models::SessionStatus::Suspended
     {

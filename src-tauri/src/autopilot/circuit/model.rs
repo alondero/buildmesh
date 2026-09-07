@@ -702,6 +702,67 @@ impl CircuitGraph {
         marker_changed || policy_changed || implementer_changed || reviewer_changed
     }
 
+    /// Only upgrade the shipped topology. User-authored wiring is never
+    /// replaced by a newly generated preset; spawn overrides stay intact.
+    pub(crate) fn upgrade_issue_review_verdict(&mut self) -> bool {
+        if !self.is_issue_driven_autopilot_review()
+            || !matches!(self.node("review_classifier").map(|n| &n.kind),
+                Some(CircuitNodeKind::LlmTurnClassifier { target_node_id })
+                    if target_node_id.as_deref() == Some("reviewer"))
+        {
+            return false;
+        }
+        let canonical = Self::issue_driven_autopilot_review("");
+        let mut legacy_edges = canonical.edges.clone();
+        legacy_edges.retain(|e| e.to != "close_approved" && e.from != "close_approved"
+            && !(e.from == "review_classifier" && e.to == "review_exhausted"));
+        for edge in &mut legacy_edges {
+            if edge.from == "review_classifier" && edge.to == "follow_feedback" {
+                edge.condition = EdgeCondition::OnOutcome(StepOutcome::Completed);
+            }
+            if edge.from == "review_retry" && edge.to == "review_exhausted" {
+                edge.to = "complete".into();
+            }
+        }
+        if self.edges != legacy_edges
+            || self.node("close_approved").is_some()
+            || self.node("review_exhausted").is_some()
+        {
+            return false;
+        }
+        for node in &mut self.nodes {
+            if node.id == "implementer" {
+                if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                    if prompt == "{{issue.prefill}}" {
+                        *prompt = Self::AUTONOMOUS_IMPLEMENTATION_PROMPT.into();
+                    }
+                }
+            }
+            let default_completion = node.id == "complete" && matches!(&node.kind,
+                CircuitNodeKind::Notify { message } if message == "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})");
+            if node.id == "review_classifier" || default_completion {
+                node.kind = canonical.node(&node.id).expect("canonical review node").kind.clone();
+            }
+            if node.id == "reviewer" {
+                if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                    let legacy_default = format!(
+                        "{}. The pull request URL is {{{{pr.url}}}}.",
+                        Self::PR_REVIEW_PROMPT
+                    );
+                    if *prompt == legacy_default {
+                        prompt.push(' ');
+                        prompt.push_str(Self::REVIEW_VERDICT_INSTRUCTION);
+                    }
+                }
+            }
+        }
+        for id in ["close_approved", "review_exhausted"] {
+            self.nodes.push(canonical.node(id).expect("canonical review node").clone());
+        }
+        self.edges = canonical.edges;
+        true
+    }
+
     fn replace_legacy_injected_first_turn(
         &mut self,
         spawn_id: &str,
@@ -837,6 +898,10 @@ impl CircuitGraph {
     /// an interactive session for a human developer with the PR URL on a newline.
     pub const PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
 
+    const AUTONOMOUS_IMPLEMENTATION_PROMPT: &'static str = "{{issue.prefill}}\nThis is an unattended implementation run. Carry the authorized issue through implementation and verification. Make routine implementation choices and record assumptions. Do not voluntarily enter interactive plan mode or stop after writing a plan. Ask for human input only when the task cannot proceed without a material decision, permission, or missing access; state that blocker clearly. Do not expand the issue's scope.";
+
+    const REVIEW_VERDICT_INSTRUCTION: &'static str = "State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
+
     /// Build the issue-driven Autopilot blueprint with a post-PR review loop.
     ///
     /// The implementation agent is finished through the same customizable
@@ -880,7 +945,7 @@ impl CircuitGraph {
                 node(
                     "implementer",
                     CircuitNodeKind::SpawnAgentNode {
-                        prompt: "{{issue.prefill}}".to_string(),
+                        prompt: Self::AUTONOMOUS_IMPLEMENTATION_PROMPT.to_string(),
                         name: None,
                         provider: None,
                         model: None,
@@ -932,8 +997,8 @@ impl CircuitGraph {
                     "reviewer",
                     CircuitNodeKind::SpawnAgentNode {
                         prompt: format!(
-                            "{}. The pull request URL is {{{{pr.url}}}}.",
-                            Self::PR_REVIEW_PROMPT
+                            "{}. The pull request URL is {{{{pr.url}}}}. {}",
+                            Self::PR_REVIEW_PROMPT, Self::REVIEW_VERDICT_INSTRUCTION
                         ),
                         name: None,
                         provider: None,
@@ -944,7 +1009,7 @@ impl CircuitGraph {
                 ),
                 node(
                     "review_classifier",
-                    CircuitNodeKind::LlmTurnClassifier {
+                    CircuitNodeKind::ReviewVerdict {
                         target_node_id: Some("reviewer".to_string()),
                     },
                 ),
@@ -968,10 +1033,16 @@ impl CircuitGraph {
                     },
                 ),
                 node("review_retry", CircuitNodeKind::RetryLimit { max_retries: 3 }),
+                node("close_approved", CircuitNodeKind::CloseAgentNode {
+                    target_node_id: Some("reviewer".to_string()),
+                }),
+                node("review_exhausted", CircuitNodeKind::Notify {
+                    message: "Review limit reached for PR #{{pr.number}}. Latest fixes have not been approved. Resume the saved implementation session and request a fresh review.".to_string(),
+                }),
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
-                        message: "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})".to_string(),
+                        message: "Review approved for PR #{{pr.number}} ({{issue.title}}). Check the current PR head and required checks before merging.".to_string(),
                     },
                 ),
             ],
@@ -988,12 +1059,15 @@ impl CircuitGraph {
                 edge("finish_round", "finish_classifier"),
                 outcome("open_pr", "reviewer", Completed),
                 edge("reviewer", "review_classifier"),
-                outcome("review_classifier", "follow_feedback", Completed),
+                outcome("review_classifier", "follow_feedback", StepOutcome::Working),
+                outcome("review_classifier", "close_approved", Completed),
+                outcome("review_classifier", "review_exhausted", StepOutcome::Blocked),
+                edge("close_approved", "complete"),
                 edge("follow_feedback", "close_reviewer"),
                 edge("close_reviewer", "feedback_classifier"),
                 outcome("feedback_classifier", "review_retry", Completed),
                 outcome("review_retry", "finish", Completed),
-                outcome("review_retry", "complete", StepOutcome::Failed),
+                outcome("review_retry", "review_exhausted", StepOutcome::Failed),
             ],
         }
     }
@@ -1711,7 +1785,7 @@ mod tests {
         assert!(matches!(
             g.node("implementer").map(|n| &n.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
-                if prompt == "{{issue.prefill}}"
+                if prompt == CircuitGraph::AUTONOMOUS_IMPLEMENTATION_PROMPT
         ));
         assert!(
             g.node("implementation_prompt").is_none(),

@@ -560,7 +560,7 @@ export function CircuitsProbeTab() {
           </div>
         ) : (
           <ul className="flex flex-col gap-1 p-2">
-            {view === 'history' && <li className="text-2xs text-text-muted px-1">Recent history · up to 10 runs per circuit</li>}
+            {view === 'history' && <li className="text-2xs text-text-muted px-1">History · all agent review runs; recent runs for other circuits</li>}
             {viewRows.map(({ circuit, visibleRuns, runningSteps }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
@@ -670,6 +670,7 @@ export function CircuitsProbeTab() {
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
+                          isReviewCircuit={circuit.is_preset}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
                           onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}

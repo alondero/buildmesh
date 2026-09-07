@@ -22,9 +22,27 @@ import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
 
 export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 
+/** Historical completion meant the graph stopped, not that a review approved. */
+export function reviewResult(detail: CircuitRunDetail, isReviewCircuit = false): { label: string; detail: string; needsAttention: boolean } | null {
+  if (!isReviewCircuit || !isTerminalRunState(detail.run.state)) return null;
+  const review = detail.steps.find((s) => s.node_id === 'review_classifier');
+  if (!review) return null;
+  let context: Record<string, unknown> = {};
+  try { context = JSON.parse(detail.run.context_json) ?? {}; } catch { /* No approval evidence. */ }
+  const exhausted = detail.steps.some((s) =>
+    (s.node_id === 'review_retry' || s.node_id === 'retry') && s.outcome === 'failed');
+  const approved = detail.run.state === 'completed' && !exhausted &&
+    context[`node.${review.node_id}.review_verdict`] === 'approved' &&
+    context[`node.${review.node_id}.review_verdict_attempt`] === String(review.attempt);
+  return approved
+    ? { label: 'Review approved', detail: 'Check the current PR head and required checks before merging.', needsAttention: false }
+    : { label: exhausted ? 'Review limit reached' : 'Review needs attention',
+      detail: 'No final approval is recorded. Continue the implementation agent, or resume its saved session from Archive. Address the latest findings, then request a fresh review. If the old session is unavailable, recover from the PR branch.', needsAttention: true };
+}
+
 /** A run needs a user's attention before the circuit can make progress. */
-export function runNeedsAttention(detail: CircuitRunDetail): boolean {
-  return detail.run.state === 'failed' || detail.run.state === 'paused' ||
+export function runNeedsAttention(detail: CircuitRunDetail, isReviewCircuit = false): boolean {
+  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, isReviewCircuit)?.needsAttention === true ||
     detail.steps.some((step) => step.status === 'blocked');
 }
 
@@ -34,8 +52,8 @@ export function runNeedsAttention(detail: CircuitRunDetail): boolean {
  * through the queue payload but remain eligible here if a backend snapshot
  * includes one.
  */
-export function runBelongsToActivity(detail: CircuitRunDetail): boolean {
-  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed';
+export function runBelongsToActivity(detail: CircuitRunDetail, isReviewCircuit = false): boolean {
+  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed' || reviewResult(detail, isReviewCircuit)?.needsAttention === true;
 }
 
 export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
@@ -72,13 +90,13 @@ export function buildCircuitProbeRows(
       const visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
-          ? row.runs.filter(runBelongsToActivity)
+          ? row.runs.filter((run) => runBelongsToActivity(run, row.circuit.is_preset))
           : [];
       visibleRuns.sort(compareRunsNewestFirst);
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some(runNeedsAttention),
+        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, row.circuit.is_preset)),
         runningSteps: countRunningSteps(row.runs),
       };
     })
@@ -102,12 +120,12 @@ export function circuitActivityStats(
   let activityCount = 0;
   let activeCount = 0;
   let attentionCount = 0;
-  for (const { runs } of rows) {
+  for (const { circuit, runs } of rows) {
     for (const detail of runs) {
-      if (runBelongsToActivity(detail)) {
+      if (runBelongsToActivity(detail, circuit.is_preset)) {
         activityCount += 1;
-        if (detail.run.state !== 'failed' && detail.run.state !== 'pending') activeCount += 1;
-        if (runNeedsAttention(detail)) attentionCount += 1;
+        if (detail.run.state === 'running' || detail.run.state === 'paused') activeCount += 1;
+        if (runNeedsAttention(detail, circuit.is_preset)) attentionCount += 1;
       }
     }
   }

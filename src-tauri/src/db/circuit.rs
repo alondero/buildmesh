@@ -294,15 +294,17 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     // Keep the history bound in SQLite. The old implementation selected the
     // entire ledger and filtered it in Rust, which made every Probe render
     // grow with the lifetime of the database. Active runs are always visible;
-    // only terminal history is ranked and bounded per circuit.
+    // only terminal history is ranked and bounded per user-authored circuit;
+    // the persisted review preset is retained in full so unresolved reviews
+    // cannot disappear from recovery history.
     let mut stmt = db.prepare(&format!(
         "WITH terminal AS ( \
-             SELECT id, circuit_id, mesh_id, trigger_identity, state, \
-                    context_json, source_agent_node_id, created_at, updated_at, \
-                    ROW_NUMBER() OVER (PARTITION BY circuit_id ORDER BY id DESC) AS history_rank \
-             FROM autopilot_circuit_runs \
-             WHERE circuit_id IN ({}) \
-               AND state NOT IN ('pending', 'running', 'paused') \
+             SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
+                    r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
+                    c.is_preset, ROW_NUMBER() OVER (PARTITION BY r.circuit_id ORDER BY r.id DESC) AS history_rank \
+             FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id \
+             WHERE r.circuit_id IN ({}) \
+               AND r.state NOT IN ('pending', 'running', 'paused') \
          ), visible AS ( \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
@@ -311,7 +313,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
              UNION ALL \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
-             FROM terminal WHERE history_rank <= ?1 \
+             FROM terminal WHERE history_rank <= ?1 OR is_preset = 1 \
          ) \
          SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -1221,12 +1223,86 @@ pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
     failed_circuit_agents_for_cleanup_inner(&super::read_conn())
 }
 
+/// Claim one terminal agent for cleanup. The claim is a durable generation:
+/// archival must present the same token, so a stale sweep cannot archive a
+/// node after a newer cleanup/resume decision has won.
+pub fn claim_circuit_agent_cleanup(node_id: i64) -> SqlResult<Option<String>> {
+    claim_circuit_agent_cleanup_inner(&super::write_conn(), node_id)
+}
+
+/// Read a pending cleanup generation without claiming or changing it. Spawn
+/// paths use this as the second half of the cleanup/resume fence.
+pub fn circuit_agent_cleanup_claim(node_id: i64) -> SqlResult<Option<String>> {
+    let db = super::read_conn();
+    db.query_row(
+        "SELECT json_extract(r.context_json, ?2) FROM autopilot_circuit_runs r
+         JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+         WHERE s.agent_node_id=?1 AND json_extract(r.context_json, ?2) IS NOT NULL LIMIT 1",
+        params![node_id, format!("$.\"cleanup.claim.{node_id}\"")],
+        |row| row.get(0),
+    ).optional()
+}
+
+pub(crate) fn claim_circuit_agent_cleanup_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let claim_path = format!("$.\"cleanup.claim.{node_id}\"");
+    let existing: Option<String> = tx
+        .query_row(
+            &format!("SELECT json_extract(context_json, '{}') FROM autopilot_circuit_runs r
+                JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+                WHERE s.agent_node_id=?1 AND json_extract(context_json, '{}') IS NOT NULL LIMIT 1", claim_path, claim_path),
+            params![node_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(claim) = existing {
+        tx.commit()?;
+        return Ok(Some(claim));
+    }
+    let eligible: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
+         JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+         JOIN agent_nodes a ON a.id=s.agent_node_id
+         WHERE s.agent_node_id=?1 AND r.state IN ('completed','failed','cancelled')
+           AND json_extract(r.context_json, '$.\"cleanup.pending\"')='1'
+           AND a.status != 'archived'
+           AND a.id IS NOT r.source_agent_node_id
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
+               WHERE borrowed.source_agent_node_id=a.id AND borrowed.state IN ('pending','running','paused'))
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
+               JOIN autopilot_circuit_runs active ON active.id=other.run_id
+               WHERE other.agent_node_id=a.id AND active.state IN ('running','paused')))",
+        params![node_id],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let claim = format!("{}:{node_id}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    tx.execute(
+        &format!("UPDATE autopilot_circuit_runs SET context_json=json_set(context_json, '{}', ?1)
+            WHERE id IN (SELECT DISTINCT s.run_id FROM autopilot_circuit_run_steps s
+                JOIN autopilot_circuit_runs r ON r.id=s.run_id
+                WHERE s.agent_node_id=?2 AND r.state IN ('completed','failed','cancelled')
+                  AND json_extract(r.context_json, '$.\"cleanup.pending\"')='1')", claim_path),
+        params![claim, node_id],
+    )?;
+    tx.commit()?;
+    Ok(Some(claim))
+}
+
 pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
     super::write_conn().execute(
         "UPDATE autopilot_circuit_runs SET context_json = json_remove(context_json, '$.\"cleanup.pending\"')
-         WHERE state IN ('failed', 'cancelled') AND json_extract(context_json, '$.\"cleanup.pending\"') = '1'
+         WHERE state IN ('completed', 'failed', 'cancelled') AND json_extract(context_json, '$.\"cleanup.pending\"') = '1'
          AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id = s.agent_node_id
-             WHERE s.run_id = autopilot_circuit_runs.id AND a.id IS NOT autopilot_circuit_runs.source_agent_node_id)", [])?;
+             WHERE s.run_id = autopilot_circuit_runs.id AND a.status != 'archived'
+               AND COALESCE(json_extract(autopilot_circuit_runs.context_json, '$.\"cleanup.retired.' || a.id || '\"'), '0') != '1'
+               AND a.id IS NOT autopilot_circuit_runs.source_agent_node_id)", [])?;
     Ok(())
 }
 
@@ -1235,8 +1311,10 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connectio
         "SELECT DISTINCT a.id FROM autopilot_circuit_runs r
          JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
          JOIN agent_nodes a ON a.id = s.agent_node_id
-         WHERE r.state IN ('failed', 'cancelled')
+         WHERE r.state IN ('completed', 'failed', 'cancelled')
            AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'
+           AND a.status != 'archived'
+           AND COALESCE(json_extract(r.context_json, '$.\"cleanup.retired.' || a.id || '\"'), '0') != '1'
            AND a.id IS NOT r.source_agent_node_id
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
                WHERE borrowed.source_agent_node_id = a.id AND borrowed.state IN ('pending', 'running', 'paused'))
@@ -1259,6 +1337,50 @@ pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
         params![run_id],
         |row| row.get(0),
     )
+}
+
+/// Archive and acknowledge cleanup together so a later manual resume cannot
+/// be mistaken for unfinished cleanup of the old circuit attempt.
+pub fn archive_circuit_agent(node_id: i64, claim: &str) -> SqlResult<Vec<(i64, String)>> {
+    archive_circuit_agent_inner(&super::write_conn(), node_id, claim)
+}
+
+pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim: &str) -> SqlResult<Vec<(i64, String)>> {
+    let tx = conn.unchecked_transaction()?;
+    let claim_path = format!("$.\"cleanup.claim.{node_id}\"");
+    let retired_path = format!("$.\"cleanup.retired.{node_id}\"");
+    let claim_matches: bool = tx.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            JOIN agent_nodes a ON a.id=s.agent_node_id
+            WHERE s.agent_node_id=?1 AND a.status != 'archived'
+              AND json_extract(r.context_json, '{}')=?2
+              AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
+                  WHERE borrowed.source_agent_node_id=a.id AND borrowed.state IN ('pending','running','paused'))
+              AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
+                  JOIN autopilot_circuit_runs active ON active.id=other.run_id
+                  WHERE other.agent_node_id=a.id AND active.state IN ('running','paused')))", claim_path),
+        params![node_id, claim],
+        |row| row.get(0),
+    )?;
+    if !claim_matches {
+        tx.commit()?;
+        return Ok(Vec::new());
+    }
+    super::update_agent_node_status_inner(&tx, node_id, crate::models::SessionStatus::Archived)?;
+    let runs = {
+        let mut statement = tx.prepare("SELECT DISTINCT r.id, r.state FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE s.agent_node_id=?1 AND r.state IN ('completed','failed','cancelled')
+              AND json_extract(r.context_json, ?2)=?3")?;
+        let rows = statement.query_map(params![node_id, claim_path, claim], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<SqlResult<Vec<_>>>()?
+    };
+    for (run_id, _) in &runs {
+        tx.execute("UPDATE autopilot_circuit_runs SET context_json=json_set(json_remove(context_json, ?2), ?3, '1') WHERE id=?1", params![run_id, claim_path, retired_path])?;
+    }
+    tx.commit()?;
+    Ok(runs)
 }
 
 /// **Admitted** circuit runs on this mesh (issue #1467) — the input to

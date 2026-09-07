@@ -122,6 +122,8 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "close_reviewer",
             "feedback_classifier",
             "review_retry",
+            "close_approved",
+            "review_exhausted",
             "complete",
         ],
         required_edges: &[
@@ -160,8 +162,10 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             (
                 "review_classifier",
                 "follow_feedback",
-                EdgeCondition::OnOutcome(StepOutcome::Completed),
+                EdgeCondition::OnOutcome(StepOutcome::Working),
             ),
+            ("review_classifier", "close_approved", EdgeCondition::OnOutcome(StepOutcome::Completed)),
+            ("close_approved", "complete", EdgeCondition::Always),
             ("follow_feedback", "close_reviewer", EdgeCondition::Always),
             ("close_reviewer", "feedback_classifier", EdgeCondition::Always),
             (
@@ -169,8 +173,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "review_retry",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
-            // review_retry: Completed → re-finish, Failed → complete
-            // notify (retry budget exhausted).
+            // Approval and retry exhaustion have separate terminal paths.
             (
                 "review_retry",
                 "finish",
@@ -178,7 +181,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             ),
             (
                 "review_retry",
-                "complete",
+                "review_exhausted",
                 EdgeCondition::OnOutcome(StepOutcome::Failed),
             ),
         ],
@@ -509,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn review_blueprint_review_retry_exhaustion_terminates_with_complete_notify() {
+    fn review_blueprint_review_retry_exhaustion_has_a_separate_notification() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let retry = graph
             .node("review_retry")
@@ -527,7 +530,7 @@ mod tests {
             })
             .collect();
         assert_eq!(retry_failed.len(), 1);
-        assert_eq!(retry_failed[0].to, "complete");
+        assert_eq!(retry_failed[0].to, "review_exhausted");
     }
 
     #[test]

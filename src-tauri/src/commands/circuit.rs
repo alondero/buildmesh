@@ -158,7 +158,9 @@ fn map_queue_rows(
 
 /// Batched single-IPC load for the Circuits Probe tab: every user-authored
 /// circuit (and any active built-in preset) on the mesh with every
-/// running/paused run and up to `limit` newest terminal runs (steps included),
+/// running/paused run and up to `limit` newest terminal runs (steps included)
+/// for user-authored circuits; the persisted review preset retains all
+/// terminal runs for recovery,
 /// one command instead of N+1 round-trips. Pending runs are returned by
 /// `list_circuit_queue` so none are hidden behind this limit.
 #[command]

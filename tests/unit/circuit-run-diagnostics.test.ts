@@ -22,6 +22,7 @@ import {
   runBelongsToActivity,
   runBelongsToHistory,
   runNeedsAttention,
+  reviewResult,
   runStateLabel,
   runStepProgress,
   stepStatusLabel,
@@ -59,6 +60,29 @@ describe('run diagnostics', () => {
   });
 
   describe('Probe view model', () => {
+    it('keeps historically completed but exhausted reviews visible for recovery', () => {
+      const run = detail(48, 'completed');
+      const step = (node_id: string, outcome: string) => ({ id: 1, run_id: 48, node_id,
+        agent_node_id: null, parent_agent_node_id: null, status: 'completed', attempt: 3,
+        outcome, error_message: null, started_at: null, completed_at: null });
+      const exhausted = { ...run, steps: [step('review_classifier', 'completed'), step('review_retry', 'failed')] };
+      expect(reviewResult(exhausted, true)?.label).toBe('Review limit reached');
+      expect(reviewResult(exhausted)).toBeNull();
+      expect(runNeedsAttention(exhausted, true)).toBe(true);
+      expect(runBelongsToActivity(exhausted, true)).toBe(true);
+      expect(runBelongsToHistory(exhausted)).toBe(true);
+      expect(circuitActivityStats([{ ...row(), circuit: { ...row().circuit, is_preset: true }, runs: [exhausted] }], 0)).toMatchObject({ activeCount: 0, attentionCount: 1 });
+      const approved = { ...run, run: { ...run.run, context_json: JSON.stringify({
+        'node.review_classifier.review_verdict': 'approved', 'node.review_classifier.review_verdict_attempt': '3',
+      }) }, steps: [step('review_classifier', 'completed')] };
+      expect(reviewResult(approved, true)?.label).toBe('Review approved');
+      expect(runNeedsAttention(approved, true)).toBe(false);
+      expect(runBelongsToActivity(approved, true)).toBe(false);
+      approved.steps[0].attempt = 4;
+      expect(reviewResult(approved, true)?.needsAttention).toBe(true);
+      approved.run.context_json = 'invalid json';
+      expect(reviewResult(approved, true)?.needsAttention).toBe(true);
+    });
     it('keeps pending and failed runs in Activity and completed runs in History', () => {
       const pending = detail(1, 'pending');
       const failed = detail(2, 'failed', '2026-08-22 10:02:00');
