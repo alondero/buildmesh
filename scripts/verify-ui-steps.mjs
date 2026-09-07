@@ -38,7 +38,7 @@ const PILL_LABEL_USAGE = `button[aria-label="Open Usage"] > span`;
 // to a single character).
 const SEGMENT_LABELS = ['Single', 'Mesh Grid', 'Pinned', 'All Nodes', 'Filtered'];
 
-export default async function ({ page, mock }) {
+export default async function ({ page }) {
   await page.waitForSelector(TITLEBAR_HEADER, { timeout: 5000 });
   await page.waitForSelector(PALETTE_BUTTON, { timeout: 5000 });
   await page.waitForSelector(SWITCHER_GROUP, { timeout: 5000 });
