@@ -603,6 +603,94 @@ pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<boo
     Ok(true)
 }
 
+/// Jump one pending run to the front or back of its mesh queue. Returns
+/// false when already at that edge or when the row is no longer pending
+/// (worker promoted/cancelled it between render and command).
+pub fn move_queued_circuit_run_to_edge(run_id: i64, to_front: bool) -> SqlResult<bool> {
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
+        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+         WHERE id = ?1 AND state = 'pending'",
+        params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()? else {
+        return Ok(false);
+    };
+    let edge: Option<i64> = tx.query_row(
+        if to_front {
+            "SELECT MIN(queue_position) FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending'"
+        } else {
+            "SELECT MAX(queue_position) FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending'"
+        },
+        params![mesh_id],
+        |row| row.get(0),
+    ).optional()?.flatten();
+    let Some(edge_position) = edge else {
+        return Ok(false);
+    };
+    if (to_front && position <= edge_position) || (!to_front && position >= edge_position) {
+        return Ok(false);
+    }
+    let new_position = if to_front { edge_position - 1 } else { edge_position + 1 };
+    tx.execute(
+        "UPDATE autopilot_circuit_runs SET queue_position = ?2 WHERE id = ?1",
+        params![run_id, new_position],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Rewrite a mesh queue to an explicit front-to-back run-id order (drag-drop
+/// / keyboard reorder seam). Only pending rows on the same mesh are touched;
+/// running/terminal ids in the payload are ignored, unknown ids abort the
+/// write. Returns the number of rows repositioned.
+pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> SqlResult<usize> {
+    if ordered_run_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    // Validate all ids belong to this mesh queue before writing, so a stale
+    // drag payload never half-applies.
+    let placeholders = std::iter::repeat("?").take(ordered_run_ids.len()).collect::<Vec<_>>().join(",");
+    let valid: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id FROM autopilot_circuit_runs \
+             WHERE mesh_id = ? AND state = 'pending' AND id IN ({placeholders})"
+        ))?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&mesh_id];
+        for id in ordered_run_ids {
+            params.push(id);
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| row.get(0))?;
+        let collected = rows.collect::<SqlResult<Vec<i64>>>()?;
+        collected
+    };
+    if valid.len() != ordered_run_ids.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    // Anchor on the current minimum so the rewrite never collides with
+    // concurrent MAX+1 mints racing this transaction.
+    let base: i64 = tx.query_row(
+        "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
+         WHERE mesh_id = ?1 AND state = 'pending'",
+        params![mesh_id],
+        |row| row.get(0),
+    )?;
+    for (index, run_id) in ordered_run_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET queue_position = ?2 \
+             WHERE id = ?1 AND state = 'pending'",
+            params![run_id, base + index as i64],
+        )?;
+    }
+    tx.commit()?;
+    Ok(ordered_run_ids.len())
+}
+
 /// Atomically terminalise one active run and return its attached Agent Nodes
 /// so the command layer can retire their processes/worktrees after the DB
 /// stops the worker from driving the run.

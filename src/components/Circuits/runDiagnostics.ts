@@ -69,13 +69,24 @@ export function runNeedsAttention(detail: CircuitRunDetail, reviewCircuit: Revie
 }
 
 /**
- * Activity includes work still in flight and failures that need explaining.
- * Completed and cancelled runs stay in History; pending runs normally arrive
- * through the queue payload but remain eligible here if a backend snapshot
- * includes one.
+ * Activity is strictly the actively-managed set: runs holding a
+ * mesh circuit-run slot (`running` + `paused`). Mirrors
+ * `db::count_active_circuit_runs` — `pending` lives in the queue,
+ * terminal states live in History. Failures and review-attention
+ * surface in History with `runNeedsAttention`, not here.
  */
-export function runBelongsToActivity(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
-  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed' || reviewResult(detail, reviewCircuit)?.needsAttention === true;
+export function isActiveRunState(state: string): boolean {
+  return state === 'running' || state === 'paused';
+}
+
+/**
+ * Activity includes only work still in flight (holding capacity).
+ * Completed, failed and cancelled runs live in History — even when they
+ * need attention. Pending runs live in the queue payload and are
+ * excluded here so the same run never presents twice.
+ */
+export function runBelongsToActivity(detail: CircuitRunDetail): boolean {
+  return isActiveRunState(detail.run.state);
 }
 
 export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
@@ -114,22 +125,45 @@ export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] 
   }));
 }
 
-/** Build the stable, view-specific row model used by the Probe. */
+/** Build the stable, view-specific row model used by the Probe.
+ * History sorts attention-first within each circuit so failed /
+ * needs-review rows surface above quiet completions; the component may
+ * additionally filter by search text / attention-only. */
 export function buildCircuitProbeRows(
   rows: Array<CircuitWithRuns | CircuitProbeRow>,
-  view: CircuitProbeView
+  view: CircuitProbeView,
+  options: { attentionOnly?: boolean; search?: string } = {}
 ): CircuitProbeRow[] {
+  const needle = (options.search ?? '').trim().toLowerCase();
   return rows
     .map((row) => {
       const reviewCircuit = 'reviewCircuit' in row
         ? row.reviewCircuit
         : reviewCircuitMetadata(row.circuit);
-      const visibleRuns = view === 'history'
+      let visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
-          ? row.runs.filter((run) => runBelongsToActivity(run, reviewCircuit))
+          ? row.runs.filter((run) => runBelongsToActivity(run))
           : [];
-      visibleRuns.sort(compareRunsNewestFirst);
+      if (view === 'history') {
+        if (options.attentionOnly) {
+          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewCircuit));
+        }
+        if (needle !== '') {
+          visibleRuns = visibleRuns.filter((run) =>
+            run.run.trigger_identity.toLowerCase().includes(needle) ||
+            String(run.run.id).includes(needle) ||
+            row.circuit.name.toLowerCase().includes(needle)
+          );
+        }
+        // Attention-first, then newest — so the 63-failure case reads as
+        // actionable items on top, not an endless completed tail.
+        visibleRuns.sort((a, b) =>
+          Number(runNeedsAttention(b, reviewCircuit)) - Number(runNeedsAttention(a, reviewCircuit)) ||
+          compareRunsNewestFirst(a, b));
+      } else {
+        visibleRuns.sort(compareRunsNewestFirst);
+      }
       return {
         ...row,
         visibleRuns,
@@ -144,9 +178,16 @@ export function buildCircuitProbeRows(
 }
 
 export interface CircuitActivityStats {
+  /** Alias of activeCount kept for backwards compat — Activity IS the
+   * active set now, so both numbers agree. Prefer activeCount. */
   activityCount: number;
+  /** Runs holding a circuit-run slot (`running` + `paused`). */
   activeCount: number;
+  /** Terminal runs needing attention (failed / blocked / unapproved
+   * review) across the fetched History window. */
   attentionCount: number;
+  /** Terminal runs in the fetched History window. */
+  historyCount: number;
   queuedCount: number;
 }
 
@@ -155,23 +196,57 @@ export function circuitActivityStats(
   rows: Array<CircuitWithRuns | CircuitProbeRow>,
   queuedCount: number
 ): CircuitActivityStats {
-  let activityCount = 0;
   let activeCount = 0;
   let attentionCount = 0;
+  let historyCount = 0;
   for (const row of rows) {
     const { runs, circuit } = row;
     const reviewCircuit = 'reviewCircuit' in row
       ? row.reviewCircuit
       : reviewCircuitMetadata(circuit);
     for (const detail of runs) {
-      if (runBelongsToActivity(detail, reviewCircuit)) {
-        activityCount += 1;
-        if (detail.run.state === 'running' || detail.run.state === 'paused') activeCount += 1;
+      if (runBelongsToActivity(detail)) {
+        activeCount += 1;
+      }
+      if (runBelongsToHistory(detail)) {
+        historyCount += 1;
         if (runNeedsAttention(detail, reviewCircuit)) attentionCount += 1;
+      } else if (runNeedsAttention(detail, reviewCircuit) && isActiveRunState(detail.run.state)) {
+        // Live attention (paused / blocked running) also counts — a
+        // paused run needing Resume is both active and actionable.
+        attentionCount += 1;
       }
     }
   }
-  return { activityCount, activeCount, attentionCount, queuedCount };
+  return { activityCount: activeCount, activeCount, attentionCount, historyCount, queuedCount };
+}
+
+/** Quiet threshold before a live run reads as stalled. Matches the
+ * worker's lost-turn watchdog window (60s) so the UI and the worker
+ * agree on what "quiet" means. */
+export const RUN_STALE_AFTER_MS = 60_000;
+
+/** Ms since `updated_at` (SQLite zoneless timestamps read as UTC). Null
+ * when the timestamp is unparseable or the run is terminal. */
+export function runStaleMs(
+  run: { state: string; updated_at: string },
+  now: Date = new Date()
+): number | null {
+  if (isTerminalRunState(run.state)) return null;
+  const updated = ledgerTimestampMs(run.updated_at);
+  if (!Number.isFinite(updated)) return null;
+  return Math.max(0, now.getTime() - updated);
+}
+
+/** True when a live run has not transitioned for longer than the stale
+ * window — surfaced as a "No update in Xm" badge, not a failure. */
+export function isRunStale(
+  run: { state: string; updated_at: string },
+  now: Date = new Date(),
+  thresholdMs: number = RUN_STALE_AFTER_MS
+): boolean {
+  const stale = runStaleMs(run, now);
+  return stale !== null && stale >= thresholdMs;
 }
 
 /**

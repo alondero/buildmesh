@@ -1553,6 +1553,14 @@ export const cancelCircuitRun = (runId: number) =>
 export const moveCircuitRun = (runId: number, direction: CircuitQueueDirection) =>
   _invoke<void>('move_circuit_run', { runId, direction });
 
+/** Persist an explicit front-to-back queue order (drag-drop / keyboard reorder). */
+export const reorderCircuitQueue = (meshId: number, orderedRunIds: number[]) =>
+  _invoke<void>('reorder_circuit_queue', { meshId, orderedRunIds });
+
+/** Bulk cancel through the single-run cleanup path (one event per run). */
+export const cancelCircuitRuns = (runIds: number[]) =>
+  _invoke<void>('cancel_circuit_runs', { runIds });
+
 export const triggerCircuitNow = (circuitId: number) =>
   _invoke<number>('trigger_circuit_now', { circuitId });
 

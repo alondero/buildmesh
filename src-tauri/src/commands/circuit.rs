@@ -32,13 +32,16 @@ pub enum CircuitTriggerKind {
     GithubPrLabel,
 }
 
-/// User-requested adjacent movement in the pending Circuit Run queue.
+/// User-requested movement in the pending Circuit Run queue: adjacent
+/// steps plus jumps to either edge for long queues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitQueueDirection.ts")]
 #[serde(rename_all = "lowercase")]
 pub enum CircuitQueueDirection {
     Up,
     Down,
+    Top,
+    Bottom,
 }
 
 /// One run plus its step ledger, for the Probe tab's run list.
@@ -158,11 +161,11 @@ fn map_queue_rows(
 
 /// Batched single-IPC load for the Circuits Probe tab: every user-authored
 /// circuit (and any active built-in preset) on the mesh with every
-/// running/paused run and up to `limit` newest terminal runs (steps included)
-/// for user-authored circuits; the persisted review preset retains all
-/// terminal runs for recovery,
-/// one command instead of N+1 round-trips. Pending runs are returned by
-/// `list_circuit_queue` so none are hidden behind this limit.
+/// running/paused run (Activity — the exact capacity set) plus up to
+/// `limit` newest terminal runs and a bounded attention window (failed /
+/// needs-review, up to 50/circuit) for History (steps included).
+/// Pending runs are returned by `list_circuit_queue` so none are hidden
+/// behind this limit. One command instead of N+1 round-trips.
 #[command]
 pub fn list_circuits_with_runs(
     mesh_id: i64,
@@ -402,14 +405,57 @@ pub fn cancel_circuit_run(app: AppHandle, run_id: i64) -> Result<(), String> {
 
 #[command]
 pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result<(), String> {
-    let toward_front = match direction {
-        CircuitQueueDirection::Up => true,
-        CircuitQueueDirection::Down => false,
-    };
-    crate::db::move_queued_circuit_run(run_id, toward_front)
+    match direction {
+        CircuitQueueDirection::Up => {
+            crate::db::move_queued_circuit_run(run_id, true).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Down => {
+            crate::db::move_queued_circuit_run(run_id, false).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Top => {
+            crate::db::move_queued_circuit_run_to_edge(run_id, true).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Bottom => {
+            crate::db::move_queued_circuit_run_to_edge(run_id, false).map_err(|error| error.to_string())?;
+        }
+    }
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
+}
+
+/// Drag-drop / keyboard reorder seam: persist an explicit front-to-back
+/// run-id order for one mesh queue. Stale ids (promoted/cancelled between
+/// render and drop) abort the write so the UI refetches instead of
+/// half-applying.
+#[command]
+pub fn reorder_circuit_queue(mesh_id: i64, ordered_run_ids: Vec<i64>) -> Result<(), String> {
+    crate::db::reorder_queued_circuit_runs(mesh_id, &ordered_run_ids)
         .map_err(|error| error.to_string())?;
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
+}
+
+/// Bulk cancel for queue / activity hygiene: terminalise every listed run
+/// through the same single-run path (leases retired, worker woken, one
+/// `circuit-run-updated` event per run). Unknown ids are skipped; at least
+/// one failure returns the joined error.
+#[command]
+pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for run_id in run_ids {
+        if let Err(error) = cancel_run_and_cleanup(&app, run_id) {
+            // A run that vanished between render and click is already gone —
+            // not a failure worth surfacing.
+            if !error.contains("does not exist") && !error.contains("QueryReturnedNoRows") {
+                failures.push(format!("run {}: {}", run_id, error));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[command]

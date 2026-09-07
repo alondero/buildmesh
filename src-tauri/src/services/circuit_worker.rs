@@ -595,7 +595,15 @@ fn run_pass(app: &AppHandle) {
     let mut reserved_circuit_slots =
         db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
-        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
+        // In-flight runs always drive to completion even when their circuit
+        // is disabled: disabling stops NEW background work (pending
+        // admission / trigger minting), it must not wedge admitted runs
+        // holding a `circuit_run_capacity` slot forever. Only pending runs
+        // gate on the enabled flag (manual Trigger Now stays a dry-run seam
+        // on drafts).
+        if active.run.state == "pending"
+            && !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity)
+        {
             continue;
         }
         // Pending runs that the gate deferred re-appear next pass;
@@ -607,12 +615,23 @@ fn run_pass(app: &AppHandle) {
             match mesh {
                 Some(m) if !may_admit_run(&active, m) => continue,
                 None => {
+                    // Orphan reaper: the mesh row is gone (deleted between
+                    // mint and this pass). Leaving the row pending wedges
+                    // the queue visualisation forever with a run that can
+                    // never admit — terminalise it so the queue reflects
+                    // reality. Cancellation is idempotent and also clears
+                    // leases/steps.
                     tracing::warn!(
-                        "circuits: pending run {} on mesh_id={} cannot be gate-evaluated: \
-                         mesh row missing (deleted between mint and this pass?); run stays pending",
+                        "circuits: pending run {} on missing mesh_id={} — cancelling orphan",
                         active.run.id,
                         active.run.mesh_id,
                     );
+                    if let Err(e) = db::cancel_circuit_run(active.run.id) {
+                        tracing::warn!("circuits: orphan cancel for run {} failed: {}", active.run.id, e);
+                    } else {
+                        let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "cancelled".into() });
+                        wake_circuit_worker();
+                    }
                     continue;
                 }
                 Some(_) => {} // admitted by may_admit_run — reserve its lease below
@@ -656,8 +675,54 @@ fn drive_run(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
 ) -> Result<(), String> {
-    let graph = CircuitGraph::from_json(&active.circuit_graph_json)?;
-    let mut context = CircuitContext::from_json(&active.run.context_json)?;
+    // Undrivable-graph fail-closed: a corrupt `graph_json` previously
+    // returned Err every 2s forever, holding the run's capacity slot with
+    // no state change. Fail the run once with the parse error so the
+    // ledger explains itself and the slot frees.
+    let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
+        Ok(graph) => graph,
+        Err(error) => {
+            let reason = format!("circuit graph is unreadable: {}", error);
+            tracing::warn!("circuits: run {} {}", active.run.id, reason);
+            let op = db::CircuitStepOp {
+                node_id: "__graph__".to_string(),
+                status: "failed".to_string(),
+                outcome: Some(Some("failed".to_string())),
+                error: Some(Some(reason.clone())),
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            };
+            // Best-effort: even if the commit fails, return Ok so run_pass
+            // does not log-and-retry this poisoned row at full tick rate —
+            // the next pass will retry the commit anyway.
+            let _ = db::commit_circuit_advance(
+                active.run.id,
+                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                None,
+                &[op],
+            );
+            let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
+            wake_circuit_worker();
+            return Ok(());
+        }
+    };
+    let mut context = match CircuitContext::from_json(&active.run.context_json) {
+        Ok(context) => context,
+        Err(error) => {
+            let reason = format!("circuit context is unreadable: {}", error);
+            tracing::warn!("circuits: run {} {}", active.run.id, reason);
+            let _ = db::commit_circuit_advance(
+                active.run.id,
+                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                None,
+                &[],
+            );
+            let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
+            wake_circuit_worker();
+            return Ok(());
+        }
+    };
     // Older runs (and the pre-seeding window) may lack `circuit.run_id`;
     // top it up on the first pass and persist through the normal commit.
     if context.get("circuit.run_id") != Some(active.run.id.to_string().as_str()) {
@@ -2735,13 +2800,21 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
         if active.run.state != "running" {
             continue; // pending runs start via the normal trigger path
         }
-        if !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity) {
-            continue; // parked mid-flight; re-enabled circuits resume normally
-        }
+        // Reconcile in-flight runs even on disabled circuits: the orphan
+        // sweep must free lost-agent slots regardless of the enabled flag.
+        // (run_pass drives disabled running/paused to completion for the
+        // same reason — disabling parks NEW work, not in-flight work.)
         let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!("circuits: run {} unreadable graph_json: {}", active.run.id, e);
+                tracing::warn!("circuits: run {} unreadable graph_json, failing: {}", active.run.id, e);
+                let _ = db::commit_circuit_advance(
+                    active.run.id,
+                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    None,
+                    &[],
+                );
+                let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
                 continue;
             }
         };
@@ -2933,9 +3006,9 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
         }
     };
     for active in runs {
-        if active.run.state != "running"
-            || !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity)
-        {
+        // Watchdog recovers in-flight running runs even on disabled
+        // circuits — a lost turn wedges a capacity slot either way.
+        if active.run.state != "running" {
             continue;
         }
         let steps = match load_steps(active.run.id) {

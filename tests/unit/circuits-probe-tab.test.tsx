@@ -37,7 +37,9 @@ import {
   pauseCircuitRun,
   resumeCircuitRun,
   cancelCircuitRun,
+  cancelCircuitRuns,
   moveCircuitRun,
+  reorderCircuitQueue,
   approveCircuitStep,
   getCircuit,
   updateCircuitGraph,
@@ -166,7 +168,9 @@ function mockBackend(overrides: {
       cmd === 'pause_circuit_run' ||
       cmd === 'resume_circuit_run' ||
       cmd === 'cancel_circuit_run' ||
+      cmd === 'cancel_circuit_runs' ||
       cmd === 'move_circuit_run' ||
+      cmd === 'reorder_circuit_queue' ||
       cmd === 'approve_circuit_step'
     ) {
       return Promise.resolve(args && cmd === 'create_circuit' ? CIRCUIT : undefined);
@@ -292,19 +296,20 @@ describe('CircuitsProbeTab', () => {
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe')).toHaveLength(2);
   });
 
-  it('keeps failures visible in Activity and retains them in History', async () => {
+  it('keeps failures in History, not Activity', async () => {
     mockBackend({ runs: [
       { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed' } },
       RUN_DONE, RUN_RUNNING,
     ] });
     openProbeDestination('circuits');
     await screen.findByTestId('run-card-12');
-    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+    // Activity is strictly live — the failed run must not present here.
+    expect(screen.queryByTestId('run-card-9')).toBeNull();
     fireEvent.click(screen.getByTestId('circuits-view-history'));
     expect(screen.getByTestId('run-card-9')).toBeTruthy();
   });
 
-  it('prioritizes attention across circuits and separates history, queue, and configuration', async () => {
+  it('prioritizes attention in History and separates activity, queue, and configuration', async () => {
     const failed = { ...RUN_DONE, run: { ...RUN_DONE.run, id: 13, circuit_id: 8, state: 'failed' } };
     mockBackend({
       circuits: [CIRCUIT, { ...CIRCUIT, id: 8, name: 'review' }],
@@ -312,10 +317,12 @@ describe('CircuitsProbeTab', () => {
       queue: QUEUE,
     });
     openProbeDestination('circuits');
-    await screen.findByTestId('run-card-13');
+    await screen.findByTestId('run-card-12');
+    // Activity shows only the live run.
     const cards = screen.getAllByTestId(/^run-card-/);
-    expect(cards.map((card) => card.getAttribute('data-run-state'))).toEqual(['failed', 'running']);
+    expect(cards.map((card) => card.getAttribute('data-run-state'))).toEqual(['running']);
     expect(screen.queryByTestId('run-card-11')).toBeNull();
+    expect(screen.queryByTestId('run-card-13')).toBeNull();
     expect(screen.queryByTestId('queue-run-21')).toBeNull();
     expect(screen.queryByTestId('circuit-name-input')).toBeNull();
     expect(screen.getByTestId('circuits-status').textContent).toContain('2 queued');
@@ -324,7 +331,13 @@ describe('CircuitsProbeTab', () => {
     expect(screen.getByTestId('circuit-edit-flow-7')).toBeTruthy();
     expect(screen.getByTestId('circuits-view-queue').textContent).toContain('(2)');
     fireEvent.click(screen.getByTestId('circuits-view-history'));
+    // History is attention-first: failed before completed.
+    const historyCards = screen.getAllByTestId(/^run-card-/);
+    expect(historyCards.map((card) => card.getAttribute('data-testid'))).toEqual(
+      expect.arrayContaining([expect.stringContaining('run-card-13'), expect.stringContaining('run-card-11')])
+    );
     expect(screen.getByTestId('run-card-11')).toBeTruthy();
+    expect(screen.getByTestId('run-card-13')).toBeTruthy();
     expect(screen.queryByTestId('run-card-12')).toBeNull();
     fireEvent.click(screen.getByTestId('circuits-view-manage'));
     expect(screen.getByTestId('circuit-name-input')).toBeTruthy();
@@ -570,7 +583,7 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('shows the complete queue nearest-first with reorder and cancel controls', async () => {
+  it('shows the complete queue nearest-first with reorder, top/bottom and cancel controls', async () => {
     mockBackend({ queue: QUEUE });
     const user = userEvent.setup();
     openProbeDestination('circuits');
@@ -589,6 +602,10 @@ describe('CircuitsProbeTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('move_circuit_run', { runId: 22, direction: 'up' });
     });
+    await user.click(screen.getByLabelText('Move run 22 to top'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('move_circuit_run', { runId: 22, direction: 'top' });
+    });
     await waitFor(() => {
       expect((screen.getByLabelText('Cancel run 21') as HTMLButtonElement).disabled).toBe(false);
     });
@@ -596,6 +613,49 @@ describe('CircuitsProbeTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('cancel_circuit_run', { runId: 21 });
     });
+  });
+
+  it('supports queue bulk selection and bulk cancel', async () => {
+    mockBackend({ queue: QUEUE });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    await user.click(await screen.findByTestId('circuits-view-queue'));
+    await screen.findByTestId('circuit-queue');
+    await user.click(screen.getByTestId('queue-select-21'));
+    await user.click(screen.getByTestId('queue-cancel-selected'));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('cancel_circuit_runs', { runIds: [21] });
+    });
+  });
+
+  it('filters history by search text and attention-only', async () => {
+    mockBackend({ runs: [
+      { ...RUN_DONE, run: { ...RUN_DONE.run, id: 9, state: 'failed', trigger_identity: 'issue:9:run' } },
+      RUN_DONE,
+    ] });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+    expect(screen.getByTestId('run-card-11')).toBeTruthy();
+
+    await user.click(screen.getByTestId('history-attention-toggle'));
+    expect(screen.getByTestId('run-card-9')).toBeTruthy();
+    expect(screen.queryByTestId('run-card-11')).toBeNull();
+
+    await user.click(screen.getByTestId('history-attention-toggle'));
+    await user.type(screen.getByTestId('history-search-input'), 'manual:1724000000000');
+    expect(screen.queryByTestId('run-card-9')).toBeNull();
+    expect(screen.getByTestId('run-card-11')).toBeTruthy();
+  });
+
+  it('reorders queue ids purely for drag-drop', async () => {
+    const { reorderQueueIds } = await import('../../src/components/Probe/CircuitsProbeTab');
+    expect(reorderQueueIds([21, 22, 23], 23, 21)).toEqual([23, 21, 22]);
+    expect(reorderQueueIds([21, 22], 21, 21)).toEqual([21, 22]);
+    expect(reorderQueueIds([21, 22], 99, 21)).toEqual([21, 22]);
   });
 
   it('shows the empty state when no circuits exist', async () => {
@@ -846,6 +906,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const user = userEvent.setup();
     openProbeDestination('circuits');
 
+    // Failed runs live in History now — switch views first.
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
     // Failed runs open by default, and a failure is never hidden.
     const collapsedError = await screen.findByTestId('run-error-25');
     expect(collapsedError.textContent).toContain('classifier verdict could not be parsed');
@@ -940,10 +1002,10 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const tablist = screen.getByRole('tablist', { name: 'Circuit views' });
     expect(tablist).toBeTruthy();
     expect(screen.getByRole('tab', { name: /Activity/ }).getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('false');
-    await userEvent.setup().click(screen.getByRole('tab', { name: 'History' }));
+    expect(screen.getByRole('tab', { name: /History/ }).getAttribute('aria-selected')).toBe('false');
+    await userEvent.setup().click(screen.getByRole('tab', { name: /History/ }));
     expect(screen.getByTestId('circuits-probe-body').getAttribute('aria-labelledby')).toBe('circuits-tab-history');
-    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: /History/ }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('supports roving keyboard navigation across circuit views', async () => {
@@ -954,8 +1016,8 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     const activityTab = screen.getByRole('tab', { name: /Activity/ });
     activityTab.focus();
     await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'History' }).getAttribute('aria-selected')).toBe('true');
-    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'History' }));
+    expect(screen.getByRole('tab', { name: /History/ }).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /History/ }));
     await user.keyboard('{ArrowDown}');
     expect(screen.getByRole('tab', { name: 'Manage' }).getAttribute('aria-selected')).toBe('true');
     await user.keyboard('{Home}');
@@ -1118,10 +1180,25 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
     await cancelCircuitRun(11);
     expect(invoke).toHaveBeenLastCalledWith('cancel_circuit_run', { runId: 11 });
 
+    await cancelCircuitRuns([11, 12]);
+    expect(invoke).toHaveBeenLastCalledWith('cancel_circuit_runs', { runIds: [11, 12] });
+
     await moveCircuitRun(11, 'up');
     expect(invoke).toHaveBeenLastCalledWith('move_circuit_run', {
       runId: 11,
       direction: 'up',
+    });
+
+    await moveCircuitRun(11, 'top');
+    expect(invoke).toHaveBeenLastCalledWith('move_circuit_run', {
+      runId: 11,
+      direction: 'top',
+    });
+
+    await reorderCircuitQueue(42, [22, 21]);
+    expect(invoke).toHaveBeenLastCalledWith('reorder_circuit_queue', {
+      meshId: 42,
+      orderedRunIds: [22, 21],
     });
 
     await approveCircuitStep(11, 'gate');

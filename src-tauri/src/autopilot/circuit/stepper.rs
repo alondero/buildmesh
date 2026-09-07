@@ -85,6 +85,10 @@ pub enum RunState {
     Paused,
     Completed,
     Failed,
+    /// Terminal cancel (user or worker). Present in the DB vocabulary and
+    /// the terminal predicate; previously missing here, which made
+    /// `from_db_str("cancelled")` resurrect a cancelled row as Pending.
+    Cancelled,
 }
 
 impl RunState {
@@ -95,6 +99,7 @@ impl RunState {
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -104,8 +109,15 @@ impl RunState {
             "paused" => Self::Paused,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
             _ => Self::Pending,
         }
+    }
+
+    /// Terminal states the worker never moves out of. Mirrors
+    /// `db::is_terminal_run_state` and the frontend `isTerminalRunState`.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -1900,12 +1912,12 @@ fn has_current_review_approval(run: &RunView, step: &StepView) -> bool {
 }
 
 fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
-    // A Failed run sweeps its leftovers: sibling Running/Queued steps are
+    // A Failed/Cancelled run sweeps its leftovers: sibling Running/Queued steps are
     // cancelled so the ledger reflects reality and the concurrency
     // counters (`count_running_circuit_steps` /
     // `count_active_circuit_agent_nodes`, which only read runs in
     // state 'running') stop leaking their slots.
-    if run.state == RunState::Failed {
+    if run.state == RunState::Failed || run.state == RunState::Cancelled {
         let leftovers: Vec<String> = run
             .steps
             .iter()
@@ -2901,10 +2913,13 @@ mod tests {
             RunState::Paused,
             RunState::Completed,
             RunState::Failed,
+            RunState::Cancelled,
         ] {
             assert_eq!(RunState::from_db_str(s.as_db_str()), s);
         }
         assert_eq!(RunState::from_db_str("garbage"), RunState::Pending);
+        assert!(RunState::Cancelled.is_terminal());
+        assert!(!RunState::Paused.is_terminal());
     }
 
     #[test]

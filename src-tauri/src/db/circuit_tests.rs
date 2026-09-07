@@ -519,6 +519,54 @@ fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
 }
 
 #[test]
+fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
+    let path = init_temp_db("queue_edge_reorder");
+    let mesh = create_mesh("circuit-queue-edge", "/tmp/circuit-queue-edge").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "queue-edge", "", 2, &sample_graph_json()).unwrap();
+
+    let first = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second = create_circuit_run(circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third = create_circuit_run(circuit.id, mesh.id, "manual:3", "{}").unwrap();
+
+    // Jump to front/back.
+    assert!(move_queued_circuit_run_to_edge(third, true).unwrap());
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![third, first, second]);
+
+    // Already at edge is a no-op.
+    assert!(!move_queued_circuit_run_to_edge(third, true).unwrap());
+
+    assert!(move_queued_circuit_run_to_edge(third, false).unwrap());
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![first, second, third]);
+
+    // Explicit drag-drop order.
+    let reordered = reorder_queued_circuit_runs(mesh.id, &[third, second, first]).unwrap();
+    assert_eq!(reordered, 3);
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![third, second, first]);
+
+    // Stale payload (unknown id) aborts instead of half-applying.
+    assert!(reorder_queued_circuit_runs(mesh.id, &[first, 999_999]).is_err());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
     let path = init_temp_db("ledger_active_outside_history");
     let mesh = create_mesh("circuit-active-ledger", "/tmp/circuit-active-ledger").unwrap();

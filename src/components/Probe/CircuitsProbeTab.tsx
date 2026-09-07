@@ -9,6 +9,14 @@
  * the circuit list, enable toggle, Trigger Now, delete, and the per-
  * circuit run ledger.
  *
+ * View contract (post activity/history split):
+ * - Activity = actively-managed runs only (`running` + `paused`, the set
+ *   `db::count_active_circuit_runs` counts against `circuit_run_capacity`).
+ * - History = every terminal run (`completed` | `failed` | `cancelled`),
+ *   attention-first, with search + attention-only filter.
+ * - Queue = pending runs in worker-admission order, with top/bottom,
+ *   drag-drop, keyboard reorder and bulk cancel.
+ *
  * Live updates ride the backend's `circuit-run-updated` event so a run
  * visibly lands as Completed without a manual refresh; every user
  * action refetches anyway.
@@ -33,15 +41,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { formatError } from '../../lib/errorUtils';
 import {
   approveCircuitStep,
   cancelCircuitRun,
+  cancelCircuitRuns,
   createCircuit,
   deleteCircuit,
   listCircuitProbe,
   moveCircuitRun,
   pauseCircuitRun,
+  reorderCircuitQueue,
   resumeCircuitRun,
   setCircuitEnabled,
   triggerCircuitNow,
@@ -66,6 +92,21 @@ import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
 
 const CIRCUIT_PROBE_VIEWS = ['activity', 'history', 'queue', 'manage'] as const;
+
+/** Page size for the queue list — full `<ol>` render wedges on long
+ * backlogs, so the list windows and reveals more on demand. */
+const QUEUE_PAGE_SIZE = 50;
+
+/** Pure: move `activeId` to where `overId` sits, returning the new id order.
+ * Exposed so the reorder math is unit-testable without simulating a drag
+ * (jsdom can't fire real pointer drags through dnd-kit). Mirrors
+ * `HarnessOrderList.reorderIds`. */
+export function reorderQueueIds(ids: number[], activeId: number, overId: number): number[] {
+  const from = ids.indexOf(activeId);
+  const to = ids.indexOf(overId);
+  if (from === -1 || to === -1 || from === to) return ids;
+  return arrayMove(ids, from, to);
+}
 
 interface CircuitCreateFormProps {
   busy: boolean;
@@ -185,6 +226,148 @@ function CircuitCreateForm({
   );
 }
 
+function SortableQueueRow({
+  entry,
+  index,
+  total,
+  busy,
+  selected,
+  onToggleSelected,
+  meshRunCapacity,
+  meshActiveRuns,
+  onMove,
+  onCancel,
+}: {
+  entry: CircuitQueueEntry;
+  index: number;
+  total: number;
+  busy: boolean;
+  selected: boolean;
+  onToggleSelected: () => void;
+  meshRunCapacity: number;
+  meshActiveRuns: number;
+  onMove: (runId: number, direction: 'up' | 'down' | 'top' | 'bottom') => void;
+  onCancel: (runId: number) => void;
+}) {
+  const { setNodeRef, transform, transition, isDragging, attributes, listeners } = useSortable({
+    id: entry.run.id,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className="rounded-md border border-border-subtle bg-bg-card/40 p-1.5"
+      data-testid={`queue-run-${entry.run.id}`}
+    >
+      <div className="flex items-start gap-1.5 min-w-0">
+        <span
+          {...attributes}
+          {...listeners}
+          tabIndex={0}
+          role="button"
+          aria-roledescription="sortable"
+          aria-label={`Reorder run ${entry.run.id}`}
+          title="Drag to reorder (arrow keys work when focused)"
+          className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm shrink-0 px-0.5"
+          data-testid={`queue-drag-${entry.run.id}`}
+        >
+          ⋮⋮
+        </span>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelected}
+          disabled={busy}
+          aria-label={`Select run ${entry.run.id}`}
+          data-testid={`queue-select-${entry.run.id}`}
+          className="mt-0.5 shrink-0 disabled:opacity-40"
+        />
+        <span className="text-2xs font-mono text-text-secondary shrink-0">
+          {entry.queue_rank}
+        </span>
+        <span className="text-xs text-text-primary break-words min-w-0 flex-1">
+          {entry.circuit_name}{' '}
+          <span className="font-mono text-text-muted">#{entry.run.id}</span>
+        </span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1 pl-4">
+        <button
+          type="button"
+          onClick={() => onMove(entry.run.id, 'up')}
+          disabled={busy || index === 0}
+          aria-label={`Move run ${entry.run.id} up`}
+          title="Move up one"
+          className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          onClick={() => onMove(entry.run.id, 'down')}
+          disabled={busy || index === total - 1}
+          aria-label={`Move run ${entry.run.id} down`}
+          title="Move down one"
+          className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
+        >
+          ↓
+        </button>
+        <button
+          type="button"
+          onClick={() => onMove(entry.run.id, 'top')}
+          disabled={busy || index === 0}
+          aria-label={`Move run ${entry.run.id} to top`}
+          title="Move to top"
+          className="px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
+        >
+          ⤒
+        </button>
+        <button
+          type="button"
+          onClick={() => onMove(entry.run.id, 'bottom')}
+          disabled={busy || index === total - 1}
+          aria-label={`Move run ${entry.run.id} to bottom`}
+          title="Move to bottom"
+          className="px-1 text-2xs text-text-muted hover:text-text-primary disabled:opacity-30"
+        >
+          ⤓
+        </button>
+        <button
+          type="button"
+          onClick={() => onCancel(entry.run.id)}
+          disabled={busy}
+          aria-label={`Cancel run ${entry.run.id}`}
+          className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+        >
+          Cancel
+        </button>
+      </div>
+      <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
+        {entry.run.trigger_identity}
+      </p>
+      {/* Pending runs live in the queue (not the ledger); surface
+          the same admission detail a run card would so users
+          see *why* the run is parked (#1475). Reads from the
+          mesh-level budget the worker checks. */}
+      <p
+        className="mt-1 text-2xs text-text-muted break-words pl-4"
+        data-testid={`queue-pending-reason-${entry.run.id}`}
+      >
+        {pendingAdmissionDetail({
+          concurrencyLimit: 0,
+          runningSteps: 0,
+          meshRunCapacity,
+          meshActiveRuns,
+        })}
+      </p>
+    </li>
+  );
+}
+
 export function CircuitsProbeTab() {
   const { activeMeshId } = useProbeContext();
   const openCircuitEditor = useUIStore((s) => s.openCircuitEditor);
@@ -202,6 +385,10 @@ export function CircuitsProbeTab() {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<CircuitProbeView>('activity');
   const [confirmDeleteCircuitId, setConfirmDeleteCircuitId] = useState<number | null>(null);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyAttentionOnly, setHistoryAttentionOnly] = useState(false);
+  const [queueSelection, setQueueSelection] = useState<Set<number>>(new Set());
+  const [queueVisibleCount, setQueueVisibleCount] = useState(QUEUE_PAGE_SIZE);
   const mountedRef = useRef(false);
   const activeMeshIdRef = useRef(activeMeshId);
   activeMeshIdRef.current = activeMeshId;
@@ -211,7 +398,10 @@ export function CircuitsProbeTab() {
   const allRuns = useMemo(() => rows.flatMap(({ runs }) => runs), [rows]);
   const annotatedRows = useMemo(() => annotateCircuitRows(rows), [rows]);
   const meshActiveRuns = useMemo(() => countActiveRuns(allRuns), [allRuns]);
-  const viewRows = useMemo(() => buildCircuitProbeRows(annotatedRows, view), [annotatedRows, view]);
+  const viewRows = useMemo(
+    () => buildCircuitProbeRows(annotatedRows, view, { attentionOnly: historyAttentionOnly, search: historySearch }),
+    [annotatedRows, view, historyAttentionOnly, historySearch]
+  );
   const activityStats = useMemo(
     () => circuitActivityStats(annotatedRows, queue.length),
     [annotatedRows, queue.length]
@@ -225,6 +415,15 @@ export function CircuitsProbeTab() {
     return parts.join(' · ') ||
       (rows.length > 0 ? `${rows.length} circuits idle` : 'No circuits configured');
   }, [activityStats, rows.length]);
+  const visibleActiveRunIds = useMemo(
+    () => viewRows.flatMap(({ visibleRuns }) => visibleRuns.map((d) => d.run.id)),
+    [viewRows]
+  );
+  const queueVisible = useMemo(() => queue.slice(0, queueVisibleCount), [queue, queueVisibleCount]);
+  const queueSensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
   /**
    * Explicit run-card disclosure overrides, keyed by run id. Absent means
    * "use the computed default" — live and failed diagnostics open while
@@ -274,10 +473,19 @@ export function CircuitsProbeTab() {
     }
     try {
       // Ledger cards and the complete queue hydrate through one IPC payload.
+      // `limit` bounds ordinary terminal history per circuit; attention
+      // (failed / needs-review, up to 50/circuit) and all live runs ride
+      // alongside so Activity stays exact while History stays windowed.
       const snapshot = await listCircuitProbe(activeMeshId, 10);
       if (requestId !== loadRequestRef.current) return;
       setRows(snapshot.circuits);
       setQueue(snapshot.queue);
+      setQueueSelection((prev) => {
+        const live = new Set(snapshot.queue.map((e) => e.run.id));
+        const next = new Set<number>();
+        for (const id of prev) if (live.has(id)) next.add(id);
+        return next;
+      });
       setLoadError(null);
     } catch (err) {
       if (requestId !== loadRequestRef.current) return;
@@ -307,6 +515,11 @@ export function CircuitsProbeTab() {
       void unlisten.then((fn) => fn());
     };
   }, [activeMeshId, load]);
+
+  // Reset queue windowing when the queue itself changes length.
+  useEffect(() => {
+    setQueueVisibleCount((prev) => (queue.length <= prev ? Math.max(queue.length, QUEUE_PAGE_SIZE) : prev));
+  }, [queue.length]);
 
   // Advance the duration clock while any visible run is still open. Gated
   // on `hasLiveRun` so a tab showing only finished runs — whose durations
@@ -369,6 +582,27 @@ export function CircuitsProbeTab() {
       openCircuitEditor(circuit.id);
     });
 
+  const handleQueueMove = (runId: number, direction: 'up' | 'down' | 'top' | 'bottom') =>
+    runAction(() => moveCircuitRun(runId, direction));
+
+  const handleQueueDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || activeMeshId === null) return;
+    const ids = queue.map((e) => e.run.id);
+    const next = reorderQueueIds(ids, active.id as number, over.id as number);
+    if (next.join(',') === ids.join(',')) return;
+    void runAction(() => reorderCircuitQueue(activeMeshId, next));
+  };
+
+  const toggleQueueSelected = (runId: number) => {
+    setQueueSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  };
+
   if (activeMeshId === null) {
     return (
       <div className="p-4">
@@ -426,7 +660,13 @@ export function CircuitsProbeTab() {
                 view === item ? 'bg-accent-cyan/15' : 'hover:bg-bg-card-hover'
               }`}>
               <span className={view === item ? 'text-accent-cyan' : 'text-text-muted'}>
-                {item === 'activity' ? `Activity (${activityStats.activityCount})` : item === 'queue' ? `Queue (${queue.length})` : item === 'history' ? 'History' : 'Manage'}
+                {item === 'activity'
+                  ? `Activity (${activityStats.activeCount})`
+                  : item === 'queue'
+                    ? `Queue (${queue.length})`
+                    : item === 'history'
+                      ? `History (${activityStats.historyCount})`
+                      : 'Manage'}
               </span>
             </button>
           ))}
@@ -478,79 +718,118 @@ export function CircuitsProbeTab() {
             </ul>
           </section>
         )}
+        {view === 'activity' && activityStats.activeCount > 1 && (
+          <div className="mx-2 mt-2 flex items-center justify-between gap-2">
+            <span className="text-2xs text-text-muted">{activityStats.activeCount} active runs hold a circuit-run slot</span>
+            <button
+              type="button"
+              onClick={() => runAction(() => cancelCircuitRuns(visibleActiveRunIds))}
+              disabled={busy || visibleActiveRunIds.length === 0}
+              data-testid="activity-cancel-all"
+              className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+            >
+              Cancel all
+            </button>
+          </div>
+        )}
+        {view === 'history' && (
+          <section className="mx-2 mt-2 rounded-md border border-border-subtle p-2" data-testid="circuit-history-filters">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <input
+                value={historySearch}
+                onChange={(e) => setHistorySearch(e.target.value)}
+                placeholder="Filter by trigger, id, circuit…"
+                aria-label="Filter history"
+                data-testid="history-search-input"
+                className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+              />
+              <label className="flex items-center gap-1 text-2xs text-text-muted shrink-0">
+                <input
+                  type="checkbox"
+                  checked={historyAttentionOnly}
+                  onChange={(e) => setHistoryAttentionOnly(e.target.checked)}
+                  data-testid="history-attention-toggle"
+                  className="disabled:opacity-40"
+                />
+                Needs attention ({activityStats.attentionCount})
+              </label>
+            </div>
+            <p className="mt-1 text-2xs text-text-muted break-words">
+              History shows finished runs (completed · failed · cancelled). Failed and unapproved reviews sort first.
+              Old throwaway runs are pruned by retention; issue/PR runs are kept as dedupe tombstones.
+            </p>
+          </section>
+        )}
         {view === 'queue' && queue.length === 0 && <EmptyState label="Queue is empty" hint="Runs waiting to start will appear here." />}
         {view === 'queue' && queue.length > 0 && (
           <section className="border-b border-border-subtle p-2" data-testid="circuit-queue">
             <div className="flex items-baseline justify-between gap-2 mb-1.5">
               <h3 className="text-xs font-semibold text-text-primary">Queue</h3>
-              <span className="text-2xs text-text-muted">Next to start first</span>
+              <span className="text-2xs text-text-muted">Next to start first · drag ⋮⋮ or use ↑↓⤒⤓</span>
             </div>
-            <ol className="flex flex-col gap-1">
-              {queue.map((entry, index) => (
-                <li
-                  key={entry.run.id}
-                  className="rounded-md border border-border-subtle bg-bg-card/40 p-1.5"
-                  data-testid={`queue-run-${entry.run.id}`}
-                >
-                  <div className="flex items-start gap-1.5 min-w-0">
-                    <span className="text-2xs font-mono text-text-secondary shrink-0">
-                      {entry.queue_rank}
-                    </span>
-                    <span className="text-xs text-text-primary break-words min-w-0 flex-1">
-                      {entry.circuit_name}{' '}
-                      <span className="font-mono text-text-muted">#{entry.run.id}</span>
-                    </span>
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1 pl-4">
-                    <button
-                      type="button"
-                      onClick={() => runAction(() => moveCircuitRun(entry.run.id, 'up'))}
-                      disabled={busy || index === 0}
-                      aria-label={`Move run ${entry.run.id} up`}
-                      className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => runAction(() => moveCircuitRun(entry.run.id, 'down'))}
-                      disabled={busy || index === queue.length - 1}
-                      aria-label={`Move run ${entry.run.id} down`}
-                      className="px-1 text-xs text-text-muted hover:text-text-primary disabled:opacity-30"
-                    >
-                      ↓
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => runAction(() => cancelCircuitRun(entry.run.id))}
-                      disabled={busy}
-                      aria-label={`Cancel run ${entry.run.id}`}
-                      className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  <p className="mt-1 text-2xs font-mono text-text-muted break-all pl-4">
-                    {entry.run.trigger_identity}
-                  </p>
-                  {/* Pending runs live in the queue (not the ledger); surface
-                      the same admission detail a run card would so users
-                      see *why* the run is parked (#1475). Reads from the
-                      mesh-level budget the worker checks. */}
-                  <p
-                    className="mt-1 text-2xs text-text-muted break-words pl-4"
-                    data-testid={`queue-pending-reason-${entry.run.id}`}
-                  >
-                    {pendingAdmissionDetail({
-                      concurrencyLimit: 0,
-                      runningSteps: 0,
-                      meshRunCapacity,
-                      meshActiveRuns,
-                    })}
-                  </p>
-                </li>
-              ))}
-            </ol>
+            <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const all = new Set(queue.map((e) => e.run.id));
+                  setQueueSelection(all.size === queueSelection.size ? new Set<number>() : all);
+                }}
+                disabled={busy}
+                data-testid="queue-select-all"
+                className="px-1.5 py-0.5 text-2xs rounded-md text-text-muted hover:text-text-primary disabled:opacity-40"
+              >
+                {queueSelection.size === queue.length ? 'Deselect all' : 'Select all'}
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction(() => cancelCircuitRuns([...queueSelection]))}
+                disabled={busy || queueSelection.size === 0}
+                data-testid="queue-cancel-selected"
+                className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+              >
+                Cancel selected ({queueSelection.size})
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction(() => cancelCircuitRuns(queue.map((e) => e.run.id)))}
+                disabled={busy}
+                data-testid="queue-cancel-all"
+                className="px-1.5 py-0.5 text-2xs rounded-md text-status-error hover:bg-status-error/10 disabled:opacity-40"
+              >
+                Cancel all
+              </button>
+            </div>
+            <DndContext sensors={queueSensors} onDragEnd={handleQueueDragEnd}>
+              <SortableContext items={queueVisible.map((e) => e.run.id)} strategy={verticalListSortingStrategy}>
+                <ol className="flex flex-col gap-1">
+                  {queueVisible.map((entry, index) => (
+                    <SortableQueueRow
+                      key={entry.run.id}
+                      entry={entry}
+                      index={index}
+                      total={queue.length}
+                      busy={busy}
+                      selected={queueSelection.has(entry.run.id)}
+                      onToggleSelected={() => toggleQueueSelected(entry.run.id)}
+                      meshRunCapacity={meshRunCapacity}
+                      meshActiveRuns={meshActiveRuns}
+                      onMove={handleQueueMove}
+                      onCancel={(runId) => runAction(() => cancelCircuitRun(runId))}
+                    />
+                  ))}
+                </ol>
+              </SortableContext>
+            </DndContext>
+            {queue.length > queueVisible.length && (
+              <button
+                type="button"
+                onClick={() => setQueueVisibleCount((c) => c + QUEUE_PAGE_SIZE)}
+                data-testid="queue-show-more"
+                className="mt-1.5 px-2 py-1 text-2xs rounded-md text-accent-cyan hover:bg-accent-cyan/10"
+              >
+                Show more ({queue.length - queueVisible.length} remaining)
+              </button>
+            )}
           </section>
         )}
         {view !== 'queue' && (rows.length === 0 ? (
@@ -562,7 +841,7 @@ export function CircuitsProbeTab() {
           </div>
         ) : (
           <ul className="flex flex-col gap-1 p-2">
-            {view === 'history' && <li className="text-2xs text-text-muted px-1">History · recent agent review runs kept in the recovery window; recent runs for other circuits</li>}
+            {view === 'history' && <li className="text-2xs text-text-muted px-1">History · failed and needs-review runs first, then newest finished runs (windowed per circuit)</li>}
             {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
@@ -596,6 +875,11 @@ export function CircuitsProbeTab() {
                       <span className="truncate text-text-primary" title={circuit.name}>
                         {circuit.name}
                       </span>
+                      {!circuit.enabled && view === 'activity' && visibleRuns.length > 0 && (
+                        <span className="text-2xs text-status-warning shrink-0" title="In-flight runs continue to completion; new background runs stay parked until re-enabled.">
+                          · disabled — in-flight continues
+                        </span>
+                      )}
                     </label>
                     <div className="flex items-center gap-1 flex-wrap">
                       <button
@@ -658,7 +942,9 @@ export function CircuitsProbeTab() {
 
                 {view !== 'manage' && visibleRuns.length === 0 && (
                   <p className="mt-1 text-2xs text-text-muted">
-                    {view === 'history' ? 'No finished runs yet.' : 'Idle · no active run.'}
+                    {view === 'history'
+                      ? (historySearch !== '' || historyAttentionOnly ? 'No finished runs match this filter.' : 'No finished runs yet.')
+                      : 'Idle · no active run.'}
                   </p>
                 )}
 

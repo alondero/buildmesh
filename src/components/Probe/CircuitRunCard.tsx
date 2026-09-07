@@ -38,9 +38,11 @@ import {
 } from '../Circuits/circuitGraphModel';
 import {
   activityStatusToken,
+  isRunStale,
   runActivity,
   reviewResult,
   runStateLabel,
+  runStaleMs,
   runStepProgress,
   stepStatusLabel,
   type CircuitCapacity,
@@ -80,6 +82,8 @@ export function CircuitRunCard({
   const review = reviewResult(detail, reviewCircuit);
   const progress = runStepProgress(steps);
   const duration = runDurationMs(run, now);
+  const stale = isRunStale(run, now);
+  const staleMs = runStaleMs(run, now);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');
   const retried = steps.filter((s) => s.attempt > 1);
   // The run row carries no error column; the ledger's first errored step
@@ -134,6 +138,15 @@ export function CircuitRunCard({
               data-testid={`run-progress-${run.id}`}
             >
               {progress.finished}/{progress.total} steps
+            </span>
+          )}
+          {stale && staleMs !== null && (
+            <span
+              className="text-2xs text-status-warning shrink-0"
+              data-testid={`run-stale-${run.id}`}
+              title="No state transition for a while — the worker watchdog also watches quiet turns. Cancel if this never moves."
+            >
+              No update in {formatDurationMs(staleMs)}
             </span>
           )}
         </span>
