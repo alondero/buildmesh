@@ -65,6 +65,41 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
 }
 
 #[test]
+fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
+    let conn = Connection::open_in_memory().unwrap();
+    super::init_schema(&conn).unwrap();
+    conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'spawn-race', '/repo');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready');
+        INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'spawn-race','{}');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+            VALUES (1,1,1,'race','failed','{\"cleanup.pending\":\"1\"}');
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
+            VALUES (1,'owned',1,'failed');").unwrap();
+
+    let generation = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
+        .unwrap()
+        .expect("the resume must claim the durable spawn generation");
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
+    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
+    assert_eq!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap(), Some(generation.clone()));
+    assert_eq!(
+        conn.query_row(
+            "SELECT json_extract(context_json, '$.\"cleanup.resumed.1\"') FROM autopilot_circuit_runs WHERE id=1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        generation
+    );
+
+    super::circuit::release_circuit_agent_spawn_inner(&conn, 1, &generation).unwrap();
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
+    assert!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap().is_none());
+    super::circuit::clear_finished_circuit_cleanup_inner(&conn).unwrap();
+    assert_eq!(conn.query_row("SELECT json_extract(context_json, '$.\"cleanup.pending\"') FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
+}
+
+#[test]
 fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() {
     let conn = Connection::open_in_memory().unwrap();
     super::init_schema(&conn).unwrap();

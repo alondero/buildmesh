@@ -15,17 +15,34 @@
  * component.
  */
 
-import { isTerminalRunState, ledgerTimestampMs } from './circuitGraphModel';
+import { isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
 import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
 
 export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 
+export interface ReviewCircuitMetadata {
+  verdictNodeId: string;
+}
+
+/** Review semantics come from the persisted graph, not `is_preset`. */
+export function reviewCircuitMetadata(
+  circuit: Pick<CircuitWithRuns['circuit'], 'graph_json'>
+): ReviewCircuitMetadata | null {
+  try {
+    const graph = parseGraph(circuit.graph_json);
+    const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
+    return verdict ? { verdictNodeId: verdict.id } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Historical completion meant the graph stopped, not that a review approved. */
-export function reviewResult(detail: CircuitRunDetail, isReviewCircuit = false): { label: string; detail: string; needsAttention: boolean } | null {
-  if (!isReviewCircuit || !isTerminalRunState(detail.run.state)) return null;
-  const review = detail.steps.find((s) => s.node_id === 'review_classifier');
+export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): { label: string; detail: string; needsAttention: boolean } | null {
+  if (reviewCircuit === null || !isTerminalRunState(detail.run.state)) return null;
+  const review = detail.steps.find((s) => s.node_id === reviewCircuit.verdictNodeId);
   if (!review) return null;
   let context: Record<string, unknown> = {};
   try { context = JSON.parse(detail.run.context_json) ?? {}; } catch { /* No approval evidence. */ }
@@ -41,8 +58,8 @@ export function reviewResult(detail: CircuitRunDetail, isReviewCircuit = false):
 }
 
 /** A run needs a user's attention before the circuit can make progress. */
-export function runNeedsAttention(detail: CircuitRunDetail, isReviewCircuit = false): boolean {
-  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, isReviewCircuit)?.needsAttention === true ||
+export function runNeedsAttention(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
+  return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit)?.needsAttention === true ||
     detail.steps.some((step) => step.status === 'blocked');
 }
 
@@ -52,8 +69,8 @@ export function runNeedsAttention(detail: CircuitRunDetail, isReviewCircuit = fa
  * through the queue payload but remain eligible here if a backend snapshot
  * includes one.
  */
-export function runBelongsToActivity(detail: CircuitRunDetail, isReviewCircuit = false): boolean {
-  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed' || reviewResult(detail, isReviewCircuit)?.needsAttention === true;
+export function runBelongsToActivity(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
+  return !isTerminalRunState(detail.run.state) || detail.run.state === 'failed' || reviewResult(detail, reviewCircuit)?.needsAttention === true;
 }
 
 export function runBelongsToHistory(detail: CircuitRunDetail): boolean {
@@ -87,16 +104,17 @@ export function buildCircuitProbeRows(
 ): CircuitProbeRow[] {
   return rows
     .map((row) => {
+      const reviewCircuit = reviewCircuitMetadata(row.circuit);
       const visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
-          ? row.runs.filter((run) => runBelongsToActivity(run, row.circuit.is_preset))
+          ? row.runs.filter((run) => runBelongsToActivity(run, reviewCircuit))
           : [];
       visibleRuns.sort(compareRunsNewestFirst);
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, row.circuit.is_preset)),
+        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuit)),
         runningSteps: countRunningSteps(row.runs),
       };
     })
@@ -121,11 +139,12 @@ export function circuitActivityStats(
   let activeCount = 0;
   let attentionCount = 0;
   for (const { circuit, runs } of rows) {
+    const reviewCircuit = reviewCircuitMetadata(circuit);
     for (const detail of runs) {
-      if (runBelongsToActivity(detail, circuit.is_preset)) {
+      if (runBelongsToActivity(detail, reviewCircuit)) {
         activityCount += 1;
         if (detail.run.state === 'running' || detail.run.state === 'paused') activeCount += 1;
-        if (runNeedsAttention(detail, circuit.is_preset)) attentionCount += 1;
+        if (runNeedsAttention(detail, reviewCircuit)) attentionCount += 1;
       }
     }
   }

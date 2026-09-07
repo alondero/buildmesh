@@ -39,5 +39,15 @@ export default async function ({ page, invoke }) {
     expect(bounds.width).toBeLessThanOrEqual(240);
     expect(bounds.scroll).toBeLessThanOrEqual(bounds.client);
     console.log(`CIRCUIT_RECOVERY_FIXTURE_MESH=${mesh.id}`);
-  } finally { db.close(); }
+  } finally {
+    db.close();
+    // The fixture creates durable circuit rows directly so the screenshot can
+    // exercise historical recovery. Remove the mesh after the DB handle is
+    // closed; mesh deletion cascades the circuit, run, and step rows.
+    try {
+      await invoke('delete_mesh', { meshId: mesh.id });
+    } catch (error) {
+      console.warn(`Could not clean up circuit recovery fixture mesh ${mesh.id}:`, error);
+    }
+  }
 }

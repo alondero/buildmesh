@@ -44,6 +44,7 @@ import {
   runStepProgress,
   stepStatusLabel,
   type CircuitCapacity,
+  type ReviewCircuitMetadata,
 } from '../Circuits/runDiagnostics';
 
 interface CircuitRunCardProps {
@@ -58,7 +59,7 @@ interface CircuitRunCardProps {
   onResume: () => void;
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
-  isReviewCircuit: boolean;
+  reviewCircuit: ReviewCircuitMetadata | null;
 }
 
 export function CircuitRunCard({
@@ -72,11 +73,11 @@ export function CircuitRunCard({
   onResume,
   onCancel,
   onApprove,
-  isReviewCircuit,
+  reviewCircuit,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
   const activity = runActivity(run, steps, capacity);
-  const review = reviewResult(detail, isReviewCircuit);
+  const review = reviewResult(detail, reviewCircuit);
   const progress = runStepProgress(steps);
   const duration = runDurationMs(run, now);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');

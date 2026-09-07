@@ -23,6 +23,7 @@ import {
   runBelongsToHistory,
   runNeedsAttention,
   reviewResult,
+  reviewCircuitMetadata,
   runStateLabel,
   runStepProgress,
   stepStatusLabel,
@@ -66,22 +67,54 @@ describe('run diagnostics', () => {
         agent_node_id: null, parent_agent_node_id: null, status: 'completed', attempt: 3,
         outcome, error_message: null, started_at: null, completed_at: null });
       const exhausted = { ...run, steps: [step('review_classifier', 'completed'), step('review_retry', 'failed')] };
-      expect(reviewResult(exhausted, true)?.label).toBe('Review limit reached');
+      const reviewCircuit = { verdictNodeId: 'review_classifier' };
+      expect(reviewResult(exhausted, reviewCircuit)?.label).toBe('Review limit reached');
       expect(reviewResult(exhausted)).toBeNull();
-      expect(runNeedsAttention(exhausted, true)).toBe(true);
-      expect(runBelongsToActivity(exhausted, true)).toBe(true);
+      expect(runNeedsAttention(exhausted, reviewCircuit)).toBe(true);
+      expect(runBelongsToActivity(exhausted, reviewCircuit)).toBe(true);
       expect(runBelongsToHistory(exhausted)).toBe(true);
-      expect(circuitActivityStats([{ ...row(), circuit: { ...row().circuit, is_preset: true }, runs: [exhausted] }], 0)).toMatchObject({ activeCount: 0, attentionCount: 1 });
+      expect(circuitActivityStats([{ ...row(), circuit: { ...row().circuit, graph_json: JSON.stringify({ version: 2, nodes: [{ id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] }), is_preset: false }, runs: [exhausted] }], 0)).toMatchObject({ activeCount: 0, attentionCount: 1 });
       const approved = { ...run, run: { ...run.run, context_json: JSON.stringify({
         'node.review_classifier.review_verdict': 'approved', 'node.review_classifier.review_verdict_attempt': '3',
       }) }, steps: [step('review_classifier', 'completed')] };
-      expect(reviewResult(approved, true)?.label).toBe('Review approved');
-      expect(runNeedsAttention(approved, true)).toBe(false);
-      expect(runBelongsToActivity(approved, true)).toBe(false);
+      expect(reviewResult(approved, reviewCircuit)?.label).toBe('Review approved');
+      expect(runNeedsAttention(approved, reviewCircuit)).toBe(false);
+      expect(runBelongsToActivity(approved, reviewCircuit)).toBe(false);
       approved.steps[0].attempt = 4;
-      expect(reviewResult(approved, true)?.needsAttention).toBe(true);
+      expect(reviewResult(approved, reviewCircuit)?.needsAttention).toBe(true);
       approved.run.context_json = 'invalid json';
-      expect(reviewResult(approved, true)?.needsAttention).toBe(true);
+      expect(reviewResult(approved, reviewCircuit)?.needsAttention).toBe(true);
+    });
+
+    it('derives the borrowed-source verdict node from a non-preset graph', () => {
+      const circuit = {
+        ...row().circuit,
+        is_preset: false,
+        graph_json: JSON.stringify({
+          version: 2,
+          nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }],
+          edges: [],
+        }),
+      };
+      expect(reviewCircuitMetadata(circuit)).toEqual({ verdictNodeId: 'verdict' });
+      expect(reviewCircuitMetadata({
+        graph_json: JSON.stringify({
+          version: 2,
+          nodes: [{ id: 'verdict', type: { type: 'notify', message: 'ordinary notification' } }],
+          edges: [],
+        }),
+      })).toBeNull();
+      const run = detail(49, 'completed');
+      const exhausted = {
+        ...run,
+        run: { ...run.run, context_json: '{"node.verdict.review_verdict":"changes_requested"}' },
+        steps: [
+          { id: 1, run_id: 49, node_id: 'verdict', agent_node_id: null, parent_agent_node_id: null, status: 'completed', attempt: 1, outcome: 'completed', error_message: null, started_at: null, completed_at: null },
+          { id: 2, run_id: 49, node_id: 'retry', agent_node_id: null, parent_agent_node_id: null, status: 'failed', attempt: 3, outcome: 'failed', error_message: null, started_at: null, completed_at: null },
+        ],
+      };
+      expect(runBelongsToActivity(exhausted, reviewCircuitMetadata(circuit))).toBe(true);
+      expect(reviewResult(exhausted, reviewCircuitMetadata(circuit))?.label).toBe('Review limit reached');
     });
     it('keeps pending and failed runs in Activity and completed runs in History', () => {
       const pending = detail(1, 'pending');

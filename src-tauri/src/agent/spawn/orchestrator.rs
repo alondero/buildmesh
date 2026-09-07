@@ -22,6 +22,26 @@ use tauri::Emitter;
 
 pub(crate) use super::prepare::SpawnOptions;
 
+/// Durable ownership held across prepare, provisioning, launch and stream
+/// startup. Cleanup sweeps use the same SQLite generation, so a terminal
+/// circuit agent cannot be killed after a resume has begun provisioning.
+struct DurableCircuitSpawnClaim {
+    node_id: i64,
+    generation: String,
+}
+
+impl Drop for DurableCircuitSpawnClaim {
+    fn drop(&mut self) {
+        if let Err(error) = db::release_circuit_agent_spawn(self.node_id, &self.generation) {
+            tracing::warn!(
+                "spawn_with_intent: could not release durable circuit spawn claim for node {}: {}",
+                self.node_id,
+                error
+            );
+        }
+    }
+}
+
 /// Pure decision for "given the stored CLI session id, the resume cause,
 /// and whether the adapter auto-resumes on startup, what should
 /// `spawn_with_intent` do?". The Skip variants are the regression-pin
@@ -123,7 +143,11 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::Skipped(node));
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    if db::circuit_agent_cleanup_claim(node_id).map_err(|e| e.to_string())?.is_some() {
+    let durable_claim = db::claim_circuit_agent_spawn(node_id).map_err(|e| e.to_string())?
+        .map(|generation| DurableCircuitSpawnClaim { node_id, generation });
+    if durable_claim.is_none()
+        && db::circuit_agent_cleanup_claim(node_id).map_err(|e| e.to_string())?.is_some()
+    {
         tracing::info!("spawn_with_intent: cleanup generation owns node {}, deferring resume", node_id);
         return Ok(SpawnOutcome::Skipped(node));
     }
@@ -281,6 +305,7 @@ pub(crate) async fn spawn_with_intent(
             Err(error)
         }
     };
+    drop(durable_claim);
     drop(claim);
     outcome
 }

@@ -2991,6 +2991,7 @@ fn notification_severity(message: &str) -> String {
 mod tests {
     use super::*;
     use crate::autopilot::circuit::model::{CircuitNode, StepOutcome};
+    use rusqlite::Connection;
 
     #[test]
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
@@ -3021,6 +3022,28 @@ mod tests {
 
     #[test]
     fn terminal_cleanup_injected_kill_or_archive_failure_keeps_notifications_quiet() {
+        let setup = || {
+            let conn = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'cleanup-failure', '/repo');
+                INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (42,1,'owned','/repo','ready');
+                INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'cleanup-failure','{}');
+                INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+                    VALUES (1,1,1,'failure','failed','{\"cleanup.pending\":\"1\"}');
+                INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
+                    VALUES (1,'owned',42,'failed');").unwrap();
+            let claim = crate::db::circuit::claim_circuit_agent_cleanup_inner(&conn, 42).unwrap().unwrap();
+            (conn, claim)
+        };
+        let assert_recovery = |conn: &Connection, claim: &str| {
+            assert_eq!(crate::db::circuit::circuit_agent_cleanup_claim_inner(conn, 42).unwrap().as_deref(), Some(claim));
+            assert_eq!(crate::db::circuit::failed_circuit_agents_for_cleanup_inner(conn).unwrap(), vec![42]);
+            assert_eq!(conn.query_row("SELECT status FROM agent_nodes WHERE id=42", [], |row| row.get::<_, String>(0)).unwrap(), "ready");
+            assert_eq!(conn.query_row("SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='owned'", [], |row| row.get::<_, i64>(0)).unwrap(), 42);
+            assert!(conn.query_row("SELECT json_extract(context_json, '$.\"cleanup.retired.42\"') FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, Option<String>>(0)).unwrap().is_none());
+        };
+
+        let (kill_conn, kill_claim) = setup();
         let kill_failed = archive_failed_circuit_agent_with(
             42,
             || Err("kill failed".to_string()),
@@ -3028,7 +3051,9 @@ mod tests {
             |_, _| panic!("cleanup notification must follow committed archive"),
         );
         assert_eq!(kill_failed, Err("kill failed".to_string()));
+        assert_recovery(&kill_conn, &kill_claim);
 
+        let (archive_conn, archive_claim) = setup();
         let archive_failed = archive_failed_circuit_agent_with(
             42,
             || Ok(()),
@@ -3036,6 +3061,7 @@ mod tests {
             |_, _| panic!("cleanup notification must follow committed archive"),
         );
         assert!(archive_failed.is_err());
+        assert_recovery(&archive_conn, &archive_claim);
     }
 
     #[test]

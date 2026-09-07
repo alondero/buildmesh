@@ -100,10 +100,11 @@ Suggested recovery prompt for an existing PR session:
   prompts. Customized wiring/order is left intact. An old ordinary classifier's
   completed result cannot authorize a newly introduced approval branch.
 - Automatic terminal cleanup stops and archives owned agents. Session identity,
-  worktree and ledger association survive. An atomic per-agent cleanup receipt
-  and cleanup generation claim prevent a stale sweep from archiving a later
-  resume; spawn checks the claim before launching. Kill/archive failures retain
-  the claim and emit no completion event.
+  worktree and ledger association survive. Durable per-agent spawn and cleanup
+  generations are mutually exclusive before provisioning and at final archive;
+  a resumed session records a durable receipt so a stale sweep cannot kill it
+  after provisioning completes. Kill/archive failures retain the claim and
+  emit no completion event.
   The frontend refresh follows the committed archive. Successful review circuits
   opt into the same process retirement so they stop accumulating pool occupancy.
 - Historical completed reviews without explicit approval remain visible in
@@ -111,9 +112,10 @@ Suggested recovery prompt for an existing PR session:
   historical ledger rows or claim current-head merge readiness.
 - Blocked review verdicts fail immediately and deliver the recovery notification;
   failed terminal transitions now permit only synchronous terminal effects.
-- Review diagnostics use persisted preset metadata rather than node-name guesses.
-  All terminal runs of the persisted review preset are retained; user-authored
-  circuit history remains bounded.
+- Review diagnostics use the persisted graph's typed ReviewVerdict node and its
+  actual node id rather than preset flags or node-name guesses. All terminal
+  runs of the persisted review preset are retained; user-authored circuit
+  history remains bounded.
 - Default issue prompts describe unattended implementation and reserve questions
   for real blockers. Classification explicitly excludes a completed plan or API
   error from implementation completion. Review prompts distinguish actionable
@@ -123,10 +125,11 @@ Suggested recovery prompt for an existing PR session:
 
 The initial changes-requested regression failed before the routing fix; the
 replacement retry test drives three real rounds rather than manually fabricating
-an exhausted gate. Standards and specification reviewers found no remaining
-actionable findings after the cleanup receipt and nonreview fallback corrections.
+an exhausted gate. The follow-up regression covers the durable spawn/cleanup
+race, cleanup failure recovery state, graph-derived review diagnostics, and
+fixture teardown.
 
-- `scripts/check.ps1 all-ts`: passed, 2,880 unit tests (1 skipped), 62 integration
+- `scripts/check.ps1 all-ts`: passed, 2,881 unit tests (1 skipped), 62 integration
   tests, 6 agent-infrastructure tests, desktop/mobile compilation and bundle budget.
   An obsolete sidebar test fixture was repaired after reproducing its missing
   `onActivateNode` callback on the recorded base. Earlier loaded runs failed on
@@ -136,6 +139,8 @@ actionable findings after the cleanup receipt and nonreview fallback corrections
 - `scripts/check.ps1 rust -SerialRust`: passed, 2,918 library tests and 18
   integration tests; 14 library tests and 1 doctest ignored. Prior failures from
   obsolete preset assertions were corrected before this full rerun.
+- Follow-up focused Rust coverage: 35 circuit DB tests plus the injected cleanup
+  failure test; focused UI diagnostics/probe tests passed (38 + 72 tests).
 - Real WebView2/Tauri UI: passed Activity/attention, recovery guidance, disclosure,
   keyboard minimum-width resize and no horizontal overflow assertions at 240px.
   Inspected before/after screenshots are under

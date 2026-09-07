@@ -56,6 +56,7 @@ import {
   circuitActivityStats,
   countActiveRuns,
   pendingAdmissionDetail,
+  reviewCircuitMetadata,
   type CircuitProbeView,
 } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
@@ -670,7 +671,7 @@ export function CircuitsProbeTab() {
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
-                          isReviewCircuit={circuit.is_preset}
+                          reviewCircuit={reviewCircuitMetadata(circuit)}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
                           onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}

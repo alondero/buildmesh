@@ -1233,12 +1233,120 @@ pub fn claim_circuit_agent_cleanup(node_id: i64) -> SqlResult<Option<String>> {
 /// Read a pending cleanup generation without claiming or changing it. Spawn
 /// paths use this as the second half of the cleanup/resume fence.
 pub fn circuit_agent_cleanup_claim(node_id: i64) -> SqlResult<Option<String>> {
-    let db = super::read_conn();
-    db.query_row(
+    circuit_agent_cleanup_claim_inner(&super::read_conn(), node_id)
+}
+
+pub(crate) fn circuit_agent_cleanup_claim_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<String>> {
+    let claim_path = format!("$.\"cleanup.claim.{node_id}\"");
+    conn.query_row(
         "SELECT json_extract(r.context_json, ?2) FROM autopilot_circuit_runs r
          JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
          WHERE s.agent_node_id=?1 AND json_extract(r.context_json, ?2) IS NOT NULL LIMIT 1",
-        params![node_id, format!("$.\"cleanup.claim.{node_id}\"")],
+        params![node_id, claim_path],
+        |row| row.get(0),
+    ).optional()
+}
+
+/// Claim a durable spawn generation for a circuit-owned agent. This is the
+/// other half of the cleanup generation fence: a spawn claims the same
+/// SQLite-owned ledger before provisioning, so cleanup cannot claim and kill
+/// the node after the orchestrator's initial check.
+///
+/// `None` means either that the node is not circuit-owned or that a cleanup
+/// generation already owns it. The caller distinguishes those cases by
+/// reading [`circuit_agent_cleanup_claim`] immediately after this transaction.
+pub fn claim_circuit_agent_spawn(node_id: i64) -> SqlResult<Option<String>> {
+    claim_circuit_agent_spawn_inner(&super::write_conn(), node_id)
+}
+
+pub(crate) fn claim_circuit_agent_spawn_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let cleanup_path = format!("$.\"cleanup.claim.{node_id}\"");
+    let spawn_path = format!("$.\"spawn.claim.{node_id}\"");
+    let resumed_path = format!("$.\"cleanup.resumed.{node_id}\"");
+    let owned: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s
+         JOIN autopilot_circuit_runs r ON r.id=s.run_id
+         JOIN agent_nodes a ON a.id=s.agent_node_id
+         WHERE s.agent_node_id=?1 AND a.status != 'archived')",
+        params![node_id],
+        |row| row.get(0),
+    )?;
+    if !owned {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let cleanup_owned: bool = tx.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE s.agent_node_id=?1 AND json_extract(r.context_json, '{}') IS NOT NULL)", cleanup_path),
+        params![node_id],
+        |row| row.get(0),
+    )?;
+    if cleanup_owned {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let generation = format!("{}:{node_id}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    tx.execute(
+        &format!("UPDATE autopilot_circuit_runs SET context_json=json_set(context_json, '{}', ?1)
+            WHERE id IN (SELECT DISTINCT run_id FROM autopilot_circuit_run_steps WHERE agent_node_id=?2)", spawn_path),
+        params![generation, node_id],
+    )?;
+    // A new spawn/resume supersedes the old terminal cleanup intent. Keep a
+    // receipt so later sweeps and restarts cannot mistake this recovered
+    // session for an unclaimed cleanup candidate.
+    tx.execute(
+        &format!("UPDATE autopilot_circuit_runs SET context_json=json_set(context_json, '{}', ?1)
+            WHERE id IN (SELECT DISTINCT run_id FROM autopilot_circuit_run_steps WHERE agent_node_id=?2)
+              AND json_extract(context_json, '$.\"cleanup.pending\"')='1'", resumed_path),
+        params![generation, node_id],
+    )?;
+    tx.commit()?;
+    Ok(Some(generation))
+}
+
+/// Release a spawn generation only if it is still the current generation.
+/// An older provisioning attempt therefore cannot clear a newer resume's
+/// ownership after a process restart or duplicate request.
+pub(crate) fn release_circuit_agent_spawn_inner(
+    conn: &Connection,
+    node_id: i64,
+    generation: &str,
+) -> SqlResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    let spawn_path = format!("$.\"spawn.claim.{node_id}\"");
+    tx.execute(
+        &format!("UPDATE autopilot_circuit_runs SET context_json=json_remove(context_json, '{}')
+            WHERE id IN (SELECT DISTINCT run_id FROM autopilot_circuit_run_steps WHERE agent_node_id=?1)
+              AND json_extract(context_json, '{}')=?2", spawn_path, spawn_path),
+        params![node_id, generation],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn release_circuit_agent_spawn(node_id: i64, generation: &str) -> SqlResult<()> {
+    release_circuit_agent_spawn_inner(&super::write_conn(), node_id, generation)
+}
+
+#[cfg(test)]
+pub(crate) fn circuit_agent_spawn_claim_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<String>> {
+    let spawn_path = format!("$.\"spawn.claim.{node_id}\"");
+    conn.query_row(
+        &format!("SELECT json_extract(r.context_json, '{}') FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE s.agent_node_id=?1 AND json_extract(r.context_json, '{}') IS NOT NULL LIMIT 1", spawn_path, spawn_path),
+        params![node_id],
         |row| row.get(0),
     ).optional()
 }
@@ -1249,6 +1357,18 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(
 ) -> SqlResult<Option<String>> {
     let tx = conn.unchecked_transaction()?;
     let claim_path = format!("$.\"cleanup.claim.{node_id}\"");
+    let spawn_path = format!("$.\"spawn.claim.{node_id}\"");
+    let spawn_owned: bool = tx.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
+            JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE s.agent_node_id=?1 AND json_extract(r.context_json, '{}') IS NOT NULL)", spawn_path),
+        params![node_id],
+        |row| row.get(0),
+    )?;
+    if spawn_owned {
+        tx.commit()?;
+        return Ok(None);
+    }
     let existing: Option<String> = tx
         .query_row(
             &format!("SELECT json_extract(context_json, '{}') FROM autopilot_circuit_runs r
@@ -1268,6 +1388,7 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(
          JOIN agent_nodes a ON a.id=s.agent_node_id
          WHERE s.agent_node_id=?1 AND r.state IN ('completed','failed','cancelled')
            AND json_extract(r.context_json, '$.\"cleanup.pending\"')='1'
+           AND json_extract(r.context_json, '$.\"cleanup.resumed.' || a.id || '\"') IS NULL
            AND a.status != 'archived'
            AND a.id IS NOT r.source_agent_node_id
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
@@ -1296,12 +1417,17 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(
 }
 
 pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
-    super::write_conn().execute(
+    clear_finished_circuit_cleanup_inner(&super::write_conn())
+}
+
+pub(crate) fn clear_finished_circuit_cleanup_inner(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
         "UPDATE autopilot_circuit_runs SET context_json = json_remove(context_json, '$.\"cleanup.pending\"')
          WHERE state IN ('completed', 'failed', 'cancelled') AND json_extract(context_json, '$.\"cleanup.pending\"') = '1'
          AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s JOIN agent_nodes a ON a.id = s.agent_node_id
              WHERE s.run_id = autopilot_circuit_runs.id AND a.status != 'archived'
                AND COALESCE(json_extract(autopilot_circuit_runs.context_json, '$.\"cleanup.retired.' || a.id || '\"'), '0') != '1'
+               AND json_extract(autopilot_circuit_runs.context_json, '$.\"cleanup.resumed.' || a.id || '\"') IS NULL
                AND a.id IS NOT autopilot_circuit_runs.source_agent_node_id)", [])?;
     Ok(())
 }
@@ -1313,6 +1439,7 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connectio
          JOIN agent_nodes a ON a.id = s.agent_node_id
          WHERE r.state IN ('completed', 'failed', 'cancelled')
            AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'
+           AND json_extract(r.context_json, '$.\"cleanup.resumed.' || a.id || '\"') IS NULL
            AND a.status != 'archived'
            AND COALESCE(json_extract(r.context_json, '$.\"cleanup.retired.' || a.id || '\"'), '0') != '1'
            AND a.id IS NOT r.source_agent_node_id
@@ -1321,6 +1448,10 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connectio
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
                JOIN autopilot_circuit_runs active ON active.id = other.run_id
                WHERE other.agent_node_id = a.id AND active.state IN ('running', 'paused'))
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs spawning
+               JOIN autopilot_circuit_run_steps spawn_step ON spawn_step.run_id = spawning.id
+               WHERE spawn_step.agent_node_id = a.id
+                 AND json_extract(spawning.context_json, '$.\"spawn.claim.' || a.id || '\"') IS NOT NULL)
          ORDER BY a.id")?;
     let ids = stmt.query_map([], |row| row.get(0))?.collect();
     ids
@@ -1348,6 +1479,7 @@ pub fn archive_circuit_agent(node_id: i64, claim: &str) -> SqlResult<Vec<(i64, S
 pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim: &str) -> SqlResult<Vec<(i64, String)>> {
     let tx = conn.unchecked_transaction()?;
     let claim_path = format!("$.\"cleanup.claim.{node_id}\"");
+    let spawn_path = format!("$.\"spawn.claim.{node_id}\"");
     let retired_path = format!("$.\"cleanup.retired.{node_id}\"");
     let claim_matches: bool = tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs r
@@ -1355,11 +1487,16 @@ pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim
             JOIN agent_nodes a ON a.id=s.agent_node_id
             WHERE s.agent_node_id=?1 AND a.status != 'archived'
               AND json_extract(r.context_json, '{}')=?2
+              AND json_extract(r.context_json, '$.\"cleanup.resumed.' || a.id || '\"') IS NULL
               AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
                   WHERE borrowed.source_agent_node_id=a.id AND borrowed.state IN ('pending','running','paused'))
               AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps other
                   JOIN autopilot_circuit_runs active ON active.id=other.run_id
-                  WHERE other.agent_node_id=a.id AND active.state IN ('running','paused')))", claim_path),
+                  WHERE other.agent_node_id=a.id AND active.state IN ('running','paused'))
+              AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs spawning
+                  JOIN autopilot_circuit_run_steps spawn_step ON spawn_step.run_id=spawning.id
+                  WHERE spawn_step.agent_node_id=a.id
+                    AND json_extract(spawning.context_json, '{}') IS NOT NULL))", claim_path, spawn_path),
         params![node_id, claim],
         |row| row.get(0),
     )?;
