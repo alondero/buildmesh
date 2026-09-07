@@ -1029,24 +1029,23 @@ mod tests {
         assert!(result.contains("random text"));
     }
 
-    /// RAII guard for hand-built Git repos created in this module's tests
-    /// (issue #1544). Holds the underlying `tempfile::TempDir` so the
-    /// directory is removed when the test returns — without this the diff
-    /// tests leaked ~150 MB / 7,000+ directories on the review machine.
+    /// Per-test fixture: a unique temp directory under `%TEMP%` for
+    /// hand-built Git repos. `Cleaning` removes the directory via
+    /// `tempfile::TempDir`'s `Drop`; `Kept` (opt-in via
+    /// `BUILDMESH_KEEP_DIFF_FIXTURES=1`) survives the test for
+    /// post-mortem inspection.
     ///
-    /// Set `BUILDMESH_KEEP_DIFF_FIXTURES=1` in the environment to preserve
-    /// the directory across the test process for post-mortem inspection
-    /// of a failing test; the path is printed to stderr so the contributor
-    /// can `cd` into it. Without the opt-in the directory is gone before
-    /// the test framework can print the path, which is the right default
-    /// (a green test has no on-disk trace).
-    struct DiffFixture {
-        // `None` only in the keep-fixture opt-in path: the TempDir is
-        // intentionally leaked there so the directory outlives the test.
-        // `Some` is the default; the TempDir's own `Drop` removes the
-        // directory, so we don't need a manual cleanup impl.
-        _guard: Option<tempfile::TempDir>,
-        path: std::path::PathBuf,
+    /// Issue #1544: the previous helper returned a bare `PathBuf` with
+    /// no `Drop` and leaked ~150 MB / 7,000+ `buildmesh-diff-test-*`
+    /// directories on the review machine across contributor/CI runs.
+    ///
+    /// `Deref<Target = Path>` so callers can pass `&fx` to functions
+    /// expecting `&Path` and use `fx.join(...)` / `fx.to_str()` directly,
+    /// mirroring how `tempfile::TempDir` itself is used throughout the
+    /// codebase and avoiding `.path()` boilerplate at every call site.
+    enum DiffFixture {
+        Cleaning(tempfile::TempDir),
+        Kept(std::path::PathBuf),
     }
 
     impl DiffFixture {
@@ -1055,58 +1054,181 @@ mod tests {
                 .prefix("buildmesh-diff-test-")
                 .tempdir()
                 .expect("create fixture tempdir");
-            let path = temp.path().to_path_buf();
-            if std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").is_some() {
-                eprintln!(
-                    "[buildmesh diff fixture] preserved at {}",
-                    path.display()
-                );
-                // Intentionally drop the TempDir handle so its cleanup
-                // `Drop` does not run; the directory survives the test
-                // process and the printed path is the only handle for
-                // manual cleanup.
-                std::mem::forget(temp);
-                Self {
-                    _guard: None,
-                    path,
-                }
+            // `TempDir::into_path()` disables the cleanup `Drop` and
+            // returns the path - exactly the "preserve this directory"
+            // semantic the opt-in wants. Stays inside `TempDir`'s own
+            // RAII machinery instead of reaching for `mem::forget`.
+            if keep_diff_fixtures() {
+                let path = temp.into_path();
+                eprintln!("[buildmesh diff fixture] preserved at {}", path.display());
+                Self::Kept(path)
             } else {
-                Self {
-                    _guard: Some(temp),
-                    path,
-                }
+                Self::Cleaning(temp)
             }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.path
         }
     }
 
-    /// Pins the cleanup contract from issue #1544: a `DiffFixture` must
-    /// remove its temp directory when it drops, so the test suite doesn't
-    /// accumulate `buildmesh-diff-test-*` entries in `%TEMP%` across
-    /// runs (the previous helper returned a bare `PathBuf` with no Drop
-    /// semantics and leaked ~150 MB / 7,000+ dirs on the review machine).
-    ///
-    /// The assertion is skipped under `BUILDMESH_KEEP_DIFF_FIXTURES=1`
-    /// because that opt-in intentionally preserves the directory.
-    #[test]
-    fn diff_fixture_cleans_up_tempdir_on_drop() {
-        if std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").is_some() {
-            // Opt-in preserves the directory on purpose.
-            return;
+    impl std::ops::Deref for DiffFixture {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            match self {
+                Self::Cleaning(t) => t.path(),
+                Self::Kept(p) => p,
+            }
         }
-        let captured = {
+    }
+
+    impl AsRef<std::path::Path> for DiffFixture {
+        fn as_ref(&self) -> &std::path::Path {
+            self
+        }
+    }
+
+    /// `BUILDMESH_KEEP_DIFF_FIXTURES` opt-in. Enabled only when the
+    /// variable is set to a value that the contributor actually intends
+    /// as "yes". `is_some()` alone treats `=` (empty) and `=0` as enabled,
+    /// which is almost never what they meant - `=0` is the obvious shell
+    /// idiom for "no". Accept any non-empty, non-`"0"` value; everything
+    /// else (unset, empty, explicit `0`) disables.
+    fn keep_diff_fixtures() -> bool {
+        std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES")
+            .is_some_and(|v| !v.is_empty() && v != "0")
+    }
+
+    /// Pins the cleanup contract from issue #1544 end-to-end: creating
+    /// a `DiffFixture`, building a real `git2::Repository` inside it,
+    /// writing tracked content, and dropping the fixture must remove
+    /// both the `.git` directory and the temp directory root - proving
+    /// the leak is gone for the production scenario (open git handles
+    /// + tracked files), not just for an empty tempdir.
+    ///
+    /// This test never short-circuits on environment state (CLAUDE.md
+    /// "no paper-tiger tests" rule). The opt-in path is covered by
+    /// `diff_fixture_keep_opt_in_preserves_dir` below. Holds `ENV_LOCK`
+    /// so it cannot run concurrently with the opt-in test (which
+    /// mutates `BUILDMESH_KEEP_DIFF_FIXTURES` while this test reads it
+    /// via `keep_diff_fixtures()` inside `DiffFixture::new`).
+    #[test]
+    fn diff_fixture_cleans_up_tempdir_and_git_repo_on_drop() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let captured_root;
+        let captured_git_dir;
+        {
             let fx = DiffFixture::new();
-            assert!(fx.path().exists(), "fixture must exist while in scope");
-            fx.path().to_path_buf()
-        };
+            let repo = init_repo_with_base(&fx);
+            // Commit a real file so `.git/` has objects + refs to remove.
+            commit_all(&repo, "fixture cleanup probe");
+            assert!(
+                fx.join("base.txt").exists(),
+                "tracked file must exist while fixture is in scope"
+            );
+            assert!(
+                fx.join(".git").exists(),
+                ".git directory must exist while fixture is in scope"
+            );
+            captured_root = fx.as_ref().to_path_buf();
+            captured_git_dir = captured_root.join(".git");
+            // `repo` drops here, before `fx` (Rust reverses declaration
+            // order). Releasing the git handle before the TempDir drops
+            // is what makes the cleanup race-free on Windows (issue #1544
+            // step #4).
+        }
         assert!(
-            !captured.exists(),
-            "fixture must be removed after drop (issue #1544 leak at {})",
-            captured.display()
+            !captured_root.exists(),
+            "fixture root must be removed after drop (issue #1544 leak at {})",
+            captured_root.display()
         );
+        assert!(
+            !captured_git_dir.exists(),
+            "fixture .git directory must be removed after drop (residue at {})",
+            captured_git_dir.display()
+        );
+    }
+
+    /// Process-wide lock for tests that mutate `BUILDMESH_KEEP_DIFF_FIXTURES`.
+    /// Without serialisation, the cleanup test would race against the opt-in
+    /// test (one mutates the env var while the other reads it) and the
+    /// cleanup assertion would intermittently see `DiffFixture::Kept` and
+    /// fail because `Kept` has no `Drop` cleanup. Matches the
+    /// `PROFILE_WRITE_LOCK` / `PR_TEST_LOCK` / `DRAIN_LOCK` pattern used
+    /// elsewhere (PR #1603, memory entry `#1278`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The opt-in flag (set to a non-empty value) preserves the
+    /// directory so a failing test can be inspected on disk. We do NOT
+    /// short-circuit the cleanup test on this flag (that would be a
+    /// paper-tiger test); instead this dedicated test verifies the
+    /// preservation contract directly. Holds `ENV_LOCK` so concurrent
+    /// tests cannot observe the mutated env var mid-test.
+    ///
+    /// The directory survives the test by design; the test cleans up
+    /// after itself so it does not itself leak in CI.
+    #[test]
+    fn diff_fixture_keep_opt_in_preserves_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES");
+        // SAFETY: `set_var` / `remove_var` are `unsafe` from Rust 2024
+        // onwards because of multi-threaded races; this test holds
+        // `ENV_LOCK` for its full duration and the cleanup test also
+        // takes the lock when reading via `keep_diff_fixtures()` (see
+        // `diff_fixture_cleans_up_tempdir_and_git_repo_on_drop`).
+        // SAFETY: rationale matches `commands/agent_tests.rs:761` and
+        // `services/freebuff_usage.rs:703` which use the same pattern.
+        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "1") };
+        let preserved = DiffFixture::new();
+        let preserved_path = preserved.as_ref().to_path_buf();
+        assert!(
+            preserved_path.exists(),
+            "kept fixture must exist while in scope"
+        );
+        // Restore before the fixtures drop so the `Cleaning` sibling
+        // confirms distinct paths under default behaviour.
+        unsafe { std::env::remove_var("BUILDMESH_KEEP_DIFF_FIXTURES") };
+        let sibling = DiffFixture::new();
+        assert_ne!(
+            sibling.as_ref(),
+            preserved_path,
+            "two DiffFixture::new calls in one test must produce distinct dirs"
+        );
+        // `Kept` has no Drop cleanup by design (that's the whole point);
+        // `Cleaning` cleans up its sibling. Remove the preserved path
+        // manually so the test does not itself leak in CI.
+        drop(sibling);
+        drop(preserved);
+        let _ = std::fs::remove_dir_all(&preserved_path);
+        // Restore original env state so subsequent tests start clean.
+        // SAFETY: see the env-mutation SAFETY block above.
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", v) };
+        }
+    }
+
+    /// Empty-string and `0` values must NOT enable the opt-in (the
+    /// reviewer flagged `.is_some()` as treating them as enabled).
+    /// Each case holds `ENV_LOCK` so the env var doesn't race with
+    /// `diff_fixture_keep_opt_in_preserves_dir` above.
+    #[test]
+    fn keep_diff_fixtures_treats_empty_and_zero_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES");
+        // SAFETY: see the SAFETY block above; lock is held for the whole test.
+        unsafe { std::env::remove_var("BUILDMESH_KEEP_DIFF_FIXTURES") };
+        assert!(!keep_diff_fixtures(), "unset must be false");
+        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "") };
+        assert!(!keep_diff_fixtures(), "empty value must be treated as unset");
+        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "0") };
+        assert!(
+            !keep_diff_fixtures(),
+            "'0' value must be treated as unset (a contributor setting this is opting out, not in)"
+        );
+        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "1") };
+        assert!(
+            keep_diff_fixtures(),
+            "non-empty value must enable the opt-in"
+        );
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", v) };
+        }
     }
 
     #[test]
@@ -1231,8 +1353,8 @@ mod tests {
         // implementation violates (~102 lines) and the fixed implementation
         // satisfies (under 30 lines).
         let tmp = DiffFixture::new();
-        let old = tmp.path().join("old.txt");
-        let new = tmp.path().join("new.txt");
+        let old = tmp.join("old.txt");
+        let new = tmp.join("new.txt");
         std::fs::write(&old, &old_content).unwrap();
         std::fs::write(&new, &new_content).unwrap();
 
@@ -1297,16 +1419,15 @@ mod tests {
     #[test]
     fn diff_against_base_shows_committed_and_uncommitted_work() {
         let tmp = DiffFixture::new();
-        let repo = init_repo_with_base(tmp.path());
+        let repo = init_repo_with_base(&tmp);
 
         // The agent commits a new file after branching...
-        std::fs::write(tmp.path().join("committed.txt"), "a\nb\n").unwrap();
+        std::fs::write(tmp.join("committed.txt"), "a\nb\n").unwrap();
         commit_all(&repo, "agent work");
         // ...and leaves an uncommitted edit to an existing file.
-        std::fs::write(tmp.path().join("base.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
-        let result =
-            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"committed.txt"), "committed file missing: {:?}", paths);
         assert!(paths.contains(&"base.txt"), "uncommitted edit missing: {:?}", paths);
@@ -1320,10 +1441,10 @@ mod tests {
     #[test]
     fn diff_against_base_detects_rename() {
         let tmp = DiffFixture::new();
-        let repo = init_repo_with_base(tmp.path());
+        let repo = init_repo_with_base(&tmp);
 
-        std::fs::remove_file(tmp.path().join("base.txt")).unwrap();
-        std::fs::write(tmp.path().join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(tmp.join("base.txt")).unwrap();
+        std::fs::write(tmp.join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
         {
             let mut index = repo.index().unwrap();
             index.remove_path(std::path::Path::new("base.txt")).unwrap();
@@ -1332,8 +1453,7 @@ mod tests {
         }
         commit_all(&repo, "rename base.txt");
 
-        let result =
-            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let renamed = result
             .files
             .iter()
@@ -1347,13 +1467,13 @@ mod tests {
     #[test]
     fn diff_against_base_falls_back_to_head_when_base_unresolvable() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(tmp.path());
+        let _repo = init_repo_with_base(&tmp);
 
-        std::fs::write(tmp.path().join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(tmp.join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
         // A base_ref that doesn't resolve must fall back to HEAD, not error.
         let result = diff_against_base(
-            tmp.path().to_str().unwrap(),
+            tmp.to_str().unwrap(),
             "origin/does-not-exist",
             None,
             None,
@@ -1368,12 +1488,11 @@ mod tests {
     #[test]
     fn diff_against_base_flags_binary_without_hunks() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(tmp.path());
+        let _repo = init_repo_with_base(&tmp);
 
-        std::fs::write(tmp.path().join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
+        std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
 
-        let result =
-            diff_against_base(tmp.path().to_str().unwrap(), "base", None, None).unwrap();
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let bin = result.files.iter().find(|f| f.path == "blob.bin").unwrap();
         assert!(bin.binary, "binary file should be flagged");
         assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
@@ -1404,14 +1523,14 @@ mod tests {
     #[test]
     fn diff_against_base_only_restricts_to_one_path() {
         let tmp = DiffFixture::new();
-        let repo = init_repo_with_base(tmp.path());
+        let repo = init_repo_with_base(&tmp);
 
-        std::fs::write(tmp.path().join("a.txt"), "x\n").unwrap();
-        std::fs::write(tmp.path().join("b.txt"), "y\n").unwrap();
+        std::fs::write(tmp.join("a.txt"), "x\n").unwrap();
+        std::fs::write(tmp.join("b.txt"), "y\n").unwrap();
         commit_all(&repo, "two files");
 
         let result = diff_against_base(
-            tmp.path().to_str().unwrap(),
+            tmp.to_str().unwrap(),
             "base",
             Some("a.txt"),
             None,
@@ -1447,9 +1566,9 @@ mod tests {
     fn diff_node_inspects_worktree_not_project_root() {
         // Project root: a clean repo with a `base` branch, nothing pending.
         let root = DiffFixture::new();
-        let _root_repo = init_repo_with_base(root.path());
+        let _root_repo = init_repo_with_base(&root);
 
-        let node = make_node(root.path().to_str().unwrap(), true, Some("wt"));
+        let node = make_node(root.to_str().unwrap(), true, Some("wt"));
         let wt_path = crate::env::node_working_path(&node).host_path;
         assert!(
             wt_path.replace('\\', "/").ends_with("/.claude/worktrees/wt"),
@@ -1551,17 +1670,12 @@ mod tests {
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_pre_set() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(tmp.path());
+        let _repo = init_repo_with_base(&tmp);
 
-        std::fs::write(tmp.path().join("edit.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
 
         let token = AtomicBool::new(true);
-        let result = diff_against_base(
-            tmp.path().to_str().unwrap(),
-            "base",
-            None,
-            Some(&token),
-        );
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
         assert_eq!(
             result.as_ref().err().map(|s| s.as_str()),
             Some(DIFF_CANCELLED),
@@ -1581,7 +1695,7 @@ mod tests {
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(tmp.path());
+        let _repo = init_repo_with_base(&tmp);
 
         // Enough files × lines that the highlight pass dominates the
         // cost and the 1ms flipper delay fires unambiguously mid-walk.
@@ -1594,7 +1708,7 @@ mod tests {
             for line in 0..100 {
                 body.push_str(&format!("file {} line {} {}\n", i, line, "x".repeat(40)));
             }
-            std::fs::write(tmp.path().join(format!("f{i}.txt")), body).unwrap();
+            std::fs::write(tmp.join(format!("f{i}.txt")), body).unwrap();
         }
 
         let token = Arc::new(AtomicBool::new(false));
@@ -1608,12 +1722,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = diff_against_base(
-            tmp.path().to_str().unwrap(),
-            "base",
-            None,
-            Some(&token),
-        );
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None, Some(&token));
         let elapsed = start.elapsed();
 
         flipper.join().unwrap();
