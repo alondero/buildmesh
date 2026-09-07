@@ -506,6 +506,11 @@ pub fn run() {
             // frontend prepends `data:application/x-apple-aspen-config;base64,`
             // to produce the data: URL Safari intercepts.
             commands::network::get_root_cert_mobileconfig,
+            // Explicit root reset (issue #1527) — wipes the persisted
+            // TLS state so the next bind mints a fresh root. Frontend
+            // exposes this as a Settings "Reset trusted certificates"
+            // affordance; never auto-invoked from bind paths.
+            commands::network::reset_trusted_certificates,
             // Agent
             // Process-lifecycle Tauri commands (issue #1052) live in
             // `agent::process`; the rest are spawn orchestration owned by

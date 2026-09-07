@@ -72,6 +72,18 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // a user whose installed root is stale can compare before re-installing.
   // Fetch failure is silent — the modal still works without it.
   const [certStatus, setCertStatus] = useState<CertChainStatus | null>(null);
+  // Last `root_generation` the user has acknowledged (issue #1527). The
+  // banner fires when the server-side counter increases past this value —
+  // i.e. the user explicitly reset the root (or the validated-unrecoverable
+  // corruption path rotated it). A routine leaf renewal (DHCP, VPN, new
+  // subnet) leaves the counter alone, so the banner does NOT fire on every
+  // interface change. `null` means "first mount — don't flash a banner
+  // just because the counter starts at 1"; the user has to see the
+  // counter move past what they last saw to be notified.
+  const [ackedRootGeneration, setAckedRootGeneration] = useState<number | null>(null);
+  // True while the explicit reset action is in-flight. Disables the
+  // button to prevent double-clicks; cleared on success or error.
+  const [resetting, setResetting] = useState(false);
   // The rendered QR PNG of the install-cert data: URL (issue #702). The
   // data: URL itself stays as a local const inside the effect — it's
   // the *QR payload*, not a render artifact, so it doesn't need state.
@@ -146,6 +158,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         setHost(displayHost);
         setUnreachable(!reachable);
         setCertStatus(cert);
+        // Issue #1527: seed the acknowledged root generation on first
+        // mount so the banner doesn't flash just because the counter
+        // happens to be > 0. The user has to see the counter INCREASE
+        // past this value (via reset or unrecoverable corruption) to be
+        // prompted to re-install.
+        if (cert && ackedRootGeneration === null) {
+          setAckedRootGeneration(cert.root_generation);
+        }
         // Hoist the install URL once — the QR payload and the fallback
         // link must stay in sync, and `${origin}/install-cert.der` has
         // future query-string / path churn risk (#702 rotation).
@@ -299,6 +319,31 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     openUrl(installUrl).catch(console.error);
   };
 
+  const handleResetCertificates = async () => {
+    // Explicit user gesture — never auto-invoked. Wipes the persisted
+    // TLS state on the server side. After this the server mints a fresh
+    // root on the next bind, the user's phone loses trust, and they
+    // must re-install via the install-QR above. We re-read certStatus
+    // on success so the new generation shows up immediately and the
+    // banner reflects the current state (the user just triggered the
+    // rotation, so they don't need a banner telling them — they know).
+    if (resetting) return;
+    if (!window.confirm(
+      'Reset the trusted root certificate? Your phone will stop trusting this server ' +
+      'until you re-install the new root from the QR above.'
+    )) return;
+    setResetting(true);
+    try {
+      const newGen = await api.resetTrustedCertificates();
+      setCertStatus(prev => prev ? { ...prev, root_generation: newGen } : prev);
+      setAckedRootGeneration(newGen);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return (
     <Modal onClose={onClose} labelledBy="remote-access-title" maxWidth="max-w-lg" className="p-8">
         <div className="absolute top-5 right-5">
@@ -322,6 +367,32 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             your phone can't reach this computer. Check the "Expose to LAN"
             status in Settings (TLS may have failed to start, or no LAN
             interface is available).
+          </div>
+        ) : certStatus &&
+          ackedRootGeneration !== null &&
+          certStatus.root_generation > ackedRootGeneration ? (
+          // Issue #1527: a `root_generation` increase past the value the
+          // user has previously seen is the only event that surfaces this
+          // banner. A routine leaf renewal (DHCP, VPN, new subnet) leaves
+          // the counter alone, so this banner does NOT fire on every
+          // network change — that's the whole point of the split. Trigger
+          // is either an explicit Reset or the (rare) unrecoverable
+          // corruption path; in both cases the phone has stopped
+          // trusting the server, so re-install is required.
+          <div
+            data-testid="remote-access-root-rotated-banner"
+            role="alert"
+            className="mb-4 w-full rounded-md border border-status-warning/40 bg-status-warning/10 p-3 text-left"
+          >
+            <div className="text-sm font-medium text-status-warning">
+              Trusted root was reset
+            </div>
+            <div className="mt-1 text-xs text-text-muted">
+              The root CA on this server has changed. Your phone will reject
+              the certificate until you re-install the new root from the QR
+              on this modal. (A network address change does NOT cause this —
+              only an explicit reset.)
+            </div>
           </div>
         ) : qrDataUrl ? (
           <div className="flex flex-col items-center">
@@ -485,6 +556,22 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                   type="button"
                 >
                   {showReinstall ? 'Hide' : 'Re-install root CA'}
+                </button>
+                {/* Issue #1527: explicit root reset. Lives below the
+                    reinstall toggle (not inside the disclosure) because
+                    resetting is a separate intent — the user isn't
+                    re-installing the *current* root, they're asking the
+                    server to mint a new one. The confirm() above catches
+                    the irreversible part (phone loses trust) so a misclick
+                    doesn't break their workflow. */}
+                <button
+                  data-testid="remote-access-cert-reset"
+                  onClick={handleResetCertificates}
+                  disabled={resetting}
+                  className="mt-2 ml-3 text-xs text-text-secondary hover:text-status-warning hover:underline disabled:opacity-50"
+                  type="button"
+                >
+                  {resetting ? 'Resetting…' : 'Reset trusted root CA'}
                 </button>
                 {showReinstall && (
                   <div

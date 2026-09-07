@@ -108,6 +108,13 @@ pub async fn set_lan_exposure_enabled(enabled: bool) -> Result<(), String> {
 /// `serde` skips `cert_path` when it's `None` so the HTTP JSON has only the
 /// 4 fingerprint/issuer/validity fields.
 ///
+/// `root_generation` (issue #1527) is a monotonically-increasing counter
+/// that bumps every time the root CA is minted. The frontend stores the
+/// last-acked value and only shows the "root rotated — please re-install
+/// on your phone" banner when the value changes; a leaf renewal leaves
+/// `root_generation` untouched, so the banner does **not** fire on
+/// routine DHCP/VPN churn.
+///
 /// Generated to `src/types/generated/CertChainStatus.ts` (ADR-0009, issue #359).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export, export_to = "CertChainStatus.ts")]
@@ -116,6 +123,16 @@ pub struct CertChainStatus {
     pub leaf_fingerprint_sha256: String,
     pub leaf_issuer: String,
     pub valid_until: String,
+    /// Monotonic counter that bumps every time the root CA is minted
+    /// (issue #1527). Annotates as `i32` because `serde_json` emits
+    /// `u64` as a JS number — the TS type agrees (rather than the
+    /// `bigint` ts-rs defaults to) so the frontend can compare with
+    /// `===` and store it in a plain `useState<number>`. Realistic
+    /// range fits comfortably in i32: each reset adds 1, and a single
+    /// user is unlikely to reset more than a handful of times in the
+    /// lifetime of an install.
+    #[ts(as = "i32")]
+    pub root_generation: u64,
     /// Absolute path to `ca.der`. `Some` for the desktop Tauri command
     /// response; `None` (and serialised-as-absent) for the HTTP route — see
     /// the type-level docstring.
@@ -140,6 +157,7 @@ pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, S
         leaf_fingerprint_sha256: status.leaf_fingerprint_sha256,
         leaf_issuer: status.leaf_issuer,
         valid_until: status.valid_until,
+        root_generation: status.root_generation,
         cert_path: Some(dir.join("ca.der").to_string_lossy().into_owned()),
     })
 }
@@ -213,6 +231,32 @@ fn get_root_cert_mobileconfig_inner(dir: &Path) -> Result<String, String> {
     crate::http::routes::mobileconfig::build_signed_mobileconfig_b64(dir)
 }
 
+/// Explicit "reset the trusted root CA" action (issue #1527). Wipes the
+/// persisted TLS state (root cert, root key, leaf, SAN sidecar,
+/// generation counter) so the next bind generates a fresh chain. The
+/// user's phone loses trust and must re-install the new root via the
+/// install-QR. Returns the new `root_generation` so the caller (the
+/// frontend Settings tab) can confirm the rotation took.
+///
+/// **Idempotent**: calling on an empty directory is a no-op generation
+/// bump (the placeholder root `RootKeyPair::create` mints is overwritten
+/// on the next real `load_or_renew_leaf`). Safe to retry on transient
+/// I/O errors.
+///
+/// Lives behind an explicit user action — never called automatically
+/// from bind paths. A network change (DHCP, VPN) no longer rotates the
+/// root; this is the **only** path that does, aside from the validated
+/// unrecoverable corruption cases (missing `ca.der` / `ca.key.der`).
+#[command]
+pub fn reset_trusted_certificates(app: tauri::AppHandle) -> Result<u64, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tls");
+    crate::http::tls::reset_trusted_certificates(&dir).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +269,7 @@ mod tests {
     #[test]
     fn get_root_cert_der_decodes_to_install_cert_der_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
         let encoded = get_root_cert_der_inner(dir.path()).expect("get_root_cert_der");
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&encoded)
@@ -262,7 +306,7 @@ mod tests {
     #[test]
     fn get_root_cert_mobileconfig_decodes_to_signed_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let b64 = get_root_cert_mobileconfig_inner(dir.path())
             .expect("get_root_cert_mobileconfig");

@@ -52,6 +52,7 @@ pub fn status_json(dir: &Path) -> Result<String, String> {
         leaf_fingerprint_sha256: status.leaf_fingerprint_sha256,
         leaf_issuer: status.leaf_issuer,
         valid_until: status.valid_until,
+        root_generation: status.root_generation,
         cert_path: None,
     };
     serde_json::to_string(&out).map_err(|e| e.to_string())
@@ -96,7 +97,7 @@ mod tests {
     #[test]
     fn install_cert_der_returns_persisted_root_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let bytes = install_cert_der(dir.path()).expect("install_cert_der");
         assert_eq!(bytes, chain.root_cert_der);

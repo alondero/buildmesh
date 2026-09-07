@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn build_unsigned_xml_round_trips_root_cert() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let xml = build_unsigned_xml(&chain.root_cert_der);
 
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn sign_mobileconfig_round_trips_through_openssl_cms_verify() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let unsigned_xml = build_unsigned_xml(&chain.root_cert_der);
         let signed = sign_mobileconfig(&chain.root_cert_der, &chain.root_key_der, unsigned_xml.as_bytes())
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn build_signed_mobileconfig_b64_verifies() {
         let dir = tempfile::tempdir().unwrap();
-        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let b64 = build_signed_mobileconfig_b64(dir.path()).expect("build_signed_mobileconfig_b64");
         let decoded = base64::engine::general_purpose::STANDARD
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn build_signed_mobileconfig_b64_errors_when_root_key_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let _chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let _chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
         std::fs::remove_file(dir.path().join("ca.key.der")).unwrap();
         let result = build_signed_mobileconfig_b64(dir.path());
         assert!(

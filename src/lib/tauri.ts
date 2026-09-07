@@ -1418,6 +1418,19 @@ export type { CertChainStatus };
 export const getCertChainStatus = () =>
   _invoke<CertChainStatus>('get_cert_chain_status');
 
+/** Explicit "Reset trusted certificates" action (issue #1527). Wipes the
+ *  persisted root + leaf + SAN sidecar + generation counter so the next
+ *  bind mints a fresh root. The user's phone loses trust and must
+ *  re-install via the install-QR. Returns the new `root_generation` so
+ *  the UI can confirm the rotation took and seed its last-acked value.
+ *
+ *  **Idempotent**: calling on an already-empty tls/ dir is a no-op
+ *  generation bump. Frontend exposes this as a Settings affordance;
+ *  never auto-invoked from network-change paths.
+ */
+export const resetTrustedCertificates = () =>
+  _invoke<number>('reset_trusted_certificates');
+
 /** Root CA bytes for the phone-install QR (issue #702). Returns base64
  *  (standard alphabet, '=' padding) — concatenate with the data: prefix
  *  to produce the OS-installable URL. The desktop modal embeds this in
