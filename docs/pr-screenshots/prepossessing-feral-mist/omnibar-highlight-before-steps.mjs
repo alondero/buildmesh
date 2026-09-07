@@ -1,6 +1,11 @@
 /**
- * Forces the pre-fix active paint (`bg-bg-card` only) so the before shot
- * shows the near-invisible keyboard caret against the overlay shell.
+ * SYNTHETIC before snapshot — not a checkout of the pre-fix commit.
+ *
+ * Forces the legacy active paint (`#16161d` = bg-bg-card) with inline
+ * !important so the before PNG shows the near-invisible keyboard caret
+ * against the overlay shell. Prefer a detached worktree at the parent
+ * commit when a true pre-change build is available; this path exists for
+ * same-session PR evidence when rebuild cost is prohibitive.
  */
 export default async function ({ page }) {
   const existing = page.getByRole('combobox');
@@ -21,7 +26,7 @@ export default async function ({ page }) {
     return inputEl?.getAttribute('aria-activedescendant') === 'command-omnibar-option-1';
   });
 
-  // Inline !important so React/Tailwind cannot keep the cyan fill/bar.
+  // Inline !important so React/Tailwind cannot keep the selection paint.
   await page.evaluate(() => {
     for (const el of document.querySelectorAll('[data-testid="command-omnibar-option"]')) {
       const selected = el.getAttribute('aria-selected') === 'true';
@@ -30,6 +35,7 @@ export default async function ({ page }) {
         selected ? '#16161d' : 'transparent',
         'important',
       );
+      el.style.setProperty('border-left-color', 'transparent', 'important');
       el.style.setProperty('box-shadow', 'none', 'important');
     }
   });
