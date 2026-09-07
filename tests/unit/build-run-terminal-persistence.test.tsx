@@ -572,12 +572,18 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     // (so subsequent writeToBuildRun calls cleanly hit the "not running"
     // path) and, if the xterm is currently attached, surface a visible
     // "[process exited]" banner so the user understands the dead state.
+    //
+    // The Rust payload now carries `generation` (round-5 review finding
+    // #3) so the listener can verify the exit event is for the current
+    // incarnation, not a previous one's late EOF. The first attach
+    // assigns generation 1 to the session (BuildRunTerminalRegistry
+    // bumps the per-sessionGeneration map on each doCreate).
     const container = document.createElement('div');
     await buildRunTerminalManager.attach(60, 'terminal', true, container);
     const term = terminalInstances[0];
     term.write.mockClear();
 
-    await emit('build-run-exited-60', {});
+    await emit('build-run-exited-60', { generation: 1 });
 
     // ptyAlive should now be false. Assert indirectly: a writeToBuildRun
     // call after the sentinel should NOT be a successful IPC round-trip

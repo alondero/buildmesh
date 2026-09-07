@@ -54,18 +54,18 @@ pub fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the bounded-join watchdog. The previous version of
-    //! this module had a `wedged_handle_is_detached_after_timeout` test
-    //! that spawned an OS thread which slept for 10 seconds; every `cargo
-    //! test` run leaked that thread, since the watchdog timeout was 200 ms
-    //! and `handle.join()` returned via timeout-detach while the inner
-    //! thread kept sleeping. The detached thread continued for 10 s past
-    //! every test run, polluting CPU and competing for the test
-    //! scheduler (round-4 review finding #8). Replaced with two tests
-    //! that use `is_finished()` (inline fast-path) and a real
-    //! already-finished handle respectively — neither leaks a thread.
+    //! Unit tests for the bounded-join watchdog. Covers the two
+    //! distinct branches:
+    //!
+    //! 1. `is_finished()` inline path — no watchdog spawned.
+    //! 2. Watchdog + channel-receive timeout path — the wedge is
+    //!    released via a release channel so the worker thread does
+    //!    NOT leak for 10 s past the timeout (round-5 review finding
+    //!    #2: the previous version slept 10 s and leaked the thread
+    //!    on every `cargo test` run).
 
     use super::*;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -89,28 +89,49 @@ mod tests {
         );
     }
 
-    /// `join_with_timeout` with an `is_finished()` handle is
-    /// functionally equivalent to `handle.join()`. Pin the
-    /// already-finished path returns the thread's Result (here `Ok(())`)
-    /// without invoking the watchdog machinery.
+    /// The watchdog branch: a wedged worker must be detached after
+    /// `timeout`. The worker blocks on a release channel; the test
+    /// sets a short `timeout` (50 ms), waits for `join_with_timeout`
+    /// to return (proving the timeout branch fired), then sends on
+    /// the channel so the worker terminates cleanly. NO leaked
+    /// thread — the worker exits as soon as the test sends on the
+    /// channel (round-5 review finding #2 pattern).
     #[test]
-    fn finished_handle_returns_thread_result() {
-        let handle = thread::spawn(|| {
-            // Return unit so the JoinHandle<()> type matches
-            // `join_with_timeout`'s parameter.
-        });
-        // Block on the spawn's exit so `handle.is_finished()` is true.
+    fn wedged_handle_is_detached_after_timeout() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = thread::Builder::new()
+            .name("test-pty-wedged-worker".to_string())
+            .spawn(move || {
+                // Block until the test releases us. A short safety
+                // fallback (500 ms) ensures the worker exits even if
+                // the test forgets to send — defensive belt-and-braces.
+                let _ = release_rx.recv_timeout(Duration::from_millis(500));
+            })
+            .expect("spawn wedged worker");
+
         let started = Instant::now();
-        while !handle.is_finished() && started.elapsed() < Duration::from_secs(2) {
-            thread::yield_now();
-        }
-        join_with_timeout(handle, Duration::from_secs(2));
-        // If we reached this line without the 2s timeout firing, the
-        // inline path worked.
+        // Bounded timeout: the watchdog must detach at 50 ms while
+        // the worker is still blocked on release_rx.
+        join_with_timeout(handle, Duration::from_millis(50));
+        let elapsed = started.elapsed();
+
+        // join_with_timeout returned at >= timeout (it had to wait)
+        // and << 2×timeout (the watchdog fired promptly).
         assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "finished handle should take the inline path; elapsed = {:?}",
-            started.elapsed()
+            elapsed >= Duration::from_millis(50),
+            "join_with_timeout must respect the timeout; elapsed = {:?}",
+            elapsed
         );
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "join_with_timeout must return promptly after timeout; \
+             elapsed = {:?}",
+            elapsed
+        );
+
+        // Unblock the worker so it terminates immediately. After this
+        // send, the worker thread returns and exits — no leaked OS
+        // thread past this line.
+        release_tx.send(()).expect("release worker");
     }
 }

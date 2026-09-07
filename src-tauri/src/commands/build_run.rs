@@ -35,16 +35,24 @@ pub struct BuildRunOutputPayload {
 }
 
 /// Payload of the per-session `build-run-exited-{sessionId}` Tauri event.
-/// Emitted when the PTY reader sees EOF on the build/run shell. Empty
-/// payload — the exit is a sentinel, not a state carrier. The event name
-/// encodes the sessionId (one event family per spawned shell) so the
-/// listener can match it without a payload field.
+/// Emitted when the PTY reader sees EOF on the build/run shell. The
+/// `generation` field identifies which incarnation exited (the same
+/// monotonic token [`BuildRunProcess::generation`]). The event name
+/// encodes the sessionId; the payload encodes the generation so the
+/// frontend can tell whether the exit event applies to the current
+/// instance or to a previous incarnation whose late EOF crossed paths
+/// with a replacement spawn.
 ///
 /// Generated to `src/types/generated/BuildRunExitedPayload.ts`; the TS half
 /// is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
+/// The TS half uses `i32` because `ts-rs` does not support `u64`
+/// natively in TS — see `ts(as = "i32")` annotation per CLAUDE.md.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "BuildRunExitedPayload.ts")]
-pub struct BuildRunExitedPayload {}
+pub struct BuildRunExitedPayload {
+    #[ts(as = "i32")]
+    pub generation: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Worktree path resolution
@@ -334,6 +342,69 @@ fn set_reader_handle(process: &Arc<BuildRunProcess>, handle: JoinHandle<()>) {
 static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<BuildRunRegistry> =
     once_cell::sync::Lazy::new(BuildRunRegistry::new);
 
+/// Per-node spawn locks (round-5 review finding #1).
+///
+/// `build_run_blocking` calls into `BUILD_RUN_REGISTRY.insert` to
+/// reap any previous incarnation, then opens a PTY and spawns the
+/// new child. Between `insert` and `spawn_command` there is a window
+/// of ~20 ms during which the registry holds the new entry with
+/// `child: None`. A concurrent `close_build_run` (or replacement
+/// insert) arriving during that window runs `teardown_inc` against
+/// the hollow entry, finds `child: None`, and tears down NOTHING —
+/// then the OS spawn returns and stores a live `Child` into the
+/// already-removed entry, leaving an orphan process holding the
+/// worktree CWD indefinitely.
+///
+/// The fix: serialize the entire `build_run` start path per node.
+/// `acquire_node_lock` returns a guard whose Drop releases the lock
+/// at the end of the `build_run` command. A second `build_run` on
+/// the same node blocks on the guard until the first finishes, so
+/// the reaping → opening PTY → spawning child → publishing entry
+/// sequence is atomic from the registry's perspective.
+///
+/// Implementation: a global `Mutex<HashMap<i64, Arc<Mutex<()>>>>`
+/// map. Acquiring the per-node mutex is the slow path (it contends),
+/// so we cache the per-node `Arc<Mutex<()>>` lookup under the outer
+/// mutex, then drop the outer mutex before acquiring the inner one
+/// (so other nodes are not blocked on the outer lock while one
+/// node is mid-spawn). The per-node Arc is leaked to give it a
+/// `'static` lifetime so the returned `NodeSpawnGuard` doesn't need
+/// a lifetime parameter; one tiny `Mutex` per node over the
+/// process lifetime is acceptable (bounded by user-initiated spawns).
+static NODE_SPAWN_LOCKS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<i64, Arc<parking_lot::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// RAII guard for a per-node spawn lock. Holds the `parking_lot`
+/// guard directly; `parking_lot::MutexGuard` is an owned guard
+/// (doesn't borrow from the Mutex), so we don't need unsafe raw
+/// pointers. The inner Arc keeps the per-node Mutex alive.
+struct NodeSpawnGuard {
+    _inner: Arc<parking_lot::Mutex<()>>,
+    _guard: parking_lot::MutexGuard<'static, ()>,
+}
+
+fn acquire_node_lock(node_id: i64) -> NodeSpawnGuard {
+    let inner: Arc<parking_lot::Mutex<()>> = {
+        let mut map = NODE_SPAWN_LOCKS.lock().unwrap();
+        map.entry(node_id)
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone()
+    };
+    // `parking_lot::Mutex::lock` returns an owned guard whose lifetime
+    // is tied to the Mutex. We need a 'static guard so we can hold it
+    // in the NodeSpawnGuard struct returned from this function without
+    // parameterising the return type with a lifetime. Box::leak the
+    // Arc to get a 'static reference; the per-node Mutex lives for the
+    // process lifetime (one Mutex per node ever spawned, ~64 bytes).
+    let leaked_arc: &'static Arc<parking_lot::Mutex<()>> = Box::leak(Box::new(inner));
+    let guard: parking_lot::MutexGuard<'static, ()> = leaked_arc.lock();
+    NodeSpawnGuard {
+        _inner: Arc::clone(leaked_arc),
+        _guard: guard,
+    }
+}
+
 /// Shared teardown for a build/run process incarnation (issue #1532).
 /// The caller must already have removed `process` from the registry so
 /// only one path owns this Arc — `kill_session` and `insert` (on
@@ -556,11 +627,26 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
     // 6. Get shell working directory from resolved path
     let shell_cwd = &resolved.spawn_path;
 
-    // 7. Open the PTY pair (NO shell yet). We must NOT spawn the new
-    //    child until AFTER `insert` has synchronously torn down any
-    //    previous incarnation — otherwise both processes would be
-    //    writing to the same worktree concurrently (issue #1532
-    //    point #2 + round-4 review finding #1).
+    // 7. Acquire the per-node spawn lock (round-5 review finding #1).
+    //    The lock serializes the entire build_run path: a second
+    //    `build_run` on the same node blocks here until this one
+    //    finishes — so the "reap previous → spawn child → publish"
+    //    sequence is atomic from the registry's perspective. Without
+    //    this lock, the round-4 "hollow process" race returned:
+    //    `insert` published an entry with `child: None`, then
+    //    `spawn_command` ran for ~20 ms while a concurrent
+    //    `kill_session` saw `child: None` and tore down nothing,
+    //    leaving the live child orphaned.
+    let _node_lock = acquire_node_lock(node_id);
+
+    // 8. Reap any previous incarnation FIRST — while holding the
+    //    per-node lock, so a concurrent `close_build_run` cannot
+    //    interfere. The previous child + tree are dead before we
+    //    spawn our own.
+    let _ = BUILD_RUN_REGISTRY.kill_session(node_id);
+
+    // 9. Open the PTY pair + clone reader + take writer. Still NO
+    //    child spawned.
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -576,34 +662,13 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
         .try_clone_reader()
         .map_err(|e| format!("failed to clone PTY reader: {}", e))?;
 
-    // Take writer up-front so the registry can serve `write_to_build_run`
-    // for terminal mode. `take_writer()` is a one-shot — must be called
-    // before the master is moved into the registry.
     let writer = pair
         .master
         .take_writer()
         .map_err(|e| format!("failed to take PTY writer: {}", e))?;
 
-    // 8. Publish the new entry to the registry and synchronously
-    //    tear down the previous one (if any). The previous's
-    //    `kill_process_tree` + `child.kill` + reader-join all run
-    //    before `insert` returns — the worktree is guaranteed free
-    //    when we spawn our own child below.
-    //
-    //    `child` is intentionally `None` here; we spawn the child
-    //    AFTER `insert` returns so it cannot race with the previous
-    //    process's tree-reap.
-    let process = BuildRunProcess {
-        generation: 0, // overwritten by `insert`
-        child: Mutex::new(None),
-        master: Mutex::new(Some(pair.master)),
-        writer: Mutex::new(writer),
-        reader_handle: Mutex::new(None),
-    };
-    let (generation, arc) = BUILD_RUN_REGISTRY.insert(node_id, process);
-
-    // 9. Now (and only now) spawn the shell into the worktree. Any
-    //    previous incarnation is fully reaped.
+    // 10. Spawn the shell INTO the (now-free) worktree. After this,
+    //     we have a fully-formed `BuildRunProcess` ready to publish.
     let mut cmd = build_shell_command(mode, command, resolved.env_type);
     cmd.cwd(shell_cwd);
     crate::pty::strip_git_env_vars(&mut cmd);
@@ -611,29 +676,21 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| {
-            // Spawn failed AFTER the previous teardown. Clean up the
-            // orphan registry entry so it doesn't pin the worktree CWD.
-            // Generation-gated removal: if a concurrent replacement
-            // insert has already taken our generation,
-            // `remove_if_current` is a no-op (round-4 review finding
-            // #4).
-            if let Some(orphan) =
-                BUILD_RUN_REGISTRY.remove_if_current(node_id, generation)
-            {
-                teardown_inc(&orphan, JoinPolicy::Join);
-            }
-            format!("failed to spawn shell: {}", e)
-        })?;
+        .map_err(|e| format!("failed to spawn shell: {}", e))?;
 
-    // Bind the child handle into the registry entry. After this, the
-    // entry's child slot is populated; subsequent teardown can reap
-    // the child via `kill_process_tree`.
-    *arc.child
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(child);
+    // 11. Publish the FULLY-FORMED entry (child: Some(child),
+    //     master: Some, writer, reader_handle: None) to the registry.
+    //     No hollow entry is ever observable by other threads.
+    let process = BuildRunProcess {
+        generation: 0, // overwritten by `insert`
+        child: Mutex::new(Some(child)),
+        master: Mutex::new(Some(pair.master)),
+        writer: Mutex::new(writer),
+        reader_handle: Mutex::new(None),
+    };
+    let (generation, arc) = BUILD_RUN_REGISTRY.insert(node_id, process);
 
-    // 10. Spawn the reader thread.
+    // 12. Spawn the reader thread.
     let node_id_clone = node_id;
     let app_handle = app.clone();
     let reader_thread_name = format!("build-run-pty-reader-{node_id_clone}");
@@ -726,16 +783,16 @@ fn reader_thread_body(
 /// reap succeeded. Returns `true` iff this thread's generation was
 /// still current.
 ///
-/// This is the single source of truth for the "natural exit → exit
-/// event" path; factored from the reader closure so the unit test
-/// can call it directly without standing up a real reader thread
-/// (review finding #6).
+/// The emitted event carries `generation` in the payload so the
+/// frontend can verify it matches the current instance (round-5
+/// review finding #3: empty payload forced the frontend to rely on
+/// ambient map state, which doesn't survive a torn lifecycle).
 pub fn reap_and_maybe_emit(node_id: i64, generation: u64, app_handle: &AppHandle) -> bool {
     let reaped = BUILD_RUN_REGISTRY.reap_incarnation(node_id, generation);
     if reaped {
         let _ = app_handle.emit(
             &format!("build-run-exited-{node_id}"),
-            BuildRunExitedPayload {},
+            BuildRunExitedPayload { generation },
         );
     }
     reaped

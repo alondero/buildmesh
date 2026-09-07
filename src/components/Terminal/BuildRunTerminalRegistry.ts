@@ -564,7 +564,16 @@ export class BuildRunTerminalRegistry {
       // the listen-resolution window would otherwise mis-fire the previous
       // reader thread's exit event onto the new instance.
       const exitEventName = `build-run-exited-${sessionId}`;
-      const exitUnlisten = await listen<BuildRunExitedPayload>(exitEventName, () => {
+      const exitUnlisten = await listen<BuildRunExitedPayload>(exitEventName, (event) => {
+        // Primary contract: the payload's `generation` field identifies
+        // which incarnation's reader saw EOF (round-5 review finding
+        // #3 — added the field to BuildRunExitedPayload). Without
+        // this, the listener can only know whether it IS the current
+        // instance — it can't tell whether the exit event is from
+        // its own incarnation or a previous one's late EOF that
+        // crossed paths with a replacement.
+        if (event.payload.generation !== generation) return;
+        // Secondary sanity checks (defense in depth):
         if (this.instances.get(instanceKey(sessionId, mode, useWorktree)) !== inst) return;
         if ((this.sessions.get(sessionId)?.generation ?? -1) !== generation) return;
         inst.ptyAlive = false;
