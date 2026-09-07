@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 
 // jsdom doesn't ship ResizeObserver. Keep each observer instance so the
 // resize scheduler can be driven without a module-level callback singleton.
@@ -274,6 +274,53 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     );
     expect(buildRunCalls).toHaveLength(1);
     expect(buildRunCalls[0]).toEqual(['build_run', { nodeId: 8, mode: 'terminal' }]);
+  });
+
+  it('closes a PTY when explicit dispose races the build_run resolution', async () => {
+    let resolveBuildRun!: () => void;
+    const buildRunPending = new Promise<void>((resolve) => { resolveBuildRun = resolve; });
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === 'build_run' ? buildRunPending : Promise.resolve({}),
+    );
+
+    const container = document.createElement('div');
+    const attachPromise = buildRunTerminalManager.attach(81, 'terminal', true, container);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(true);
+
+    // The instance is removed while the Rust command is still in flight.
+    // The eventual resolution must close the PTY instead of reviving the
+    // removed instance or leaving an unreachable child process behind.
+    buildRunTerminalManager.dispose(81, 'terminal', true);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'close_build_run')).toBe(false);
+
+    resolveBuildRun();
+    expect(await attachPromise).toBeNull();
+    expect(vi.mocked(invoke).mock.calls).toEqual(expect.arrayContaining([
+      ['close_build_run', { nodeId: 81 }],
+    ]));
+    expect(buildRunTerminalManager.getInstance(81, 'terminal', true)).toBeUndefined();
+  });
+
+  it('does not retain a registry instance when attach is aborted before lazy creation finishes', async () => {
+    let resolveOutputListener!: (unlisten: () => void) => void;
+    const outputListenerPending = new Promise<() => void>((resolve) => { resolveOutputListener = resolve; });
+    vi.mocked(listen).mockImplementationOnce(() => outputListenerPending as never);
+
+    const controller = new AbortController();
+    const container = document.createElement('div');
+    const attachPromise = buildRunTerminalManager.attach(82, 'terminal', true, container, controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(listen)).toHaveBeenCalled();
+
+    controller.abort();
+    buildRunTerminalManager.dispose(82, 'terminal', true);
+    resolveOutputListener(() => {});
+
+    expect(await attachPromise).toBeNull();
+    expect(buildRunTerminalManager.getInstance(82, 'terminal', true)).toBeUndefined();
+    expect(terminalInstances[0].dispose).toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(false);
   });
 
   it('D: deduplicates concurrent attach() calls into one doCreate + one build_run', async () => {

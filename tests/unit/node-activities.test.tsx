@@ -13,15 +13,18 @@ vi.mock('@dnd-kit/core', () => ({
   useDroppable: () => ({ setNodeRef: vi.fn() }),
 }));
 vi.mock('../../src/components/AgentNodeView/nodeDrag', () => ({ NodeDropCue: () => null }));
+const { disposeUtility, focusAgentTerminal } = vi.hoisted(() => ({
+  disposeUtility: vi.fn(),
+  focusAgentTerminal: vi.fn(),
+}));
 vi.mock('../../src/components/Terminal/Terminal', () => ({
   AgentTerminal: ({ nodeId }: { nodeId: number }) => <textarea aria-label={`Agent ${nodeId}`} />,
-  terminalManager: { getInstance: () => null },
+  terminalManager: { getInstance: () => ({ term: { focus: focusAgentTerminal } }) },
 }));
 vi.mock('../../src/components/Terminal/BuildRunTerminal', () => ({
   BuildRunTerminal: ({ sessionId, mode }: { sessionId: number; mode: string }) =>
     <div><span>{`${mode} output ${sessionId}`}</span></div>,
 }));
-const { disposeUtility } = vi.hoisted(() => ({ disposeUtility: vi.fn() }));
 vi.mock('../../src/components/Terminal/BuildRunTerminalRegistry', () => ({
   buildRunTerminalManager: { dispose: disposeUtility, getInstance: () => null },
 }));
@@ -54,6 +57,7 @@ beforeEach(() => {
     circuitOwnerships: ownerships, activeNodeId: 1, closingNodeIds: new Set(), semanticTurns: {} });
   useNodeActivityStore.setState({ selections: {}, utilities: {} });
   disposeUtility.mockClear();
+  focusAgentTerminal.mockClear();
 });
 
 describe('node activities', () => {
@@ -138,6 +142,25 @@ describe('node activities', () => {
     expect(screen.getByRole('menuitem', { name: /Security reviewer.*awaiting input/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('menuitem', { name: /^Implementation/ }));
     expect(screen.getByLabelText('Agent 1')).toBeTruthy();
+  });
+
+  it('focuses the terminal when a session is chosen from All sessions with the pointer', async () => {
+    render(card());
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Review.*Reviewer/ }));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(focusAgentTerminal).toHaveBeenCalled();
+  });
+
+  it('keeps tab focus for keyboard activation from All sessions', async () => {
+    render(card());
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    const reviewer = screen.getByRole('menuitem', { name: /Review.*Reviewer/ });
+    reviewer.focus();
+    fireEvent.click(reviewer, { detail: 0 });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(focusAgentTerminal).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Review.*Reviewer/ }));
   });
 
   it('does not allocate tabs for a standalone agent without a utility', () => {

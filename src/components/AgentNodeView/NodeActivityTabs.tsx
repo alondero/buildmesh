@@ -88,8 +88,19 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
         style={{ top: 0, left: 0 }}>
         {tabs.map((tab, index) => <button key={tab.key} type="button" role="menuitem" tabIndex={index === activeIndex ? 0 : -1}
           aria-label={fullLabel(tab)} aria-current={index === selectedIndex ? 'true' : undefined}
-          onClick={event => { event.stopPropagation(); setOpen(false); onSelect(tab.member.id, tab.utility, false);
-            requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true })); }}
+          onClick={event => {
+            event.stopPropagation();
+            setOpen(false);
+            // Native button activation reports detail=0 for keyboard
+            // activation and a positive detail for pointer clicks. Pointer
+            // selection should move focus into the terminal; keyboard
+            // selection keeps the roving tab focus on the selected tab.
+            const focusTerminal = event.detail > 0;
+            onSelect(tab.member.id, tab.utility, focusTerminal);
+            if (!focusTerminal) {
+              requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));
+            }
+          }}
           className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs text-text-secondary hover:bg-bg-card focus:bg-bg-card">
           <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
           <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.member.name}</span></span>
