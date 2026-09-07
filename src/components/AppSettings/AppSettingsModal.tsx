@@ -96,50 +96,51 @@ export function AccountCard({
    */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  // Issue #1535 (round 2, PR #1636 review): track ONLY the user's
-  // uncommitted form delta. The `account` prop IS the committed state —
-  // there's no parallel `committedAccount` snapshot. On a successful save
-  // the parent's re-fetch updates the prop; on a failed save the parent
-  // rolls the prop back. The prop-sync effect below adopts fresh fields
-  // when the draft is pristine and shadows churn while it's dirty, so the
-  // user's typed API key survives the parent's optimistic prop cycle
-  // (handleSaveAccount's `setAccounts(prev.map(...))` lands BEFORE the
-  // IPC resolves).
-  const [draft, setDraft] = useState<AccountDelta>(() => pickAccountDelta(account));
+  // Issue #1535 (round 3, PR #1636 review round 2): draft is `null` when
+  // the user has no uncommitted edits, and an `AccountDelta` otherwise.
+  // Display values fall back to the account prop when draft is null, so
+  // there's no prop-sync effect, no shadow ref, and no toggle-erase race:
+// the toggle cannot wipe the typed draft because it never touches the
+  // draft state. After a successful save, setDraft(null) collapses the
+  // card back to pristine; the next prop change naturally flows through
+  // the display fallback. This is the cleanest of the three rounds: round
+  // 1 stored three state copies (account, committedAccount, draft), round
+  // 2 reduced to two with a sync effect + ref, round 3 collapses to one
+  // (account prop, plus a nullable draft that overlays it).
+  const [draft, setDraft] = useState<AccountDelta | null>(null);
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // `userTouchedRef` distinguishes "user actively edited the draft" from
-  // "prop just changed underneath us" — a naive `draft !== account` check
-  // conflates the two (e.g. server renames `api_key` from null to
-  // 'sk-x' while the card is closed looks identical to the user typing
-  // 'sk-x'). Only an actual user edit flips the ref, and a successful save
-  // resets it so the next prop change can adopt again. This is the
-  // closure-staleness fix used elsewhere in the codebase (e.g.
-  // `providersRef`, `poolSavedRef`).
-  const userTouchedRef = useRef(false);
+  // Baseline = the EDITABLE fields of the latest `account` prop. When
+  // `draft` is null, the input shows baseline; when non-null, the input
+  // shows the user's typed (or cleared) value. We distinguish "draft is
+  // null" from "draft.api_key is null" because the latter means the user
+  // explicitly cleared the field — and the input should reflect that as
+  // an empty string, NOT silently fall back to baseline.api_key. A naive
+  // `draft?.api_key ?? baseline.api_key` would make "clear the key"
+  // visually invisible (the user types empty, the input still shows the
+  // server's value).
+  const baseline = pickAccountDelta(account);
+  const draftApiKey = draft === null ? baseline.api_key : draft.api_key;
+  const draftBillingMode = draft === null ? baseline.billing_mode : draft.billing_mode;
+  const isDirty = draft !== null;
 
-  // Dirty = the user has uncommitted edits. Drives the modal-wide discard
-  // banner (issue #730). We compare against the latest `account` prop so
-  // a server-side rename that diverges from the user's typed value also
-  // counts as dirty — the user has unsaved work either way.
-  const draftApiKey = draft.api_key ?? null;
-  const accountApiKey = account.api_key ?? null;
-  const isDirty =
-    draftApiKey !== accountApiKey ||
-    draft.billing_mode !== account.billing_mode;
-
-  // Prop sync: adopt fresh account fields into the draft IFF the user
-  // hasn't actively edited. The ref-based check (not a `!isDirty` check)
-  // is what lets a pristine card adopt a renamed `api_key` from the
-  // server — `isDirty` would be momentarily true on the new render
-  // (draft=null vs account='sk-x') and skip the adoption.
-  useEffect(() => {
-    if (userTouchedRef.current) return;
-    setDraft(pickAccountDelta(account));
-  }, [account]);
+  // Smart setter: if the user's edit produces a value equal to the
+  // baseline, collapse draft back to null (pristine). This handles
+  // Finding 3 — a user who backspaces to match the original value
+  // automatically reverts the dirty state without needing a separate
+  // "reset" button or a fragile userTouchedRef. It also means typing
+  // and then deleting the typed value leaves the card clean.
+  const editDraft = useCallback((next: AccountDelta) => {
+    if (next.api_key === baseline.api_key && next.billing_mode === baseline.billing_mode) {
+      setDraft(null);
+    } else {
+      setDraft(next);
+    }
+    setError(null);
+  }, [baseline.api_key, baseline.billing_mode]);
 
   // account.id drives the confirmingRemove reset on row identity change
   // (the account was removed and re-added with a different id).
@@ -147,16 +148,8 @@ export function AccountCard({
     setConfirmingRemove(false);
   }, [account.id]);
 
-  // Wrap setDraft so any user edit clears a stale inline error AND marks
-  // the draft as user-touched so the prop-sync effect stops adopting.
-  const updateDraft = useCallback((next: AccountDelta) => {
-    setDraft(next);
-    setError(null);
-    userTouchedRef.current = true;
-  }, []);
-
-  // Dirty notification (issue #730). Compare to `lastReportedDirtyRef` so we
-  // don't re-fire the parent's `setDirtySites` for every keystroke.
+  // Dirty notification (issue #730). Compare to `lastReportedDirtyRef` so
+  // we don't re-fire the parent's `setDirtySites` for every keystroke.
   const lastReportedDirtyRef = useRef<boolean>(false);
   useEffect(() => {
     if (lastReportedDirtyRef.current === isDirty) return;
@@ -170,67 +163,49 @@ export function AccountCard({
   // Billing mode is first-class only (self-auth + keyed catalog).
   const showBilling = isFirstClassId(account.id);
 
-  // Persist helper: wraps onSave to surface a card-local error and translate
-  // throws into the `false` return the parent's handleSaveAccount uses.
-  // On success, resets `userTouchedRef` so the prop-sync effect can adopt
-  // fresh fields again — without this, a successful save would leave the
-  // user "stuck dirty" against future external updates even though the
-  // draft now matches the server view.
-  const persist = async (next: ProviderAccount): Promise<boolean> => {
-    try {
-      const ok = await onSave(next);
-      if (ok) {
-        setError(null);
-        userTouchedRef.current = false;
-      } else {
-        // Parent already surfaced the failure via its own top-level toast;
-        // the inline message here just flags the offending card with a
-        // Retry affordance. We deliberately do NOT echo the backend error
-        // here because the parent already shows it in the toast — duplicating
-        // it would invite drift if the parent ever changes its formatter.
-        setError('Save failed');
-      }
-      return ok;
-    } catch (e) {
-      setError(formatError(e));
-      return false;
-    }
-  };
-
-  // Non-atomic toggle policy (issue #1535, reviewer-discovered option C):
-  // flipping Enabled commits ONLY the toggle. The form draft is unchanged —
-  // it stays for explicit Save. This eliminates the toggle-failure zombie
-  // state (Finding 1): the checkbox binds to `account.enabled` from the
-  // prop, the parent's optimistic update flips it, the IPC failure path
-  // rolls the prop back, the checkbox reflects the rollback. No "draft
-  // optimistically flipped but never rolled back" scenario exists because
-  // the draft never holds `enabled`.
+  // Toggle commits ONLY the enabled flag. The form draft is never touched
+  // — the typed API key (if any) survives the parent re-render that
+  // follows the IPC, because nothing in the toggle path sets `draft`. On
+  // failure the parent's existing top-level toast handles reporting; we
+  // do NOT set a card-local error because the inline alert's Retry button
+  // is wired to `saveDraft` (Finding 4). A toggle retry would need its
+  // own affordance — out of scope for this issue.
   const toggleEnabled = async (enabled: boolean) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await persist({ ...account, enabled });
+      await onSave({ ...account, enabled });
     } finally {
       setBusy(false);
     }
   };
 
+  // Save composes the IPC payload from the latest `account` prop + the
+  // draft (or baseline if pristine). Server-side renames ride along with
+  // the spread. On success: collapse draft to null so the card adopts
+  // the next prop change automatically via the display fallback.
   const saveDraft = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      // Compose the save payload from the LATEST account prop + the user's
-      // editable delta. Server-side renames (`account.name`), the catalogue
-      // id, and the live `enabled` state all ride along — without this
-      // spread, a frozen snapshot inside the card would clobber them
-      // (Finding 2).
-      await persist({
+      const fields = draft ?? baseline;
+      const ok = await onSave({
         ...account,
-        api_key: draft.api_key,
-        billing_mode: draft.billing_mode,
+        api_key: fields.api_key,
+        billing_mode: fields.billing_mode,
       });
+      if (ok) {
+        setDraft(null);
+      } else {
+        // Inline alert is the navigation affordance for the Retry button.
+        // The backend's actual error already surfaces in the parent's top-
+        // level toast, so we deliberately don't echo it here.
+        setError('Save failed');
+      }
+    } catch (e) {
+      setError(formatError(e));
     } finally {
       setBusy(false);
     }
@@ -316,9 +291,12 @@ export function AccountCard({
               <label className="block text-sm text-text-muted mb-1">API key</label>
               <input
                 type="password"
-                value={draft.api_key ?? ''}
+                value={draftApiKey ?? ''}
                 disabled={busy}
-                onChange={e => updateDraft({ ...draft, api_key: e.target.value || null })}
+                onChange={e => editDraft({
+                  api_key: e.target.value || null,
+                  billing_mode: draftBillingMode,
+                })}
                 placeholder="Enter API key..."
                 className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} API key`}
@@ -332,9 +310,12 @@ export function AccountCard({
             <div>
               <label className="block text-sm text-text-muted mb-1">Billing</label>
               <select
-                value={draft.billing_mode}
+                value={draftBillingMode}
                 disabled={busy}
-                onChange={e => updateDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
+                onChange={e => editDraft({
+                  api_key: draftApiKey,
+                  billing_mode: e.target.value as ProviderAccount['billing_mode'],
+                })}
                 className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
                 aria-label={`${account.name} billing mode`}
               >

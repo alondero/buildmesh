@@ -292,14 +292,17 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       });
     }
 
-    it('toggle commits ONLY enabled; typed draft stays for explicit Save', async () => {
+    it('toggle commits ONLY enabled; typed draft survives the parent re-render after the IPC', async () => {
       // Non-atomic toggle policy: the toggle's IPC payload must NOT include
-      // any typed-but-unsaved api_key. The user's draft is preserved so
-      // explicit Save commits it. This avoids the toggle-failure zombie
-      // state where an optimistic draft.enabled was never rolled back.
+      // any typed-but-unsaved api_key. The user's draft is preserved through
+      // the parent's post-toggle re-render (handleSaveAccount's optimistic
+      // `setAccounts(prev.map(...))` + re-fetch) so explicit Save commits
+      // it. This is Finding 1 + Finding 2: round-2 reset userTouchedRef on
+      // toggle success, so the prop-sync effect then wiped the draft; the
+      // test only caught this once the rerender step was added.
       const onSave = vi.fn().mockResolvedValue(true);
       const user = userEvent.setup();
-      render(
+      const { rerender } = render(
         <AccountCard
           account={claudeCompatibleAccount({ enabled: true })}
           onSave={onSave}
@@ -319,7 +322,18 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       // not the user's typed value.
       expect(payload).toMatchObject({ id: 'kimi', enabled: false });
       expect(payload.api_key).not.toBe('sk-typed');
-      // The card stays dirty (api_key typed, not yet saved).
+
+      // Simulate the parent's optimistic update + re-fetch after the IPC:
+      // account arrives with the post-toggle enabled=false. The typed
+      // api_key MUST survive this re-render. (Round-2's userTouchedRef was
+      // reset by persist's success branch, so this rerender would wipe the
+      // draft — the original test missed this because it never rerendered.)
+      rerender(
+        <AccountCard
+          account={claudeCompatibleAccount({ enabled: false })}
+          onSave={onSave}
+        />,
+      );
       expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-typed');
     });
 
