@@ -1,3 +1,5 @@
+// @ts-nocheck — see verify-edit-persisted.test.ts for the rationale. The hook
+// is agent infrastructure outside the typecheck program.
 import { describe, it, expect } from "vitest";
 import {
   checkContentViolations,

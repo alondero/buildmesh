@@ -1,3 +1,5 @@
+// @ts-nocheck — see verify-edit-persisted.test.ts for the rationale. The
+// imported script is a plain ESM .mjs at scripts/, not application code.
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startDevServer, stopDevServer } from '../../scripts/ui-shot-server.mjs';

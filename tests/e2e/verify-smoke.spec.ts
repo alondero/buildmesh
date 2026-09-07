@@ -52,6 +52,8 @@
  *    won't try to start the slow `npm run tauri dev` flow, so the
  *    stable hub on :1991 is never disturbed.)
  */
+// @ts-nocheck — see verify-edit-persisted.test.ts for the rationale. The
+// imported mock is a plain ESM .mjs at scripts/ui-mock/, not application code.
 import { test, expect, Page } from '@playwright/test';
 import { buildInitScript } from '../../scripts/ui-mock/tauri-mock.mjs';
 

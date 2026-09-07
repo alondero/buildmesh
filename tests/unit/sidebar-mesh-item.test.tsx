@@ -66,8 +66,8 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 
 type Props = React.ComponentProps<typeof MeshItem>;
 
-/// Returns a fresh mock-prop set so `vi.fn()` spies don't cross-contaminate
-/// across tests sharing a constant.
+/** Fresh per call so `vi.fn()` spies don't cross-contaminate across tests
+ *  sharing a constant. */
 function makeMeshItemProps(mesh: Mesh, overrides: Partial<Props> = {}): Props {
   return {
     mesh,
@@ -81,10 +81,6 @@ function makeMeshItemProps(mesh: Mesh, overrides: Partial<Props> = {}): Props {
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
     onOpenWorktreesProbe: vi.fn(),
-    // Issue #378 — the right-click "GitHub Issues" / "Archive" entries route
-    // through the Probe Panel via the new probe-tab handlers. The legacy
-    // `onOpenGitHubIssues` / `onOpenSessionBrowser` props are gone; the
-    // modal components stay on disk but no consumer wires them up.
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
