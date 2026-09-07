@@ -61,6 +61,8 @@ mod circuit_tests;
 
 #[cfg(test)]
 mod circuit_prune_tests;
+#[cfg(test)]
+mod pool_exhaustion_tests;
 
 use rusqlite::{Connection, OpenFlags, params};
 pub use rusqlite::Result as SqlResult;
@@ -68,8 +70,9 @@ use once_cell::sync::OnceCell;
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::models::*;
 use crate::preferences::HarnessConfigValue;
@@ -78,10 +81,99 @@ use crate::preferences::HarnessConfigValue;
 // SQLite's file-descriptor and cache footprint bounded.
 const READER_POOL_SIZE: usize = 8;
 // Synchronous callers retain the historical accessor, but no checkout may
-// park a thread forever. Async callers use `try_read_conn()` to surface this
-// timeout as an error instead of blocking a runtime worker indefinitely.
+// park a thread forever. Production read paths use [`try_read_conn`] which
+// surfaces this deadline as a typed [`DbError::ReaderPoolExhausted`] instead
+// of blocking a runtime worker indefinitely (issue #1533).
 const READER_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 static INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Errors that can occur at the database-accessor boundary.
+///
+/// Most existing call sites still return [`SqlResult<T>`] (`Result<T,
+/// rusqlite::Error>`), so we provide a blanket `From<DbError> for
+/// rusqlite::Error` that preserves the underlying sqlite error verbatim and
+/// maps pool exhaustion to a `SQLITE_BUSY` `SqliteFailure` (callers that want
+/// the rich diagnostics — wait time, leases in use, longest lease — should
+/// switch their return type to [`DbResult<T>`] and pattern-match on
+/// [`DbError::ReaderPoolExhausted`]).
+///
+/// The exhaustive variant exists so HTTP/command boundaries can map pool
+/// exhaustion to a retryable 503-style response (issue #1533 verification
+/// step 4) rather than a generic internal failure.
+#[derive(Debug)]
+pub enum DbError {
+    /// Underlying SQLite error from a checked-out reader or the writer.
+    Sqlite(rusqlite::Error),
+    /// All reader-pool leases were held past the configured checkout
+    /// deadline (issue #1533). Carries the wait time observed, the leases
+    /// still in use at the moment of failure, the configured pool size, and
+    /// the longest lease we've ever recorded since process start — enough
+    /// to diagnose a slow holder without leaking SQL parameters or secrets.
+    ReaderPoolExhausted {
+        waited_ms: u64,
+        in_use: usize,
+        pool_size: usize,
+        longest_lease_ms: u64,
+    },
+}
+
+/// Result type for the database-accessor boundary. Most existing call sites
+/// continue to return [`SqlResult<T>`] — see [`DbError`] for the conversion
+/// story.
+pub type DbResult<T> = Result<T, DbError>;
+
+impl From<rusqlite::Error> for DbError {
+    fn from(err: rusqlite::Error) -> Self {
+        DbError::Sqlite(err)
+    }
+}
+
+impl From<DbError> for rusqlite::Error {
+    fn from(err: DbError) -> Self {
+        match err {
+            // Preserve the underlying sqlite error verbatim so existing
+            // callers that match on `Error::QueryReturnedNoRows` / etc.
+            // keep working unchanged.
+            DbError::Sqlite(err) => err,
+            // Map pool exhaustion to SQLITE_BUSY so the SqlResult boundary
+            // keeps a structured signal rather than a generic `InvalidQuery`.
+            // Callers that want the rich diagnostics should switch to
+            // `DbResult<T>` and match on `DbError::ReaderPoolExhausted`.
+            DbError::ReaderPoolExhausted { waited_ms, .. } => {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some(format!("reader pool exhausted after {waited_ms}ms")),
+                )
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbError::Sqlite(err) => write!(f, "sqlite error: {err}"),
+            DbError::ReaderPoolExhausted {
+                waited_ms,
+                in_use,
+                pool_size,
+                longest_lease_ms,
+            } => write!(
+                f,
+                "reader pool exhausted after {waited_ms}ms ({in_use}/{pool_size} in use, longest lease {longest_lease_ms}ms)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DbError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DbError::Sqlite(err) => Some(err),
+            DbError::ReaderPoolExhausted { .. } => None,
+        }
+    }
+}
 
 struct Database {
     // `std::sync::Mutex` is intentional: issue #1224 requires poison recovery
@@ -98,10 +190,20 @@ struct ReaderPool {
     ready: parking_lot::Condvar,
     db_path: PathBuf,
     flags: OpenFlags,
+    /// Longest reader-pool lease observed since process start, in
+    /// milliseconds. Diagnostic only — surfaced via
+    /// [`DbError::ReaderPoolExhausted`] so callers can spot slow lease
+    /// holders without logging query parameters or secrets (issue #1533
+    /// verification step 5).
+    longest_lease_ms: AtomicU64,
 }
 
 impl ReaderPool {
-    fn open(db_path: &Path) -> SqlResult<Self> {
+    /// Open a fresh [`ReaderPool`] against `db_path`. `pub(crate)` so the
+    /// reader-pool-exhaustion tests in [`super::pool_exhaustion_tests`] can
+    /// construct an isolated pool without touching the global `DB`
+    /// `OnceCell`; production still wires the pool through [`Database::init`].
+    pub(crate) fn open(db_path: &Path) -> SqlResult<Self> {
         let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         if db_path.to_string_lossy().starts_with("file:") {
             flags |= OpenFlags::SQLITE_OPEN_URI;
@@ -117,27 +219,59 @@ impl ReaderPool {
             ready: parking_lot::Condvar::new(),
             db_path: db_path.to_path_buf(),
             flags,
+            longest_lease_ms: AtomicU64::new(0),
         })
     }
 
-    fn checkout(&self) -> SqlResult<ReadConnection<'_>> {
+    /// Check out a reader connection. Returns [`DbError::ReaderPoolExhausted`]
+    /// (issue #1533) — never panics — if all `READER_POOL_SIZE` leases are
+    /// held past [`READER_CHECKOUT_TIMEOUT`]. Uses an absolute deadline so
+    /// spurious `Condvar` notifications cannot extend the nominal timeout.
+    fn checkout(&self) -> DbResult<ReadConnection<'_>> {
         let mut available = self.available.lock();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
+        let deadline = started + READER_CHECKOUT_TIMEOUT;
         loop {
             if let Some(conn) = available.pop() {
-                if started.elapsed() >= Duration::from_millis(10) {
-                    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "database reader pool contention ended");
+                let waited = started.elapsed();
+                if waited >= Duration::from_millis(10) {
+                    tracing::debug!(
+                        elapsed_ms = waited.as_millis() as u64,
+                        "database reader pool contention ended"
+                    );
                 }
                 return Ok(ReadConnection {
                     pool: self,
                     conn: Some(conn),
+                    checked_out_at: Instant::now(),
                 });
             }
-            let wait = self.ready.wait_for(&mut available, READER_CHECKOUT_TIMEOUT);
-            if wait.timed_out() {
-                tracing::warn!(elapsed_ms = started.elapsed().as_millis(), "database reader pool checkout timed out");
-                return Err(rusqlite::Error::InvalidQuery);
+            let now = Instant::now();
+            if now >= deadline {
+                let waited_ms = started.elapsed().as_millis() as u64;
+                let in_use = READER_POOL_SIZE - available.len();
+                let longest_lease_ms = self.longest_lease_ms.load(Ordering::Relaxed);
+                tracing::warn!(
+                    waited_ms,
+                    in_use,
+                    pool_size = READER_POOL_SIZE,
+                    longest_lease_ms,
+                    "database reader pool checkout timed out"
+                );
+                return Err(DbError::ReaderPoolExhausted {
+                    waited_ms,
+                    in_use,
+                    pool_size: READER_POOL_SIZE,
+                    longest_lease_ms,
+                });
             }
+            // Wait for the *remaining* time, not a fresh
+            // `READER_CHECKOUT_TIMEOUT`. A spurious wake right before the
+            // deadline must not re-arm the timer — that bug compounded
+            // checkouts past the nominal timeout and is what the absolute-
+            // deadline loop here closes (issue #1533).
+            let remaining = deadline - now;
+            let _ = self.ready.wait_for(&mut available, remaining);
         }
     }
 }
@@ -145,6 +279,10 @@ impl ReaderPool {
 pub struct ReadConnection<'a> {
     pool: &'a ReaderPool,
     conn: Option<Connection>,
+    /// `Instant::now()` at checkout. `None` only after the inner `Option` has
+    /// been moved out by `Drop`, which is the only legitimate way the field is
+    /// observed by anyone outside this module.
+    checked_out_at: Instant,
 }
 
 impl Deref for ReadConnection<'_> {
@@ -160,6 +298,23 @@ impl Deref for ReadConnection<'_> {
 impl Drop for ReadConnection<'_> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            // Track lease duration for diagnostics — `fetch_max` so concurrent
+            // leases don't tear each other's longest-record down. A lease
+            // exceeding 500ms is unusual and points at a caller holding a
+            // connection across filesystem / network work; surface a warning
+            // without leaking query parameters (issue #1533 verification
+            // step 5).
+            let lease_ms = self.checked_out_at.elapsed().as_millis() as u64;
+            self.pool
+                .longest_lease_ms
+                .fetch_max(lease_ms, Ordering::Relaxed);
+            if lease_ms >= 500 {
+                tracing::warn!(
+                    lease_ms,
+                    "slow reader-pool lease returned; review connection lifetime"
+                );
+            }
+
             let conn = if conn.is_autocommit() {
                 conn
             } else {
@@ -998,7 +1153,7 @@ pub fn persist_semantic_turn(node_id: i64, value: Option<&str>) -> SqlResult<()>
 }
 
 pub fn list_semantic_turns() -> SqlResult<Vec<(i64, String)>> {
-    let conn = read_conn();
+    let conn = try_read_conn()?;
     let mut stmt = conn.prepare("SELECT key,value FROM app_settings WHERE key LIKE ?1")?;
     let rows = stmt.query_map(params![format!("{SEMANTIC_TURN_KEY_PREFIX}%")], |row| {
         let key: String = row.get(0)?;
@@ -1090,7 +1245,7 @@ const COORDINATOR_DRIVE_TOKEN_KEY: &str = "coordinator_drive_token";
 /// Is the coordinator read API enabled? Defaults to `false` (off) for a fresh
 /// install, so a naive setup is never an open endpoint.
 pub fn coordinator_api_enabled() -> SqlResult<bool> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     coordinator_api_enabled_inner(&db)
 }
 
@@ -1130,7 +1285,7 @@ const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
 /// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
 /// setup is never reachable from another machine.
 pub fn lan_exposure_enabled() -> SqlResult<bool> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     lan_exposure_enabled_inner(&db)
 }
 
@@ -1181,7 +1336,7 @@ pub fn generate_coordinator_read_token_inner(conn: &Connection) -> SqlResult<Str
 /// Used by the status command to report `has_token` — presence only; the value
 /// is a SHA-256 hash (#495), never the raw token.
 pub fn coordinator_read_token() -> SqlResult<Option<String>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     coordinator_read_token_inner(&db)
 }
 
@@ -1624,7 +1779,7 @@ pub fn touch_device_session_inner(conn: &Connection, id: i64, ip: Option<&str>) 
 /// List all paired devices, newest first, for the "Authorized Devices" panel.
 /// Returns the wire view (`DeviceSession`) — never the `token_hash`.
 pub fn list_device_sessions() -> SqlResult<Vec<DeviceSession>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_device_sessions_inner(&db)
 }
 
@@ -1714,17 +1869,34 @@ fn get() -> &'static Database {
     DB.get().expect("database not initialized")
 }
 
-/// Check out a read-only connection. Queries run without the pool's
-/// bookkeeping mutex and without the dedicated writer mutex.
-pub fn read_conn() -> ReadConnection<'static> {
-    try_read_conn().expect("database reader pool checkout failed")
+/// Check out a read-only connection with bounded waiting. This is the safe
+/// entry point for production call sites — both synchronous and async — which
+/// must surface pool exhaustion as a typed [`DbError::ReaderPoolExhausted`]
+/// instead of panicking and aborting the release process (issue #1533).
+///
+/// Returns [`DbResult<ReadConnection<'static>>`]. Callers that previously used
+/// the infallible [`read_conn()`] should now use the `?` operator:
+///
+/// ```ignore
+/// let db = try_read_conn()?;
+/// foo_inner(&db)
+/// ```
+pub fn try_read_conn() -> DbResult<ReadConnection<'static>> {
+    get().readers.checkout()
 }
 
-/// Check out a read-only connection with bounded waiting. This is the safe
-/// entry point for async request paths, which must surface pool exhaustion
-/// instead of blocking a runtime worker indefinitely.
-pub fn try_read_conn() -> SqlResult<ReadConnection<'static>> {
-    get().readers.checkout()
+/// Infallible reader-pool checkout, available only inside the `db` module's
+/// tests and the few external test files that historically relied on a panic
+/// when the global DB was uninitialized (issue #1533).
+///
+/// Production code MUST use [`try_read_conn()`] — panicking on
+/// `panic = "abort"` release builds is exactly what this helper exists to
+/// keep that one panic out of the hot path. Tests use it because pool
+/// exhaustion is structurally impossible when only the test thread holds
+/// leases.
+#[cfg(test)]
+pub fn read_conn() -> ReadConnection<'static> {
+    try_read_conn().expect("database reader pool checkout failed")
 }
 
 /// Lock the dedicated writer connection, recovering from a poisoned mutex instead of
@@ -1961,7 +2133,7 @@ fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
 /// into a Node Digest. Spine-only — no transcript enrichment in this slice.
 pub fn list_coordinator_node_rows()
 -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_coordinator_node_rows_inner(&db)
 }
 
@@ -2049,7 +2221,7 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
 }
 
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     get_mesh_by_id_inner(&db, id)
 }
 
@@ -2194,7 +2366,7 @@ pub fn set_mesh_loop_config(
 /// Read the typed `harness_overrides` map for a Mesh. None on a missing
 /// mesh (the IPC surface maps `None` to a "mesh not found" error).
 pub fn get_mesh_harness_overrides(mesh_id: i64) -> SqlResult<Option<std::collections::HashMap<String, HarnessConfigValue>>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db
         .prepare("SELECT harness_overrides FROM meshes WHERE id = ?1")?;
     let result = stmt.query_row(params![mesh_id], |row| {
@@ -2332,7 +2504,7 @@ pub fn clear_mesh_harness_overrides(mesh_id: i64) -> SqlResult<usize> {
 
 /// Every mesh with Autopilot enabled — the poller's work list.
 pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(&format!(
         "SELECT {} FROM meshes WHERE COALESCE(autopilot_enabled, 0) = 1 ORDER BY id",
         mesh_columns()
@@ -2446,7 +2618,7 @@ impl serde::Serialize for AutopilotRunState {
 pub type AutopilotRun = (i64, AutopilotRunState, i32, Option<i64>, Option<String>);
 
 pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<AutopilotRun>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT issue_number, state, attempts, loop_iteration, pr_url \
          FROM autopilot_runs WHERE node_id = ?1",
@@ -2503,7 +2675,7 @@ pub fn set_autopilot_run_pr(node_id: i64, pr_number: i64, pr_url: &str) -> SqlRe
 /// still on the grid — the merged-PR auto-close sweep's work list:
 /// `(node_id, pr_number)`.
 pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64, i64)>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT r.node_id, r.pr_number FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2546,7 +2718,7 @@ const COUNT_ACTIVE_AUTOPILOT_SQL: &str = "SELECT COUNT(*) FROM autopilot_runs r 
 /// poller compares against `autopilot_concurrency_limit`; completed/failed
 /// runs free their slot.
 pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     db.query_row(
         &format!("{} AND r.mesh_id = ?1", COUNT_ACTIVE_AUTOPILOT_SQL),
         params![mesh_id],
@@ -2560,7 +2732,7 @@ pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
 /// `autopilot_pool_size` preference: per-mesh limits bound each mesh, but
 /// only this total bounds the machine.
 pub fn count_active_autopilot_nodes_total() -> SqlResult<i64> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     count_active_autopilot_nodes_total_inner(&db)
 }
 
@@ -2588,7 +2760,7 @@ pub type LoopRunSnapshot = (i64, AutopilotRunState, String);
 /// Pre-existing issue-driven rows are filtered by `loop_iteration IS
 /// NOT NULL` so the two modes never cross-contaminate the ledger view.
 pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT loop_iteration, state, updated_at FROM autopilot_runs \
          WHERE mesh_id = ?1 AND loop_iteration IS NOT NULL \
@@ -2614,7 +2786,7 @@ pub fn list_loop_iterations(mesh_id: i64) -> SqlResult<Vec<LoopRunSnapshot>> {
 /// state/attempt write, so "stale" means "no pipeline activity", not
 /// "agent quiet".
 pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Vec<i64>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT r.node_id FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2629,7 +2801,7 @@ pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Ve
 /// hydration for the evaluator's piloted-node registry — a restart must not
 /// silently drop live autopilot nodes out of the wrap-up loop.
 pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT node_id FROM autopilot_runs \
          WHERE state IN ('implementing', 'finishing', 'suffix_pending')",
@@ -2642,7 +2814,7 @@ pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
 /// autopilot-pill data (which nodes are piloted, and where in the pipeline
 /// each one is). Excludes archived nodes: their cards aren't on the grid.
 pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT r.node_id, r.state FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
@@ -2659,7 +2831,7 @@ pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
 /// Autopilot ledger and manually issue-spawned nodes — so the poller never
 /// double-spawns an issue (including issues whose node completed or errored).
 pub fn list_known_autopilot_issue_numbers(mesh_id: i64) -> SqlResult<Vec<i64>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT issue_number FROM autopilot_runs WHERE mesh_id = ?1 \
          UNION \
@@ -2684,7 +2856,7 @@ pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
 /// editor without a second round-trip — Scratch Pad is a "type whatever
 /// you want" surface and the absence of notes is the common case.
 pub fn get_mesh_scratchpad(id: i64) -> SqlResult<String> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     get_mesh_scratchpad_inner(&db, id)
 }
 
@@ -2791,7 +2963,7 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 }
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", mesh_columns())
     )?;
@@ -2801,7 +2973,7 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 
 /// Look up a mesh by its path.
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM meshes WHERE path = ?1", mesh_columns())
     )?;
@@ -3067,12 +3239,12 @@ pub(crate) fn toggle_agent_node_pinned_inner(
 }
 
 pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     get_agent_node_by_id_inner(&db, id)
 }
 
 pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY mesh_id ASC, position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
@@ -3081,7 +3253,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 }
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
@@ -3257,7 +3429,7 @@ pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResul
 
 pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
     use rusqlite::OptionalExtension;
-    let conn = read_conn();
+    let conn = try_read_conn()?;
     conn.query_row("SELECT session_started_at FROM agent_nodes WHERE id = ?1",
         params![id], |row| row.get(0))
         .optional()
@@ -3274,7 +3446,7 @@ pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
 /// Identity of the process and its last lifecycle transition. Continuations
 /// observed before user input/regeneration must not write into the new turn.
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
-    read_conn().query_row("SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
+    try_read_conn()?.query_row("SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
         params![id], |row| {
             let generation: Option<i64> = row.get(0)?;
             let changed: Option<String> = row.get(1)?;
@@ -3321,7 +3493,7 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
 }
 
 pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_suspended_nodes_inner(&db)
 }
 
@@ -3381,7 +3553,7 @@ pub(crate) fn recover_live_cli_session_id_inner(
 /// mirrors `set_cli_session_id_if_missing_inner`'s write guard exactly —
 /// present here means a conditional write would be a no-op there.
 pub fn cli_session_id_present(id: i64) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     cli_session_id_present_inner(&db, id)
 }
 
@@ -3459,7 +3631,7 @@ pub fn delete_agent_node_enqueueing_removal(
 }
 
 pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_pending_worktree_removals_inner(&db)
 }
 
@@ -3597,7 +3769,7 @@ pub(crate) fn mark_warm_worktree_refreshing_inner(conn: &Connection, id: i64) ->
 /// a live spawn. Returns the same `WarmWorktree` projection a claim hands back
 /// (`base_sha` is the field the freshness pass diffs against the new SHA).
 pub fn list_available_warm_for_mesh(mesh_id: i64) -> SqlResult<Vec<WarmWorktree>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3731,7 +3903,7 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
 /// inner.
 #[allow(dead_code)]
 pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_warm_paths_for_mesh_inner(&db, mesh_id)
 }
 
@@ -3756,7 +3928,7 @@ pub(crate) fn list_warm_paths_for_mesh_inner(
 /// NOT help here because the mesh's `agent_nodes` rows are cascade-deleted
 /// by the same transaction, so no `close` event ever fires for them.
 pub fn list_warm_paths_for_mesh_droppable(mesh_id: i64) -> SqlResult<Vec<String>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_warm_paths_for_mesh_droppable_inner(&db, mesh_id)
 }
 
@@ -3810,7 +3982,7 @@ pub struct WarmReconcileEntry {
 pub fn list_warm_worktrees_to_reconcile(
     stale_after_minutes: i64,
 ) -> SqlResult<Vec<WarmReconcileEntry>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)
 }
 
@@ -4138,7 +4310,7 @@ fn live_mesh_ids_for(
 /// by the worker (hardcoded to 1 for the v21 tracer bullet) so we don't
 /// plumb a config parameter through yet.
 pub fn count_available_warm_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     count_available_warm_for_mesh_inner(&db, mesh_id)
 }
 
@@ -4163,7 +4335,7 @@ pub(crate) fn count_available_warm_for_mesh_inner(
 /// `git worktree remove --force` a live agent's worktree during the window
 /// between claim and `forget_after_spawn`).
 pub fn count_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     count_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
@@ -4200,7 +4372,7 @@ pub fn list_oldest_warm_entries_for_mesh(
     mesh_id: i64,
     limit: i64,
 ) -> SqlResult<Vec<(i64, String)>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_oldest_warm_entries_for_mesh_inner(&db, mesh_id, limit)
 }
 
@@ -4230,7 +4402,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 pub fn list_all_droppable_warm_entries_for_mesh(
     mesh_id: i64,
 ) -> SqlResult<Vec<(i64, String)>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_all_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
@@ -4255,7 +4427,7 @@ pub(crate) fn list_all_droppable_warm_entries_for_mesh_inner(
 /// (indexed on `path UNIQUE`) and side-effect free — safe to call from
 /// `collect_prune_info` for every worktree.
 pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     is_warm_pool_path_inner(&db, path)
 }
 
@@ -4298,7 +4470,7 @@ pub(crate) fn is_warm_pool_path_inner(
 /// to call from `services::agent_node::process_pending_removals` for every
 /// pending entry.
 pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     warm_pool_claims_path_inner(&db, path)
 }
 
@@ -4320,7 +4492,7 @@ pub(crate) fn warm_pool_claims_path_inner(
 /// fill-up to the per-mesh target. Mirrors the projection `MeshRow` uses
 /// for the spawn-time read so the two paths can't drift.
 pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>> {
-    let db = read_conn();
+    let db = try_read_conn()?;
     list_worktree_enabled_meshes_for_warm_inner(&db)
 }
 

@@ -175,7 +175,7 @@ fn get_autopilot_circuit_inner(
 }
 
 pub fn get_autopilot_circuit(id: i64) -> SqlResult<Option<AutopilotCircuit>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     get_autopilot_circuit_inner(&db, id)
 }
 
@@ -195,7 +195,7 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
 }
 
 pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at, is_preset \
@@ -210,7 +210,7 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
 /// mesh-scoped at the trigger layer: a circuit carries its own mesh_id,
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at, is_preset \
@@ -226,7 +226,7 @@ pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
 /// Deliberately trigger-kind agnostic: ANY run (manual Trigger Now
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT MAX(created_at) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
         params![circuit_id],
@@ -239,7 +239,7 @@ pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String
 /// constraint stays the authoritative backstop; this just keeps the pass
 /// from rewriting identical rows every cycle.
 pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
     )?;
@@ -265,7 +265,7 @@ pub fn list_circuits_with_recent_runs(
     mesh_id: i64,
     runs_per_circuit: i64,
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)
 }
 
@@ -478,7 +478,7 @@ pub fn create_circuit_run(
 pub fn list_queued_circuit_runs(
     mesh_id: i64,
 ) -> SqlResult<Vec<(AutopilotCircuitRun, String)>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     list_queued_circuit_runs_inner(&db, mesh_id)
 }
 
@@ -522,7 +522,7 @@ pub fn list_circuit_probe(
     Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>,
     Vec<(AutopilotCircuitRun, String)>,
 )> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let circuits = list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)?;
     let queue = list_queued_circuit_runs_inner(&db, mesh_id)?;
     Ok((circuits, queue))
@@ -628,7 +628,7 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
 /// transient process/worktree cleanup failure without orphaning retained
 /// agents from a completed or failed run.
 pub fn list_circuit_run_ids_for_cleanup(circuit_id: i64) -> SqlResult<Vec<i64>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id FROM autopilot_circuit_runs \
          WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused', 'completed', 'failed', 'cancelled') \
@@ -652,7 +652,7 @@ pub struct ActiveCircuitRun {
 }
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
@@ -685,7 +685,7 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
 }
 
 pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -749,7 +749,7 @@ pub fn is_terminal_run_state(state: &str) -> bool {
 
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -772,7 +772,7 @@ pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
 }
 
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     let mut stmt = db.prepare(
         "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                 outcome, error_message, started_at, completed_at \
@@ -1029,7 +1029,7 @@ pub fn reserve_circuit_agent_slots(run_id: i64, slots: i64) -> SqlResult<bool> {
 }
 
 pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT slots FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
         params![run_id],
@@ -1040,7 +1040,7 @@ pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
 }
 
 pub fn count_reserved_circuit_agent_slots_total() -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COALESCE(SUM(l.slots), 0) \
          FROM autopilot_circuit_run_agent_leases l \
@@ -1084,7 +1084,7 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 type AgentOwnershipRow = (i64, i64, i64, String, String, Option<i64>);
 
 pub fn list_circuit_agent_ownerships() -> SqlResult<Vec<AgentOwnershipRow>> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     list_circuit_agent_ownerships_inner(&db)
 }
 
@@ -1174,7 +1174,7 @@ mod activity_ownership_tests {
 /// against `autopilot_circuits.concurrency_limit`. Paused runs count:
 /// their steps still hold real agents even though the graph is parked.
 pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -1191,7 +1191,7 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
 /// circuit agent. The legacy per-mesh node limit is intentionally not part of
 /// this accounting.
 pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -1203,7 +1203,7 @@ pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
 }
 
 pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -1218,7 +1218,8 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
 /// Failed associations remain the durable cleanup retry ledger. Historic
 /// terminal runs are not opted in: the user may have kept their agents.
 pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
-    failed_circuit_agents_for_cleanup_inner(&super::read_conn())
+    let db = super::try_read_conn()?;
+    failed_circuit_agents_for_cleanup_inner(&db)
 }
 
 pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
@@ -1249,7 +1250,7 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connectio
 }
 
 pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) \
          FROM autopilot_circuit_run_steps s \
@@ -1298,7 +1299,7 @@ pub fn count_active_circuit_agent_nodes_for_run(run_id: i64) -> SqlResult<i64> {
 /// agent-node count saturated on the implementation agent and parked
 /// the reviewer step in `pending_slot` indefinitely.
 pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
-    let db = super::read_conn();
+    let db = super::try_read_conn()?;
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_runs \
          WHERE mesh_id = ?1 AND state IN ('running', 'paused')",
