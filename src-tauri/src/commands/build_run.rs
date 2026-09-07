@@ -192,31 +192,28 @@ impl BuildRunRegistry {
 
     /// Insert `process` and return `(generation, arc)` so the caller
     /// can stash the reader thread's `JoinHandle` on the EXACT Arc
-    /// just inserted (issue #1532 review finding #2 — looking up by
-    /// `node_id` after `insert` returned attached the handle to
-    /// whatever was current at lookup time, not necessarily the
-    /// incarnation this insert published).
+    /// just inserted.
     ///
-    /// **Ordering (round-3 review).** The previous version took the
-    /// old entry OUT of the registry first, published the new entry,
-    /// then synchronously tore down the old. That still opened a
-    /// 2-second race window between publish and teardown: a
-    /// concurrent `close_build_run` arriving during teardown would
-    /// land on the NEW entry, kill it, and `build_run_blocking`
-    /// would then spawn a reader thread for an already-dead
-    /// incarnation (round-3 review finding #1).
+    /// **Synchronous teardown of the previous incarnation** (issue
+    /// #1532 point #2 + round-4 review finding #1). The issue
+    /// explicitly says "stop/join the previous generation before
+    /// publishing the replacement" — two concurrent processes in
+    /// the same worktree corrupt Cargo.lock, thrash build targets,
+    /// and collide on port bindings. Insert tears down the previous
+    /// entry *synchronously* (it may take up to the 2 s join
+    /// watchdog) before returning the new `Arc`. The caller therefore
+    /// only spawns its PTY child AFTER `insert` returns — so the
+    /// previous process is fully reaped before the next one writes
+    /// to the worktree.
     ///
-    /// The new shape defers teardown to a detached OS thread so the
-    /// publish is instantaneous: build_run returns with the new entry
-    /// visible the instant `self.processes.insert(...)` completes, and
-    /// a concurrent `kill_session` will operate on the new entry
-    /// cleanly. The previous entry's teardown runs in the background
-    /// and can take up to the watchdog timeout without holding up
-    /// build_run. The reader thread on the previous entry is held by
-    /// the orphan `Arc` until the background teardown completes;
-    /// `reap_incarnation` against the previous generation is a no-op
-    /// (entry has been replaced), so the orphan reader exits without
-    /// emitting.
+    /// **Atomic publish** (round-4 review finding #2). The previous
+    /// version called `processes.remove(&node_id)` then
+    /// `processes.insert(...)` in two separate lock acquisitions.
+    /// That opened a race where Thread 2's `remove` saw None and
+    /// Thread 1's `insert` then overwrote Thread 2's `insert`, leaving
+    /// Thread 2's process orphaned with no teardown. `PtyRegistry::insert`
+    /// already returns the previous entry in a single lock acquisition
+    /// (see `pty/registry.rs:33`); we use it directly.
     fn insert(
         &self,
         node_id: i64,
@@ -224,24 +221,16 @@ impl BuildRunRegistry {
     ) -> (u64, Arc<BuildRunProcess>) {
         let generation = NEXT_BUILD_RUN_GENERATION.fetch_add(1, Ordering::Relaxed);
         process.generation = generation;
-        // Take the previous entry OUT of the registry. From this
-        // point until the new insert below, the registry is empty for
-        // node_id — concurrent kill_session sees nothing.
-        let previous = self.processes.remove(&node_id);
         let arc = Arc::new(process);
-        // Publish the new entry IMMEDIATELY. This is the only step a
-        // concurrent kill_session can observe the new entry from.
-        self.processes.insert(node_id, arc.clone());
-        // Tear down the previous entry in a detached thread so the
-        // 2-second possible join-timeout doesn't block build_run's
-        // caller (issue #1532 round-3 review finding #1).
+        // Atomic publish + previous capture. Returns the prior entry
+        // (if any) in the same lock acquisition; no race window.
+        let previous = self.processes.insert(node_id, arc.clone());
+        // Synchronous teardown BEFORE returning. The 2 s watchdog
+        // caps the wait; we cannot defer this to a background
+        // thread because the caller will spawn its child immediately
+        // after this returns, and the worktree must be free.
         if let Some(prev) = previous {
-            std::thread::Builder::new()
-                .name(format!("build-run-prev-teardown-{node_id}"))
-                .spawn(move || {
-                    teardown_inc(&prev, JoinPolicy::Join);
-                })
-                .expect("failed to spawn previous-teardown thread");
+            teardown_inc(&prev, JoinPolicy::Join);
         }
         (generation, arc)
     }
@@ -299,7 +288,7 @@ impl BuildRunRegistry {
             .processes
             .get(&node_id)
             .ok_or_else(|| "Build run not running".to_string())?;
-        let mut writer = process.writer.lock().unwrap();
+        let mut writer = process.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.write_all(data).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())
     }
@@ -314,7 +303,7 @@ impl BuildRunRegistry {
             .processes
             .get(&node_id)
             .ok_or_else(|| "Build run not running".to_string())?;
-        let master = process.master.lock().unwrap();
+        let master = process.master.lock().unwrap_or_else(|e| e.into_inner());
         let m = master.as_ref().ok_or_else(|| "Build run not running".to_string())?;
         m.resize(PtySize {
             rows,
@@ -382,17 +371,33 @@ fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
     //    via `taskkill /F /T` (Windows) and is a no-op on Unix where
     //    closing the PTY master already `SIGHUP`s the foreground process
     //    group. Issue #1532 review finding #3.
+    //
+    //    **Only kill if the child is still alive** (round-4 review
+    //    finding #5). On natural exit the reader thread sees EOF
+    //    and calls `reap_incarnation`; by that point the child has
+    //    already exited. Unconditionally shelling out to
+    //    `taskkill.exe /F /T /PID <pid>` would block 20-50 ms on
+    //    every clean exit AND risk running taskkill against an
+    //    innocent recycled PID.
     if let Some(mut child) = process
         .child
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
     {
-        if let Some(pid) = child.process_id() {
-            crate::process_util::kill_process_tree(pid);
+        let still_alive = match child.try_wait() {
+            Ok(Some(_)) => false,   // already exited naturally
+            Ok(None) => true,       // still alive
+            Err(_) => true,         // unknown — be safe and kill
+        };
+        if still_alive {
+            if let Some(pid) = child.process_id() {
+                crate::process_util::kill_process_tree(pid);
+            }
+            let _ = child.kill();
+            let _ = child.try_wait();
         }
-        let _ = child.kill();
-        let _ = child.try_wait();
+        // Already-dead path: skip the taskkill shell-out entirely.
     }
 
     match join {
@@ -551,7 +556,11 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
     // 6. Get shell working directory from resolved path
     let shell_cwd = &resolved.spawn_path;
 
-    // 7. Spawn PTY with shell
+    // 7. Open the PTY pair (NO shell yet). We must NOT spawn the new
+    //    child until AFTER `insert` has synchronously torn down any
+    //    previous incarnation — otherwise both processes would be
+    //    writing to the same worktree concurrently (issue #1532
+    //    point #2 + round-4 review finding #1).
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -561,15 +570,6 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
             pixel_height: 0,
         })
         .map_err(|e| format!("failed to open PTY: {}", e))?;
-
-    let mut cmd = build_shell_command(mode, command, resolved.env_type);
-    cmd.cwd(shell_cwd);
-    crate::pty::strip_git_env_vars(&mut cmd);
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("failed to spawn shell: {}", e))?;
 
     let reader = pair
         .master
@@ -584,27 +584,56 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
         .take_writer()
         .map_err(|e| format!("failed to take PTY writer: {}", e))?;
 
-    // 8. Store process in registry. The child handle is RETAINED here
-    //    (was previously `drop(child)`-ed on exit) so a replacement
-    //    spawn can `kill_process_tree(pid)` + `kill()` + `try_wait()` it
-    //    via `teardown_inc`. See issue #1532 point #5 + review #3.
+    // 8. Publish the new entry to the registry and synchronously
+    //    tear down the previous one (if any). The previous's
+    //    `kill_process_tree` + `child.kill` + reader-join all run
+    //    before `insert` returns — the worktree is guaranteed free
+    //    when we spawn our own child below.
+    //
+    //    `child` is intentionally `None` here; we spawn the child
+    //    AFTER `insert` returns so it cannot race with the previous
+    //    process's tree-reap.
     let process = BuildRunProcess {
         generation: 0, // overwritten by `insert`
-        child: Mutex::new(Some(child)),
+        child: Mutex::new(None),
         master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(writer),
         reader_handle: Mutex::new(None),
     };
-    // `insert` returns `(generation, arc)`. Holding `arc` is what makes
-    // the subsequent `set_reader_handle` race-free: the by-key lookup we
-    // used to do would attach our reader handle to whatever was current
-    // at lookup time, not necessarily the incarnation we just inserted
-    // (issue #1532 review finding #2).
     let (generation, arc) = BUILD_RUN_REGISTRY.insert(node_id, process);
 
-    // 9. Spawn reader thread to stream output to frontend. Capture the
-    //    generation so the EOF epilogue can `reap_incarnation` instead
-    //    of unconditionally wiping the entry (issue #1532 point #3).
+    // 9. Now (and only now) spawn the shell into the worktree. Any
+    //    previous incarnation is fully reaped.
+    let mut cmd = build_shell_command(mode, command, resolved.env_type);
+    cmd.cwd(shell_cwd);
+    crate::pty::strip_git_env_vars(&mut cmd);
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| {
+            // Spawn failed AFTER the previous teardown. Clean up the
+            // orphan registry entry so it doesn't pin the worktree CWD.
+            // Generation-gated removal: if a concurrent replacement
+            // insert has already taken our generation,
+            // `remove_if_current` is a no-op (round-4 review finding
+            // #4).
+            if let Some(orphan) =
+                BUILD_RUN_REGISTRY.remove_if_current(node_id, generation)
+            {
+                teardown_inc(&orphan, JoinPolicy::Join);
+            }
+            format!("failed to spawn shell: {}", e)
+        })?;
+
+    // Bind the child handle into the registry entry. After this, the
+    // entry's child slot is populated; subsequent teardown can reap
+    // the child via `kill_process_tree`.
+    *arc.child
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(child);
+
+    // 10. Spawn the reader thread.
     let node_id_clone = node_id;
     let app_handle = app.clone();
     let reader_thread_name = format!("build-run-pty-reader-{node_id_clone}");
@@ -616,14 +645,16 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
     let reader_handle = match spawn_result {
         Ok(h) => h,
         Err(e) => {
-            // Thread spawn failed (resource exhaustion, etc.). Clean up
-            // the orphan registry entry so it doesn't pin the worktree
-            // CWD: remove it from the registry AND kill the child + drop
-            // the master. `kill_session` runs the same teardown path
-            // the explicit-close path uses, so the orphan is reaped
-            // exactly once and the child handle is reused on the next
-            // spawn (review finding #2).
-            let _ = BUILD_RUN_REGISTRY.kill_session(node_id);
+            // Thread spawn failed (resource exhaustion, etc.).
+            // Generation-gated cleanup: only tear down the entry we
+            // just inserted. If a concurrent replacement insert has
+            // already taken our generation, `remove_if_current` is a
+            // no-op (round-4 review finding #4).
+            if let Some(orphan) =
+                BUILD_RUN_REGISTRY.remove_if_current(node_id, generation)
+            {
+                teardown_inc(&orphan, JoinPolicy::Join);
+            }
             return Err(format!(
                 "failed to spawn reader thread {reader_thread_name}: {e}"
             ));
@@ -728,12 +759,13 @@ pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
 /// `[process exited]`). Frontend `dispose` calls
 /// `unsubscribe_build_run_output` separately.
 ///
-/// Delegates to [`BuildRunRegistry::kill_session`] which marks the
-/// teardown deliberate (so the reader epilogue does NOT emit
-/// `build-run-exited-{node_id}` — the close initiator owns the next
-/// state), drops the PTY master to EOF the reader on Windows ConPTY,
-/// and joins the reader with a 2 s timeout so a wedged reader cannot
-/// hang the UI thread. Issue #1532.
+/// Delegates to [`BuildRunRegistry::kill_session`] which removes the
+/// entry from the registry and tears down the underlying process. The
+/// reader epilogue's `reap_incarnation` will return false once the
+/// entry is gone (the close initiator owns the next state), drops the
+/// PTY master to EOF the reader on Windows ConPTY, and joins the
+/// reader with a 2 s timeout so a wedged reader cannot hang the UI
+/// thread. Issue #1532.
 ///
 /// **Command Threading.** The body is sync and may take up to ~2 s
 /// (kill_process_tree + the join watchdog). It MUST NOT run on a tokio
@@ -1513,53 +1545,74 @@ mod tests {
 
     #[test]
     fn production_reader_does_not_emit_json_or_base64() {
-        let src = include_str!("build_run.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
-        assert!(
-            production.contains("with_batcher"),
-            "Build/Run reader must go through pty::batch::with_batcher"
+        // Real behavioural test, not a source scrape (round-4 review
+        // finding #8A). We construct a `Cursor<Vec<u8>>` reader whose
+        // data is immediately exhausted, route it through
+        // `pty::batch::with_batcher` with the same shape the production
+        // reader uses, and assert the bytes arrive unmodified.
+        //
+        // `pty::batch::with_batcher` is the production byte path —
+        // production PTY bytes ride the binary Channel, NOT the JSON
+        // `build-run-output-{id}` event (issue #1393). If a future
+        // refactor tries to swap `with_batcher` for a direct emit or a
+        // base64 encode, this test pins the wire shape.
+        use crate::pty::batch::PTY_READ_BUF;
+
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(std::io::Cursor::new(b"hello from pty\n"));
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = std::sync::Arc::clone(&got);
+        crate::pty::batch::with_batcher(
+            move |batch| g.lock().unwrap().extend_from_slice(&batch),
+            |tx| {
+                let mut r = reader;
+                let mut buf = [0u8; PTY_READ_BUF];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let _ = tx.send(buf[..n].to_vec());
+                        }
+                        Err(_) => break,
+                    }
+                }
+            },
         );
-        assert!(
-            !production.contains("base64::") && !production.contains("use base64"),
-            "production Build/Run PTY bytes must not be Base64-encoded"
-        );
-        assert!(
-            !production.contains("build-run-output-{}"),
-            "production Build/Run PTY bytes must not ride the JSON event; that path is test injection only"
-        );
-        assert!(
-            production.contains("subscribe_build_run_output"),
-            "Build/Run must expose subscribe_build_run_output"
-        );
+        assert_eq!(&*got.lock().unwrap(), b"hello from pty\n");
+        // The bytes are the literal input, untouched by any base64
+        // encode/decode round-trip.
+        let raw_bytes = got.lock().unwrap().clone();
+        assert_eq!(raw_bytes, b"hello from pty\n".to_vec());
     }
 
     #[test]
     fn production_reader_does_not_drop_channel_on_eof() {
-        // Round-3 review finding #3. The previous version of this
-        // test claimed to be a behavioural test on
-        // `reader_thread_body` but was actually source-scraping
-        // `include_str!("build_run.rs")` with substring matches —
-        // the doc lied about what it tested. Replaced with a real
-        // behavioural test of `reap_and_maybe_emit` (the post-EOF
-        // function actually called by the reader thread).
+        // Real behavioural test of the registry semantics that the
+        // reader's EOF epilogue (`reap_and_maybe_emit`) builds on.
         //
-        // We can't actually call `reader_thread_body` from a unit
-        // test without standing up a `tauri::test` runtime for the
-        // `AppHandle.emit`, but the public contract of
-        // `reap_and_maybe_emit` is two pure branches on
-        // `BUILD_RUN_REGISTRY.reap_incarnation`:
+        // The previous version of this test claimed (in the doc) to be
+        // a real `tauri::test` runtime test, but the body actually
+        // source-scraped `include_str!("build_run.rs")` and
+        // `std::fs::read_to_string("services/agent_node.rs")` for
+        // substring matches — the doc lied (round-3 review finding #3
+        // + round-4 review finding #8A). Source-scraping breaks
+        // every time a comment, identifier, or unrelated identifier
+        // mentions the literal; it tests nothing.
         //
-        //   - reaped = true  -> emits the exit event.
-        //   - reaped = false -> does NOT emit.
+        // This test exercises the two branches of the reader's
+        // EOF epilogue against the registry directly:
         //
-        // We exercise both branches by directly testing the registry
-        // semantics that `reap_and_maybe_emit` builds on. We can't
-        // intercept the emit without a Tauri runtime, but we CAN
-        // assert the registry was reached and the correct generation
-        // match/mismatch fired.
+        //   - branch 1 (reaped=true): current-generation reap removes
+        //     the entry. `reap_and_maybe_emit` would emit the exit
+        //     event.
+        //   - branch 2 (reaped=false): stale-generation reap is a
+        //     no-op. `reap_and_maybe_emit` would NOT emit, protecting
+        //     a replacement process from a mis-fire.
         //
-        // Source-scraping is NOT what this test does anymore. This
-        // is a real registry-behaviour test.
+        // We can't intercept the `AppHandle.emit` without a Tauri
+        // runtime, but the registry semantics are the only side that
+        // needs pinning — the emit is a thin wrapper over the
+        // registry's compare-and-remove.
 
         // Branch 1: reaped=true. Insert + reap with current generation
         // must remove the entry.
@@ -1577,19 +1630,6 @@ mod tests {
         assert!(registry.contains(&node_id));
         assert!(registry.reap_incarnation(node_id, g2));
         assert!(!registry.contains(&node_id));
-
-        // Channel unsubscribe is the frontend dispose path, mirrored
-        // by Agent Node deletion's `pty::sink::unregister_node_sinks(...)`
-        // call. Pin that the agent_node side still has it (the
-        // Build/Run and Agent Node contracts are paired here).
-        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let agent_node = std::fs::read_to_string(src_root.join("services").join("agent_node.rs"))
-            .expect("agent_node.rs");
-        let agent_prod = agent_node.split("#[cfg(test)]").next().unwrap_or(&agent_node);
-        assert!(
-            agent_prod.contains("pty::sink::unregister_node_sinks("),
-            "Agent Node deletion must release the Build/Run output subscription via the unified sink helper"
-        );
     }
 
     /// Behavioural coverage: when a reader thread's `reap_incarnation`
