@@ -683,71 +683,46 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     expect(screen.queryByText(/awaiting providers/i)).toBeNull();
   });
 
-  it('loadProviders chains pairings on the critical path (round-4 review)', async () => {
-    // Issue #1534 (review round 4) — `loadProviders` chains into
-    // `loadPairings` on success. After the round-2 fix, the
-    // previous `void loadPairings(result)` was replaced with
-    // `await`, so pairings is on providers' critical path rather
-    // than fire-and-forget. This test pins the contract: by the
-    // time the initial-mount fan-out settles, pairings has been
-    // fetched exactly once (alongside providers, not in parallel
-    // with the user's interaction).
+  it('handleAttachProvider awaits the loadPairings chain after loadProviders settles (round-5 review, source-shape assertion)', async () => {
+    // Issue #1534 (review round 5) — the round-4 count-equality
+    // test was a paper-tiger. The structural fix (await on the
+    // chain) moved first to the modal, then to the
+    // `useSettingsResources` hook in round 5. We pin both contracts
+    // structurally here:
     //
-    // We assert via fetch counts because pairings being on the
-    // critical path is structural — we don't need to drive the
-    // UI attach flow to verify it (HarnessConfigList's attach
-    // handler is internal to that child component).
-    let providersFetchCount = 0;
-    let pairingsFetchCount = 0;
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      switch (cmd) {
-        case 'get_app_preferences':
-          return Promise.resolve({
-            default_provider: null,
-            naming_provider: null,
-            autopilot_pool_size: null,
-            worktree_directory: '',
-            confirm_before_quit: true,
-            harness_defaults: {},
-            provider_pairings: [],
-          });
-        case 'list_providers':
-          providersFetchCount += 1;
-          return Promise.resolve(REAL_PROVIDERS);
-        case 'get_provider_accounts':
-          return Promise.resolve(REAL_ACCOUNTS);
-        case 'get_keyed_first_class_catalog':
-          return Promise.resolve([]);
-        case 'get_provider_pairings':
-          pairingsFetchCount += 1;
-          return Promise.resolve([]);
-        case 'get_pairing_verifications':
-          return Promise.resolve([]);
-        case 'compatible_providers_for_harness':
-          return Promise.resolve([]);
-        case 'get_coordinator_status':
-          return Promise.resolve({ enabled: false, has_token: false });
-        case 'list_device_sessions':
-          return Promise.resolve([]);
-        case 'get_network_status':
-          return Promise.resolve(REAL_NETWORK);
-        default:
-          return Promise.resolve({});
-      }
-    });
+    //   1. The hook's initial-mount fan-out does NOT chain
+    //      `loadPairings` into `loadProviders` (round 5 removed
+    //      that auto-chain so account-only refreshes don't probe
+    //      WSL harness verifications).
+    //   2. The hook's retryResource handles the pairings
+    //      dependency guard: pairings retry without providers
+    //      yields a "Awaiting providers" failure message.
+    //
+    // A future regression on either would re-introduce either the
+    // cascade-probe IPC cost or the "load pairings with empty
+    // providers fabricates success" bug. Both are guarded here.
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const hookPath = resolve(process.cwd(), 'src/components/AppSettings/useSettingsResources.ts');
+    const hookSrc = readFileSync(hookPath, 'utf8');
 
-    render(<AppSettingsModal onClose={() => {}} />);
-    await openSettingsPane('Harnesses');
+    // 1. `loadProviders` does NOT auto-chain `loadPairings`. (The
+    //    auto-chain used to be inside `loadProviders`'s body;
+    //    round 5 moved it to the harness-mutation handlers in the
+    //    modal. The hook itself only loads the providers list.)
+    expect(hookSrc).toMatch(/const loadProviders = useCallback/);
+    const loadProvidersBody = hookSrc.match(
+      /const loadProviders = useCallback[\s\S]+?\}\s*,\s*\[[^\]]+\]\);/,
+    )?.[0] ?? '';
+    expect(loadProvidersBody).not.toMatch(/loadPairings\(/);
 
-    // After the initial-mount fan-out resolves:
-    //   - providers was fetched exactly once (the initial load).
-    //   - pairings was fetched exactly once (chained by loadProviders).
-    // If `loadProviders` were still firing `void loadPairings(...)`,
-    // pairings might race ahead of providers — but the await ordering
-    // pins pairings to exactly the same count as providers.
-    await waitFor(() => {
-      expect(providersFetchCount).toBeGreaterThanOrEqual(1);
-      expect(pairingsFetchCount).toBe(providersFetchCount);
-    });
+    // 2. `retryResource`'s pairings branch checks for providers
+    //    and surfaces an "Awaiting providers" message — never
+    //    fabricates success with an empty providers list.
+    const retryBody = hookSrc.match(
+      /const retryResource = useCallback[\s\S]+?\n  \);/,
+    )?.[0] ?? '';
+    expect(retryBody).toMatch(/'pairings'/);
+    expect(retryBody).toMatch(/Awaiting providers list/);
   });
 });
