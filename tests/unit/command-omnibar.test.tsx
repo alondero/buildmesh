@@ -326,7 +326,7 @@ describe('CommandOmnibar — keyboard interaction', () => {
     render(<CommandOmnibar />);
     openOmnibar();
     expect(document.activeElement).toBe(screen.getByRole('combobox'));
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(useUIStore.getState().omnibarOpen).toBe(false);
     expect(document.activeElement).toBe(trigger);
     trigger.remove();
@@ -713,7 +713,7 @@ describe('CommandOmnibar — quick spawn prompt mode (issue #1413)', () => {
     const input = await openSpawnResults();
     fireEvent.keyDown(input, { key: 'Tab' });
     expect(screen.getByTestId('command-omnibar-prompt-context')).toBeTruthy();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(useUIStore.getState().omnibarOpen).toBe(true);
     expect(screen.queryByTestId('command-omnibar-prompt-context')).toBeNull();
     expect((screen.getByRole('combobox') as HTMLInputElement).value).toBe('/claude');

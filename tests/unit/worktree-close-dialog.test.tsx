@@ -63,7 +63,7 @@ describe('WorktreeCloseDialog (#643)', () => {
     // Sanity-check the dialog is up before we send the key.
     expect(screen.getByRole('heading', { name: /Remove agent worktree/i })).toBeTruthy();
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     await expect(actionPromise).resolves.toBe('cancel');
     expect(useWorktreeClosePromptStore.getState().pending).toBeNull();
@@ -76,7 +76,7 @@ describe('WorktreeCloseDialog (#643)', () => {
     expect(useWorktreeClosePromptStore.getState().pending).toBeNull();
 
     render(<WorktreeCloseDialog />);
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(useWorktreeClosePromptStore.getState().pending).toBeNull();
   });

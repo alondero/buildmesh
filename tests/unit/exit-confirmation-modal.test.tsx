@@ -91,7 +91,7 @@ describe('ExitConfirmationModal (issue #1501)', () => {
         onExit={() => {}}
       />,
     );
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onKeep).not.toHaveBeenCalled();
   });
 

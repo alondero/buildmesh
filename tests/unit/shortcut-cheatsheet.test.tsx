@@ -56,7 +56,7 @@ describe('ShortcutCheatsheet', () => {
   it('calls onClose when Escape is pressed (acceptance criterion: "simulate Escape and assert close")', () => {
     const onClose = vi.fn();
     render(<ShortcutCheatsheet open onClose={onClose} />);
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
