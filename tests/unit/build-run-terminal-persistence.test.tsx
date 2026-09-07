@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import { render, unmount, waitFor } from '@testing-library/react';
 
 // jsdom doesn't ship ResizeObserver. Keep each observer instance so the
 // resize scheduler can be driven without a module-level callback singleton.
@@ -527,7 +528,6 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
 
   it('survives unmount/remount (the user-reported mesh-navigation scenario)', async () => {
     const { BuildRunTerminal } = await import('../../src/components/Terminal/BuildRunTerminal');
-    const { render, unmount, waitFor } = await import('@testing-library/react');
 
     // Initial mount — simulates the user clicking BuildRun → "Terminal in worktree".
     const { unmount: unmount1 } = render(

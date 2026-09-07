@@ -9,6 +9,11 @@
  * plugin calls get benign defaults, unknown commands resolve null (not throw),
  * and the listen/emit event roundtrip works.
  */
+// @ts-nocheck — the imported mock is plain ESM at scripts/ui-mock/tauri-mock.mjs
+// with no .d.ts. TypeScript resolves the import to an absolute machine path
+// in the diagnostic, which then leaks into tests/.typecheck-baseline.txt and
+// breaks every other developer's baseline. The mock is build-tool code, not
+// application code, so it stays out of the typecheck program.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { buildInitScript, defaultFixtures, loadFixtures } from '../../scripts/ui-mock/tauri-mock.mjs';
 

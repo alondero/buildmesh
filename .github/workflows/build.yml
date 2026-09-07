@@ -97,6 +97,16 @@ jobs:
       - name: Build desktop + mobile bundles
         run: npm run build
 
+      # Issue #1647 review — tsc never ran on tests/, so prop renames
+      # like `setActiveNode` → `onActivateNode` slipped through and broke
+      # the unit suite silently on main. The gate is snapshot-based
+      # against `tests/.typecheck-baseline.txt` so pre-existing test-fixture
+      # drift (358 lines today) doesn't break the world; it only fails on
+      # NEW errors. To shrink the baseline as errors are fixed, run
+      # `npm run check:test-typecheck -- --update-baseline`.
+      - name: Gate new test/typecheck errors (issue #1647)
+        run: npm run check:test-typecheck
+
       # Issue #1568 - gate the desktop initial JS/CSS bundles against the
       # documented budget in `scripts/bundle-budget.json`. The script exits
       # non-zero on a breach so a regression on the entry chunk becomes a

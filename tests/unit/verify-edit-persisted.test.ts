@@ -1,3 +1,10 @@
+// @ts-nocheck — this test imports the untyped agent hook at
+// `../../.claude/hooks/verify-edit-persisted.mjs`. The hook is plain ESM
+// JavaScript with no .d.ts; declaring it as ambient here would let the
+// typecheck scope include it, but the resolved path then leaks into the
+// test/typecheck baseline (TS7016 reports an absolute machine path), which
+// breaks every other developer/CI run. The hook is agent infrastructure, not
+// application code, so it stays out of the typecheck program.
 import { describe, it, expect } from "vitest";
 import {
   checkRecentlyWritten,

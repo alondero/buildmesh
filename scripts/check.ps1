@@ -224,6 +224,26 @@ try {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
 } finally { Pop-Location }
 
+function Invoke-TestTypecheck {
+  # Issue #1647 review — tsc never ran on tests/, so prop renames like
+  # `setActiveNode` → `onActivateNode` slipped through and broke the unit
+  # suite silently on main. The gate is snapshot-based against
+  # `tests/.typecheck-baseline.txt` so pre-existing test-fixture drift
+  # doesn't break the world; it only fails on NEW errors. To shrink the
+  # baseline as errors are fixed, run `npm run check:test-typecheck -- --update-baseline`.
+  Write-Host '== test/typecheck (snapshot gate, issue #1647) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npm run check:test-typecheck
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'test-typecheck' }
+}
+
 # Static-docs block: README drift gate + its test suite. Both are
 # docs concerns — a stale README has no bearing on a Rust build, so
 # the bare-rust target skips this block entirely. Grouped together
@@ -237,7 +257,10 @@ if ($Target -in @('unit', 'integration', 'all', 'all-ts')) {
 # Build before Rust so embedded mobile assets reflect the current source.
 if ($Target -in @('all', 'all-ts')) { Invoke-TsBuild }
 if ($Target -eq 'rust') { Ensure-MobileBuilt }
-if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
+# Issue #1647 review — test/typecheck only matters alongside the TS gates
+# (vitest unit runs the typecheck's output). It costs ~15s on a cold
+# node_modules and would be a wasted round trip on a bare Rust run.
+if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit ; Invoke-TestTypecheck }
 # Issue #1257 — integration must run in the default green bar (`all`)
 # as well as `integration` and `all-ts`, otherwise a developer who only
 # runs `scripts\check.ps1` locally gets a green bar that CI will reject.

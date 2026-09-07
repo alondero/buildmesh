@@ -66,9 +66,11 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 
 type Props = React.ComponentProps<typeof MeshItem>;
 
-function renderMeshItem(overrides: Partial<Props> = {}) {
-  const props: Props = {
-    mesh: MESH,
+/** Fresh per call so `vi.fn()` spies don't cross-contaminate across tests
+ *  sharing a constant. */
+function makeMeshItemProps(mesh: Mesh, overrides: Partial<Props> = {}): Props {
+  return {
+    mesh,
     isSelected: false,
     isDropdownOpen: false,
     isSpawning: false,
@@ -79,20 +81,20 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
     onOpenWorktreesProbe: vi.fn(),
-    // Issue #378 — the right-click "GitHub Issues" / "Archive" entries route
-    // through the Probe Panel via the new probe-tab handlers. The legacy
-    // `onOpenGitHubIssues` / `onOpenSessionBrowser` props are gone; the
-    // modal components stay on disk but no consumer wires them up.
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
-    setActiveNode: vi.fn(),
+    onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
     ...overrides,
   };
+}
+
+function renderMeshItem(overrides: Partial<Props> = {}) {
+  const props = makeMeshItemProps(MESH, overrides);
   const result = render(
     <DndContext>
       <SortableContext items={[MESH.id]}>
@@ -165,7 +167,7 @@ describe('MeshItem', () => {
   it('renders a NodeItem per mesh node and selects it on click', async () => {
     const { props } = renderMeshItem({ meshNodes: [makeNode()] });
     await userEvent.click(screen.getByText('node-a'));
-    expect(props.setActiveNode).toHaveBeenCalledWith(10);
+    expect(props.onActivateNode).toHaveBeenCalledWith(10);
     expect(props.selectMesh).toHaveBeenCalledWith(3);
   });
 
@@ -771,28 +773,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
         <SortableContext items={[MESH_A.id, MESH_B.id, MESH_C.id]} strategy={verticalListSortingStrategy}>
           <div data-testid="mesh-list">
             {[MESH_A, MESH_B, MESH_C].map(mesh => (
-              <MeshItem
-                key={mesh.id}
-                mesh={mesh}
-                isSelected={false}
-                isDropdownOpen={false}
-                isSpawning={false}
-                providerList={PROVIDERS}
-                onSelectMesh={vi.fn()}
-                onNewNode={vi.fn()}
-                onSelectProvider={vi.fn()}
-                onOpenFilesProbe={vi.fn()}
-                onOpenPropertiesProbe={vi.fn()}
-                onOpenWorktreesProbe={vi.fn()}
-                onOpenIssuesProbe={vi.fn()}
-                onOpenSessionHistoryProbe={vi.fn()}
-                meshNodes={[]}
-                activeNodeId={null}
-                setActiveNode={vi.fn()}
-                selectMesh={vi.fn()}
-                onDeleteNode={vi.fn()}
-                getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
-              />
+              <MeshItem key={mesh.id} {...makeMeshItemProps(mesh)} />
             ))}
           </div>
         </SortableContext>
