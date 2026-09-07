@@ -3,10 +3,12 @@
 use crate::db;
 use crate::env;
 use crate::models::MeshRow;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use crate::pty::PtyRegistry;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
@@ -94,41 +96,146 @@ fn validate_worktree_exists(
 // Process management
 // ---------------------------------------------------------------------------
 
-/// A build/run process tracked separately from agents
+/// A build/run process tracked separately from agents.
+///
+/// Each entry carries a per-incarnation `generation` token so the natural-exit
+/// reader thread can compare-and-remove against it instead of unconditionally
+/// deleting whatever happens to be at the same `node_id` (issue #1532). A
+/// rapid `Build → Build` (or `Run → Run`) replacement drops the previous Arc
+/// in `insert`; the previous reader thread is still pumping and will reach
+/// EOF when its master is closed, but `remove_if_current(node_id, prev_gen)`
+/// must fail to match — the entry now points at the *new* incarnation.
 struct BuildRunProcess {
-    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    /// Writer for sending user input to the PTY. Always populated (even for
-    /// one-shot build/run) so `write_to_build_run` can be called for any
-    /// entry in the registry. Build/run never receives user input today,
-    /// but storing the writer is harmless and keeps the surface uniform.
+    /// Per-incarnation token assigned by [`BuildRunRegistry::insert`].
+    /// `0` is the "not yet inserted" sentinel (matches `AgentProcess`
+    /// convention); callers should pass `0` from struct literals and
+    /// let `insert` overwrite.
+    generation: u64,
+    /// Retained child handle. The previous design `drop(child)`-ed it
+    /// immediately after spawn, leaving a stale reader thread's master
+    /// with no reaper. `teardown_inc` now `kill()` + `try_wait()`s this
+    /// so a replacement spawn cannot leak a process tree (issue #1532
+    /// point #5). `Option` so teardown can `take()` it; `None` is the
+    /// "already reaped" state.
+    child: Arc<Mutex<Option<Box<dyn Child + Send>>>>,
+    /// PTY master wrapped in `Option` so teardown can `take()` it and
+    /// drop the pseudoconsole. On Windows ConPTY the master read pipe
+    /// does not EOF on child exit — closing the master is the only way
+    /// to unblock the reader thread (mirrors `AgentProcess`).
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    /// Writer for sending user input to the PTY. Always populated (even
+    /// for one-shot build/run) so `write_to_build_run` can be called for
+    /// any entry in the registry. Build/run never receives user input
+    /// today, but storing the writer is harmless and keeps the surface
+    /// uniform.
     writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    /// PTY reader thread handle. `kill_session` joins it with a bounded
+    /// timeout so the close path can never hang the UI thread on a
+    /// wedged reader (issue #1532 teardown contract; mirrors
+    /// `AgentProcess::reader_handle`).
+    reader_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// Registry for build/run processes
+/// Thread-safe registry for build/run processes. Mirrors the
+/// incarnation-safe shape of `AgentProcessRegistry`: insertion assigns a
+/// monotonic generation token and tears down the previous entry under
+/// the same key, and reader-cleanup uses compare-and-remove.
 struct BuildRunRegistry {
-    processes: HashMap<i64, Arc<BuildRunProcess>>,
+    processes: PtyRegistry<i64, BuildRunProcess>,
+}
+
+/// Monotonic token source for [`BuildRunProcess::generation`]. Starts at
+/// `1` so a literal `generation: 0` is visibly "not yet inserted"
+/// (matches `NEXT_PROCESS_GENERATION` in `agent::process`).
+static NEXT_BUILD_RUN_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Whether teardown should join the PTY reader thread. Natural-exit
+/// reaping runs *on* the reader itself, so it must not join itself
+/// (mirrors `agent::process::JoinPolicy`).
+#[derive(Debug, Clone, Copy)]
+enum JoinPolicy {
+    /// `kill_session` / `insert` replacement path — wait up to 2 s for
+    /// the reader to exit before detaching.
+    Join,
+    /// `reap_incarnation` from inside the reader — drop the handle without
+    /// joining.
+    Drop,
 }
 
 impl BuildRunRegistry {
     fn new() -> Self {
         Self {
-            processes: HashMap::new(),
+            processes: PtyRegistry::new(),
         }
     }
 
-    fn insert(&mut self, node_id: i64, process: BuildRunProcess) {
-        self.processes.insert(node_id, Arc::new(process));
+    /// Insert `process` and return the generation token assigned to this
+    /// incarnation. A previous entry under the same node id is torn
+    /// down so `insert` cannot leak a child/PTY/writer (issue #1532
+    /// point #2 — serialize starts per node).
+    fn insert(&self, node_id: i64, mut process: BuildRunProcess) -> u64 {
+        let generation = NEXT_BUILD_RUN_GENERATION.fetch_add(1, Ordering::Relaxed);
+        process.generation = generation;
+        let previous = self.processes.insert(node_id, Arc::new(process));
+        if let Some(prev) = previous {
+            teardown_inc(&prev, JoinPolicy::Join);
+        }
+        generation
     }
 
-    fn remove(&mut self, node_id: &i64) -> Option<Arc<BuildRunProcess>> {
-        self.processes.remove(node_id)
+    /// Drop the registry entry only if it is still this incarnation. A
+    /// replacement spawn under the same node id keeps its entry (issue
+    /// #1532).
+    fn remove_if_current(&self, node_id: i64, generation: u64) -> Option<Arc<BuildRunProcess>> {
+        self.processes
+            .remove_if(&node_id, |process| process.generation == generation)
+    }
+
+    /// Reap a naturally-exited process incarnation. Returns `true` iff
+    /// the registry entry was actually removed — the caller uses the
+    /// boolean to decide whether to emit the
+    /// `build-run-exited-{node_id}` event. Compare-and-remove first so
+    /// only one teardown owns the Arc: a replacement spawn or a
+    /// concurrent `kill_session` wins the other path.
+    fn reap_incarnation(&self, node_id: i64, generation: u64) -> bool {
+        let Some(process) = self.remove_if_current(node_id, generation) else {
+            return false;
+        };
+        teardown_inc(&process, JoinPolicy::Drop);
+        true
+    }
+
+    /// Explicit close initiated by the user (X-button, `close_build_run`).
+    /// Mirrors `AgentProcessRegistry::kill_session`: removes the entry
+    /// and joins the reader with a bounded timeout. Returns true if a
+    /// process was actually reaped (used by the test surface to assert
+    /// close-vs-replacement isolation).
+    fn kill_session(&self, node_id: i64) -> bool {
+        let Some(process) = self.processes.remove(&node_id) else {
+            return false;
+        };
+        teardown_inc(&process, JoinPolicy::Join);
+        true
+    }
+
+    /// Predicate exposed for the test surface and for any future
+    /// pre-write checks. Marked `#[allow(dead_code)]` so clippy on
+    /// `--lib` doesn't flag it — the tests under `mod tests` exercise
+    /// it, but `--lib` analysis does not see test-only usage.
+    #[allow(dead_code)]
+    fn contains(&self, node_id: &i64) -> bool {
+        self.processes.contains(node_id)
+    }
+
+    fn get(&self, node_id: &i64) -> Option<Arc<BuildRunProcess>> {
+        self.processes.get(node_id)
     }
 
     /// Write bytes (user keystrokes) to the PTY master of a live process.
     /// Returns `Err("Build run not running")` if the node has no live process
     /// — matches the agent registry's error string shape so the frontend can
     /// safely ignore the "not running" case.
-    pub fn write_bytes(&self, node_id: i64, data: &[u8]) -> Result<(), String> {
+    fn write_bytes(&self, node_id: i64, data: &[u8]) -> Result<(), String> {
         let process = self
             .processes
             .get(&node_id)
@@ -139,25 +246,112 @@ impl BuildRunRegistry {
     }
 
     /// Resize the PTY to `cols` x `rows`. Same "not running" semantics.
-    pub fn resize_pty(&self, node_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+    fn resize_pty(&self, node_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         let process = self
             .processes
             .get(&node_id)
             .ok_or_else(|| "Build run not running".to_string())?;
         let master = process.master.lock().unwrap();
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())
+        let Some(m) = master.as_ref() else {
+            return Err("PTY master already closed".to_string());
+        };
+        m.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())
     }
+}
+
+/// Stash the reader thread's `JoinHandle` on the registry entry. The
+/// window between `insert` and this setter is benign — a `kill_session`
+/// arriving in that window sees `reader_handle = None` and skips the
+/// join (the thread is detached when the registry entry drops; the
+/// channel close will terminate its loop).
+fn set_reader_handle(process: &Arc<BuildRunProcess>, handle: JoinHandle<()>) {
+    *process.reader_handle.lock().unwrap() = Some(handle);
 }
 
 static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<BuildRunRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(BuildRunRegistry::new())));
+
+/// Shared teardown for a build/run process incarnation (issue #1532).
+/// The caller must already have removed `process` from the registry so
+/// only one path owns this Arc — `kill_session` and `insert` (on
+/// replacement) call this after `remove`/`insert`; `reap_incarnation`
+/// calls this after `remove_if_current`.
+fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
+    // 1. Drop the master. `Option::take` removes the `Box<dyn MasterPty>`
+    //    from the mutex; the binding falls out of scope and drops it,
+    //    closing the pseudoconsole. On Windows ConPTY this is the only
+    //    way to EOF the reader thread (mirror of the
+    //    `AgentProcess::master` close).
+    if let Ok(mut master_guard) = process.master.lock() {
+        master_guard.take();
+    }
+
+    // 2. Kill the child handle. `child.kill()` + `try_wait()` reaps the
+    //    shell handle portable-pty owns. Issue #1532 point #5: the
+    //    previous design `drop(child)`-ed the handle at the bottom of
+    //    `build_run_blocking`, leaving the process tree un-reapable
+    //    once a replacement spawn needed to kill it. Now retained for
+    //    explicit teardown.
+    if let Ok(mut child_guard) = process.child.lock() {
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
+    }
+
+    match join {
+        JoinPolicy::Join => {
+            if let Some(handle) = process.reader_handle.lock().unwrap().take() {
+                join_with_timeout(handle, std::time::Duration::from_secs(2));
+            }
+        }
+        JoinPolicy::Drop => {
+            // This thread *is* the reader. Drop the handle without
+            // joining — `JoinHandle::drop` detaches.
+            drop(process.reader_handle.lock().unwrap().take());
+        }
+    }
+}
+
+/// Join a thread, detaching it (via a watchdog) if it hasn't returned in
+/// `timeout`. Mirrors `agent::process::join_with_timeout` so a wedged
+/// reader cannot hang `kill_session` on the UI thread.
+///
+/// We can't use `JoinHandle::join_timeout` (the method doesn't exist on
+/// stable), so we run the join on a watchdog thread and wait on a
+/// oneshot channel. The watchdog outlives the timeout only if the
+/// reader is genuinely stuck; the thread itself is cheap (it's idle in
+/// `join`) and exits as soon as the reader does. The inner
+/// `JoinHandle` is dropped at the end of the watchdog's closure, which
+/// detaches the reader per `JoinHandle::drop` docs.
+fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
+    if handle.is_finished() {
+        let _ = handle.join();
+        return;
+    }
+    let watch_name = match handle.thread().name() {
+        Some(name) => format!("join-watch-{name}"),
+        None => "join-watch-buildrun-reader".to_string(),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _watchdog = std::thread::Builder::new()
+        .name(watch_name)
+        .spawn(move || {
+            let _ = handle.join();
+            // If the receiver is gone (we timed out), the send errors
+            // silently; the `JoinHandle` is still dropped on closure
+            // exit, detaching the reader thread.
+            let _ = tx.send(());
+        })
+        .expect("failed to spawn join watchdog");
+    let _ = rx.recv_timeout(timeout);
+}
 
 // ---------------------------------------------------------------------------
 // Shell selection
@@ -323,75 +517,95 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
         .take_writer()
         .map_err(|e| format!("failed to take PTY writer: {}", e))?;
 
-    // 8. Store process in registry
-    {
-        let mut registry = BUILD_RUN_REGISTRY.lock().unwrap();
-        registry.insert(
-            node_id,
-            BuildRunProcess {
-                master: Arc::new(Mutex::new(pair.master)),
-                writer: Arc::new(Mutex::new(writer)),
-            },
-        );
-    }
+    // 8. Store process in registry. The child handle is RETAINED here
+    //    (was previously `drop(child)`-ed on exit) so a replacement
+    //    spawn can `kill()` + `try_wait()` it via `teardown_inc`. See
+    //    issue #1532 point #5.
+    let process = BuildRunProcess {
+        generation: 0, // overwritten by `insert`
+        child: Arc::new(Mutex::new(Some(child))),
+        master: Arc::new(Mutex::new(Some(pair.master))),
+        writer: Arc::new(Mutex::new(writer)),
+        reader_handle: Mutex::new(None),
+    };
+    let generation = BUILD_RUN_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(node_id, process);
 
-    // 9. Spawn reader thread to stream output to frontend
+    // 9. Spawn reader thread to stream output to frontend. Capture the
+    //    generation so the EOF epilogue can `remove_if_current` instead
+    //    of unconditionally wiping the entry (issue #1532 point #3).
     let node_id_clone = node_id;
     let app_handle = app.clone();
-    std::thread::spawn(move || {
-        // Issue #1393: coalesce OS reads onto the same batcher the agent
-        // path uses (8 ms / 32 KiB) and push raw bytes over a binary
-        // Channel. Production bytes never share the JSON
-        // `build-run-output-{id}` event — that path is test injection
-        // only. The Channel is session-scoped: this reader must not
-        // unregister it on exit. `with_batcher` drops the producer
-        // before joining — joining while still holding `SyncSender`
-        // deadlocks the reader on every PTY exit.
-        let sink = crate::pty::sink::BUILD_RUN.ensure(node_id_clone);
-        crate::pty::batch::with_batcher(
-            move |batch| {
-                sink.send_owned(batch);
-            },
-            |batch_tx| {
-                let mut r = reader;
-                let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
-                loop {
-                    match r.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if batch_tx.send(buf[..n].to_vec()).is_err() {
+    let reader_handle = std::thread::Builder::new()
+        .name(format!("build-run-pty-reader-{node_id_clone}"))
+        .spawn(move || {
+            // Issue #1393: coalesce OS reads onto the same batcher the
+            // agent path uses (8 ms / 32 KiB) and push raw bytes over a
+            // binary Channel. Production bytes never share the JSON
+            // `build-run-output-{id}` event — that path is test
+            // injection only. The Channel is session-scoped: this reader
+            // must not unregister it on exit. `with_batcher` drops the
+            // producer before joining — joining while still holding
+            // `SyncSender` deadlocks the reader on every PTY exit.
+            let sink = crate::pty::sink::BUILD_RUN.ensure(node_id_clone);
+            crate::pty::batch::with_batcher(
+                move |batch| {
+                    sink.send_owned(batch);
+                },
+                |batch_tx| {
+                    let mut r = reader;
+                    let mut buf = [0u8; crate::pty::batch::PTY_READ_BUF];
+                    loop {
+                        match r.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if batch_tx.send(buf[..n].to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("build_run PTY read error: {}", e);
                                 break;
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("build_run PTY read error: {}", e);
-                            break;
-                        }
                     }
-                }
-            },
-        );
-        // EOF / read error — process is gone. Notify the frontend so the
-        // BuildRunTerminalRegistry can flip `ptyAlive=false` and surface
-        // a visible banner if the terminal is currently attached —
-        // without this, a shell that exits while the user is on another
-        // mesh would leave a zombie PTY that silently swallows keystrokes.
-        let _ = app_handle.emit(
-            &format!("build-run-exited-{}", node_id_clone),
-            BuildRunExitedPayload {},
-        );
-        // Drop the BUILD_RUN_REGISTRY entry on EOF so subsequent
-        // `write_to_build_run` calls correctly hit the "Build run not
-        // running" path. Without this, the registry still holds the
-        // writer after the child has exited, so `write_bytes` succeeds
-        // at the syscall level — keystrokes vanish silently into a dead
-        // PTY instead of producing the visible rejection. See code-review
-        // Finding Alt-2.
-        BUILD_RUN_REGISTRY.lock().unwrap().remove(&node_id_clone);
-    });
-
-    // 10. Drop child guard — the process continues in the reader thread
-    drop(child);
+                },
+            );
+            // EOF / read error — process is gone. Compare-and-remove
+            // against this thread's generation so a stale reader cannot
+            // delete a replacement process (issue #1532). `reaped`
+            // distinguishes the three lifecycle exits:
+            //
+            // - `true`  → this thread's generation is still current, so
+            //             the natural exit is real. Emit the
+            //             `build-run-exited-{node_id}` event so the
+            //             frontend can flip `ptyAlive=false`.
+            // - `false` → a replacement `insert` or a `kill_session`
+            //             already removed this entry; the close /
+            //             replacement initiator owns the next state and
+            //             emitting would mis-fire onto a live
+            //             replacement's terminal.
+            let reaped = BUILD_RUN_REGISTRY
+                .lock()
+                .unwrap()
+                .reap_incarnation(node_id_clone, generation);
+            if reaped {
+                let _ = app_handle.emit(
+                    &format!("build-run-exited-{}", node_id_clone),
+                    BuildRunExitedPayload {},
+                );
+            }
+        })
+        .map_err(|e| format!("failed to spawn reader thread: {}", e))?;
+    // Stash the JoinHandle on the registry entry so `kill_session` /
+    // a replacement `insert` can join it. The window between `insert`
+    // and this setter is benign — a teardown arriving in that window
+    // sees `reader_handle = None` and skips the join.
+    if let Some(process) = BUILD_RUN_REGISTRY.lock().unwrap().get(&node_id) {
+        set_reader_handle(&process, reader_handle);
+    }
 
     Ok(())
 }
@@ -413,13 +627,17 @@ pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
 /// X-close is a new subscribe; natural EOF keeps the xterm showing
 /// `[process exited]`). Frontend `dispose` calls
 /// `unsubscribe_build_run_output` separately.
+///
+/// Delegates to [`BuildRunRegistry::kill_session`] which marks the
+/// teardown deliberate (so the reader epilogue does NOT emit
+/// `build-run-exited-{node_id}` — the close initiator owns the next
+/// state), drops the PTY master to EOF the reader on Windows ConPTY,
+/// and joins the reader with a 2 s timeout so a wedged reader cannot
+/// hang the UI thread. Issue #1532.
 #[tauri::command]
 pub async fn close_build_run(node_id: i64) -> Result<(), String> {
-    let mut registry = BUILD_RUN_REGISTRY.lock().unwrap();
-    if let Some(process) = registry.remove(&node_id) {
-        let master = process.master.lock().unwrap();
-        drop(master);
-    }
+    let registry = BUILD_RUN_REGISTRY.lock().unwrap();
+    let _ = registry.kill_session(node_id);
     Ok(())
 }
 
@@ -621,6 +839,257 @@ mod tests {
         assert!(result.unwrap_err().contains("not running"));
     }
 
+    // --- Generation-safety tests (issue #1532) ---------------------------
+    //
+    // These exercise the lifecycle contract: a rapid Build→Build (or any
+    // spawn→spawn) replacement must (a) tear down the previous incarnation
+    // under the same node_id without leaking the entry, and (b) make the
+    // replacement immune to the previous reader thread's late EOF. The
+    // tests operate on the registry directly — no real PTY is opened;
+    // `dummy_process` constructs a stand-in BuildRunProcess whose
+    // child/master slots are empty (so `teardown_inc` no-ops on those
+    // paths but still exercises the generation bookkeeping).
+
+    use std::io::Cursor;
+
+    /// Construct a `BuildRunProcess` stand-in for tests. `child` and
+    /// `master` are `None` so `teardown_inc` no-ops on them; `writer`
+    /// is a real `Cursor<Vec<u8>>` (Send + Write) so `write_bytes` can
+    /// actually push bytes through the entry.
+    fn dummy_process() -> BuildRunProcess {
+        BuildRunProcess {
+            generation: 0,
+            child: Arc::new(Mutex::new(None)),
+            master: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(Box::new(Cursor::new(Vec::new())))),
+            reader_handle: Mutex::new(None),
+        }
+    }
+
+    /// Insert assigns strictly-monotonic generation tokens so a stale
+    /// reader can never be mistaken for a current one (issue #1532
+    /// point #1).
+    #[test]
+    fn insert_assigns_monotonic_generations() {
+        let registry = BuildRunRegistry::new();
+        let g1 = registry.insert(-915_1533, dummy_process());
+        let g2 = registry.insert(-915_1534, dummy_process());
+        let g3 = registry.insert(-915_1533, dummy_process()); // same node_id, new generation
+        assert!(g1 < g2, "g2 must be strictly greater than g1");
+        assert!(g2 < g3, "g3 must be strictly greater than g2 even on the same node_id");
+        assert_ne!(g1, g2);
+        assert_ne!(g2, g3);
+    }
+
+    /// `insert` returns the generation assigned to the new entry, not
+    /// the previous one — the reader thread must capture THIS value to
+    /// drive `reap_incarnation`.
+    #[test]
+    fn insert_returns_assigned_generation() {
+        let registry = BuildRunRegistry::new();
+        let g1 = registry.insert(-915_1535, dummy_process());
+        let arc1 = registry.get(&-915_1535).unwrap();
+        assert_eq!(arc1.generation, g1);
+
+        let g2 = registry.insert(-915_1535, dummy_process());
+        let arc2 = registry.get(&-915_1535).unwrap();
+        assert_eq!(arc2.generation, g2);
+        assert_ne!(arc1.generation, arc2.generation);
+    }
+
+    /// A previous reader's `remove_if_current` against the SAME
+    /// `node_id` must NOT delete a replacement incarnation
+    /// (issue #1532 point #3 + AC "stale A exit does not alter B").
+    /// This is the canonical race the issue describes.
+    #[test]
+    fn stale_generation_cannot_remove_replacement() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1536;
+
+        let g_a = registry.insert(node_id, dummy_process());
+        // B replaces A — `insert` tears down A's process handle (no-op
+        // on the dummy process) and assigns a fresh generation.
+        let g_b = registry.insert(node_id, dummy_process());
+        assert_ne!(g_a, g_b);
+
+        // A's reader reaches EOF after B has been published. It calls
+        // `reap_incarnation(node_id, g_a)` — must be a no-op so B
+        // stays current.
+        let reaped = registry.reap_incarnation(node_id, g_a);
+        assert!(!reaped, "stale generation must not reap a replacement");
+        assert!(
+            registry.contains(&node_id),
+            "replacement B must survive A's late EOF"
+        );
+        assert_eq!(
+            registry.get(&node_id).unwrap().generation,
+            g_b,
+            "replacement's generation must be unchanged"
+        );
+
+        // B remains writable — the user's keystrokes land on the live
+        // PTY (issue #1532 AC "B remains current and writable").
+        registry
+            .write_bytes(node_id, b"hello from replacement")
+            .expect("replacement must accept writes after stale reap");
+    }
+
+    /// `reap_incarnation` on a never-inserted generation is a no-op.
+    /// Covers the late-EOF-from-old-restart case where the generation
+    /// counter has wrapped or was never issued.
+    #[test]
+    fn reap_incarnation_unknown_generation_is_noop() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1537;
+        let g_real = registry.insert(node_id, dummy_process());
+
+        let reaped = registry.reap_incarnation(node_id, g_real + 999);
+        assert!(!reaped);
+
+        // Original entry is untouched.
+        assert_eq!(registry.get(&node_id).unwrap().generation, g_real);
+    }
+
+    /// `reap_incarnation` returns true and removes the entry when the
+    /// generation still matches — the natural-exit happy path the
+    /// reader thread takes on its own EOF.
+    #[test]
+    fn reap_incarnation_current_generation_removes_entry() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1538;
+        let g = registry.insert(node_id, dummy_process());
+        assert!(registry.contains(&node_id));
+
+        let reaped = registry.reap_incarnation(node_id, g);
+        assert!(reaped, "current-generation reap must succeed");
+        assert!(
+            !registry.contains(&node_id),
+            "current-generation reap must remove the entry"
+        );
+    }
+
+    /// `kill_session` is a deliberate teardown — mirrors user X-click.
+    /// It must reap the current incarnation and return true; subsequent
+    /// calls are no-ops (issue #1532 AC "closing current B
+    /// removes/reaps B only").
+    #[test]
+    fn kill_session_tears_down_only_current() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1539;
+
+        let g_a = registry.insert(node_id, dummy_process());
+        let g_b = registry.insert(node_id, dummy_process()); // replaces
+
+        // kill_session removes the CURRENT (B) entry — A is already gone.
+        assert!(registry.kill_session(node_id));
+        assert!(!registry.contains(&node_id));
+
+        // A's late reap (had it survived in the reader thread) would
+        // also be a no-op now.
+        assert!(!registry.reap_incarnation(node_id, g_a));
+        assert!(!registry.reap_incarnation(node_id, g_b));
+
+        // Calling kill_session on an empty registry is a no-op.
+        assert!(!registry.kill_session(node_id));
+    }
+
+    /// AC: "Concurrent starts settle on exactly one live generation."
+    /// Two sequential inserts on the same node_id end with exactly one
+    /// entry — the second insert both (a) assigns a new generation and
+    /// (b) tears down the first. After both calls settle, the registry
+    /// contains only g_b.
+    #[test]
+    fn sequential_replacements_leave_one_live_entry() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1540;
+
+        let _g_a = registry.insert(node_id, dummy_process());
+        let _g_b = registry.insert(node_id, dummy_process());
+        let _g_c = registry.insert(node_id, dummy_process());
+
+        assert_eq!(registry.processes.len(), 1, "only one entry per node_id");
+
+        // No residue: stale reaps for any earlier generation are silent.
+        assert!(!registry.reap_incarnation(node_id, _g_a));
+        assert!(!registry.reap_incarnation(node_id, _g_b));
+        // Current reap reaps cleanly.
+        assert!(registry.reap_incarnation(node_id, _g_c));
+        assert!(!registry.contains(&node_id));
+    }
+
+    /// AC: "No process/reader remains after repeated replacements."
+    /// A three-spawn cycle followed by a final kill_session leaves an
+    /// empty registry — no zombie entries, no panics on a follow-up
+    /// reap_incarnation.
+    #[test]
+    fn repeated_replacements_followed_by_close_yields_empty_registry() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1541;
+
+        for _ in 0..5 {
+            let _ = registry.insert(node_id, dummy_process());
+        }
+        // After the storm, exactly one entry remains.
+        assert_eq!(registry.processes.len(), 1);
+
+        assert!(registry.kill_session(node_id));
+        assert!(registry.processes.is_empty());
+
+        // Stale reaps do not panic, do not resurrect the entry.
+        assert!(!registry.reap_incarnation(node_id, u64::MAX));
+        assert!(registry.processes.is_empty());
+    }
+
+    /// A first-generation reap, then a second-generation insert, then a
+    /// close: the close must operate on B (the current entry), not on
+    /// the already-reaped A. Mirrors the user's mental model of "I
+    /// clicked Build twice quickly, then X-closed the second one."
+    #[test]
+    fn reap_then_replace_then_close_only_touches_current() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1542;
+
+        let g_a = registry.insert(node_id, dummy_process());
+        // A naturally exits.
+        assert!(registry.reap_incarnation(node_id, g_a));
+        assert!(!registry.contains(&node_id));
+
+        // B is inserted after A has been reaped.
+        let g_b = registry.insert(node_id, dummy_process());
+        assert!(registry.contains(&node_id));
+
+        // User closes — kill_session operates on B.
+        assert!(registry.kill_session(node_id));
+        assert!(!registry.contains(&node_id));
+
+        // B's reap would now be a no-op (entry already gone).
+        assert!(!registry.reap_incarnation(node_id, g_b));
+    }
+
+    /// The reader-facing contract: `write_bytes` keeps working on the
+    /// replacement AFTER a stale reap. Pinned explicitly because the
+    /// original bug (issue #1532) was "B is now missing from the
+    /// registry or shown as exited even though it is alive."
+    #[test]
+    fn replacement_remains_writable_after_stale_reap() {
+        let registry = BuildRunRegistry::new();
+        let node_id = -915_1543;
+
+        let g_a = registry.insert(node_id, dummy_process());
+        let g_b = registry.insert(node_id, dummy_process());
+        assert_ne!(g_a, g_b);
+
+        // Stale A reap.
+        assert!(!registry.reap_incarnation(node_id, g_a));
+
+        // B is still the live entry; writes still succeed.
+        assert!(registry.write_bytes(node_id, b"alive").is_ok());
+
+        // Sanity: B's reap reaps correctly when its own reader reaches EOF.
+        assert!(registry.reap_incarnation(node_id, g_b));
+        assert!(registry.write_bytes(node_id, b"dead").is_err());
+    }
+
     // --- Per-context command resolution (issue #802) --------------------
 
     /// Build a `MeshRow` with only the four command columns set — every other
@@ -807,10 +1276,23 @@ mod tests {
         let src = include_str!("build_run.rs");
         let production = src.split("#[cfg(test)]").next().unwrap_or(src);
 
+        // Extract the reader thread body. Anchored on `.spawn(move || {`
+        // (the open) and the `.map_err(...)?` that wraps the Builder
+        // result — the body is the only text between them (issue #1532
+        // changed `std::thread::spawn` to `std::thread::Builder` so the
+        // previous split markers no longer match).
+        //
+        // `nth(2)` rather than `nth(1)` because the production text has
+        // TWO `.spawn(move || {` patterns: the watchdog in
+        // `join_with_timeout` (line ~363) and the actual reader (line
+        // ~565). `nth(0)` is before the watchdog, `nth(1)` is between
+        // the watchdog and the reader, `nth(2)` is the reader body.
+        // Without this offset, the assertion could pass on the
+        // watchdog's body and miss a regression in the real reader.
         let reader = production
-            .split("std::thread::spawn(move || {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    });").next())
+            .split(".spawn(move || {")
+            .nth(2)
+            .and_then(|rest| rest.split(".map_err(").next())
             .expect("reader thread body");
         assert!(
             !reader.contains("BUILD_RUN.unregister") && !reader.contains("unregister_output"),
