@@ -145,8 +145,14 @@ export function FileTree({
   // the upstream source of truth, and the size here is bounded by the
   // repo's changed-file count (always small). Wrapping in useMemo
   // would add a cache to invalidate without changing what the keyboard
-  // handler observes. Issue #1542.
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- rebuilt every render on purpose; useMemo would add a cache layer without changing what the keyboard handler observes.
+  // handler observes.
+  //
+  // The lint rule fires on this line because `gitStatusMap` is consumed
+  // inside a useCallback's deps at L342 — the rule warns "object
+  // construction makes deps change every render". Wrapping in useMemo
+  // would replace one re-allocation with two (the memo + the Map
+  // construction); the simpler fix is to suppress the warning here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- rebuilt every render on purpose; useMemo would replace one allocation with two without changing the rendered output.
   const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
 
   const handleFileClick = useCallback(

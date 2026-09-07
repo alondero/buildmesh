@@ -52,12 +52,18 @@ function AppSubscriptionPattern({ onRender }: { onRender: () => void }) {
   return null;
 }
 
-/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246). */
+/** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246).
+ *  The whole-store hook call subscribes the component to every state
+ *  change (Zustand's default `Object.is` on the entire store object),
+ *  which is exactly what re-renders the app on every `patchAgentNode`.
+ *  We discard the return value — the test asserts render-count behaviour,
+ *  not which specific field was subscribed. PR #1635 review feedback:
+ *  destructure-with-rename syntax would subscribe to a single field,
+ *  turning the "anti-pattern" harness into the fix's behaviour. */
 function AppWholeStoreAntiPattern({ onRender }: { onRender: () => void }) {
   onRender();
-  const { _fetchMeshes } = useMeshStore();
-  const { _fetchAgentNodes, _initAttentionListeners } = useAgentNodeStore();
-  const _storeError = useAgentNodeStore((state) => state.error);
+  useMeshStore();
+  useAgentNodeStore();
   return null;
 }
 

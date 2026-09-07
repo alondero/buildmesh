@@ -31,12 +31,30 @@ import globals from 'globals';
 
 export default tseslint.config(
   {
+    // `reportUnusedDisableDirectives: 'error'` makes every stale
+    // `// eslint-disable-next-line …` comment fail lint instead of
+    // silently masking a rule that no longer fires (review feedback on
+    // PR #1635 — this is what caught the inert directives I had
+    // sprinkled over empty switch fall-throughs and the FileTree
+    // `new Map(...)` line). Cost: zero at runtime, a one-time
+    // backfill pain to clean up obsolete disables.
+    linterOptions: {
+      reportUnusedDisableDirectives: 'error',
+    },
+  },
+  {
     ignores: [
       'src/types/generated/**',
       'dist/**',
       'node_modules/**',
       'coverage/**',
       '.tmp/**',
+      // Agent infrastructure (PreToolUse / PostToolUse hook scripts).
+      // They live in this repo so version-controlled changes can ship
+      // with the rest of the tooling, but they're not authored against
+      // this ESLint config and have their own `process.env` / hook
+      // contract checks.
+      '.claude/hooks/**',
       // The fixture under tests/agent-infra/fixtures/ exists to PROVE
       // the gate catches what it claims to catch (issue #1542 acceptance:
       // "Fixtures with conditional Hooks or missing effect dependencies
@@ -95,21 +113,23 @@ export default tseslint.config(
       ],
 
       // General correctness — narrow, high-signal.
-      // `no-console` / `no-eval` / `no-empty-function` / `no-undef` are
-      // intentionally OFF:
+      // `no-console` / `no-eval` / `no-empty-function` are intentionally
+      // OFF in TS/TSX (TS handles unused vars + types; these are pure
+      // style):
       //   * no-console: pure style; `console.warn` is a legitimate
       //     fallback in lib/pathInvalidatedCache.ts and tests/integration.
       //   * no-eval: only used by the test mock harness; the call site is
       //     already isolated in tests/unit/tauri-mock-harness.test.ts.
       //   * no-empty-function: a flood of test-fixture vi.fn(() => {})
       //     callbacks would be the entire signal — zero bugs caught.
-      //   * no-undef: superseded by the TypeScript checker; turning it
-      //     on only catches false positives in script files using
-      //     `process` / `Buffer` (which the test override covers).
+      // `no-undef` is enabled per-file in the JS override block below
+      // (PR #1635 review feedback: turning it off globally made the
+      // browser-vs-Node globals scoping decorative — typed files have
+      // TS coverage; JS files (notably the OpenCode attention plugin)
+      // don't).
       'no-console': 'off',
       'no-eval': 'off',
       'no-empty-function': 'off',
-      'no-undef': 'off',
       'no-debugger': 'error',
       'no-fallthrough': 'error',
       'no-constant-condition': ['warn', { checkLoops: false }],
@@ -127,12 +147,24 @@ export default tseslint.config(
   // gets React Hooks rules but tests also need their own globals and
   // slightly relaxed TS rules so vitest fixtures (e.g. `as any`, `eval`)
   // can be expressed honestly. Production UI source never sees node globals.
+  //
+  // `no-undef` is OFF here because the TypeScript checker already
+  // catches undefined references AND the TS lib types
+  // (`RequestInit`, `ResizeObserverCallback`, `React` under the
+  // react-jsx transform, etc.) aren't exposed to ESLint's globals
+  // registry — turning the rule on would surface ~80 false positives
+  // (PR #1635 review feedback). The plain-JS override below is the
+  // only place we keep `no-undef: 'error'`, and only because the JS
+  // file it targets has no TypeScript coverage at all.
   {
     files: ['src/**/*.{ts,tsx}', 'mobile/**/*.{ts,tsx}'],
     languageOptions: {
       globals: {
         ...globals.browser,
       },
+    },
+    rules: {
+      'no-undef': 'off',
     },
   },
 
@@ -141,6 +173,10 @@ export default tseslint.config(
   // process/Buffer). Production TS rules still apply, but `no-explicit-any`
   // is suppressed — vitest fixture setup code regularly uses `as any` to
   // install mocks (jsdom's window, Tauri __TAURI_INTERNALS__, …).
+  //
+  // `no-undef` is OFF here too — the same TS-lib-types problem from the
+  // UI override applies, and vitest fixture setup often references TS
+  // types (`RequestInit`, `NodeJS`, etc.) that ESLint can't see.
   {
     files: ['tests/**/*.{ts,tsx,mts,mjs,js}', 'src/**/*.test.{ts,tsx}'],
     languageOptions: {
@@ -166,6 +202,7 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'off',
       'no-console': 'off',
       'no-eval': 'off',
+      'no-undef': 'off',
     },
   },
 
@@ -182,6 +219,34 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       'no-console': 'off', // these are CLI scripts; console IS the UI.
+    },
+  },
+
+  // ── Plain JS files (no TypeScript coverage) ──────────────────────────────
+  // Most of the repo is TS/TSX and is covered by the TypeScript checker
+  // for undefined-reference detection. The notable exception is
+  // `src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js`
+  // — an ESM module loaded by the OpenCode TUI at runtime. It's
+  // shipped as plain `.js` (no `tsc` compile step), so it has zero
+  // type coverage outside ESLint. We enable `no-undef` here and seed
+  // Node + browser globals so a typo in `process.env.X` actually
+  // surfaces as a lint error instead of silently passing a `undefined`
+  // into the network layer. (PR #1635 review feedback.)
+  //
+  // Posix patterns only — negation patterns (`!**/*.test.js`) caused
+  // the override to apply to `.tsx` files too during testing, which
+  // surfaces ~80 false positives for TS lib types that aren't in
+  // ESLint's globals registry.
+  {
+    files: ['src-tauri/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+      },
+    },
+    rules: {
+      'no-undef': 'error',
     },
   },
 
