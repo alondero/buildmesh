@@ -57,10 +57,24 @@ jobs:
         env:
           AGENT_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
         run: |
-          node --test tests/agent-infra/*.test.mjs
+          # test:agent runs check-agent-diff; test:readme runs the
+          # README drift gate's in-memory tests. Invoking the npm
+          # scripts explicitly (instead of a `tests/agent-infra/*.test.mjs`
+          # glob) keeps CI in lock-step with what `scripts/check.ps1`
+          # invokes locally.
+          npm run test:agent
+          npm run test:readme
           base="$AGENT_DIFF_BASE"
           if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
           node scripts/check-agent-diff.mjs --base "$base"
+
+      # Issue #1545 — gate the README against drift in the Provider enum
+      # count, supported-platforms claim, SmartScreen warning, and the
+      # CLAUDE.md "no internal issue numbers in user-facing docs" rule.
+      # Cheap (no build), runs in ~50ms; safe to add at the top of the
+      # job so a stale landing page fails before any compilation starts.
+      - name: Check README drift (issue #1545)
+        run: npm run check:readme
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
