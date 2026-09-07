@@ -441,9 +441,12 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     // lockstep on `git::sync::SyncOutcome` / `git::sync::FetchOutcome`
     // (issue #634).
     // The `is_initialized` guard keeps this hermetic under `cargo test`:
-    // `db::read_conn()` panics on an uninitialized global DB, and a filtered test
-    // run may execute `git_sync` before any DB-initializing test has run.
-    // In production the DB is always initialized at startup.
+    // a filtered test run may execute `git_sync` before any DB-initializing
+    // test has run. In production the DB is always initialized at startup.
+    // `try_read_conn()` is the production reader-pool accessor (issue #1533)
+    // — the old `read_conn()` infallible helper would have panicked here if
+    // the DB were uninitialized; today the `is_initialized` short-circuit
+    // avoids the call entirely.
     if outcome.advanced_ref() && crate::db::is_initialized() {
         if let Ok(mesh) = crate::db::get_mesh_by_path(&path) {
             let mesh_id = mesh.id;
