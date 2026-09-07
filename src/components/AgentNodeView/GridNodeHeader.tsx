@@ -23,6 +23,7 @@ import { SignalHealthBadge } from '../shared/SignalHealthBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
+import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
 import { InlineEditableText } from '../shared/InlineEditableText';
@@ -32,7 +33,7 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
-import { getAutopilotNodePresentation, getAutopilotRunDetails } from '../../lib/autopilotNodePresentation';
+import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone } from '../../lib/autopilotNodePresentation';
 import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 
 interface GridNodeHeaderProps {
@@ -53,17 +54,29 @@ interface GridNodeHeaderProps {
   dragHandleProps?: Record<string, unknown>;
 }
 
+const AUTOPILOT_PILL_CLASSES: Record<AutopilotIndicatorTone, string> = {
+  automation: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
+  warning: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
+  success: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
+  error: 'bg-status-error-bg text-status-error ring-status-error/40',
+};
+
 function getAutopilotPillDetails(node: AgentNode, state: AutopilotRunState) {
   const presentation = getAutopilotNodePresentation(node, state);
   const copy = getAutopilotRunDetails(state);
-  const className = presentation?.tone === 'success'
-    ? 'bg-accent-green/10 text-accent-green ring-accent-green/30'
-    : presentation?.tone === 'error'
-      ? 'bg-status-error-bg text-status-error ring-status-error/40'
-      : presentation?.tone === 'warning'
-        ? 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40'
-        : 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40';
-  return { ...copy, className };
+  return { ...copy, className: AUTOPILOT_PILL_CLASSES[presentation?.tone ?? 'automation'] };
+}
+
+function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership) {
+  const presentation = getAutopilotNodePresentation(node, undefined, ownership);
+  const tone: AutopilotIndicatorTone = presentation?.tone
+    ?? (ownership.state === 'cancelled' ? 'warning' : 'error');
+  const stateLabel = ownership.state.replace(/_/g, ' ');
+  return {
+    label: `${ownership.circuit_name} · #${ownership.run_id}`,
+    title: `Circuit run #${ownership.run_id} (${stateLabel}): ${presentation?.detail ?? 'historical ownership retained for inspection.'}`,
+    className: AUTOPILOT_PILL_CLASSES[tone],
+  };
 }
 
 /** Width contracts for the compact header. Keep layout decisions named so a
@@ -102,9 +115,10 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const mesh = meshesById.get(titleNode.mesh_id);
   const meshColor = getMeshColor(titleNode.mesh_id, mesh?.color);
   const canResume = canResumeSuspendedNode(node);
-  const lostConversation = hasLostConversation(node, !!autopilotState || !!circuitOwnership);
+  const lostConversation = hasLostConversation(node, hasActiveAutopilotOwnership(autopilotState, circuitOwnership));
   const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
   const autopilotPill = autopilotState ? getAutopilotPillDetails(node, autopilotState) : null;
+  const circuitPill = circuitOwnership ? getCircuitPillDetails(node, circuitOwnership) : null;
   const signalUnavailable = node.signal_health === 'unavailable';
   const compactHeader = width < HEADER_TIER_BREAKPOINTS.compact;
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
@@ -185,7 +199,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {circuitOwnership && <div data-testid="circuit-run-pill" className="mt-1 text-accent-violet">{circuitOwnership.circuit_name} · #{circuitOwnership.run_id}</div>}
+            {circuitPill && <div data-testid="circuit-run-pill" title={circuitPill.title}
+              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${circuitPill.className}`}>{circuitPill.label}</div>}
             {!circuitOwnership && autopilotPill && <div data-testid="autopilot-pill" title={autopilotPill.title}
               className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${autopilotPill.className}`}>{autopilotPill.label}</div>}
             {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">

@@ -191,6 +191,15 @@ describe('NodeItem', () => {
     expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy();
   });
 
+  it('does not suppress lost-conversation recovery for terminal Circuit history', () => {
+    const node = makeNode({ status: 'suspended', cli_session_id: '' });
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
+      10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
+    } });
+    render(<NodeItem node={node} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    expect(screen.getByText('Missing session ID')).toBeTruthy();
+  });
+
   it('uses the same waiting and failure presentations as the canvas header', () => {
     useAgentNodeStore.setState({ autopilotStates: { 10: 'finishing' }, circuitOwnerships: {} });
     const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);

@@ -46,6 +46,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
+    patchCircuitOwnershipState: spy('patchCircuitOwnershipState', () => {}),
     setSemanticTurn: spy('setSemanticTurn', () => {}),
     findAgentNode: spy('findAgentNode', (id: number) =>
       nodes.find(n => n.id === id),
@@ -144,9 +145,9 @@ describe('attachAgentNodeListeners', () => {
     await Promise.resolve();
 
     expect(surface.__calls).toEqual(
-      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(() => ({
-        method: 'fetchAgentNodes',
-        args: [],
+      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(state => ({
+        method: 'patchCircuitOwnershipState',
+        args: [9, state],
       })),
     );
   });

@@ -78,6 +78,8 @@ export interface AgentNodeActionSurface {
    *  `autopilot-finishing` / `autopilot-pr-created` /
    *  `autopilot-finish-failed`. */
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
+  /** Patch every visible node owned by a Circuit run when its runner state changes. */
+  patchCircuitOwnershipState: (runId: number, state: string) => void;
   /** Set or clear the structured action shown above an awaiting terminal. */
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   /** Read a single agent node by id — the cache-invalidation handlers
@@ -113,7 +115,7 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
       if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
-        void surface.fetchAgentNodes();
+        surface.patchCircuitOwnershipState(payload.run_id, payload.state);
       }
     }),
   );

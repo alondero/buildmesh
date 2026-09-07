@@ -1,8 +1,15 @@
-import type { AutopilotNodePresentation } from '../../lib/autopilotNodePresentation';
+import type { AutopilotIndicatorTone, AutopilotNodePresentation } from '../../lib/autopilotNodePresentation';
 
 interface AutopilotNodeIndicatorProps {
   presentation: AutopilotNodePresentation | null;
 }
+
+const TONE_COLORS: Record<AutopilotIndicatorTone, string> = {
+  automation: 'text-accent-violet',
+  warning: 'text-accent-amber',
+  success: 'text-accent-green',
+  error: 'text-status-error',
+};
 
 /** Reserves the shared 14px identity column even when the light is absent. */
 export function AutopilotNodeIndicatorCell({ presentation }: AutopilotNodeIndicatorProps) {
@@ -17,21 +24,13 @@ export function AutopilotNodeIndicatorCell({ presentation }: AutopilotNodeIndica
 export function AutopilotNodeIndicator({ presentation }: AutopilotNodeIndicatorProps) {
   if (!presentation) return null;
 
-  const color = presentation.tone === 'automation'
-    ? 'text-accent-violet'
-    : presentation.tone === 'warning'
-      ? 'text-accent-amber'
-      : presentation.tone === 'success'
-        ? 'text-accent-green'
-        : 'text-status-error';
-
   return (
     <span
       data-testid="autopilot-indicator"
       role="img"
       aria-label={presentation.label}
       title={presentation.detail}
-      className={`inline-flex h-3.5 w-3.5 items-center justify-center ${color}`}
+      className={`inline-flex h-3.5 w-3.5 items-center justify-center ${TONE_COLORS[presentation.tone]}`}
     >
       {presentation.phase === 'active' && (
         <svg aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-pulse motion-reduce:animate-none" viewBox="0 0 16 16" fill="none">

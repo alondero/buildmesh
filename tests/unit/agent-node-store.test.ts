@@ -213,6 +213,27 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().error).toContain('timeout');
     });
 
+    it('retains every satellite cache when its read fails transiently', async () => {
+      const node = makeNode({ id: 12 });
+      const ownership = { node_id: 12, run_id: 4, circuit_id: 2, circuit_name: 'Review', state: 'running', parent_node_id: null };
+      const semanticTurn = { node_id: 12, kind: 'turn_finished' as const, description: 'ready for review' };
+      useAgentNodeStore.setState({
+        autopilotStates: { 12: 'implementing' },
+        circuitOwnerships: { 12: ownership },
+        semanticTurns: { 12: semanticTurn },
+      });
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.reject(new Error(`${command} unavailable`));
+      });
+
+      await useAgentNodeStore.getState().fetchAgentNodes();
+
+      expect(useAgentNodeStore.getState().autopilotStates[12]).toBe('implementing');
+      expect(useAgentNodeStore.getState().circuitOwnerships[12]).toEqual(ownership);
+      expect(useAgentNodeStore.getState().semanticTurns[12]).toEqual(semanticTurn);
+    });
+
     it('does not let an older refresh overwrite a newer Circuit snapshot', async () => {
       const oldNode = makeNode({ id: 7, name: 'old' });
       const newNode = makeNode({ id: 7, name: 'new' });
@@ -235,9 +256,9 @@ describe('useAgentNodeStore', () => {
       const first = useAgentNodeStore.getState().fetchAgentNodes();
       await Promise.resolve();
       const second = useAgentNodeStore.getState().fetchAgentNodes();
-      await second;
       resolveOld([oldNode]);
       await first;
+      await second;
 
       expect(useAgentNodeStore.getState().nodesById[7]?.name).toBe('new');
       expect(useAgentNodeStore.getState().circuitOwnerships[7]?.run_id).toBe(2);
@@ -264,7 +285,7 @@ describe('useAgentNodeStore', () => {
       const second = useAgentNodeStore.getState().fetchAgentNodes();
       resolveOld([oldNode]);
       await first;
-      expect(useAgentNodeStore.getState().nodesById[9]).toBeUndefined();
+      expect(useAgentNodeStore.getState().nodesById[9]?.name).toBe('old');
       resolveNew([newNode]);
       await second;
 
@@ -286,9 +307,9 @@ describe('useAgentNodeStore', () => {
 
       const first = useAgentNodeStore.getState().fetchAgentNodes();
       await Promise.resolve();
-      await useAgentNodeStore.getState().fetchAgentNodes();
       rejectOld(new Error('stale timeout'));
       await first;
+      await useAgentNodeStore.getState().fetchAgentNodes();
 
       expect(useAgentNodeStore.getState().nodesById[8]?.name).toBe('new');
       expect(useAgentNodeStore.getState().error).toBeNull();
@@ -400,28 +421,22 @@ describe('useAgentNodeStore', () => {
       // remount or manual reload is involved.
       const circuitNode = makeNode({ id: 11, status: 'running' });
       seedAgentNodes([circuitNode]);
+      useAgentNodeStore.setState({ circuitOwnerships: {
+        11: { node_id: 11, run_id: 1, circuit_id: 1, circuit_name: 'Review', state: 'running', parent_node_id: null },
+      } });
+      mockInvoke.mockClear();
       const circuitStates = ['running', 'paused', 'running', 'completed'] as const;
-      let circuitRefreshes = 0;
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === 'list_agent_nodes') return Promise.resolve([circuitNode]);
-        if (command === 'list_circuit_agent_ownerships') {
-          const state = circuitStates[circuitRefreshes++] ?? 'completed';
-          return Promise.resolve([{ node_id: 11, run_id: 1, circuit_id: 1, circuit_name: 'Review', state, parent_node_id: null }]);
-        }
-        return Promise.resolve([]);
-      });
       const phases = [];
       render(createElement(StoreBackedAutopilotIndicator, { nodeId: 11 }));
       const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active', 'Autopilot done'];
       for (const [index, state] of circuitStates.entries()) {
         await mockEmit('circuit-run-updated', { run_id: 1, state });
-        await Promise.resolve();
-        await Promise.resolve();
         await waitFor(() => expect(screen.getByRole('img', { name: visibleLabels[index] })).toBeTruthy());
         const ownership = useAgentNodeStore.getState().circuitOwnerships[11];
         phases.push(getAutopilotNodePresentation(circuitNode, undefined, ownership)?.phase);
       }
       expect(phases).toEqual(['active', 'waiting', 'active', 'done']);
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 

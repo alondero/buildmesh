@@ -1121,6 +1121,12 @@ fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<Vec<AgentOw
     )?;
     for row in sources.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))? {
         let (node, run, circuit, name, state) = row?;
+        if ownerships.iter().any(|owned| owned.0 == node && owned.1 > run) {
+            // A source run is only an override when it is at least as new as
+            // the node's latest step ownership. Historical source runs must
+            // never hide a newer active step run.
+            continue;
+        }
         let source = (node, run, circuit, name, state, None);
         ownerships.retain(|owned| owned.0 != source.0);
         ownerships.push(source);
@@ -1194,6 +1200,26 @@ mod activity_ownership_tests {
         let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
         assert_eq!(rows[0].1, 2, "a newer source run supersedes older terminal history");
         assert_eq!(rows[0].4, "running");
+    }
+
+    #[test]
+    fn older_source_history_does_not_replace_newer_step_ownership() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'mixed', '/repo');
+          INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider, status)
+            VALUES (5, 1, 'mixed-node', '/repo', 'main', 'windows', 'terminal', 'running'),
+                   (8, 1, 'parent-node', '/repo', 'main', 'windows', 'terminal', 'completed');
+          INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json)
+            VALUES (1, 1, 'review', '{}');
+          INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state, source_agent_node_id)
+            VALUES (1, 1, 1, 'issue:1', 'completed', 5),
+                   (2, 1, 1, 'issue:2', 'running', NULL);
+          INSERT INTO autopilot_circuit_run_steps (run_id, node_id, status, agent_node_id, parent_agent_node_id)
+            VALUES (2, 'worker', 'running', 5, 8);").unwrap();
+
+        let rows = list_circuit_agent_ownerships_inner(&db).unwrap();
+        assert_eq!(rows, vec![(5, 2, 1, "review".to_owned(), "running".to_owned(), Some(8))]);
     }
 }
 

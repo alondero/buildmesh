@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { CircuitAgentOwnership } from '../../src/types/generated/CircuitAgentOwnership';
-import { getAutopilotNodePresentation, getAutopilotRunDetails } from '../../src/lib/autopilotNodePresentation';
+import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership } from '../../src/lib/autopilotNodePresentation';
 
 const node = (status: AgentNode['status'] = 'running'): AgentNode => ({
   id: 1,
@@ -143,5 +143,13 @@ describe('getAutopilotNodePresentation', () => {
       tone: 'error',
       label: 'Autopilot needs attention',
     });
+  });
+
+  it('only treats live ownership as active for suspended-node recovery suppression', () => {
+    expect(hasActiveAutopilotOwnership('implementing')).toBe(true);
+    expect(hasActiveAutopilotOwnership('completed')).toBe(false);
+    expect(hasActiveAutopilotOwnership(undefined, ownership('running'))).toBe(true);
+    expect(hasActiveAutopilotOwnership(undefined, ownership('completed'))).toBe(false);
+    expect(hasActiveAutopilotOwnership('implementing', ownership('completed'))).toBe(false);
   });
 });

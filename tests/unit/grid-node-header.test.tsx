@@ -146,7 +146,23 @@ describe('GridNodeHeader contextual information and actions', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     expect(screen.queryByTestId('circuit-run-pill')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
-    expect(screen.getByTestId('circuit-run-pill').textContent).toBe('Review workflow · #2');
+    const pill = screen.getByTestId('circuit-run-pill');
+    expect(pill.textContent).toBe('Review workflow · #2');
+    expect(pill.className).toContain('text-accent-violet');
+    expect(pill.getAttribute('title')).toContain('Autopilot is driving');
+  });
+
+  it.each([
+    ['failed', 'text-status-error'],
+    ['cancelled', 'text-accent-amber'],
+  ] as const)('keeps Circuit %s history richly styled in session details', (state, toneClass) => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
+      circuit_name: 'Review workflow', state, parent_node_id: null } } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    const pill = screen.getByTestId('circuit-run-pill');
+    expect(pill.className).toContain(toneClass);
+    expect(pill.getAttribute('title')).toContain(state);
   });
 
   it('keeps session and signal health warnings distinct at compact widths', () => {
@@ -499,6 +515,15 @@ describe('GridNodeHeader resume affordance', () => {
     const { getByText, queryByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
     expect(getByText('Missing session ID')).toBeTruthy();
     expect(queryByTestId('grid-resume-button')).toBeNull();
+  });
+
+  it('does not suppress lost-conversation recovery for terminal Circuit history', () => {
+    const node = { ...NODE, status: 'suspended' as const, cli_session_id: '' };
+    seedAgentNodes([node], node.id);
+    useAgentNodeStore.setState({ circuitOwnerships: {
+      1: { node_id: 1, run_id: 2, circuit_id: 9, circuit_name: 'Review workflow', state: 'completed', parent_node_id: null },
+    } });
+    expect(render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />).getByText('Missing session ID')).toBeTruthy();
   });
 
   it('renders an inline Resume button when Suspended AND cli_session_id is set', () => {

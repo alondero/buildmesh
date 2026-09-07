@@ -17,7 +17,7 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
-import { getAutopilotNodePresentation } from '../../lib/autopilotNodePresentation';
+import { getAutopilotNodePresentation, hasActiveAutopilotOwnership } from '../../lib/autopilotNodePresentation';
 import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
@@ -58,7 +58,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);
   const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
-  const isAutopilot = Boolean(autopilotState || circuitOwnership);
+  const isAutopilot = hasActiveAutopilotOwnership(autopilotState, circuitOwnership);
   const lostConversation = hasLostConversation(node, isAutopilot);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);

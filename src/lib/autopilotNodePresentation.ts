@@ -68,43 +68,32 @@ const NEEDS_ATTENTION: AutopilotNodePresentation = {
   detail: 'Autopilot reported a failure or an unknown state and needs attention.',
 };
 
-type WaitingContext = 'legacy' | 'circuit';
+const WAITING_NODE_DETAILS: Partial<Record<AgentNode['status'], string | ((node: AgentNode) => string)>> = {
+  ready: 'Autopilot is between turns after this Agent Node yielded cleanly.',
+  idle: 'Autopilot is waiting to start the next turn.',
+  awaiting_input: 'Autopilot is waiting for input from you.',
+  pending: 'Autopilot is waiting for this Agent Node to start.',
+  spawning: 'Autopilot is waiting for this Agent Node to start.',
+  suspended: (node) => node.cli_session_id
+    ? 'Autopilot is waiting for this Agent Node to recover its existing session.'
+    : 'Autopilot is waiting for this Agent Node to recover before starting a new session.',
+  completed: 'Autopilot ownership is reconciling; the run is still live while this Agent Node reports completed.',
+};
 
-function waitingForNode(node: AgentNode, context: WaitingContext, circuitState?: string): AutopilotNodePresentation {
+const CIRCUIT_WAITING_DETAILS: Record<'pending' | 'paused', string> = {
+  pending: 'Autopilot is queued for the next Circuit step.',
+  paused: 'Autopilot is paused by the Circuit.',
+};
+
+function waitingForNode(node: AgentNode, circuitState?: string): AutopilotNodePresentation {
   if (node.status === 'error') return NEEDS_ATTENTION;
-  if (node.status === 'awaiting_input') {
-    return { ...WAITING, detail: 'Autopilot is waiting for input from you.' };
+  if (circuitState === 'pending' || circuitState === 'paused') {
+    return { ...WAITING, detail: CIRCUIT_WAITING_DETAILS[circuitState] };
   }
-  if (node.status === 'suspended') {
-    return {
-      ...WAITING,
-      detail: node.cli_session_id
-        ? 'Autopilot is waiting for this Agent Node to recover its existing session.'
-        : 'Autopilot is waiting for this Agent Node to recover before starting a new session.',
-    };
-  }
-  if (node.status === 'completed') {
-    return {
-      ...WAITING,
-      detail: 'Autopilot ownership is reconciling; the run is still live while this Agent Node reports completed.',
-    };
-  }
-  if (context === 'circuit' && circuitState === 'paused') {
-    return { ...WAITING, detail: 'Autopilot is paused by the Circuit.' };
-  }
-  if (context === 'circuit' && circuitState === 'pending') {
-    return { ...WAITING, detail: 'Autopilot is queued for the next Circuit step.' };
-  }
-  if (node.status === 'ready') {
-    return { ...WAITING, detail: 'Autopilot is between turns after this Agent Node yielded cleanly.' };
-  }
-  if (node.status === 'pending' || node.status === 'spawning') {
-    return { ...WAITING, detail: 'Autopilot is waiting for this Agent Node to start.' };
-  }
-  if (node.status === 'idle') {
-    return { ...WAITING, detail: 'Autopilot is waiting to start the next turn.' };
-  }
-  return WAITING;
+  const detail = WAITING_NODE_DETAILS[node.status];
+  return detail
+    ? { ...WAITING, detail: typeof detail === 'function' ? detail(node) : detail }
+    : WAITING;
 }
 
 function mapCircuitOwnership(node: AgentNode, ownership: CircuitAgentOwnership): AutopilotNodePresentation | null {
@@ -118,7 +107,7 @@ function mapCircuitOwnership(node: AgentNode, ownership: CircuitAgentOwnership):
     if (ownership.state === 'running' && (node.status === 'running' || node.status === 'spawning')) {
       return ACTIVE;
     }
-    return waitingForNode(node, 'circuit', ownership.state);
+    return waitingForNode(node, ownership.state);
   }
   return NEEDS_ATTENTION;
 }
@@ -129,7 +118,7 @@ function mapLegacyState(node: AgentNode, state: AutopilotRunState): AutopilotNod
   if (state === 'failed') return NEEDS_ATTENTION;
   if (ACTIVE_LEGACY_STATES.has(state)) {
     if (node.status === 'running' || node.status === 'spawning') return ACTIVE;
-    return waitingForNode(node, 'legacy');
+    return waitingForNode(node);
   }
   return NEEDS_ATTENTION;
 }
@@ -147,4 +136,14 @@ export function getAutopilotNodePresentation(
   if (circuitOwnership) return mapCircuitOwnership(node, circuitOwnership);
   if (autopilotState) return mapLegacyState(node, autopilotState);
   return null;
+}
+
+/** Historical terminal rows stay in the ownership ledger for inspection, but
+ * only live ownership suppresses the suspended-node recovery warning. */
+export function hasActiveAutopilotOwnership(
+  autopilotState?: AutopilotRunState,
+  circuitOwnership?: CircuitAgentOwnership,
+): boolean {
+  if (circuitOwnership) return LIVE_CIRCUIT_STATES.has(circuitOwnership.state);
+  return autopilotState ? ACTIVE_LEGACY_STATES.has(autopilotState) : false;
 }
