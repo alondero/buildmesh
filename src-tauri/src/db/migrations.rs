@@ -284,6 +284,10 @@ pub(crate) enum AlwaysStep {
     /// Collapse duplicate built-in review preset rows left by pre-v40 builds,
     /// preserving their run history on the oldest row for each mesh.
     DeduplicateReviewPresets,
+    /// Upgrade persisted review graph contracts after the original one-shot
+    /// migration may already have been recorded. Active runs retain their
+    /// graph and are retried after they reach a terminal state.
+    UpgradeReviewContracts,
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +662,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
     AlwaysStep::DeduplicateReviewPresets,
+    AlwaysStep::UpgradeReviewContracts,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1039,6 +1044,67 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             )?;
             tx.commit()?;
         }
+        AlwaysStep::UpgradeReviewContracts => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+            {
+                return Ok(());
+            }
+            let circuits: Vec<(i64, String, bool)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, graph_json, is_preset FROM autopilot_circuits ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
+                })?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            let mut updates = Vec::new();
+            for (id, graph_json, is_preset) in circuits {
+                let active: bool = conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM autopilot_circuit_runs
+                         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused')
+                     )",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if active {
+                    continue;
+                }
+                let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!("evolve_to: cannot inspect review circuit {}: {}", id, error);
+                        continue;
+                    }
+                };
+                let changed = if is_preset {
+                    graph.upgrade_legacy_agent_review_prompts()
+                } else if graph.is_issue_driven_autopilot_review() {
+                    graph.upgrade_legacy_issue_review_contract()
+                } else {
+                    false
+                };
+                if changed {
+                    updates.push((id, graph.to_json().map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                        ))
+                    })?));
+                }
+            }
+            if !updates.is_empty() {
+                let tx = conn.unchecked_transaction()?;
+                for (id, graph_json) in updates {
+                    tx.execute(
+                        "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        params![id, graph_json],
+                    )?;
+                }
+                tx.commit()?;
+            }
+        }
         AlwaysStep::UpgradeIssueReviewFirstTurns => {
             // v2 also backfills the explicit OpenPr policy on persisted
             // review graphs, so the migration must run once after v1 has
@@ -1062,7 +1128,20 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
+            let mut deferred = false;
             for (id, graph_json) in circuits {
+                let active: bool = conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM autopilot_circuit_runs
+                         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused')
+                     )",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if active {
+                    deferred = true;
+                    continue;
+                }
                 let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(
                     &graph_json,
                 ) {
@@ -1098,10 +1177,12 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     )?;
                 }
             }
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
-                params![FLAG],
-            )?;
+            if !deferred {
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                    params![FLAG],
+                )?;
+            }
         }
     }
     Ok(())

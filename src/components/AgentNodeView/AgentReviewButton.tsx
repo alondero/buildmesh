@@ -77,15 +77,15 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
 
   return <>
     <button type="button"
-      aria-label="Start agent workflow"
-      title="Start a review loop or Circuit"
+      aria-label="Start the Review Loop or Circuit"
+      title="Start the Review Loop or Circuit"
       disabled={!activeOwnership && !eligible}
       onClick={() => setOpen(true)}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
     ><CircuitsIcon className="h-4 w-4" /></button>
     {open && createPortal(
-      <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start agent workflow" maxWidth="max-w-sm">
-        <h2 className="text-sm font-semibold mb-2">Workflow for {node.name}</h2>
+      <Modal onClose={() => { if (!busy) setOpen(false); }} ariaLabel="Start the Review Loop or Circuit" maxWidth="max-w-sm">
+        <h2 className="text-sm font-semibold mb-2">Review Loop or Circuit for {node.name}</h2>
         {activeOwnership ? <>
           <p className="text-xs text-text-secondary mb-3">
             This agent is already controlled by Circuit #{activeOwnership.run_id} ({activeOwnership.state}).
@@ -109,7 +109,8 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
         {circuitId === null ? <><p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
-          The reviewer uses the same provider as this agent. You can pause or cancel in Circuits.
+          The reviewer uses this agent's provider and the Mesh's configured review model and effort.
+          You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">
           Maximum review rounds

@@ -20,6 +20,34 @@ to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
 
+## Review presentation contract
+
+The title-bar review preset and the issue-driven Autopilot review blueprint
+use the same activity presentation and review criteria.
+The source is the **Implementation** activity and each owned reviewer is a
+**Review** activity in the source's node card, selected through the shared
+activity tabs. Selecting a review activity retargets the header actions,
+terminal, input, and changes to that reviewer; the source task title remains
+stable. The All sessions menu remains available when the card is narrow.
+
+Review findings are returned through the circuit run's existing feedback step
+to the source agent. The source's terminal remains the place where that agent
+receives the requested fixes, while the reviewer report remains available in
+the run history and on the reviewer activity until the existing retention or
+cleanup policy removes it. Both flows use explicit approval, changes-requested,
+and blocked verdicts. Only changes-requested reports start a fix round.
+
+By default, reviewers inherit the reviewed agent's harness. Explicit reviewer
+settings in an authored Circuit take precedence; model and effort use the
+existing Mesh/harness cascade. PR reviews inspect the published PR and post
+their findings there as well as returning the terminal report. Local reviews
+include uncommitted work and do not publish comments.
+
+On startup, inactive stock review graphs are upgraded to this contract while
+preserving spawn settings and round limits. Customized issue-review prompts
+or topology are left intact. Active runs retain their saved graph; their
+upgrade is reconsidered on a later startup after they finish.
+
 Runs use the existing Circuits queue, capacity limits, run history, pause,
 approval, and cancellation controls. A repeated start while the source already
 has a pending/active node-started run returns that run. An agent actively owned

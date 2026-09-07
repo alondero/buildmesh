@@ -401,7 +401,7 @@ pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option
 pub(crate) fn review_prompt(output: &str) -> String {
     format!(
         "Assess the final review report in this agent's terminal output. Ignore echoed prompts and tool progress. \
-         Answer exactly one word: COMPLETED only if the reviewer explicitly approves the work with no remaining findings; \
+         The reviewer uses APPROVED, CHANGES_REQUESTED, or BLOCKED. Answer exactly one word: COMPLETED only if the reviewer explicitly approves the work with no remaining findings; \
          WORKING if the reviewer requests changes or reports unresolved actionable findings; \
          BLOCKED if the review is incomplete, ambiguous, or cannot be performed.\n\n{}",
         output

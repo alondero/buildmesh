@@ -2149,6 +2149,40 @@ fn non_empty_trim(s: &str) -> Option<&str> {
     }
 }
 
+fn inherited_review_provider(
+    explicit: Option<&str>,
+    parent_provider: Option<&str>,
+) -> Option<String> {
+    explicit
+        .and_then(non_empty_trim)
+        .or_else(|| parent_provider.and_then(non_empty_trim))
+        .map(str::to_string)
+}
+
+fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
+    (view.context.get("source.review_preset") == Some("1")
+        || view.graph.is_issue_driven_autopilot_review())
+        && node_id == "reviewer"
+        || view.graph.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                CircuitNodeKind::ReviewVerdict { target_node_id }
+                    if target_node_id.as_deref() == Some(node_id)
+            )
+    })
+}
+
+fn review_parent_agent_id(view: &RunView, node_id: &str) -> Option<i64> {
+    view.graph
+        .nearest_upstream_agent_step(node_id)
+        .and_then(|parent_step| view.step(&parent_step).and_then(|step| step.agent_node_id))
+        .or_else(|| {
+            is_review_spawn_step(view, node_id)
+                .then(|| view.context.source_agent_id())
+                .flatten()
+        })
+}
+
 /// The output of [`resolve_circuit_spawn_inputs`]: the prompt + name
 /// carried through verbatim, the optional per-step provider string for
 /// `create_pending`, the layer-1 cascade override for
@@ -2335,10 +2369,7 @@ fn spawn_step_agent(
     // Activity parentage is derived once from the circuit graph and persisted
     // with the step association. The DB layer does not inspect graph JSON or
     // infer special step names.
-    let parent_agent_node_id = view
-        .graph
-        .nearest_upstream_agent_step(node_id)
-        .and_then(|parent_step| view.step(&parent_step).and_then(|step| step.agent_node_id));
+    let parent_agent_node_id = review_parent_agent_id(view, node_id);
     let kind = view
         .graph
         .node(node_id)
@@ -2386,6 +2417,12 @@ fn spawn_step_agent(
         .get("issue.number")
         .and_then(|number| number.parse::<i64>().ok());
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    if is_review_spawn_step(view, node_id) && parent_agent_node_id.is_some() {
+        let parent_provider = parent_agent_node_id
+            .and_then(|id| db::get_agent_node_by_id(id).ok())
+            .map(|node| node.provider);
+        provider_str = inherited_review_provider(provider_str.as_deref(), parent_provider.as_deref());
+    }
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
@@ -4441,6 +4478,83 @@ mod tests {
         let kind = spawn_kind(Some("codex"), None, None, None);
         let resolved = resolve_circuit_spawn_inputs(&kind).expect("valid spawn");
         assert_eq!(resolved.provider_str.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn review_provider_selection_preserves_explicit_and_inherits_parent() {
+        assert_eq!(
+            inherited_review_provider(None, Some("codex")),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            inherited_review_provider(Some("  claude  "), Some("codex")),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            inherited_review_provider(Some(" \t"), Some("  kimi ")),
+            Some("kimi".to_string())
+        );
+        assert_eq!(inherited_review_provider(None, None), None);
+    }
+
+    #[test]
+    fn review_spawn_detection_is_limited_to_review_graphs() {
+        let review = CircuitGraph::agent_review("claude", None, None, 2);
+        let mut context = CircuitContext::new();
+        context.set("source.review_preset", "1");
+        let view = RunView {
+            run_id: 1,
+            graph: review,
+            state: RunState::Running,
+            context,
+            steps: vec![],
+        };
+        assert!(is_review_spawn_step(&view, "reviewer"));
+        assert_eq!(review_parent_agent_id(&view, "reviewer"), None);
+
+        let mut source_context = CircuitContext::new();
+        source_context.set("source.review_preset", "1");
+        source_context.set("source.agent_id", "77");
+        let source_view = RunView {
+            run_id: 3,
+            graph: CircuitGraph::agent_review("claude", None, None, 2),
+            state: RunState::Running,
+            context: source_context,
+            steps: vec![],
+        };
+        assert_eq!(review_parent_agent_id(&source_view, "reviewer"), Some(77));
+
+        let issue_graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let issue_steps = issue_graph
+            .nodes
+            .iter()
+            .map(|node| StepView {
+                node_id: node.id.clone(),
+                status: StepStatus::Completed,
+                outcome: None,
+                error: None,
+                agent_node_id: (node.id == "implementer").then_some(42),
+                attempt: 1,
+            })
+            .collect();
+        let issue_view = RunView {
+            run_id: 4,
+            graph: issue_graph,
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: issue_steps,
+        };
+        assert_eq!(review_parent_agent_id(&issue_view, "reviewer"), Some(42));
+
+        let ordinary = CircuitGraph::walking_skeleton("work");
+        let plain = RunView {
+            run_id: 2,
+            graph: ordinary,
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        assert!(!is_review_spawn_step(&plain, "spawn"));
     }
 
     /// The cascade layer-1 (explicit) override slot must carry the per-node

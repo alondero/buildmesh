@@ -693,10 +693,10 @@ impl CircuitGraph {
             "review_prompt",
             "review_classifier",
             "The pull request URL is {{pr.url}}. Use it as additional review context.",
-            Self::PR_REVIEW_PROMPT,
+            Self::LEGACY_PR_REVIEW_PROMPT,
             &format!(
                 "{}. The pull request URL is {{{{pr.url}}}}.",
-                Self::PR_REVIEW_PROMPT
+                Self::LEGACY_PR_REVIEW_PROMPT
             ),
         );
         marker_changed || policy_changed || implementer_changed || reviewer_changed
@@ -835,7 +835,110 @@ impl CircuitGraph {
     /// this is a headless circuit template using `{{pr.number}}` that instructs an
     /// autonomous agent to post comments back to GitHub, whereas the probe prefill formats
     /// an interactive session for a human developer with the PR URL on a newline.
-    pub const PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
+    pub const REVIEW_POLICY: &'static str = "Review the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the complete change, including relevant project instructions and tests. Report only actionable findings with file locations and explain their impact. End with exactly one verdict: APPROVED when no actionable findings remain, CHANGES_REQUESTED when fixes are needed, or BLOCKED when the review cannot be completed.";
+    pub const PR_REVIEW_PROMPT: &'static str = "Review PR {{pr.number}} ({{pr.url}}). Add actionable review comments to the PR, then provide the same findings and one canonical verdict in your final response.";
+    const LEGACY_PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
+    pub const REVIEW_FEEDBACK_POLICY: &'static str = "Reviewer report:\n{{node.reviewer.output}}\nAddress every valid finding, run relevant tests, and report what you changed. Explain any finding you disagree with. Do not start another review loop yourself.";
+    pub fn local_review_prompt() -> String {
+        let scope = concat!(
+            "Review the work of agent {{source.agent_id}} in {{source.path}}. ",
+            "Read that directory directly: review committed changes from the merge-base with ",
+            "{{source.base_ref}} and all uncommitted/untracked changes. ",
+            "The source task is {{source.name}}. Its latest report is: {{source.output}}\n",
+            "Do not modify files, commit, push, post comments, or open a PR. ",
+            "This is review round {{retry.attempt}} of {{retry.max_retries}}."
+        );
+        format!("{}\n{}", Self::REVIEW_POLICY, scope)
+    }
+    pub fn pr_review_prompt() -> String {
+        format!("{}\n{} Do not modify files, commit, push, or open another PR.", Self::REVIEW_POLICY, Self::PR_REVIEW_PROMPT)
+    }
+    pub fn review_feedback_prompt(scope: &str) -> String { format!("{}\n{}", scope, Self::REVIEW_FEEDBACK_POLICY) }
+
+    pub fn upgrade_legacy_agent_review_prompts(&mut self) -> bool {
+        let old_review = "Review the work of agent {{source.agent_id}} in {{source.path}}. Read that directory directly: review committed changes from the merge-base with {{source.base_ref}} and all uncommitted/untracked changes. The source task is {{source.name}}. Its latest report is: {{source.output}}\nInspect the code and relevant project instructions. Do not modify files, commit, push, post comments, or open a PR. Report actionable findings with file locations in your final response. If the work is satisfactory, explicitly state that you approve and have no remaining findings. Otherwise explicitly state that changes are requested. If you cannot assess the work, explain the blocker. This is review round {{retry.attempt}} of {{retry.max_retries}}.";
+        let old_feedback = "An independent reviewer requested changes to your work. Review report:\n{{node.reviewer.output}}\nAddress every valid finding, run relevant checks, and report your changes. Explain any finding you disagree with. Another independent review will follow. Do not start another review loop yourself.";
+        let mut changed = false;
+        for node in &mut self.nodes {
+            match &mut node.kind {
+                CircuitNodeKind::SpawnAgentNode { prompt, .. }
+                    if node.id == "reviewer" && prompt == old_review => {
+                        *prompt = Self::local_review_prompt(); changed = true;
+                    }
+                CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "feedback" && prompt == old_feedback => {
+                        *prompt = Self::review_feedback_prompt("An independent reviewer requested changes to your work."); changed = true;
+                    }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// Startup migration entry point for the review contract. Kept separate
+    /// from the first-turn migration so callers can run one idempotent pass
+    /// for already-installed circuits.
+    pub(crate) fn upgrade_legacy_issue_review_contract(&mut self) -> bool {
+        let mut candidate = self.clone();
+        candidate.upgrade_legacy_issue_review_first_turns();
+        if !candidate.is_issue_driven_autopilot_review() {
+            return false;
+        }
+        let Some(CircuitNodeKind::GithubIssueLabel { label }) =
+            candidate.node("trigger").map(|node| &node.kind)
+        else { return false; };
+        let mut replacement = Self::issue_driven_autopilot_review(label);
+        // Spawn settings and round limits are independent of the review contract.
+        // Preserve them, but require every prompt, target and edge to be stock.
+        for node in &mut replacement.nodes {
+            let Some(saved) = candidate.node(&node.id) else { continue; };
+            match (&mut node.kind, &saved.kind) {
+                (CircuitNodeKind::SpawnAgentNode { name, provider, model, effort, extra_args, .. },
+                 CircuitNodeKind::SpawnAgentNode { name: saved_name, provider: saved_provider,
+                     model: saved_model, effort: saved_effort, extra_args: saved_args, .. }) => {
+                    name.clone_from(saved_name);
+                    provider.clone_from(saved_provider);
+                    model.clone_from(saved_model);
+                    effort.clone_from(saved_effort);
+                    extra_args.clone_from(saved_args);
+                }
+                (CircuitNodeKind::RetryLimit { max_retries },
+                 CircuitNodeKind::RetryLimit { max_retries: saved_max }) => *max_retries = *saved_max,
+                _ => {}
+            }
+        }
+        let mut legacy = replacement.clone();
+        legacy.version = candidate.version;
+        let added = ["close_review_approved", "review_approved", "close_review_blocked", "review_blocked"];
+        legacy.nodes.retain(|node| !added.contains(&node.id.as_str()));
+        legacy.edges.retain(|edge| !added.contains(&edge.from.as_str()) && !added.contains(&edge.to.as_str()));
+        for node in &mut legacy.nodes {
+            match node.id.as_str() {
+                "reviewer" => if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                    *prompt = format!("{}. The pull request URL is {{{{pr.url}}}}.", Self::LEGACY_PR_REVIEW_PROMPT);
+                },
+                "review_classifier" => node.kind = CircuitNodeKind::LlmTurnClassifier {
+                    target_node_id: Some("reviewer".into()),
+                },
+                "follow_feedback" => node.kind = CircuitNodeKind::InjectPty {
+                    prompt: "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.".into(),
+                    target_node_id: Some("implementer".into()),
+                },
+                "complete" => node.kind = CircuitNodeKind::Notify {
+                    message: "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})".into(),
+                },
+                _ => {}
+            }
+        }
+        for edge in &mut legacy.edges {
+            if edge.from == "review_classifier" && edge.to == "follow_feedback" {
+                edge.condition = EdgeCondition::OnOutcome(StepOutcome::Completed);
+            }
+        }
+        if candidate != legacy { return false; }
+        *self = replacement;
+        true
+    }
 
     /// Build the issue-driven Autopilot blueprint with a post-PR review loop.
     ///
@@ -931,10 +1034,7 @@ impl CircuitGraph {
                 node(
                     "reviewer",
                     CircuitNodeKind::SpawnAgentNode {
-                        prompt: format!(
-                            "{}. The pull request URL is {{{{pr.url}}}}.",
-                            Self::PR_REVIEW_PROMPT
-                        ),
+                        prompt: Self::pr_review_prompt(),
                         name: None,
                         provider: None,
                         model: None,
@@ -944,14 +1044,14 @@ impl CircuitGraph {
                 ),
                 node(
                     "review_classifier",
-                    CircuitNodeKind::LlmTurnClassifier {
+                    CircuitNodeKind::ReviewVerdict {
                         target_node_id: Some("reviewer".to_string()),
                     },
                 ),
                 node(
                     "follow_feedback",
                     CircuitNodeKind::InjectPty {
-                        prompt: "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.".to_string(),
+                        prompt: Self::review_feedback_prompt("Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}) and update the PR."),
                         target_node_id: Some("implementer".to_string()),
                     },
                 ),
@@ -961,6 +1061,10 @@ impl CircuitGraph {
                         target_node_id: Some("reviewer".to_string()),
                     },
                 ),
+                node("close_review_approved", CircuitNodeKind::CloseAgentNode { target_node_id: Some("reviewer".to_string()) }),
+                node("review_approved", CircuitNodeKind::Notify { message: "PR review approved for #{{pr.number}} ({{pr.url}})".to_string() }),
+                node("close_review_blocked", CircuitNodeKind::CloseAgentNode { target_node_id: Some("reviewer".to_string()) }),
+                node("review_blocked", CircuitNodeKind::Notify { message: "PR review needs attention for #{{pr.number}}: reviewer could not complete the review.".to_string() }),
                 node(
                     "feedback_classifier",
                     CircuitNodeKind::LlmTurnClassifier {
@@ -971,7 +1075,7 @@ impl CircuitGraph {
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
-                        message: "PR review feedback was sent to the implementation agent for PR #{{pr.number}} ({{issue.title}})".to_string(),
+                        message: "Review limit reached for PR #{{pr.number}} after {{retry.max_retries}} rounds. Latest fixes have not been approved; inspect the review report before continuing.".to_string(),
                     },
                 ),
             ],
@@ -988,7 +1092,11 @@ impl CircuitGraph {
                 edge("finish_round", "finish_classifier"),
                 outcome("open_pr", "reviewer", Completed),
                 edge("reviewer", "review_classifier"),
-                outcome("review_classifier", "follow_feedback", Completed),
+                outcome("review_classifier", "follow_feedback", StepOutcome::Working),
+                outcome("review_classifier", "close_review_approved", StepOutcome::Completed),
+                outcome("review_classifier", "close_review_blocked", StepOutcome::Blocked),
+                edge("close_review_approved", "review_approved"),
+                edge("close_review_blocked", "review_blocked"),
                 edge("follow_feedback", "close_reviewer"),
                 edge("close_reviewer", "feedback_classifier"),
                 outcome("feedback_classifier", "review_retry", Completed),
@@ -1105,6 +1213,39 @@ pub fn trigger_kind_to_node_kind(req: &ValidatedCircuitRequest) -> CircuitNodeKi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_review_scopes_share_policy_and_resolve_their_complete_context() {
+        use crate::autopilot::circuit::context::CircuitContext;
+        let mut context = CircuitContext::new();
+        for (key, value) in [
+            ("source.agent_id", "42"), ("source.path", "C:/work/local"),
+            ("source.base_ref", "origin/main"), ("source.name", "Fix persistence"),
+            ("source.output", "Added durable storage"), ("retry.attempt", "2"),
+            ("retry.max_retries", "3"), ("pr.number", "81"),
+            ("pr.url", "https://example.test/pull/81"),
+            ("node.reviewer.output", "CHANGES_REQUESTED: persist before notifying"),
+        ] { context.set(key, value); }
+        let local = context.resolve(&CircuitGraph::local_review_prompt());
+        let pr = context.resolve(&CircuitGraph::pr_review_prompt());
+        for prompt in [&local, &pr] {
+            assert!(prompt.contains(CircuitGraph::REVIEW_POLICY));
+            assert!(!prompt.contains("{{"));
+            assert!(prompt.contains("Do not modify files, commit, push"));
+        }
+        for detail in ["42", "C:/work/local", "origin/main", "Fix persistence", "Added durable storage", "round 2 of 3"] {
+            assert!(local.contains(detail), "missing local review context: {detail}");
+        }
+        assert!(pr.contains("Review PR 81 (https://example.test/pull/81)"));
+        for graph in [CircuitGraph::agent_review("codex", None, None, 3), CircuitGraph::issue_driven_autopilot_review("run")] {
+            let feedback = graph.nodes.iter().find_map(|node| match &node.kind {
+                CircuitNodeKind::InjectPty { prompt, .. } if node.id == "feedback" || node.id == "follow_feedback" => Some(prompt),
+                _ => None,
+            }).unwrap();
+            assert!(feedback.contains(CircuitGraph::REVIEW_FEEDBACK_POLICY));
+            assert!(context.resolve(feedback).contains("CHANGES_REQUESTED: persist before notifying"));
+        }
+    }
 
     fn spawn_kind(prompt: &str, name: Option<&str>) -> CircuitNodeKind {
         CircuitNodeKind::SpawnAgentNode {
@@ -1743,7 +1884,7 @@ mod tests {
         assert!(matches!(
             g.node("complete").map(|n| &n.kind),
             Some(CircuitNodeKind::Notify { message })
-                if message.contains("{{pr.number}}") && message.contains("{{issue.title}}")
+                if message.contains("{{pr.number}}") && message.contains("have not been approved")
         ));
         assert!(
             g.edges.iter().any(|edge| {
@@ -1801,7 +1942,7 @@ mod tests {
         graph.nodes.push(CircuitNode {
             id: "review_prompt".into(),
             kind: CircuitNodeKind::InjectPty {
-                prompt: CircuitGraph::PR_REVIEW_PROMPT.into(),
+                prompt: CircuitGraph::LEGACY_PR_REVIEW_PROMPT.into(),
                 target_node_id: Some("reviewer".into()),
             },
         });
@@ -1830,7 +1971,7 @@ mod tests {
         assert!(matches!(
             parsed.node("reviewer").map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
-                if prompt.contains(CircuitGraph::PR_REVIEW_PROMPT)
+                if prompt.contains(CircuitGraph::LEGACY_PR_REVIEW_PROMPT)
                     && prompt.contains("{{pr.url}}")
         ));
         parsed.validate().unwrap();

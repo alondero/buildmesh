@@ -4039,7 +4039,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("The architecture needs a cleanup pass."),
             ),
         );
@@ -4077,6 +4077,44 @@ mod tests {
         assert_eq!(run.context.get("retry.attempt"), Some("2"));
         assert_eq!(run.context.get("retry.max_retries"), Some("3"));
         assert!(retry.effects.is_empty());
+    }
+
+    #[test]
+    fn issue_review_approved_verdict_closes_reviewer_without_feedback() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(), success: true, pr_number: Some(1),
+            pr_url: Some("https://example/pr/1".into()), pr_head_ref: Some("b".into()),
+            pr_title: Some("t".into()), error: None,
+        });
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        let t = advance(&mut run, &classified_with_output("review_classifier", Some(Classification::Completed), Some("APPROVED")));
+        assert!(t.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "reviewer")));
+        assert!(run.step("follow_feedback").is_none());
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "review_approved"), StepStatus::Completed);
+    }
+
+    #[test]
+    fn issue_review_blocked_verdict_closes_reviewer_and_notifies_attention() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(), success: true, pr_number: Some(1),
+            pr_url: Some("https://example/pr/1".into()), pr_head_ref: Some("b".into()),
+            pr_title: Some("t".into()), error: None,
+        });
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 9001);
+        advance(&mut run, &agent_finished(9001, true));
+        let t = advance(&mut run, &classified_with_output("review_classifier", Some(Classification::Blocked), Some("BLOCKED")));
+        assert!(t.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "reviewer")));
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
+        assert!(run.step("follow_feedback").is_none());
     }
 
     // -- issue-driven Autopilot review blueprint contract (#1469) -----------
@@ -4263,7 +4301,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("The implementation misses an explicit cleanup hook."),
             ),
         );
@@ -4303,7 +4341,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("reviewer report"),
             ),
         );
@@ -4366,7 +4404,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("report"),
             ),
         );
@@ -4431,7 +4469,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("fix"),
             ),
         );
@@ -4508,7 +4546,7 @@ mod tests {
             &mut run,
             &classified_with_output(
                 "review_classifier",
-                Some(Classification::Completed),
+                Some(Classification::Working),
                 Some("reviewer report"),
             ),
         );
