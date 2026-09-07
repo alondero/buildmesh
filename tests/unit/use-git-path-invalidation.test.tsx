@@ -126,7 +126,7 @@ describe('useGitPathInvalidation (issue #357)', () => {
     // be the new value on the first emit after the rerender. With the
     // ref pattern, the LATEST cb runs on every emit, so the new
     // counter value is observed.
-    let counter = 0;
+    let _counter = 0;
     const cb1 = vi.fn(() => {
       // The current closure captures `counter = 0` — if the hook called
       // this on the second emit, we'd see counter === 0 in the marker.
@@ -151,7 +151,7 @@ describe('useGitPathInvalidation (issue #357)', () => {
     // inline arrow) WITHOUT changing `path`. The hook must NOT
     // re-subscribe — instead, it should call the LATEST cb on the
     // next event (via the ref).
-    counter = 1;
+    _counter = 1;
     rerender({ cb: cb2 });
 
     await act(async () => {

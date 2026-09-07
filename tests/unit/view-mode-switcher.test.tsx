@@ -13,7 +13,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { ViewModeSwitcher } from '../../src/components/ViewModeSwitcher/ViewModeSwitcher';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const MESH_1: Mesh = {

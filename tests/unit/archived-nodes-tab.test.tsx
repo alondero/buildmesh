@@ -24,7 +24,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { ArchivedNodesTab } from '../../src/components/Probe/ArchivedNodesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ArchivedAgentNode } from '../../src/lib/tauri';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
@@ -114,7 +113,7 @@ function mockBackend(opts: {
   defaultProvider?: string;
   providers?: typeof PROVIDERS;
 } = {}) {
-  vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+  vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
     switch (cmd) {
       case 'discover_agent_nodes':
         return Promise.resolve(opts.sessions ?? SESSIONS);

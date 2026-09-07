@@ -59,7 +59,11 @@ function openTerminalLink(_event: MouseEvent, uri: string): void {
 }
 
 function measureAndFit(inst: TerminalInstance): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // xterm's `_core._charSizeService` is the canonical hook for forcing
+  // a re-measure of cell widths after a font swap or a Unicode 11+
+  // override; the public API doesn't expose it. Cast to `any` is the
+  // supported escape hatch documented in the xterm source. Issue #1542.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- xterm public API doesn't expose charSizeService; the cast is the documented escape hatch for cell-width re-measurement.
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
   charSizeService?.measure();
   inst.fitAddon.fit();
@@ -365,8 +369,7 @@ export class TerminalRegistry {
       // attached terminals; everything else uses xterm's DOM renderer —
       // see WebglRendererPool.ts and loadWebglRenderer.ts.
 
-      let instance: TerminalInstance;
-      instance = {
+      const instance: TerminalInstance = {
         term,
         fitAddon,
         serializeAddon,

@@ -11,7 +11,7 @@
  * space shrinks ~34 px and the menu items keep their original labels.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, fireEvent, screen, act } from '@testing-library/react';
+import { render, fireEvent, screen } from '@testing-library/react';
 import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { BuildRunDropdown } from '../../src/components/BuildRun/BuildRunDropdown';
 

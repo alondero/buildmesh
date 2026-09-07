@@ -429,13 +429,18 @@ function App() {
       addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [addToast]);
+    // `addToast` is a stable function reference from the toast store;
+    // re-binding the listener on every render churns unlisten/relisten
+    // for no functional gain. Issue #1542 — exhaustive-deps.
+  }, []);
 
   useEffect(() => {
     if (storeError) {
       addToast('System', storeError, 'error');
     }
-  }, [storeError, addToast]);
+    // `addToast` is a stable function reference; see the comment on the
+    // effect above. Issue #1542 — exhaustive-deps.
+  }, [storeError]);
 
   // Issue #1250 — extract init into a callback so the BootErrorPanel's
   // Retry button can re-run it without unmounting the whole App.

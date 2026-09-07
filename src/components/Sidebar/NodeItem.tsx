@@ -283,6 +283,13 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
+    // `closeContextMenu` and `regenSubmenu` are local closures that
+    // capture `regenSubmenu` (itself a fresh object each render);
+    // depending on either would re-attach the keydown listener on
+    // every render. The handler reads the live ref values via
+    // `activeIndexRef.current` / `regenSubmenu.submenuContainsFocus()`,
+    // so the stale-closure trap doesn't apply here. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- local closures; handler reads live refs so stale-closure trap doesn't apply.
   }, [contextMenu, getParentMenuItems]);
 
   // Issue #776 — viewport clamping. Runs after the menu mounts so we
@@ -342,7 +349,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     setActiveIndex(0);
     const parentItems = getParentMenuItems();
     if (parentItems[0]) focusWithoutScroll(parentItems[0]);
-  }, [contextMenu !== null, getParentMenuItems]);
+    // The boolean expression `contextMenu !== null` is the canonical
+    // "menu opened/closed" signal; depending on the full `contextMenu`
+    // object would re-run the focus dance whenever any menu field
+    // changed. `getParentMenuItems` is a stable callback. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- getParentMenuItems is stable; deps key on the boolean `menu open` signal, not the full contextMenu object.
+  }, [contextMenu !== null]);
 
   return (
     <div

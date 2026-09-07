@@ -77,7 +77,12 @@ function mountHook(
     rerender: () => {},
     rerenders: 0,
   };
-  let tick = 0;
+  // `tick` is the closure-captured counter the test increments on each
+  // rerender; the assertion reads it via the closure, not directly, so
+  // the value is intentionally write-only from the harness's POV. The
+  // `_` prefix lets `varsIgnorePattern: '^_'` keep the ESLint gate quiet
+  // without an explicit disable (issue #1542).
+  let _tick = 0;
 
   function Tree() {
     // Inline arrow — a NEW function reference every render. This is
@@ -100,7 +105,7 @@ function mountHook(
   });
 
   harness.rerender = () => {
-    tick += 1;
+    _tick += 1;
     // NO `key` change — we WANT React to preserve the component
     // instance across rerenders so the hook's effect stays mounted.
     // A `key` change would force unmount + remount, which would re-arm

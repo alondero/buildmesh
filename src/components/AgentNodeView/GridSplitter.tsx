@@ -81,7 +81,7 @@ export function GridSplitter({ nodes, activityMembersByRoot, draggable = true }:
     const l = resolveLayout(useGridLayoutStore.getState().byMesh[layoutMeshId!], getGridRows(nodes.length));
     setColWidths(l.colWidths);
     setRowHeights(l.rowHeights);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setColWidths/setRowHeights are stable React setters; resolveLayout/nodes are read via refs intentionally so the effect doesn't refire on every grid mutation.
   }, [layoutMeshId, rowKey]);
 
   useEffect(() => {

@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
 import { useProviderListInvalidation, PROVIDER_LIST_CHANGED_EVENT } from '../../src/hooks/useProviderListInvalidation';
 
 const listenMock = vi.fn();
-const emitMock = vi.fn();
+const _emitMock = vi.fn();
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (event: string, handler: (e: unknown) => void) => {

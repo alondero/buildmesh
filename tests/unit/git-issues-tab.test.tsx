@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { GitIssuesTab } from '../../src/components/Probe/GitIssuesTab';
@@ -120,7 +120,7 @@ const DRAFT = {
  * keep loading.
  */
 function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDERS } = {}) {
-  vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+  vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
     switch (cmd) {
       case 'get_repo_issues':
         return Promise.resolve(opts.issues ?? ISSUES);

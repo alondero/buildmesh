@@ -45,19 +45,19 @@ function makeAgentNode(overrides: Partial<AgentNode> = {}): AgentNode {
  *  Each render increments `onRender` so the parent can count. */
 function AppSubscriptionPattern({ onRender }: { onRender: () => void }) {
   onRender();
-  const fetchMeshes = useMeshStore((s) => s.fetchMeshes);
-  const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
-  const initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
-  const storeError = useAgentNodeStore((state) => state.error);
+  const _fetchMeshes = useMeshStore((s) => s.fetchMeshes);
+  const _fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
+  const _initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
+  const _storeError = useAgentNodeStore((state) => state.error);
   return null;
 }
 
 /** Reproduces the pre-fix anti-pattern from src/App.tsx (issue #1246). */
 function AppWholeStoreAntiPattern({ onRender }: { onRender: () => void }) {
   onRender();
-  const { fetchMeshes } = useMeshStore();
-  const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
-  const storeError = useAgentNodeStore((state) => state.error);
+  const { _fetchMeshes } = useMeshStore();
+  const { _fetchAgentNodes, _initAttentionListeners } = useAgentNodeStore();
+  const _storeError = useAgentNodeStore((state) => state.error);
   return null;
 }
 

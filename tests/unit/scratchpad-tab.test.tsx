@@ -28,12 +28,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 

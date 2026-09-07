@@ -410,7 +410,7 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
 
   it('survives unmount/remount (the user-reported mesh-navigation scenario)', async () => {
     const { BuildRunTerminal } = await import('../../src/components/Terminal/BuildRunTerminal');
-    const { render, unmount, waitFor } = await import('@testing-library/react');
+    const { render, _unmount, waitFor } = await import('@testing-library/react');
 
     // Initial mount — simulates the user clicking BuildRun → "Terminal in worktree".
     const { unmount: unmount1 } = render(

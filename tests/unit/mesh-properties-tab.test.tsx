@@ -22,7 +22,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 
 const MESH: Mesh = {
   id: 42,
@@ -818,7 +817,7 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
 
   function rejectNextOverrideWrite(message: string) {
     let armed = true;
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
       if (armed && cmd === 'upsert_mesh_harness_override') {
         armed = false;
         return Promise.reject(new Error(message));

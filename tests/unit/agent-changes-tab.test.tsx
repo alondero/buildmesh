@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { AgentChangesTab } from '../../src/components/Probe/AgentChangesTab';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import type { GitStatus } from '../../src/lib/tauri';
 import { resetPathInvalidatedCacheForTests } from '../../src/lib/pathInvalidatedCache';

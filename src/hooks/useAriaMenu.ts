@@ -158,7 +158,9 @@ export function useAriaMenu({
       document.removeEventListener('keydown', handleKeyDown);
     };
     // The listener attachment is keyed only on `enabled` and `closeOnTab`.
-    // `rootRef` and the state setters are stable across renders.
+    // `rootRef` and the state setters (e.g. `setActiveIndex`) are stable
+    // across renders. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- rootRef and state setters are stable; deps key on the toggles that actually need to retrigger.
   }, [enabled, closeOnTab, rootRef]);
 
   // Auto-focus the first menuitem on mount (WAI-ARIA menu contract).

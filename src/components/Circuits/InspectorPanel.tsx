@@ -394,11 +394,13 @@ export function InspectorPanel(props: InspectorPanelProps) {
   // id is identical (review feedback round 2: a `props.node` dep
   // busts the memo on every keystroke because the canvas editor's
   // working copy mints a fresh React Flow node each render).
+  // `node` is read by identity so subscribers re-run when the graph
+  // reassigns the node reference (not on every props pass).
   const reachable = useMemo(
     () => (props.graph !== undefined && props.node !== null
       ? getReachableContext(props.node.id, props.graph)
       : undefined),
-    [props.graph, props.node?.id]
+    [props.graph, props.node]
   );
 
   if (props.node === null) {

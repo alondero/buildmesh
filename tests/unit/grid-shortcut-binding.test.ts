@@ -28,7 +28,7 @@ describe('grid traversal shortcut binding', () => {
     'utf8',
   );
 
-  const ARROWS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'] as const;
+  const _ARROWS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'] as const;
   // Each entry pairs the key glyph with the action string the dispatch
   // listener at `src/App.tsx:212` keys off of. Asserting the pair (not just
   // the binding string) closes the coverage gap where a refactor could swap

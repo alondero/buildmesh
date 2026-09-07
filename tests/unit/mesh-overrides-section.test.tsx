@@ -76,7 +76,6 @@ function providerFixture(
     provider_id: is_proxied ? 'minimax' : null,
     is_proxied,
     group_key: harness_id,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     capabilities: capabilities as any,
   };
 }

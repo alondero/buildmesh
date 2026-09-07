@@ -264,7 +264,11 @@ export function MeshPropertiesTab() {
   // hook's own reset() cancels the pending saved→idle timer cleanly.
   useEffect(() => {
     saveStatus.reset();
-  }, [activeMeshId, saveStatus.reset]);
+    // `saveStatus.reset` is a stable closure from the SaveIndicator
+    // hook; see the matching comment in AutopilotProbeTab.tsx.
+    // Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- saveStatus.reset is a stable closure from the SaveIndicator hook; tracking it in deps adds noise without changing when the effect fires.
+  }, [activeMeshId]);
 
   // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
   // `wrappedSave` can read the CURRENT mesh id at resolve time, not

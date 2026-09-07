@@ -19,7 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
-import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 

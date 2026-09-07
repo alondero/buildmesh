@@ -12,6 +12,7 @@
     "version:set": "node scripts/set-version.mjs",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
+    "lint": "eslint . --max-warnings 0",
     "check:agent": "node scripts/check-agent-diff.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs --dist dist",
     "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs",
@@ -47,6 +48,7 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.59.1",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/cli": "^2.11.4",
@@ -58,10 +60,14 @@
     "@vitejs/plugin-react": "^4.6.0",
     "@vitest/coverage-v8": "^4.1.5",
     "autoprefixer": "^10.4.27",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^15.15.0",
     "jsdom": "^29.1.0",
     "postcss": "^8.5.9",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.8.3",
+    "typescript-eslint": "^8.69.0",
     "vite": "^7.0.4",
     "vitest": "^4.1.5"
   }

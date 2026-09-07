@@ -167,7 +167,7 @@ export function Modal({
       previouslyFocused?.focus?.();
     };
     // Arm once per mount; onClose identity churn must not re-run focus moves.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose captured on mount; consumer passes a stable callback identity (or accepts the stale closure).
   }, []);
 
   // Mirror `confirmingDiscard` into a ref so the unmount-once Escape handler

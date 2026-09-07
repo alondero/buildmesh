@@ -317,15 +317,19 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   // Drawer. Base diffs use `node_changed_files` (per-node cancel-aware,
   // see `commands/diff.rs`); head diffs use `get_git_status` for the
   // session's working tree. `drawerVersion` is a dep so a successful
-  // Stage/Revert bumps it and forces the drawer to refetch — the
-  // previous shape had the drawer showing stale M/A/D badges until the
-  // user manually closed + reopened it (issue #1374 review feedback).
+  // Stage/Revert bumps `drawerVersion` and forces the drawer to refetch
+  // — the previous shape had the drawer showing stale M/A/D badges until
+  // the user manually closed + reopened it (issue #1374 review feedback).
+  // The refetch is driven by the consumer's effect (which depends on
+  // `drawerVersion`); this callback closure only reads `diff.*`, so
+  // listing `drawerVersion` here would re-allocate on every bump without
+  // changing what the callback does. Issue #1542.
   const fetchAllFiles = useCallback((): Promise<GitStatus[]> => {
     if (diff.source === 'base' && diff.nodeId !== null) {
       return nodeChangedFiles(diff.nodeId);
     }
     return getGitStatus(diff.rootPath);
-  }, [diff.source, diff.nodeId, diff.rootPath, drawerVersion]);
+  }, [diff.source, diff.nodeId, diff.rootPath]);
 
   // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
   // body re-fetches the new file's diff via the existing `fetchDiff`

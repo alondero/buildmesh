@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useToastStore, addToast, dismissToast } from '../../src/stores/toastStore';
-import { TOAST_DEDUP_TTL_MS, TOAST_MAX, TOAST_TTL_MS, type Toast } from '../../src/lib/toastUtils';
+import { TOAST_DEDUP_TTL_MS, TOAST_MAX, type Toast } from '../../src/lib/toastUtils';
 
 // Issue #1001 — store-level tests for the lifted `addToast` / `dismissToast`
 // Zustand surface. The pure helpers (`dedupToasts`, `applyToastCap`) are

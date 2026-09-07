@@ -8,7 +8,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { terminalManager } from '../../src/components/Terminal/Terminal';
 import * as tauriApi from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 
 describe('TerminalManager', () => {
   beforeEach(() => {

@@ -413,7 +413,12 @@ export function AutopilotProbeTab() {
   // form (same defensive pattern as `MeshPropertiesTab.tsx`).
   useEffect(() => {
     saveStatus.reset();
-  }, [activeMeshId, saveStatus.reset]);
+    // `saveStatus.reset` is a stable closure returned from the
+    // SaveIndicator hook; including it in the dep array is correct
+    // per the rules-of-hooks contract but triggers an ESLint
+    // exhaustive-deps noise. Issue #1542.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- saveStatus.reset is a stable closure from the SaveIndicator hook; tracking it in deps adds noise without changing when the effect fires.
+  }, [activeMeshId]);
 
   // Mesh-switch guard for in-flight saves (review finding #1 from
   // `MeshPropertiesTab.tsx`) — capture `activeMeshId` at IPC start,

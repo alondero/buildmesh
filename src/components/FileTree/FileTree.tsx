@@ -141,6 +141,12 @@ export function FileTree({
   // each node by stripping rootPath, so changed files are badged correctly.
   // Declared before `handleKeyDown` so the keyboard handler's closure can
   // read it on every render without tripping the TDZ (issue #728).
+  // The map is intentionally rebuilt on every render — `gitFiles` is
+  // the upstream source of truth, and the size here is bounded by the
+  // repo's changed-file count (always small). Wrapping in useMemo
+  // would add a cache to invalidate without changing what the keyboard
+  // handler observes. Issue #1542.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- rebuilt every render on purpose; useMemo would add a cache layer without changing what the keyboard handler observes.
   const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
 
   const handleFileClick = useCallback(

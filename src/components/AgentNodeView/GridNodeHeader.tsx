@@ -222,7 +222,9 @@ export function GridNodeHeader({ nodeId, onBuildRun, dragHandleProps }: GridNode
     if (!node) return '';
     const m = meshesById.get(node.mesh_id);
     return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
-  }, [meshesById, node?.mesh_id, node?.id]);
+    // `node` is intentionally read via its identity — `meshesById` is
+    // the only thing that can change the rendered output. Issue #1542.
+  }, [meshesById, node]);
 
   if (!node) return null;
   const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
@@ -819,7 +821,7 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
     // mid-menu); everything submenu-shaped comes from the hook's stable
     // callbacks — hence no `regenSubmenuOpen` dep and no listener churn
     // on hover.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- regenSubmenu/canResume captured on mount; the menu re-mounts when `open` flips, so this is intentional.
   }, [open, itemCount]);
 
   // Fixed-menu anchoring, viewport clamping, and scroll tracking are shared

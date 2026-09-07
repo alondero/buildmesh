@@ -44,7 +44,7 @@ export default function Connect({ onConnected, notice }: Props) {
       window.location.pathname + (rest ? "?" + rest : ""),
     );
     connectWith(urlToken);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- connectWith captured on mount; the screen re-mounts when the user re-opens with a new token.
   }, []);
 
   // Exchange the token for the HttpOnly session cookie via POST /api/session.

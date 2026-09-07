@@ -331,6 +331,13 @@ const subscriberExtras = new WeakMap<PathSubscriber, string[]>();
 // subscriber's `kind` field still narrows the SUBSCRIBER (so `sub.key` is
 // always defined inside a keyed handler); the lookup-side narrowing is
 // what this split fixes. Issue #355.
+// `any` is intentional: KeyedBusHandler is parameterised by the value
+// type the SUBSCRIBER will receive, but the dispatcher's internal bus
+// must store heterogeneous handlers keyed only by clientId. The runtime
+// type safety lives in `registerKeyedBusHandler`'s call signature
+// (issue #355) — using a generic here would either need an upper bound
+// that excludes the real callers or leak the bus's internal type.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous subscriber map keyed by symbol; the per-call site is type-checked at registration.
 const keyedBusHandlers = new Map<symbol, KeyedBusHandler<any>>();
 const callbackBusHandlers = new Map<symbol, CallbackBusHandler>();
 let listenerInstalled = false;
@@ -411,6 +418,11 @@ export function resetPathInvalidatedCacheForTests(): void {
  * between tests. Issue #355 split this from the callback variant so the
  * dispatch-side lookup is monomorphic (no union cast).
  */
+// `any` is intentional — see the comment on `keyedBusHandlers` above;
+// the bus must store handlers of every value shape the dispatcher is
+// willing to deliver. The public surface (the parameter type here)
+// is type-checked at every call site.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous subscriber map; rationale matches the comment on the map declaration above.
 function registerKeyedBusHandler(clientId: symbol, handler: KeyedBusHandler<any>): void {
   keyedBusHandlers.set(clientId, handler);
 }
@@ -632,7 +644,12 @@ function createInternalClient<K, V>(
             key,
             err instanceof Error ? err : new Error(String(err)),
           );
-          // eslint-disable-next-line no-console
+          // `console.warn` is intentional: the fetch helper surfaces a
+          // structured `errors` map to its caller and uses the console
+          // only as a low-noise fallback for the developer log.
+          // (The ESLint gate disables `no-console` globally; the
+          // explicit `console.warn` here stays deliberate rather than
+          // migrating to a logger to keep this file dependency-free.)
           console.warn(`${name}: fetch failed for key`, key, err);
           return null;
         });

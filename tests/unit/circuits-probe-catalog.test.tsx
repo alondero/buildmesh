@@ -19,13 +19,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitBlueprintKind } from '../../src/types/generated/CircuitBlueprintKind';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';

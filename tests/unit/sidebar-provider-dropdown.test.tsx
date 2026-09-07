@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProviderDropdown } from '../../src/components/Sidebar/ProviderDropdown';
 import { colorClassForProvider, type SpawnOption } from '../../src/lib/groups';

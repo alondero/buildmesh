@@ -99,8 +99,6 @@ export function HarnessOrderList({
   // half* of an arbitrary pairing, which is meaningless. Terminal is
   // pinned last by the backend and isn't user-orderable.
   const rows = providers.filter(p => !p.is_proxied && p.id !== 'terminal');
-  // Nothing meaningful to drag with fewer than two rows.
-  if (rows.length < 2) return null;
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -118,10 +116,17 @@ export function HarnessOrderList({
   // up too, Arrow keys move, Escape drops the item back where it
   // started. No options on PointerSensor — matches the dnd-kit default
   // sensor set so existing pointer behaviour is unchanged.
+  //
+  // Hooks must run unconditionally (issue #1542 / #1242) — call
+  // `useSensors` BEFORE the early return below. `sensors` is harmless
+  // when `rows.length < 2` because the early return skips rendering.
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+
+  // Nothing meaningful to drag with fewer than two rows.
+  if (rows.length < 2) return null;
 
   return (
     <DndContext sensors={sensors} onDragEnd={handleDragEnd}>

@@ -4,7 +4,7 @@
  * Tests that the correct path format (UNC for Windows, Linux for WSL)
  * is used based on the environment detected for a given path.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 describe('environment detection for build/run paths', () => {
   describe('env_for_path', () => {

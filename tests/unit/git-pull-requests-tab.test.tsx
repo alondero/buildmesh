@@ -1010,7 +1010,7 @@ describe('GitPullRequestsTab', () => {
     // whatever `origin/<head_ref>` is currently at.
     mockBackend();
     // Override the PR list to omit head_sha for PR 201 (the first row).
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
       if (cmd === 'get_repo_pulls') {
         return Promise.resolve(OPEN_PRS.map((pr) =>
           pr.number === 201 ? { ...pr, head_sha: '' } : pr,
@@ -1042,7 +1042,7 @@ describe('GitPullRequestsTab', () => {
     // dock, the user needs to be able to retry (e.g. transient `gh` hiccup,
     // a fork PR that the backend refuses, etc.). The error surfaces inline
     // on the row, the spawning label clears.
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
@@ -1071,7 +1071,7 @@ describe('GitPullRequestsTab', () => {
 
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {
     let resolveCreate!: (v: typeof PR_DRAFT) => void;
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
