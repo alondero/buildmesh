@@ -296,6 +296,7 @@ const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrad
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
 const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'";
+type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
 // ---------------------------------------------------------------------------
 // The registry.
@@ -1130,7 +1131,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             // then issued one active-run query per row, which made startup cost grow with the
             // entire circuit history. The sentinel row preserves the distinction between
             // "nothing legacy remains" and "legacy work is still active" without another scan.
-            let circuits: Vec<(Option<i64>, Option<String>, Option<i64>, bool)> = {
+            let circuits: Vec<ReviewContractCandidate> = {
                 let mut stmt = conn.prepare(&format!(
                     "WITH legacy AS (
                          SELECT c.id, c.graph_json, c.is_preset
