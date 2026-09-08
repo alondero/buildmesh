@@ -14,7 +14,15 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn.execute("INSERT INTO meshes (id, name, path) VALUES (1, 'review', 'C:/review')", []).unwrap();
-        let legacy: CircuitGraph = serde_json::from_str(include_str!("../../../tests/fixtures/legacy-issue-review-circuit.json")).unwrap();
+        let fixture: CircuitGraph = serde_json::from_str(include_str!("../../tests/fixtures/legacy-issue-review-circuit.json")).unwrap();
+        // Keep the recovery/topology migration separate from this prompt
+        // migration test by using the current graph with the historically
+        // shipped reviewer and feedback text.
+        let mut legacy = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        for id in ["reviewer", "follow_feedback"] {
+            let previous = &fixture.node(id).unwrap().kind;
+            legacy.nodes.iter_mut().find(|node| node.id == id).unwrap().kind = previous.clone();
+        }
         legacy.validate().unwrap();
         let mut configured = legacy.clone();
         if let K::SpawnAgentNode { provider, model, .. } = &mut configured.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
@@ -44,16 +52,30 @@ mod tests {
         upgraded.validate().unwrap();
         assert!(matches!(&upgraded.node("review_classifier").unwrap().kind, K::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some("reviewer")));
         assert!(upgraded.edges.iter().any(|e| e.from == "review_classifier" && e.to == "follow_feedback" && e.condition == EdgeCondition::OnOutcome(StepOutcome::Working)));
-        assert!(upgraded.node("review_approved").is_some());
+        assert!(upgraded.node("close_approved").is_some());
+        assert!(upgraded.node("review_exhausted").is_some());
         assert!(upgraded.node("review_blocked").is_some());
         assert!(matches!(&upgraded.node("reviewer").unwrap().kind, K::SpawnAgentNode { provider, model, prompt, .. } if provider.as_deref() == Some("codex") && model.as_deref() == Some("review-model") && prompt == &CircuitGraph::pr_review_prompt()));
         assert!(matches!(&upgraded.node("review_retry").unwrap().kind, K::RetryLimit { max_retries: 5 }));
-        assert_eq!(read(2), custom_prompt);
-        assert_eq!(read(3), custom_edges);
+        assert_eq!(read(2).node("reviewer").unwrap().kind, custom_prompt.node("reviewer").unwrap().kind);
+        assert_eq!(read(3).edges, custom_edges.edges);
         assert_eq!(read(4), legacy);
         conn.execute("UPDATE autopilot_circuit_runs SET state='completed' WHERE id=10", []).unwrap();
         crate::db::init_schema(&conn).unwrap();
-        assert_eq!(read(4), CircuitGraph::issue_driven_autopilot_review("buildmesh:run"));
+        let completed = read(4);
+        let canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let expected_feedback = match &canonical.node("follow_feedback").unwrap().kind {
+            K::InjectPty { prompt, .. } => prompt,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            &completed.node("reviewer").unwrap().kind,
+            K::SpawnAgentNode { prompt, .. } if prompt == &CircuitGraph::pr_review_prompt()
+        ));
+        assert!(matches!(
+            &completed.node("follow_feedback").unwrap().kind,
+            K::InjectPty { prompt, .. } if prompt == expected_feedback
+        ));
         assert_eq!(read(1), upgraded);
     }
 

@@ -875,9 +875,9 @@ impl CircuitGraph {
         }
     }
 
-    /// Exact reviewer instruction used by the issue-driven review blueprint.
-    /// Keep this text stable: it is both the user-requested contract and the
-    /// prompt that a reviewer sees after its PTY becomes ready.
+    /// PR-specific scope fragment used by the issue-driven review blueprint.
+    /// Keep this text stable because it is also the catalog's user-visible
+    /// contract; [`Self::pr_review_prompt`] adds the shared review policy.
     ///
     /// Shares the grumpy senior engineer review persona with the interactive PR probe
     /// prefill ([`crate::agent::spawn::intent`]), but intentionally diverges in structure:
