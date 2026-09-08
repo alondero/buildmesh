@@ -78,6 +78,7 @@ export function WindowCloseGuard() {
           const supportsMap = buildSupportsResumeMap(providers);
           const { nonResumable } = partitionExitNodes(active, supportsMap);
           useExitPromptStore.getState().showExitPrompt(
+            'window-close',
             active.length,
             nonResumable.map((n) => ({
               id: n.id,

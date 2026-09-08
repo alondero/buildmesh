@@ -24,6 +24,14 @@ const tauriMocks = vi.hoisted(() => ({
   exitApplication: vi.fn(),
 }));
 
+const { relaunchMock } = vi.hoisted(() => ({
+  relaunchMock: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/plugin-process', () => ({
+  relaunch: relaunchMock,
+}));
+
 vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/lib/tauri')>()),
   getAppPreferences: tauriMocks.getAppPreferences,
@@ -37,6 +45,7 @@ beforeEach(() => {
   tauriMocks.getAppPreferences.mockReset().mockResolvedValue({ confirm_before_quit: false });
   tauriMocks.cancelWindowClose.mockReset().mockResolvedValue(undefined);
   tauriMocks.exitApplication.mockReset().mockResolvedValue(undefined);
+  relaunchMock.mockReset().mockResolvedValue(undefined);
   toastMock.addToast.mockReset();
   useExitPromptStore.setState({ pending: null, exiting: false, confirmBeforeQuit: true });
 });
@@ -63,7 +72,7 @@ describe('useExitPromptStore (issue #1501)', () => {
 
   it('keepWorking clears the prompt and retracts the expected-exit marking', () => {
     useExitPromptStore.setState({
-      pending: { activeCount: 1, nonResumable: [] },
+      pending: { mode: 'window-close', activeCount: 1, nonResumable: [] },
     });
     useExitPromptStore.getState().keepWorking();
     expect(useExitPromptStore.getState().pending).toBeNull();
@@ -77,7 +86,7 @@ describe('useExitPromptStore (issue #1501)', () => {
 
   it('confirmExit hands shutdown to the backend lifecycle command', async () => {
     useExitPromptStore.setState({
-      pending: { activeCount: 1, nonResumable: [] },
+      pending: { mode: 'window-close', activeCount: 1, nonResumable: [] },
     });
     await act(async () => {
       await useExitPromptStore.getState().confirmExit();
@@ -92,7 +101,7 @@ describe('useExitPromptStore (issue #1501)', () => {
   it('a failed exit retracts the expected-exit marking, toasts, and resets for retry', async () => {
     tauriMocks.exitApplication.mockRejectedValueOnce(new Error('command failed'));
     useExitPromptStore.setState({
-      pending: { activeCount: 1, nonResumable: [] },
+      pending: { mode: 'window-close', activeCount: 1, nonResumable: [] },
     });
     await act(async () => {
       await useExitPromptStore.getState().confirmExit();
@@ -111,12 +120,43 @@ describe('useExitPromptStore (issue #1501)', () => {
     tauriMocks.exitApplication.mockRejectedValueOnce(new Error('command failed'));
     tauriMocks.cancelWindowClose.mockRejectedValueOnce(new Error('ipc down'));
     useExitPromptStore.setState({
-      pending: { activeCount: 1, nonResumable: [] },
+      pending: { mode: 'window-close', activeCount: 1, nonResumable: [] },
     });
     await act(async () => {
       await useExitPromptStore.getState().confirmExit();
     });
     expect(toastMock.addToast).toHaveBeenCalledTimes(1);
+    expect(useExitPromptStore.getState().exiting).toBe(false);
+  });
+
+  it('update-restart mode dispatches relaunch, not exitApplication (issue #1526)', async () => {
+    // The updater route must NOT call exit_application — that ends the
+    // process without starting the staged binary. The plugin's
+    // relaunch() swaps the binary on top of the running process.
+    useExitPromptStore.setState({
+      pending: { mode: 'update-restart', activeCount: 1, nonResumable: [] },
+    });
+    await act(async () => {
+      await useExitPromptStore.getState().confirmExit();
+    });
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.exitApplication).not.toHaveBeenCalled();
+    // Plugin handles the swap on success — no retract / toast needed.
+    expect(tauriMocks.cancelWindowClose).not.toHaveBeenCalled();
+    expect(toastMock.addToast).not.toHaveBeenCalled();
+  });
+
+  it('update-restart failure shows a distinct toast (issue #1526)', async () => {
+    relaunchMock.mockRejectedValueOnce(new Error('plugin failed'));
+    useExitPromptStore.setState({
+      pending: { mode: 'update-restart', activeCount: 1, nonResumable: [] },
+    });
+    await act(async () => {
+      await useExitPromptStore.getState().confirmExit();
+    });
+    expect(toastMock.addToast).toHaveBeenCalledTimes(1);
+    // Distinct toast title so the user can tell which flow interrupted.
+    expect(toastMock.addToast.mock.calls[0][0]).toBe('Restart failed');
     expect(useExitPromptStore.getState().exiting).toBe(false);
   });
 });
