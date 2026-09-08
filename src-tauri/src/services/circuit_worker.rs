@@ -2229,9 +2229,9 @@ fn inherited_review_provider(
 }
 
 fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
-    (view.context.get("source.review_preset") == Some("1")
+    ((view.context.get("source.review_preset") == Some("1")
         || view.graph.is_issue_driven_autopilot_review())
-        && node_id == "reviewer"
+        && node_id == "reviewer")
         || view.graph.nodes.iter().any(|node| {
             matches!(
                 &node.kind,
