@@ -135,8 +135,16 @@ async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: Sock
         _ => return,
     };
 
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let response = process_request(&request, app);
+    // The test bridge deliberately exercises real synchronous command/service
+    // seams. Keep SQLite, filesystem cleanup, and any other blocking work off
+    // the Tauri async worker while retaining async socket I/O here.
+    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let app = app.clone();
+    let response = crate::commands::run_blocking("test_server_request", move || {
+        Ok(process_request(&request, &app))
+    })
+    .await
+    .unwrap_or_else(|error| JsonRpcResponse::error(&error));
 
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\

@@ -5,32 +5,39 @@ import { mkdirSync } from 'node:fs';
 // test bridge's production persistence and attachment seams: no agent spawns.
 export default async function ({ page, invoke }) {
   const fixture = await invoke('create_test_review_fixture', { name: 'Review consistency verification' });
-  const { mesh, source, reviewer } = fixture;
+  const { mesh, node, autopilot } = fixture;
   const output = 'docs/pr-screenshots/hopeful-lifeless-epic';
   mkdirSync(output, { recursive: true });
   try {
-    for (const scope of ['node', 'autopilot']) {
+    for (const [scope, pair] of [['node', node], ['autopilot', autopilot]]) {
       await page.reload({ waitUntil: 'domcontentloaded' });
       const meshItem = page.locator(`#mesh-item-name-${mesh.id}`);
       await meshItem.waitFor({ state: 'visible', timeout: 10000 });
       await meshItem.click();
-      const implementation = page.locator(`#activity-${source}-agent-${source}`);
-      const review = page.locator(`#activity-${source}-agent-${reviewer}`);
+      const implementation = page.locator(`#activity-${pair.source}-agent-${pair.source}`);
+      const review = page.locator(`#activity-${pair.source}-agent-${pair.reviewer}`);
+      const implementationPanel = page.locator(`#activity-panel-${pair.source}`);
+      const card = implementationPanel.locator('..');
+      const header = card.locator('[data-testid="grid-node-header"]');
       await expect(implementation).toBeVisible();
       await expect(review).toBeVisible();
       await expect(implementation).toHaveAttribute('aria-selected', 'true');
       await review.click();
       await expect(review).toHaveAttribute('aria-selected', 'true');
+      await expect(implementationPanel).toHaveAttribute('aria-labelledby', `activity-${pair.source}-agent-${pair.reviewer}`);
+      await expect(header).toHaveAttribute('data-node-id', String(pair.reviewer));
+      await expect(implementationPanel.locator(`[data-node-id="${pair.reviewer}"]`)).toBeVisible();
       await implementation.click();
       await expect(implementation).toHaveAttribute('aria-selected', 'true');
-      const implementationPanel = page.locator(`#activity-panel-${source}`);
-      await expect(implementationPanel).toBeVisible();
-      const card = await page.locator(`#activity-panel-${source}`).locator('..').boundingBox();
-      if (!card) throw new Error('Review node card is not rendered');
+      await expect(implementationPanel).toHaveAttribute('aria-labelledby', `activity-${pair.source}-agent-${pair.source}`);
+      await expect(header).toHaveAttribute('data-node-id', String(pair.source));
+      await expect(implementationPanel.locator(`[data-node-id="${pair.source}"]`)).toBeVisible();
+      const cardBounds = await card.boundingBox();
+      if (!cardBounds) throw new Error('Review node card is not rendered');
       await page.screenshot({ path: `${output}/${scope}-review-activities.png`,
-        clip: { ...card, height: Math.min(card.height, 110) } });
+        clip: { ...cardBounds, height: Math.min(cardBounds.height, 110) } });
     }
-    const launch = page.locator(`#activity-panel-${source}`).locator('..').getByRole('button', { name: 'Start review or circuit', exact: true });
+    const launch = page.locator(`#activity-panel-${node.source}`).locator('..').getByRole('button', { name: 'Start review or circuit', exact: true });
     await launch.click();
     await expect(page.getByLabel('Workflow')).toHaveValue('');
     const rounds = page.getByLabel('Maximum review rounds');
