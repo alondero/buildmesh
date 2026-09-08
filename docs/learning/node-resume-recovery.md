@@ -30,7 +30,7 @@ and launch timestamp are unchanged, its identity is missing, and no other node
 already owns that ID. The spawn claim precedes identity clearing so duplicate
 launches cannot erase the winning request's identity.
 
-Missing or ambiguous transcripts remain Suspended with a **Missing session ID**
+Missing or ambiguous transcripts remain Suspended with a **No session**
 badge and the existing Regenerate action. Its message tells the user to use
 Regenerate to start a new conversation; it does not imply that another restart
 will retry an already completed startup. No fresh conversation is silently
