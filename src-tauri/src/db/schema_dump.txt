@@ -1,0 +1,228 @@
+index:idx_agent_nodes_mesh
+CREATE INDEX idx_agent_nodes_mesh ON agent_nodes(mesh_id)
+
+index:idx_autopilot_circuit_runs_circuit
+CREATE INDEX idx_autopilot_circuit_runs_circuit
+            ON autopilot_circuit_runs(circuit_id)
+
+index:idx_autopilot_circuit_runs_state
+CREATE INDEX idx_autopilot_circuit_runs_state
+            ON autopilot_circuit_runs(state)
+
+index:idx_autopilot_circuits_mesh
+CREATE INDEX idx_autopilot_circuits_mesh ON autopilot_circuits(mesh_id)
+
+index:idx_autopilot_circuits_preset_mesh
+CREATE INDEX idx_autopilot_circuits_preset_mesh ON autopilot_circuits(mesh_id, is_preset)
+
+index:idx_autopilot_runs_mesh
+CREATE INDEX idx_autopilot_runs_mesh ON autopilot_runs(mesh_id)
+
+index:idx_circuit_runs_mesh_queue
+CREATE INDEX idx_circuit_runs_mesh_queue
+            ON autopilot_circuit_runs(mesh_id, state, queue_position)
+
+index:idx_circuit_runs_source_agent
+CREATE INDEX idx_circuit_runs_source_agent ON autopilot_circuit_runs(source_agent_node_id)
+
+index:idx_circuit_steps_run
+CREATE INDEX idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id)
+
+index:idx_coordinator_drive_prompts_created_at
+CREATE INDEX idx_coordinator_drive_prompts_created_at
+            ON coordinator_drive_prompts(created_at)
+
+index:idx_warm_worktrees_mesh
+CREATE INDEX idx_warm_worktrees_mesh ON warm_worktrees(mesh_id)
+
+index:idx_warm_worktrees_status
+CREATE INDEX idx_warm_worktrees_status ON warm_worktrees(status)
+
+index:uq_autopilot_circuits_preset_mesh
+CREATE UNIQUE INDEX uq_autopilot_circuits_preset_mesh
+            ON autopilot_circuits(mesh_id) WHERE is_preset = 1
+
+table:agent_node_lifecycle_leases
+CREATE TABLE agent_node_lifecycle_leases (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            cleanup_requested INTEGER NOT NULL DEFAULT 0,
+            cleanup_generation TEXT,
+            cleanup_expires_at INTEGER,
+            spawn_generation TEXT,
+            spawn_expires_at INTEGER,
+            retired INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+
+table:agent_nodes
+CREATE TABLE agent_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id),
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            env TEXT NOT NULL DEFAULT 'windows',
+            provider TEXT NOT NULL DEFAULT 'anthropic',
+            status TEXT NOT NULL DEFAULT 'idle',
+            cli_session_id TEXT,
+            session_started_at INTEGER,
+            worktree_name TEXT,
+            use_worktree INTEGER NOT NULL DEFAULT 1,
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            source_pr INTEGER,
+            head_repo_owner TEXT,
+            head_repo_clone_url TEXT,
+            source_pr_pinned_sha TEXT,
+            signal_health TEXT,
+            worktree_path TEXT
+        , source_issue INTEGER)
+
+table:app_settings
+CREATE TABLE app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+
+table:autopilot_circuit_run_agent_leases
+CREATE TABLE autopilot_circuit_run_agent_leases (
+            run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            slots INTEGER NOT NULL CHECK (slots > 0),
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
+table:autopilot_circuit_run_steps
+CREATE TABLE autopilot_circuit_run_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            agent_node_id INTEGER,
+            parent_agent_node_id INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL,
+            status TEXT NOT NULL DEFAULT 'pending_slot',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE (run_id, node_id)
+        )
+
+table:autopilot_circuit_runs
+CREATE TABLE autopilot_circuit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            circuit_id INTEGER NOT NULL REFERENCES autopilot_circuits(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            trigger_identity TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'pending',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            queue_position INTEGER NOT NULL DEFAULT 0,
+            source_agent_node_id INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (circuit_id, trigger_identity)
+        )
+
+table:autopilot_circuits
+CREATE TABLE autopilot_circuits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            concurrency_limit INTEGER NOT NULL DEFAULT 1,
+            graph_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_preset INTEGER NOT NULL DEFAULT 0
+        )
+
+table:autopilot_runs
+CREATE TABLE autopilot_runs (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            issue_number INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'implementing',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            pr_number INTEGER,
+            pr_url TEXT,
+            -- v31 — Looping Autopilot iteration marker (ticket #992). NULL
+            -- for issue-driven runs (the pre-v31 default; preserves every
+            -- existing row). The Looping-mode poller writes the 1-based
+            -- iteration number on each spawn, so iteration count + cap
+            -- checks reduce to MAX(loop_iteration) + 1 vs loop_max_iterations.
+            loop_iteration INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
+table:coordinator_drive_prompts
+CREATE TABLE coordinator_drive_prompts (
+            node_id INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            verdict TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            prompt_hash TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (node_id, idempotency_key)
+        )
+
+table:device_sessions
+CREATE TABLE device_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            label TEXT,
+            last_ip TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
+table:meshes
+CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            worktree_directory TEXT
+        , build_command TEXT, run_command TEXT, model TEXT, effort TEXT, use_worktree INTEGER NOT NULL DEFAULT 1, worktree_mode TEXT, default_provider TEXT, base_ref TEXT NOT NULL DEFAULT 'origin/main', scratchpad TEXT NOT NULL DEFAULT '', sandbox INTEGER NOT NULL DEFAULT 0, pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0, color TEXT, autopilot_enabled INTEGER NOT NULL DEFAULT 0, autopilot_trigger_label TEXT, autopilot_concurrency_limit INTEGER NOT NULL DEFAULT 2, autopilot_provider TEXT, autopilot_action_on_success TEXT, root_build_command TEXT, root_run_command TEXT, autopilot_mode TEXT NOT NULL DEFAULT 'issue_driven', loop_initial_prompt TEXT, loop_suffix_prompt TEXT, loop_max_iterations INTEGER, loop_interval_seconds INTEGER NOT NULL DEFAULT 0, loop_consecutive_failures INTEGER NOT NULL DEFAULT 0, harness_overrides TEXT NOT NULL DEFAULT '{}', circuit_run_capacity INTEGER NOT NULL DEFAULT 2)
+
+table:pending_worktree_removals
+CREATE TABLE pending_worktree_removals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worktree_path TEXT NOT NULL UNIQUE,
+            node_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
+table:warm_worktrees
+CREATE TABLE warm_worktrees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            -- Absolute host-side path to the pre-warmed worktree directory.
+            -- Always lives under `{mesh.path}/.claude/worktrees/...`.
+            path TEXT NOT NULL UNIQUE,
+            -- The slug baked into the directory name. Adopted as
+            -- `agent_nodes.worktree_name` on claim, so the spawn pipeline
+            -- never has to rename the directory (zero folder-rename overhead).
+            preassigned_name TEXT NOT NULL,
+            -- `filling` (worker is mid-checkout), `available` (claimable),
+            -- `claimed` (spawned, dropped once the node row is in place).
+            status TEXT NOT NULL DEFAULT 'filling',
+            -- 40-char hex SHA the warm entry is checked out at. Spawn can
+            -- compare against the mesh's resolved base SHA; mismatch → drop
+            -- + cold spawn.
+            base_sha TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+
+trigger:meshes_circuit_run_capacity_range
+CREATE TRIGGER meshes_circuit_run_capacity_range BEFORE INSERT ON meshes FOR EACH ROW WHEN NEW.circuit_run_capacity IS NOT NULL AND (NEW.circuit_run_capacity < 1 OR NEW.circuit_run_capacity > 8) BEGIN SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); END
+
+trigger:meshes_circuit_run_capacity_range_update
+CREATE TRIGGER meshes_circuit_run_capacity_range_update BEFORE UPDATE ON meshes FOR EACH ROW WHEN NEW.circuit_run_capacity IS NOT NULL AND NEW.circuit_run_capacity != OLD.circuit_run_capacity AND (NEW.circuit_run_capacity < 1 OR NEW.circuit_run_capacity > 8) BEGIN SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); END
+

@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn test_mesh_loop_config_round_trips() {
         let _serial = serial();
-        use crate::db::AutopilotMode;
+        use crate::models::AutopilotMode;
 
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
