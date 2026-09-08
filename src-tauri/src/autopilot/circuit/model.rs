@@ -937,21 +937,23 @@ impl CircuitGraph {
         if !self.is_issue_driven_autopilot_review() {
             return false;
         }
-        // Keep matching prompts shipped before PR_REVIEW_PROMPT was split
-        // from REVIEW_POLICY so existing saved blueprints still upgrade. Use
-        // the old shape rather than copying its retired persona wording.
-        let is_legacy_pr_review_prompt = |prompt: &str| {
-            prompt.starts_with("review PR {{pr.number}} as ")
-                && prompt.contains("The pull request URL is {{pr.url}}.")
-                && prompt.contains("Add the review comments to the PR as a comment")
-        };
+        // Match only the two exact prompts shipped before PR_REVIEW_PROMPT
+        // was split from REVIEW_POLICY. A user-authored extension of either
+        // prompt is not stock and must remain intact.
+        const LEGACY_PR_REVIEW_PROMPT: &str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}.";
+        const LEGACY_REVIEW_VERDICT: &str = "State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
+        let legacy_pr_review_with_verdict = format!(
+            "{} {}",
+            LEGACY_PR_REVIEW_PROMPT, LEGACY_REVIEW_VERDICT
+        );
         let old_feedback = "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.";
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
                 CircuitNodeKind::SpawnAgentNode { prompt, .. }
                     if node.id == "reviewer"
-                        && is_legacy_pr_review_prompt(prompt) =>
+                        && (prompt == LEGACY_PR_REVIEW_PROMPT
+                            || prompt == &legacy_pr_review_with_verdict) =>
                 {
                     *prompt = Self::pr_review_prompt();
                     changed = true;
@@ -1912,6 +1914,22 @@ mod tests {
         assert!(CircuitGraph::REVIEW_POLICY.contains("reviewed commit or revision under review"));
         assert!(CircuitGraph::local_review_prompt().contains("reviewed commit or revision under review"));
         assert!(CircuitGraph::pr_review_prompt().contains("post the findings as a PR comment"));
+    }
+
+    #[test]
+    fn legacy_pr_review_prompt_with_custom_suffix_is_preserved() {
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let custom = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}. Also check our release checklist.";
+        if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == "reviewer") {
+            if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                *prompt = custom.into();
+            }
+        }
+        assert!(!graph.upgrade_legacy_issue_review_contract());
+        assert!(matches!(
+            graph.node("reviewer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. }) if prompt == custom
+        ));
     }
 
     #[test]

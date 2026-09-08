@@ -1119,30 +1119,26 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             let circuits: Vec<(Option<i64>, Option<String>, Option<i64>, bool)> = {
                 let mut stmt = conn.prepare(
                     "WITH legacy AS (
-                         SELECT c.id, c.graph_json, c.is_preset,
-                                EXISTS(
-                                    SELECT 1
-                                    FROM autopilot_circuit_runs r
-                                    WHERE r.circuit_id = c.id
-                                      AND r.state IN ('pending', 'running', 'paused')
-                                ) AS active
+                         SELECT c.id, c.graph_json, c.is_preset
                          FROM autopilot_circuits c
                          WHERE c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%'
                             OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%'
                             OR c.graph_json LIKE '%review PR {{pr.number}} as%'
                             OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'
+                     ), active AS (
+                         SELECT DISTINCT r.circuit_id
+                         FROM autopilot_circuit_runs r
+                         JOIN legacy ON legacy.id = r.circuit_id
+                         WHERE r.state IN ('pending', 'running', 'paused')
                      )
                      SELECT id, graph_json, is_preset, 0 AS deferred
                      FROM legacy
                      WHERE NOT EXISTS (
-                         SELECT 1
-                         FROM autopilot_circuit_runs r
-                         WHERE r.circuit_id = legacy.id
-                           AND r.state IN ('pending', 'running', 'paused')
+                         SELECT 1 FROM active WHERE active.circuit_id = legacy.id
                      )
                      UNION ALL
                      SELECT NULL, NULL, NULL, 1 AS deferred
-                     WHERE EXISTS (SELECT 1 FROM legacy WHERE active)
+                     WHERE EXISTS (SELECT 1 FROM active)
                      ORDER BY deferred, id",
                 )?;
                 let rows = stmt.query_map([], |row| {
