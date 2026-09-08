@@ -30,6 +30,16 @@ use serde::{Deserialize, Serialize};
 /// this version so a save upgrades the stored blueprint.
 pub const CIRCUIT_GRAPH_VERSION: i32 = 3;
 
+/// Maximum `SpawnAgentNode.timeout_seconds` the validator accepts
+/// (#1219 review). One week gives every realistic circuit room to wait
+/// (a flaky CI run, a long-running PR review) while bounding the
+/// user-typable range so a typo like `999999999` doesn't ship a value
+/// the orchestrator's eventual watchdog (#1219 follow-up) can't reason
+/// about. The inspector mirrors the same upper bound on the TS side
+/// (see `InspectorPanel.tsx::Step timeout` clamp) so the contract is
+/// enforced in one place per language and the error is field-named.
+pub const MAX_STEP_TIMEOUT_SECONDS: u32 = 604_800; // 7 days
+
 /// Server-owned circuit blueprints. Keeping the discriminator in the graph
 /// AST means runtime policy does not have to infer a blueprint from an
 /// author-editable prompt or node topology.
@@ -169,8 +179,13 @@ pub enum CircuitNodeKind {
         #[serde(default)]
         extra_args: Option<String>,
         /// Optional per-step timeout in seconds (#1219). `None` = inherit
-        /// the orchestrator default. The orchestrator carries the value
-        /// via `ExplicitSpawnOverrides::timeout_seconds`; enforcement
+        /// the orchestrator default; `Some(0)` collapses to `None` at
+        /// the resolver seam (`resolve_circuit_spawn_inputs`) so a
+        /// zero-int overflow at save time can't request an instant
+        /// expiry. The valid range is `1..=MAX_STEP_TIMEOUT_SECONDS`
+        /// (7 days) — `validate()` rejects larger values with a
+        /// field-named error. The orchestrator carries the value via
+        /// `ExplicitSpawnOverrides::timeout_seconds`; enforcement
         /// (cancellation of stuck spawns) is a follow-up slice — this
         /// AST addition is plumbing + UI only.
         #[serde(default)]
@@ -457,6 +472,19 @@ impl CircuitGraph {
         for node in &self.nodes {
             if !ids.insert(node.id.as_str()) {
                 return Err(format!("duplicate node id '{}'", node.id));
+            }
+            if let CircuitNodeKind::SpawnAgentNode {
+                timeout_seconds: Some(t),
+                ..
+            } = &node.kind
+            {
+                if *t > MAX_STEP_TIMEOUT_SECONDS {
+                    return Err(format!(
+                        "SpawnAgentNode '{}' timeout_seconds={} exceeds the maximum {} \
+                         (set to 0 or leave blank to inherit the orchestrator default)",
+                        node.id, t, MAX_STEP_TIMEOUT_SECONDS
+                    ));
+                }
             }
         }
         if self.requires_source_agent()
@@ -1355,6 +1383,93 @@ mod tests {
         assert!(g.validate().unwrap_err().contains("connects to itself"));
     }
 
+    /// #1219 review: `timeout_seconds` is bounded to `MAX_STEP_TIMEOUT_SECONDS`
+    /// (7 days). A user can type any `u32` in the inspector and the JSON
+    /// round-trips freely, so the validator is the only enforcement point.
+    /// Pin the rejection message so a future typo from a serializer
+    /// (e.g. handing us an `i32` overflow) yields a field-named error.
+    #[test]
+    fn validate_rejects_timeout_seconds_above_max() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![node(
+                "s",
+                CircuitNodeKind::SpawnAgentNode {
+                    prompt: "p".into(),
+                    name: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    extra_args: None,
+                    timeout_seconds: Some(MAX_STEP_TIMEOUT_SECONDS + 1),
+                },
+            )],
+            edges: vec![],
+        };
+        let err = g.validate().unwrap_err();
+        assert!(
+            err.contains("timeout_seconds="),
+            "rejection must name the field: {err}"
+        );
+        assert!(
+            err.contains("'s'"),
+            "rejection must name the offending node id: {err}"
+        );
+    }
+
+    /// The inspector's contract is "0 or blank = inherit default";
+    /// `Some(0)` therefore must NOT be rejected — the resolver collapses
+    /// it to `None` at the seam so the cascade falls through. Pin that
+    /// the validator accepts it as a valid `u32` value AND that it does
+    /// not trip the upper-bound check.
+    #[test]
+    fn validate_accepts_zero_timeout_seconds() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![node(
+                "s",
+                CircuitNodeKind::SpawnAgentNode {
+                    prompt: "p".into(),
+                    name: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    extra_args: None,
+                    timeout_seconds: Some(0),
+                },
+            )],
+            edges: vec![],
+        };
+        g.validate().unwrap();
+    }
+
+    /// The upper bound is inclusive — `Some(MAX_STEP_TIMEOUT_SECONDS)`
+    /// is a legitimate "one week" override that the validator must
+    /// accept. (The clamp on the inspector side mirrors this.)
+    #[test]
+    fn validate_accepts_max_timeout_seconds() {
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![node(
+                "s",
+                CircuitNodeKind::SpawnAgentNode {
+                    prompt: "p".into(),
+                    name: None,
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    extra_args: None,
+                    timeout_seconds: Some(MAX_STEP_TIMEOUT_SECONDS),
+                },
+            )],
+            edges: vec![],
+        };
+        g.validate().unwrap();
+    }
+
     #[test]
     fn validate_rejects_source_bindings_on_automatic_roots() {
         let g = CircuitGraph {
@@ -1904,5 +2019,18 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Cross-boundary pin for the AST version constant (#1219).
+    ///
+    /// `CIRCUIT_GRAPH_VERSION` is hand-maintained on BOTH sides (Rust
+    /// here, TS at `src/components/Circuits/circuitGraphModel.ts`) and
+    /// the ts-rs drift gate does NOT cover hand-maintained constants.
+    /// When this assertion fails, mirror the bump to the TS mirror or
+    /// the next canvas save will silently downgrade a v3 graph back
+    /// to v2.
+    #[test]
+    fn circuit_graph_version_is_v3() {
+        assert_eq!(CIRCUIT_GRAPH_VERSION, 3);
     }
 }

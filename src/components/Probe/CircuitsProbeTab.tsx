@@ -47,6 +47,7 @@ import {
   triggerCircuitNow,
   type CircuitBlueprintKind,
   type CircuitQueueEntry,
+  type CircuitTriggerKind,
   type CircuitWithRuns,
 } from '../../lib/tauri';
 import { isTerminalRunState } from '../Circuits/circuitGraphModel';
@@ -102,8 +103,20 @@ export function CircuitsProbeTab() {
   // `validate_circuit_request` defaults `trigger_kind` to `Manual` when
   // None, so a name-only create lands the walking skeleton with a
   // Manual root that the inspector can rewire.
+  //
+  // Exception: the review blueprint forces `trigger_kind =
+  // github_issue_label` (its `allowed_triggers()` is a one-element list)
+  // AND `validate_circuit_request` rejects github triggers without a
+  // non-empty label. The row MUST therefore collect a label for the
+  // review blueprint — otherwise the create fails with
+  // "blueprint IssueDrivenAutopilotReview requires one of
+  // [GithubIssueLabel], got Manual". This is the seam #1219 (round-2
+  // review) demanded: the row stays name + blueprint, but the review
+  // blueprint surfaces a single inline label input so the IPC call can
+  // send the right trigger config.
   const [newName, setNewName] = useState('');
   const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
+  const [reviewTriggerLabel, setReviewTriggerLabel] = useState('');
   const isReviewBlueprint = blueprint === 'issue_driven_autopilot_review';
 
   const load = useCallback(async () => {
@@ -186,24 +199,35 @@ export function CircuitsProbeTab() {
     runAction(async () => {
       const name = newName.trim();
       if (name === '') return;
-      // #1219: the row no longer authors trigger config. The walking
-      // skeleton lands with a Manual root, which the canvas inspector
-      // can rewire to Interval / GitHub-Issue / GitHub-PR. The wrapper's
-      // positional args default triggerKind='manual' when omitted, so
-      // we pass it explicitly here to keep the call shape stable for
-      // the IPC contract tests at tests/unit/circuits-probe-tab.test.tsx.
+      // #1219 (round-2 review): the row stays name + blueprint, but
+      // the review blueprint MUST send the right trigger config —
+      // its `allowed_triggers()` is a single-element list
+      // (`GithubIssueLabel`) and `validate_circuit_request` rejects
+      // a missing/empty label for github triggers. The walking
+      // skeleton still sends `manual` (the inspector's Trigger type
+      // select rewires it). The wrapper's positional args default
+      // `triggerKind='manual'` when omitted, so the walking skeleton
+      // sends `manual` explicitly here to keep the IPC contract
+      // tests stable.
+      const effectiveTriggerKind: CircuitTriggerKind = isReviewBlueprint
+        ? 'github_issue_label'
+        : 'manual';
+      const effectiveTriggerLabel = isReviewBlueprint
+        ? reviewTriggerLabel.trim() || undefined
+        : undefined;
       const circuit = await createCircuit(
         activeMeshId!,
         name,
         '',
         isReviewBlueprint ? 2 : 1,
         '', // the prompt is authored in the canvas editor's inspector
-        'manual',
-        undefined,
+        effectiveTriggerKind,
+        effectiveTriggerLabel,
         undefined,
         blueprint
       );
       setNewName('');
+      setReviewTriggerLabel('');
       setBlueprint('walking_skeleton');
       openCircuitEditor(circuit.id);
     });
@@ -221,7 +245,18 @@ export function CircuitsProbeTab() {
     <div className="flex flex-col h-full min-h-0 text-sm" data-testid="circuits-probe-tab">
       {/* New Circuit row — authoring itself happens in the canvas editor.
           #1219 collapses this to name + blueprint only; trigger, label,
-          and interval editing all live in the canvas inspector now. */}
+          and interval editing all live in the canvas inspector now.
+
+          Exception: the review blueprint forces
+          `trigger_kind = github_issue_label` (its `allowed_triggers()` is
+          a one-element list) AND `validate_circuit_request` rejects
+          github triggers without a non-empty label. The row MUST
+          therefore collect a label for the review blueprint — otherwise
+          the create fails with "blueprint IssueDrivenAutopilotReview
+          requires one of [GithubIssueLabel], got Manual". The inline
+          label input surfaces only when the review blueprint is
+          selected; the inspector can still edit the label after
+          creation. */}
       <div className="px-3 py-2 border-b border-border-subtle shrink-0">
         <div className="flex items-center gap-1">
           <input
@@ -245,13 +280,36 @@ export function CircuitsProbeTab() {
           <button
             type="button"
             onClick={handleCreate}
-            disabled={busy || newName.trim() === ''}
+            disabled={
+              busy ||
+              newName.trim() === '' ||
+              (isReviewBlueprint && reviewTriggerLabel.trim() === '')
+            }
             data-testid="circuit-create-button"
             className="px-2 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 shrink-0"
           >
             New Circuit
           </button>
         </div>
+        {isReviewBlueprint && (
+          <div className="flex items-center gap-1 mt-1">
+            <label
+              htmlFor="review-trigger-label"
+              className="text-2xs uppercase tracking-wide text-text-muted shrink-0"
+            >
+              GitHub label
+            </label>
+            <input
+              id="review-trigger-label"
+              value={reviewTriggerLabel}
+              onChange={(e) => setReviewTriggerLabel(e.target.value)}
+              placeholder="buildmesh:run"
+              aria-label="Review blueprint trigger label"
+              data-testid="circuit-review-trigger-label"
+              className="flex-1 min-w-0 px-2 py-1 bg-bg-surface border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none"
+            />
+          </div>
+        )}
       </div>
 
       {(loadError !== null || actionError !== null) && (

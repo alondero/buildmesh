@@ -4305,4 +4305,65 @@ mod tests {
             "None -> resolve the mesh/application default at spawn time"
         );
     }
+
+    /// #1219 review: a user-authored `timeout_seconds: Some(1800)` must
+    /// ride the explicit-override seam so the (separate) watchdog slice
+    /// can consume it. The inspector's contract is "0 or blank = inherit
+    /// default"; this test pins the carrier behaviour so the next slice
+    /// can wire the watchdog against `explicit.timeout_seconds` and trust
+    /// the seam.
+    #[test]
+    fn circuit_spawn_passes_timeout_seconds_through_explicit_override() {
+        let kind = spawn_kind(Some("anthropic"), None, None, None, Some(1800));
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.explicit.timeout_seconds, Some(1800));
+    }
+
+    /// #1219 review: `Some(0)` collapses to `None` at the seam (the
+    /// inspector's "0 = inherit default" affordance) so the cascade
+    /// falls through. Without this collapse a zero-int overflow at save
+    /// time could request an instant expiry once the watchdog slice
+    /// lands. Pin the contract here.
+    #[test]
+    fn circuit_spawn_zero_timeout_seconds_collapses_to_none() {
+        let kind = spawn_kind(Some("anthropic"), None, None, None, Some(0));
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert!(
+            resolved.explicit.timeout_seconds.is_none(),
+            "Some(0) must collapse to None so the cascade falls through"
+        );
+    }
+
+    /// #1219 review: `None` carries through unchanged — the inspector's
+    /// "blank" affordance is semantically identical to "inherit the
+    /// orchestrator default" and must not become `Some(0)` at the seam.
+    #[test]
+    fn circuit_spawn_none_timeout_seconds_stays_none() {
+        let kind = spawn_kind(Some("anthropic"), None, None, None, None);
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(resolved.explicit.timeout_seconds, None);
+    }
+
+    /// #1219 (round-2 review): the carrier seam must thread the value
+    /// end-to-end. `ResolvedCircuitSpawn` carries `explicit.timeout_seconds`
+    /// and is later flattened into `SpawnOptions::explicit_timeout_seconds`
+    /// by the orchestrator — this test asserts the carrier shape stays
+    /// populated so the (deferred) watchdog slice can read
+    /// `SpawnOptions::explicit_timeout_seconds` without re-deriving from
+    /// the AST. A future refactor that flattens the carrier without
+    /// copying the timeout would drop the wiring silently; the field
+    /// pin in `prepare_tests::spawn_options_carries_explicit_slots`
+    /// catches that at compile time, this test catches the runtime
+    /// regression.
+    #[test]
+    fn circuit_spawn_carries_timeout_through_to_resolved_carrier() {
+        let kind = spawn_kind(Some("anthropic"), None, None, None, Some(1800));
+        let resolved = resolve_circuit_spawn_inputs(&kind).unwrap();
+        assert_eq!(
+            resolved.explicit.timeout_seconds,
+            Some(1800),
+            "carrier must thread timeout end-to-end so the orchestrator can \
+             pass it into SpawnOptions"
+        );
+    }
 }

@@ -170,9 +170,11 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.queryByTestId('inspector-model-input')).toBeNull();
     expect(screen.queryByTestId('inspector-effort-select')).toBeNull();
     expect(screen.queryByTestId('inspector-extra-args-input')).toBeNull();
-    // #1219: timeout is gated on `caps` (any harness selected). With
-    // no provider, caps is null, so no timeout input surfaces either.
-    expect(screen.queryByTestId('inspector-timeout')).toBeNull();
+    // #1219 (review feedback): timeout is orchestrator policy, not a
+    // harness capability, so it ALWAYS renders — even with no provider
+    // selected. The previous `caps &&` gate hid the most-common
+    // authoring mode behind a capability the user had to opt into.
+    expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
   });
 
   it('renders model + closed-effort + extra-args + timeout when Claude Code is selected', async () => {
@@ -180,7 +182,8 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
-    // #1219: timeout surfaces once any harness is selected.
+    // #1219: timeout always renders (orchestrator policy), independent
+    // of harness selection.
     expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     // Closed vocabulary: low / medium / high
     const effortSelect = screen.getByTestId(
@@ -197,8 +200,8 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
-    // #1219: timeout field rides the same capability-gating tier as
-    // model/effort/extra-args.
+    // #1219: timeout always renders; the harness dropdown is unrelated
+    // to its visibility.
     expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
@@ -225,8 +228,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect(screen.getByTestId('inspector-model-input')).toBeTruthy();
     expect(screen.getByTestId('inspector-effort-select')).toBeTruthy();
     expect(screen.getByTestId('inspector-extra-args-input')).toBeTruthy();
-    // #1219: timeout field is capability-gated on `caps` (any harness),
-    // not on the model/effort/extra-args capability set.
+    // #1219: timeout is independent of the harness capability set.
     expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
@@ -312,10 +314,13 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
 
   // Issue #1362 review fix: switching provider must NOT leave
   // dangling model/effort/extra_args fields from the previous
-  // harness in the AST. The Inspector clears them on the next emit
-  // so the serialised circuit JSON never contains values the new
-  // harness can't honour.
-  it('clears model/effort/extra_args/timeout on provider switch', () => {
+  // Provider-specific overrides must not survive a harness switch
+  // (#1362): the serialised circuit JSON would carry values the new
+  // harness can't honour, and the capability mask would silently drop
+  // them at spawn time. `timeout_seconds` is the exception — it's
+  // orchestrator-level policy, not a harness capability, so the
+  // authored budget must persist across switches.
+  it('clears model/effort/extra_args but PRESERVES timeout_seconds on provider switch', () => {
     const onChange = vi.fn();
     // Codex row with Anthropic-incompatible overrides set.
     renderNode(
@@ -333,16 +338,17 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     fireEvent.change(select, { target: { value: 'anthropic' } });
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
     expect(lastCall).toBeDefined();
-    // Provider is now Anthropic, but every prior harness-specific
-    // override is cleared so a stale value can't sneak through the
-    // capability mask at spawn time. #1219 extends the same rule to
-    // `timeout_seconds` so a stale budget authored against Codex
-    // can't survive into an Anthropic spawn.
+    // Provider is now Anthropic; the harness-specific overrides are
+    // cleared so a stale value can't sneak through the capability mask
+    // at spawn time.
     expect((lastCall as { provider: string }).provider).toBe('anthropic');
     expect((lastCall as { model: string | null }).model).toBeNull();
     expect((lastCall as { effort: string | null }).effort).toBeNull();
     expect((lastCall as { extra_args: string | null }).extra_args).toBeNull();
-    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
+    // #1219 (review feedback): timeout persists across the switch.
+    // The future step-level watchdog is buildmesh-wide, so clearing
+    // the value here would destroy harness-agnostic user data.
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBe(1800);
   });
 
   // #1219: the timeout input is nullable — clearing the field commits
@@ -372,6 +378,103 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
   });
 
+  // #1219 (review feedback): a typed `0` is the inspector's affordance
+  // for "inherit default" — the resolver collapses `Some(0)` to `None`
+  // at the seam (`resolve_circuit_spawn_inputs`). Without this commit
+  // path the `min={1}` clamp would coerce the typed `0` to `1` behind
+  // the user's back.
+  it('commits null when the user types 0 in the timeout field', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '0' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
+  });
+
+  // #1219 (review feedback): values above MAX_STEP_TIMEOUT_SECONDS are
+  // clamped at the inspector so the AST never carries a value the
+  // Rust `validate()` would reject at save time.
+  it('clamps the typed timeout to MAX_STEP_TIMEOUT_SECONDS', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '9999999999' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBe(604_800);
+  });
+
+  // #1219 (review feedback): the input advertises `max=604800` so
+  // assistive tech + form validation surface the upper bound, even
+  // though our `onChange` clamp is the actual enforcement.
+  it('advertises MAX_STEP_TIMEOUT_SECONDS as the max attribute', () => {
+    renderNode(spawnNode({ provider: 'anthropic' }));
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    expect(input.max).toBe('604800');
+  });
+
+  // #1219 (review feedback, round 2): the inspector's onChange clamp
+  // is the actual enforcement — `min={1}` and `max={...}` attributes
+  // are advisory (typing bypasses them). Pin every boundary case so a
+  // future regression that lets a value escape the clamp is caught at
+  // the input layer, NOT at save time with a generic JSON error from
+  // the Rust `validate()`.
+  it('clamps a typed negative value up to the min (1)', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '-5' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBe(1);
+  });
+
+  // Fractions (3.14) silently truncate to the integer floor so the AST
+  // carries a value the Rust `Option<u32>` deserialiser accepts. Pin
+  // the floor (3), not a round — half values round inconsistently
+  // across implementations and the floor matches the inspector's
+  // stated "integer" semantic.
+  it('truncates a typed fractional value to its integer floor', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '3.14' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBe(3);
+  });
+
+  // Whitespace-only input is silently ignored — `Number(' ')` is 0,
+  // which would route through the nullable+0 collapse to `null`. The
+  // user-typed intent for a cleared whitespace string is "blank" not
+  // "0", so reject the keystroke rather than collapse. The
+  // `nullable && raw === ''` branch handles the explicit empty
+  // string; this test pins the non-empty-but-whitespace stub.
+  it('ignores a whitespace-only typed value (does not commit null or zero)', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '   ' } });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  // #1219 (review feedback): the save-time collapse `Some(0) → None`
+  // lives in `resolve_circuit_spawn_inputs` (Rust). The inspector
+  // mirrors it at commit time so the typed 0 never reaches the AST.
+  // Already covered by `commits null when the user types 0 in the
+  // timeout field` above; this test pins the boundary at exactly 0
+  // for the record.
+  it('collapses typed zero to null (not Some(0))', () => {
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'anthropic' }), onChange);
+    const input = screen.getByTestId('inspector-timeout') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '0' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
+  });
+
   it('clears overrides when switching back to Default (mesh autopilot)', () => {
     const onChange = vi.fn();
     renderNode(
@@ -386,5 +489,125 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
     expect((lastCall as { provider: string | null }).provider).toBeNull();
     expect((lastCall as { model: string | null }).model).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1219 review feedback: Trigger type select for root nodes.
+//
+// #1219 collapsed the Probe tab's New Circuit row to name + blueprint only,
+// on the promise that trigger authoring moved "fully into the canvas
+// inspector" — but the inspector's Trigger type select was missing. The
+// review blueprint (and every non-Manual trigger) was therefore
+// unreachable from the UI. These tests pin the inspector-level seam
+// that fixes the dead end: root trigger nodes expose a Trigger type
+// select, and switching it rewires the kind via `defaultKind`.
+// ---------------------------------------------------------------------------
+
+describe('InspectorPanel — Trigger type select for root nodes (#1219)', () => {
+  function manualTriggerNode(): CircuitNode {
+    return { id: 'trigger', type: { type: 'manual' } };
+  }
+
+  it('renders a Trigger type select on a Manual trigger', () => {
+    renderNode(manualTriggerNode());
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    expect(select).toBeTruthy();
+    expect(select.value).toBe('manual');
+    const options = Array.from(select.options).map((o) => o.value);
+    expect(options).toEqual([
+      'manual',
+      'interval',
+      'github_issue_label',
+      'github_pull_request_label',
+    ]);
+  });
+
+  it('renders a Trigger type select on an Interval trigger', () => {
+    renderNode({ id: 't', type: { type: 'interval', interval_seconds: 60 } });
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    expect(select.value).toBe('interval');
+  });
+
+  it('renders a Trigger type select on a github_issue_label trigger', () => {
+    renderNode({ id: 't', type: { type: 'github_issue_label', label: 'buildmesh:run' } });
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    expect(select.value).toBe('github_issue_label');
+  });
+
+  it('renders a Trigger type select on a github_pull_request_label trigger', () => {
+    renderNode({ id: 't', type: { type: 'github_pull_request_label', label: 'buildmesh:review' } });
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    expect(select.value).toBe('github_pull_request_label');
+  });
+
+  it('switching Manual → GithubIssueLabel rewires to a fresh default kind', () => {
+    const onChange = vi.fn();
+    renderNode(manualTriggerNode(), onChange);
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'github_issue_label' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toBeDefined();
+    expect(lastCall).toEqual({ type: 'github_issue_label', label: '' });
+  });
+
+  it('switching Manual → Interval rewires to a fresh default kind', () => {
+    const onChange = vi.fn();
+    renderNode(manualTriggerNode(), onChange);
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'interval' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toEqual({ type: 'interval', interval_seconds: 300 });
+  });
+
+  it('switching Manual → GithubPullRequestLabel rewires to a fresh default kind', () => {
+    const onChange = vi.fn();
+    renderNode(manualTriggerNode(), onChange);
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'github_pull_request_label' } });
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(lastCall).toEqual({ type: 'github_pull_request_label', label: '' });
+  });
+
+  it('does NOT render the Trigger type select on non-trigger kinds', () => {
+    // Spawn / action nodes don't have a trigger discriminator — the
+    // Trigger type select would be misleading. Confirm it stays out of
+    // every non-trigger category.
+    const nonTriggerKinds: CircuitNode['type'][] = [
+      { type: 'spawn_agent_node', prompt: 'p', name: null, provider: null, model: null, effort: null, extra_args: null, timeout_seconds: null },
+      { type: 'inject_pty', prompt: 'p', target_node_id: null },
+      { type: 'notify', message: 'm' },
+      { type: 'set_node_status', status: 'completed', target_node_id: null },
+      { type: 'close_agent_node', target_node_id: null },
+      { type: 'all_completed' },
+      { type: 'any_completed' },
+    ];
+    for (const kind of nonTriggerKinds) {
+      const { unmount } = renderNode({ id: 'n', type: kind });
+      expect(
+        screen.queryByTestId('inspector-trigger-type-select'),
+        `Trigger type select must not render for ${kind.type}`,
+      ).toBeNull();
+      unmount();
+    }
+  });
+
+  it('after switching Manual → GithubIssueLabel, the label input is editable', () => {
+    // The dead-end scenario from the review: user opens a circuit,
+    // switches the trigger to GitHubIssueLabel, then needs to set the
+    // label. Pin that the label input is editable after the switch.
+    const onChange = vi.fn();
+    renderNode(manualTriggerNode(), onChange);
+    const select = screen.getByTestId('inspector-trigger-type-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'github_issue_label' } });
+    // The onChange call replaces the kind; re-render with the new kind
+    // and the same onChange so the label-input change is captured.
+    const newKind = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    renderNode({ id: 'trigger', type: newKind }, onChange);
+    const labelInput = screen.getByTestId('inspector-trigger-label') as HTMLInputElement;
+    expect(labelInput).toBeTruthy();
+    fireEvent.change(labelInput, { target: { value: 'buildmesh:run' } });
+    const labelCall = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0];
+    expect(labelCall).toEqual({ type: 'github_issue_label', label: 'buildmesh:run' });
   });
 });

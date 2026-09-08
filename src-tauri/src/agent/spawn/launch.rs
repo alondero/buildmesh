@@ -24,6 +24,13 @@ pub(super) struct LaunchParams {
     pub explicit_model: Option<String>,
     pub explicit_effort: Option<String>,
     pub explicit_extra_args: Option<String>,
+    /// Optional per-step wall-clock budget in seconds (#1219). Read by
+    /// the (deferred) step-level watchdog from the resolved spawn
+    /// config. Today the launch phase logs it at warn-level when set
+    /// so a circuit author with a non-default budget has a recognisable
+    /// trace entry — the carrier is testable end-to-end without
+    /// requiring the watchdog slice to ship first.
+    pub explicit_timeout_seconds: Option<u32>,
     /// Composite spawn-option id (`node.provider`), used as the harness
     /// map key for application defaults and per-mesh overrides.
     pub harness_id: String,
@@ -73,12 +80,29 @@ pub(super) async fn launch_process(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        explicit_timeout_seconds,
         harness_id,
         node_mesh_id,
         registry_mesh_id,
         session_id_mode,
         sandbox,
     } = launch;
+
+    // #1219 (round-2 review): a non-None `explicit_timeout_seconds`
+    // signals the circuit author pinned a per-step wall-clock budget.
+    // The watchdog enforcement slice is a follow-up; today we log the
+    // value at info-level so the carrier is visible in the trace and
+    // the integration test (services::circuit_worker::tests::
+    // circuit_spawn_carries_timeout_through_to_launch) can pin the
+    // seam. `Some(0)` is filtered at the orchestrator (collapse rule
+    // on `ExplicitSpawnOverrides`) so we never see it here.
+    if let Some(timeout) = explicit_timeout_seconds {
+        tracing::info!(
+            "launch_process: session {} explicit timeout = {}s (watchdog enforcement deferred to follow-up slice)",
+            session_id,
+            timeout,
+        );
+    }
     let adapter = provider.adapter();
 
     // Resolve configuration values through the per-field cascade (issue

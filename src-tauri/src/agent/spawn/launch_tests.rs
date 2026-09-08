@@ -11,6 +11,12 @@ fn launch_params_carry_pty_size_and_cascade_overrides() {
         explicit_model: Some("sonnet-4".into()),
         explicit_effort: Some("low".into()),
         explicit_extra_args: Some("--verbose".into()),
+        // #1219: per-step wall-clock budget from the AST. Threaded
+        // through SpawnOptions → LaunchParams so the launch phase
+        // can log it (and the deferred watchdog slice can consume
+        // it). Pin the field here so a future refactor that drops
+        // it fails compilation.
+        explicit_timeout_seconds: Some(1800),
         harness_id: "anthropic".into(),
         node_mesh_id: 1,
         registry_mesh_id: 1,
@@ -23,6 +29,7 @@ fn launch_params_carry_pty_size_and_cascade_overrides() {
     assert_eq!(launch.explicit_model.as_deref(), Some("sonnet-4"));
     assert_eq!(launch.explicit_effort.as_deref(), Some("low"));
     assert_eq!(launch.explicit_extra_args.as_deref(), Some("--verbose"));
+    assert_eq!(launch.explicit_timeout_seconds, Some(1800));
 }
 
 #[test]
@@ -43,6 +50,10 @@ fn provisioned_workspace_has_no_launch_knobs() {
         "explicit_model",
         "explicit_effort",
         "explicit_extra_args",
+        // #1219: timeout is a launch-time knob, not a provisioning
+        // concern. Pin that provision.rs doesn't grow a stray
+        // `explicit_timeout_seconds` field that bypasses launch.
+        "explicit_timeout_seconds",
     ] {
         assert!(
             !body.contains(needle),

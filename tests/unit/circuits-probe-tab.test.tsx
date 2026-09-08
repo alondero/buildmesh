@@ -308,13 +308,74 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  // #1219: GitHub-labelled and review-blueprint creation no longer live on
-  // the row — the row is name + blueprint only. Trigger kind / label /
-  // interval are authored in the canvas inspector. A follow-up issue
-  // adds the inspector's "Trigger type" select for root nodes so users
-  // can rewire Manual → Interval / GithubIssueLabel / GithubPrLabel
-  // without deleting-and-recreating; until then, the IPC contract tests
-  // below pin the wrapper's wire shape for those trigger kinds.
+  // #1219 (review feedback, round 2): the row is name + blueprint, but
+  // the review blueprint forces triggerKind=github_issue_label +
+  // requires a non-empty label. The row surfaces a single inline label
+  // input when the review blueprint is selected and sends the right
+  // trigger config; the inspector still owns the trigger-type select
+  // for the walking skeleton (which lands with a Manual root the user
+  // can rewire).
+
+  // Pin the review-blueprint row-level wire shape end-to-end:
+  // blueprint, triggerKind, triggerLabel, concurrency. This is the
+  // test #1219 round-1 deleted; round-2 restores it as the contract
+  // the backend's validate_circuit_request enforces.
+  it('creates the review blueprint with triggerKind=github_issue_label + label', async () => {
+    mockBackend();
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
+    await user.selectOptions(
+      screen.getByTestId('circuit-blueprint-select'),
+      'issue_driven_autopilot_review'
+    );
+    await user.type(screen.getByTestId('circuit-review-trigger-label'), 'buildmesh:run');
+    await user.click(screen.getByTestId('circuit-create-button'));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('create_circuit', {
+        meshId: 42,
+        name: 'autopilot-review',
+        description: '',
+        // Review blueprint's concurrency 2 prevents implementation ↔
+        // reviewer deadlock.
+        concurrencyLimit: 2,
+        initialPrompt: '',
+        // Review blueprint's allowed_triggers() is [GithubIssueLabel];
+        // sending Manual here would fail validate_circuit_request.
+        triggerKind: 'github_issue_label',
+        triggerLabel: 'buildmesh:run',
+        intervalSeconds: null,
+        blueprint: 'issue_driven_autopilot_review',
+      });
+    });
+  });
+
+  it('disables the New Circuit button for the review blueprint until a label is entered', async () => {
+    mockBackend();
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+
+    await user.type(await screen.findByTestId('circuit-name-input'), 'autopilot-review');
+    await user.selectOptions(
+      screen.getByTestId('circuit-blueprint-select'),
+      'issue_driven_autopilot_review'
+    );
+    // No label typed — button must stay disabled so the create doesn't
+    // fire against an invalid config.
+    expect((screen.getByTestId('circuit-create-button') as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByTestId('circuit-review-trigger-label'), 'buildmesh:run');
+    expect((screen.getByTestId('circuit-create-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('does not surface the inline label input for the walking skeleton', async () => {
+    mockBackend();
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuit-name-input');
+    // Walking skeleton (default) — no inline label input.
+    expect(screen.queryByTestId('circuit-review-trigger-label')).toBeNull();
+  });
 
   it('Edit Flow opens the canvas editor for that circuit (#1209)', async () => {
     mockBackend();

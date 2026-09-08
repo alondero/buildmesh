@@ -266,6 +266,16 @@ describe('parseGraph', () => {
     expect(graph.edges[0].condition).toBe('always');
   });
 
+  // #1219 / review feedback: `CIRCUIT_GRAPH_VERSION` exists in two
+  // places (TS here, Rust in `src-tauri/src/autopilot/circuit/model.rs`)
+  // and the drift gate does NOT cover it because the constant is hand-
+  // maintained. Pin the current value as a single source of truth on
+  // the TS side; if a future bump forgets the TS mirror, this test
+  // fails the moment someone updates one without the other.
+  it('TS version constant matches the expected v3 schema (#1219)', () => {
+    expect(CIRCUIT_GRAPH_VERSION).toBe(3);
+  });
+
   it('stableGraphJson is order-insensitive — an add+delete round-trip is not dirty', () => {
     const a = parseGraph(
       '{"version":1,"nodes":[{"id":"a","type":"manual"},{"id":"b","type":"notify","message":"m"}],"edges":[{"from":"a","to":"b"}]}'

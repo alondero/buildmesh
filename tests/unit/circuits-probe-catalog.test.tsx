@@ -193,17 +193,13 @@ describe('Circuits Probe catalog contract (#1469)', () => {
   it.each(PROBE_CATALOG)(
     'creating a $kind circuit passes the right blueprint + concurrencyLimit to create_circuit',
     async (entry) => {
-      // #1219: the Probe tab row is name + blueprint only — trigger
-      // authoring lives in the canvas inspector. The
-      // issue_driven_autopilot_review blueprint requires a
-      // GitHub-issue label that the inspector cannot yet set on a
-      // new Manual root (the inspector's "Trigger type" select for
-      // root nodes is a tracked follow-up). Skip the row-driven
-      // creation for that blueprint; the walking skeleton row
-      // creation is still fully testable here.
-      if (entry.kind === 'issue_driven_autopilot_review') {
-        return;
-      }
+      // #1219 (review feedback, round 2): every catalog entry must
+      // produce a create_circuit call with the right blueprint +
+      // concurrency + trigger config (the review blueprint forces
+      // `trigger_kind = github_issue_label` + a non-empty label,
+      // which the row surfaces as an inline label input). The walking
+      // skeleton + review blueprints both pin here so a future
+      // blueprint that breaks the row-level contract is caught.
       mockBackend();
       const user = userEvent.setup();
       openProbeDestination('circuits');
@@ -214,6 +210,13 @@ describe('Circuits Probe catalog contract (#1469)', () => {
         entry.kind
       );
       await user.type(screen.getByTestId('circuit-name-input'), `${entry.kind}-test`);
+      // Review blueprint surfaces an inline label input — fill it so
+      // the create button is enabled. The walking skeleton doesn't
+      // have one, so the query returns null and we skip.
+      const labelInput = screen.queryByTestId('circuit-review-trigger-label');
+      if (labelInput !== null) {
+        await user.type(labelInput, 'buildmesh:run');
+      }
 
       await user.click(screen.getByTestId('circuit-create-button'));
 
