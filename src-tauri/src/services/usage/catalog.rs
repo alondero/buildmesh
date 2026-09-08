@@ -229,4 +229,56 @@ mod tests {
         // Native self-auth providers never appear in the keyed set.
         assert!(!ids.contains("anthropic"));
     }
+
+    #[test]
+    fn dispatched_keyed_adapters_report_no_credential_without_network() {
+        // Production-boundary contract through the seam: real keyed adapters
+        // with an empty account snapshot must report the no-credential
+        // envelope without touching the network (empty-key early return).
+        // A miswired adapter (wrong fn, wrong provider id) fails here.
+        for id in ["minimax", "kimi", "openrouter", "openai", "deepseek"] {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            let usage = adapter.fetch(&[]);
+            assert_eq!(usage.provider, id, "adapter {id} must mint its own envelope");
+            assert!(!usage.logged_in, "adapter {id} with no key must be logged out");
+            let error = usage.error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("No API key"),
+                "adapter {id} must report no-credential, got: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatched_adapters_mint_their_own_provider_envelope() {
+        // Wiring contract through the seam for every registered adapter:
+        // `dispatch(id).fetch` must return an envelope stamped with that same
+        // id. Keyed adapters take the deterministic no-key path above (no
+        // network). Native adapters read local credentials; on CI (no
+        // credentials) they take the logged-out path without network, while
+        // on a credential-bearing host they may probe live endpoints exactly
+        // as the production fetchers do — either way the provider stamp must
+        // match, so a broken or miswired fetch implementation fails here.
+        // Loopback success/malformed coverage per adapter is an explicit
+        // follow-up once adapters accept an injectable transport (#1657 step 6).
+        for id in [
+            "anthropic",
+            "codex",
+            "cursor",
+            "minimax",
+            "agy",
+            "kimi",
+            "openrouter",
+            "grok",
+            "opencode",
+            "commandcode",
+            "openai",
+            "deepseek",
+            "freebuff",
+        ] {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            let usage = adapter.fetch(&[]);
+            assert_eq!(usage.provider, id, "adapter {id} must mint its own envelope");
+        }
+    }
 }

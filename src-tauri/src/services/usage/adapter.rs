@@ -62,18 +62,27 @@ pub(crate) fn api_key_for<'a>(
         .filter(|key| !key.is_empty())
 }
 
-/// One shared HTTP client for all adapters (issue #1657 step 6).
+/// One shared HTTP client for all adapters (issue #1657 step 6, first half).
 ///
 /// Previously every fetcher built its own `reqwest::blocking::Client` inline,
-/// so tests could only intercept at the loopback-HTTP layer. Centralising
-/// construction here is the first half of the transport injection: the second
-/// half (a `fetch_json` seam taking a transport) can land per-adapter without
-/// touching the call sites again. Timeout mirrors the Freebuff fetcher's 15s.
+/// so tests could only intercept at the loopback-HTTP layer. Construction is
+/// centralised here behind a process-wide `OnceLock`; per-adapter transport
+/// injection is an explicit follow-up and is not claimed here. Timeout is 15s,
+/// matching the Freebuff fetcher; `fetch_usage` callers previously built an
+/// unbounded client, so this adds a timeout there (behaviour change, covered
+/// by the existing status/parse loopback tests, no timeout-specific test).
+static SHARED_CLIENT: std::sync::OnceLock<Result<Client, String>> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn shared_client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Client error: {e}"))
+    SHARED_CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|e| format!("Client error: {e}"))
+        })
+        .clone()
 }
 
 /// Drives the shared request → status-check → parse flow. Callers reach this
@@ -81,9 +90,10 @@ pub(crate) fn shared_client() -> Result<Client, String> {
 /// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
 ///
 /// Moved here from the `usage.rs` god-module so adapters import the driver
-/// from the seam, never from the fetcher module. Behaviour is unchanged —
-/// existing `parse_*` + loopback tests must pass unmodified after each
-/// provider move (tests move files, not assertions).
+/// from the seam, never from the fetcher module. Existing `parse_*` +
+/// loopback tests must pass unmodified after each provider move (tests move
+/// files, not assertions); the only intended behaviour delta is the 15s
+/// timeout noted on [`shared_client`].
 pub(crate) fn fetch_usage(
     provider: &str,
     build_request: impl FnOnce(&Client) -> RequestBuilder,
