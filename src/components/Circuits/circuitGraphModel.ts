@@ -18,6 +18,13 @@ import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { CircuitEdge } from '../../types/generated/CircuitEdge';
 import type { EdgeCondition } from '../../types/generated/EdgeCondition';
 import type { StepOutcome } from '../../types/generated/StepOutcome';
+import {
+  isQueuedStepStatus,
+  isTerminalRunState,
+  STEP_STATUS_QUEUED,
+} from './circuitVocabulary';
+
+export { isTerminalRunState } from './circuitVocabulary';
 
 export type NodeCategory = 'trigger' | 'action' | 'gate' | 'join';
 export type KindDiscriminator = CircuitNodeKind['type'];
@@ -867,7 +874,7 @@ export function statusTextClass(status: string): string {
     // Queued work is deliberately subordinate — it is distinguished by its
     // label and reason line, never by colour alone (WCAG 1.4.1).
     case 'pending':
-    case 'pending_slot':
+    case STEP_STATUS_QUEUED:
       return 'text-text-muted';
     default:
       return 'text-text-muted';
@@ -977,11 +984,6 @@ export function formatDurationMs(ms: number): string {
 // wording is unit-testable without mounting the Probe.
 // ---------------------------------------------------------------------------
 
-/** Run states the worker never moves out of (`stepper::RunState`). */
-export function isTerminalRunState(state: string): boolean {
-  return state === 'completed' || state === 'failed' || state === 'cancelled';
-}
-
 /**
  * Edge keys traversed by a run: each finished step routes along edges
  * whose condition matches its recorded outcome; an Always edge carries
@@ -994,7 +996,7 @@ export function traversedEdgeKeys(
 ): Set<string> {
   const keys = new Set<string>();
   for (const step of steps) {
-    if (step.status === 'queued' || step.status === 'pending_slot') continue;
+    if (isQueuedStepStatus(step.status)) continue;
     for (const edge of edges) {
       if (edge.from !== step.node_id) continue;
       if (

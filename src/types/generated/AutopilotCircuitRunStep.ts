@@ -13,7 +13,8 @@ node_id: string,
  */
 agent_node_id: number | null, 
 /**
- * `pending_slot` | `running` | `completed` | `failed` | `cancelled`.
+ * StepStatus wire token (`pending_slot` | `running` | `blocked` |
+ * `completed` | `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
  */
 status: string, attempt: number, 
 /**

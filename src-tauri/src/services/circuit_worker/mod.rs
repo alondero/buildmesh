@@ -47,17 +47,20 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
 
+use crate::autopilot::circuit::capacity;
 use crate::autopilot::circuit::context::CircuitContext;
 use crate::autopilot::circuit::model::{
     CircuitGraph, CircuitNodeKind, StepOutcome as GraphStepOutcome,
 };
 use crate::autopilot::circuit::stepper::{
-    advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
+    advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
+mod github;
+mod spawn;
 use crate::db;
 use crate::models::SessionStatus;
 use crate::process_util::run_worker_pass;
-use crate::agent::spawn::ExplicitSpawnOverrides;
+
 
 /// Fast tick — covers interval pacing headroom, slot unblocking latency,
 /// and piloted-agent observation lag.
@@ -174,7 +177,7 @@ pub fn finish_circuit_run_cancellation(run_id: i64) {
     }
 }
 
-struct CircuitSpawnPermit {
+pub(super) struct CircuitSpawnPermit {
     run_id: i64,
 }
 
@@ -196,7 +199,7 @@ impl Drop for CircuitSpawnPermit {
 /// Reserve the spawn barrier while checking the durable run state. The check
 /// and insertion share the mutex with command-side quiescence, so a delete
 /// that has acquired the barrier cannot be followed by a late stage-1 spawn.
-fn begin_circuit_spawn(run_id: i64) -> Result<Option<CircuitSpawnPermit>, String> {
+pub(super) fn begin_circuit_spawn(run_id: i64) -> Result<Option<CircuitSpawnPermit>, String> {
     let (lock, _) = &*CIRCUIT_SPAWNS;
     let mut active = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if !run_accepts_effects(run_id)? {
@@ -430,7 +433,8 @@ fn may_admit_run(
     active: &db::ActiveCircuitRun,
     mesh: &crate::models::Mesh,
 ) -> bool {
-    if active.run.state != "pending" {
+    let state = RunState::from_db_str(&active.run.state);
+    if state != RunState::Pending {
         return true; // already admitted or never-needs-admission
     }
     let active_runs = match db::count_active_circuit_runs(active.run.mesh_id) {
@@ -443,7 +447,7 @@ fn may_admit_run(
             return false;
         }
     };
-    if active_runs < i64::from(mesh.circuit_run_capacity) {
+    if capacity::admit_pending_run(active_runs, mesh.circuit_run_capacity) {
         return true;
     }
     tracing::info!(
@@ -462,33 +466,8 @@ fn may_admit_run(
 /// process while a reviewer is spawned.
 fn required_agent_slots(active: &db::ActiveCircuitRun) -> i64 {
     CircuitGraph::from_json(&active.circuit_graph_json)
-        .map(|graph| {
-            graph
-                .nodes
-                .iter()
-                .filter(|node| crate::autopilot::circuit::model::consumes_agent_slot(&node.kind))
-                .count() as i64
-        })
+        .map(|graph| capacity::declared_agent_slots(&graph))
         .unwrap_or(0)
-}
-
-/// Free slots in the optional app-wide Autopilot pool after accounting for
-/// agents outside a circuit lease and circuit-owned slots. Admission passes
-/// durable worst-case lease reservations here; a running Tick passes the
-/// live circuit-agent count. The snapshots intentionally differ even though
-/// they protect the same host-wide resource.
-fn global_agent_free_slots(
-    global_pool: Option<u32>,
-    unleased_slots: i64,
-    circuit_occupied_slots: i64,
-) -> i64 {
-    global_pool
-        .map(|pool| {
-            i64::from(pool)
-                .saturating_sub(unleased_slots)
-                .saturating_sub(circuit_occupied_slots)
-        })
-        .unwrap_or(i64::MAX)
 }
 
 fn global_agent_reservation_fits(
@@ -497,10 +476,12 @@ fn global_agent_reservation_fits(
     unleased_slots: i64,
     global_pool: Option<u32>,
 ) -> bool {
-    if required <= 0 {
-        return true;
-    }
-    global_agent_free_slots(global_pool, unleased_slots, reserved_circuit_slots) >= required
+    capacity::global_agent_reservation_fits(
+        required,
+        reserved_circuit_slots,
+        unleased_slots,
+        global_pool,
+    )
 }
 
 /// Observe the capacity available to one running circuit. The worker injects
@@ -521,7 +502,7 @@ fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> 
             let retained_total = db::count_retained_circuit_agent_nodes_total();
             match (legacy_total, circuit_total, retained_total) {
                 (Ok(legacy), Ok(circuits), Ok(retained)) => {
-                    global_agent_free_slots(
+                    capacity::global_agent_free_slots(
                         Some(pool),
                         legacy.saturating_add(retained),
                         circuits,
@@ -539,11 +520,13 @@ fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> 
     };
     let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
     let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
-    let lease_free = reserved_for_run.saturating_sub(owned_by_run);
-    CircuitEvent::Tick(Capacity {
-        circuit_free_slots: active.circuit_concurrency_limit - circuit_running,
-        agent_free_slots: global_free_slots.min(lease_free),
-    })
+    CircuitEvent::Tick(capacity::tick_capacity(
+        active.circuit_concurrency_limit,
+        circuit_running,
+        reserved_for_run,
+        owned_by_run,
+        global_free_slots,
+    ))
 }
 
 /// One full pass over every active circuit run. Per-run failures are
@@ -576,7 +559,7 @@ fn run_pass(app: &AppHandle) {
     // Repair leases for active runs created before the reservation table was
     // introduced. This is idempotent and keeps restarts from losing a claim.
     for active in &runs {
-        if matches!(active.run.state.as_str(), "running" | "paused") {
+        if RunState::is_admitted_db_str(&active.run.state) {
             let required = required_agent_slots(active);
             if required > 0 && db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0) < required {
                 let _ = db::reserve_circuit_agent_slots(active.run.id, required);
@@ -886,7 +869,7 @@ fn drive_run(
 
 /// Persist exactly one pure stepper transition. All durable run/context/step
 /// writes, including post-effect delivery outcomes, pass through this seam.
-fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
+pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
     let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
     if !transition.step_writes.is_empty()
         || transition.run_state_changed
@@ -1271,7 +1254,7 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     }
 
     // Capacity snapshot for scheduling. Every failure here fails CLOSED
-    // (zero capacity — the run parks in pending_slot until the next
+    // (zero capacity — the run parks in Queued until the next
     // pass), but loudly: a silent permanent queue would look exactly
     // like a busy mesh. Circuit-owned agents use their durable run lease;
     // the optional app-wide pool is the only external agent backstop.
@@ -1572,7 +1555,7 @@ fn select_turn_report(
 /// context update is committed together with the step transition before any
 /// external effect runs. New spawns do not need a baseline: their launch path
 /// records a live turn boundary after the process is attached.
-fn prepare_turn_boundaries(
+pub(super) fn prepare_turn_boundaries(
     view: &mut RunView,
     effects: &[crate::autopilot::circuit::stepper::Effect],
 ) -> Result<bool, String> {
@@ -1675,283 +1658,6 @@ fn run_verification_command(mesh_path: &str, command: &str) -> bool {
     }
 }
 
-///// Determine the target (issue vs PR number) for a GitHub action.
-/// If the action is CloseIssue, it explicitly requires an issue trigger.
-/// If this node has an upstream OpenPr node in its lineage, it targets that PR (pr.number).
-/// Otherwise, it falls back to issue.number if present, then pr.number.
-fn determine_github_target(
-    view: &RunView,
-    node_id: &str,
-    action: crate::autopilot::circuit::model::GithubActionKind,
-) -> Result<(&'static str, i64), String> {
-    use crate::autopilot::circuit::model::GithubActionKind;
-    if action == GithubActionKind::CloseIssue {
-        let num = view
-            .context
-            .get("issue.number")
-            .and_then(|n| n.parse::<i64>().ok())
-            .ok_or_else(|| "CloseIssue requires an issue-triggered run with issue.number".to_string())?;
-        return Ok(("issue", num));
-    }
-
-    let has_upstream_open_pr = view.has_upstream_node_of_kind(node_id, |kind| {
-        matches!(kind, CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. })
-    });
-
-    if has_upstream_open_pr {
-        if let Some(pr_num) = view.context.get("pr.number").and_then(|n| n.parse::<i64>().ok()) {
-            return Ok(("pr", pr_num));
-        }
-    }
-
-    if let Some(issue_num) = view.context.get("issue.number").and_then(|n| n.parse::<i64>().ok()) {
-        Ok(("issue", issue_num))
-    } else if let Some(pr_num) = view.context.get("pr.number").and_then(|n| n.parse::<i64>().ok()) {
-        Ok(("pr", pr_num))
-    } else {
-        Err("GitHub action has no issue/pr context — the circuit needs a GitHub trigger upstream of this node".to_string())
-    }
-}
-
-/// Reconcile the implementation branch with GitHub before emitting the durable
-/// result. Inject the external observations so replay and lookup failures can
-/// be exercised without a process-wide database or GitHub writes.
-fn ensure_open_pr(
-    view: &RunView,
-    node_id: &str,
-    policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
-    observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
-    find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
-    create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
-) -> Result<CircuitEvent, String> {
-    let agent_node_id = view.resolve_open_pr_agent(node_id)
-        .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
-    let wrapup = observe(agent_node_id)?;
-    let reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
-    if !reasons.is_empty() {
-        return Err(format!("autopilot wrap-up verification failed: {}", reasons.join("; ")));
-    }
-    let head = wrapup
-        .branch
-        .clone()
-        .ok_or_else(|| "the implementation worktree has no checked-out branch".to_string())?;
-    let title = view.context.get("issue.title")
-        .or_else(|| view.context.get("pr.title"))
-        .unwrap_or("Circuit run").to_string();
-    // A replay after GitHub accepted creation but before the ledger commit
-    // must discover that PR, never create a second one.
-    let pr = match find(&head)? {
-        Some(pr) => pr,
-        None if policy.is_some_and(|policy| policy.requires_existing()) => {
-            return Err("the implementation agent did not raise an open pull request for its branch".to_string());
-        }
-        None => create(&head, &title)?,
-    };
-    let head_ref = if pr.head_ref.trim().is_empty() { head } else { pr.head_ref };
-    let title = if pr.title.trim().is_empty() { title } else { pr.title };
-    Ok(CircuitEvent::GithubActionResult {
-        node_id: node_id.to_string(), success: true, pr_number: Some(pr.number),
-        pr_url: Some(pr.html_url), pr_head_ref: Some(head_ref),
-        pr_title: if title.is_empty() { None } else { Some(title) }, error: None,
-    })
-}
-
-/// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
-/// the target repo from the mesh's `origin`, execute the mutation through
-/// the shared [`crate::services::github::GitHubClient`] seam, and advance
-/// the stepper with the result so context updates (e.g. `pr.*`) commit atomically
-/// before downstream nodes cascade.
-fn call_github_effect(
-    app: &AppHandle,
-    active: &db::ActiveCircuitRun,
-    view: &mut RunView,
-    node_id: &str,
-    action: crate::autopilot::circuit::model::GithubActionKind,
-    label: Option<&str>,
-    comment: Option<&str>,
-) -> Result<(), String> {
-    use crate::autopilot::circuit::model::GithubActionKind;
-    use crate::services::github::GitHubClient;
-
-    if action == GithubActionKind::OpenPr
-        && crate::autopilot::circuit::stepper::resolve_upstream_spawn_agent(&view.graph, &view.steps, node_id).is_none() {
-        return Err("OpenPr cannot recover: its upstream spawned agent association is missing".into());
-    }
-
-    let mesh = db::get_mesh_by_id(active.run.mesh_id).map_err(|e| e.to_string())?;
-    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)?;
-    let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let resolved_comment = comment.map(|c| view.context.resolve(c));
-    let open_pr_policy = match view.graph.node(node_id).map(|node| &node.kind) {
-        Some(CircuitNodeKind::GithubAction { open_pr_policy, .. }) => *open_pr_policy,
-        _ => None,
-    };
-
-    let action_res: Result<CircuitEvent, String> = (|| {
-        match action {
-            GithubActionKind::AddLabel => {
-                let target = determine_github_target(view, node_id, action)?;
-                let label = label.ok_or_else(|| "AddLabel requires a label".to_string())?;
-                client
-                    .add_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
-                    .map_err(|e| e.to_string())?;
-                Ok(CircuitEvent::GithubActionResult {
-                    node_id: node_id.to_string(),
-                    success: true,
-                    pr_number: None,
-                    pr_url: None,
-                    pr_head_ref: None,
-                    pr_title: None,
-                    error: None,
-                })
-            }
-            GithubActionKind::RemoveLabel => {
-                let target = determine_github_target(view, node_id, action)?;
-                let label = label.ok_or_else(|| "RemoveLabel requires a label".to_string())?;
-                client
-                    .remove_issue_label(&owner, &repo, target.1, &view.context.resolve(label))
-                    .map_err(|e| e.to_string())?;
-                Ok(CircuitEvent::GithubActionResult {
-                    node_id: node_id.to_string(),
-                    success: true,
-                    pr_number: None,
-                    pr_url: None,
-                    pr_head_ref: None,
-                    pr_title: None,
-                    error: None,
-                })
-            }
-            GithubActionKind::PostComment => {
-                let target = determine_github_target(view, node_id, action)?;
-                let body = resolved_comment
-                    .filter(|c| !c.trim().is_empty())
-                    .ok_or_else(|| "PostComment requires a non-empty comment template".to_string())?;
-                client
-                    .add_issue_comment(&owner, &repo, target.1, &body)
-                    .map_err(|e| e.to_string())?;
-                Ok(CircuitEvent::GithubActionResult {
-                    node_id: node_id.to_string(),
-                    success: true,
-                    pr_number: None,
-                    pr_url: None,
-                    pr_head_ref: None,
-                    pr_title: None,
-                    error: None,
-                })
-            }
-            GithubActionKind::CloseIssue => {
-                let target = determine_github_target(view, node_id, action)?;
-                if target.0 != "issue" {
-                    return Err("CloseIssue requires an issue-triggered run".to_string());
-                }
-                client
-                    .close_issue(&owner, &repo, target.1)
-                    .map_err(|e| e.to_string())?;
-                Ok(CircuitEvent::GithubActionResult {
-                    node_id: node_id.to_string(),
-                    success: true,
-                    pr_number: None,
-                    pr_url: None,
-                    pr_head_ref: None,
-                    pr_title: None,
-                    error: None,
-                })
-            }
-            GithubActionKind::OpenPr => {
-                if open_pr_policy.is_some_and(|policy| policy.requires_existing())
-                    && crate::services::autopilot::configured_action_on_success(active.run.mesh_id)
-                        == "none"
-                {
-                    return Err(
-                        "this OpenPr action requires a pull-request wrap-up policy"
-                            .to_string(),
-                    );
-                }
-                let body = resolved_comment.unwrap_or_default();
-                ensure_open_pr(view, node_id, open_pr_policy,
-                    |agent_node_id| {
-                        let agent_node = db::get_agent_node_by_id(agent_node_id).map_err(|e| e.to_string())?;
-                        if !agent_node.use_worktree {
-                            return Err("OpenPr requires a worktree-backed agent (its commits have no branch)".to_string());
-                        }
-                        Ok(crate::autopilot::pipeline::observe_wrapup_git_state(&agent_node))
-                    },
-                    |head| client.find_open_pr_for_branch(&owner, &repo, head)
-                        .map_err(|e| format!("could not verify the pull request for {owner}/{repo} branch {head}: {e}")),
-                    |head, title| {
-                        let base = crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
-                        client.create_pull_request_details(&owner, &repo, title, &body, head, &base)
-                            .map_err(|e| e.to_string())
-                    },
-                )
-            }
-        }
-    })();
-
-    let event = match action_res {
-        Ok(ev) => ev,
-        Err(err) => CircuitEvent::GithubActionResult {
-            node_id: node_id.to_string(),
-            success: false,
-            pr_number: None,
-            pr_url: None,
-            pr_head_ref: None,
-            pr_title: None,
-            error: Some(err),
-        },
-    };
-
-    let transition = advance(view, &event);
-    // GitHub actions can cascade directly into a wrap-up correction prompt.
-    // Capture that prompt's pre-turn report in this same transition commit;
-    // otherwise the recursive effect path would bypass the normal drive loop.
-    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
-    if !transition.step_writes.is_empty()
-        || transition.run_state_changed
-        || transition.context_changed
-        || turn_boundary_changed
-    {
-        let ops = transition
-            .step_writes
-            .iter()
-            .map(|w| db::CircuitStepOp {
-                node_id: w.node_id.clone(),
-                status: w.status.as_db_str().to_string(),
-                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
-                error: w.error.clone(),
-                agent_node_id: None,
-                attempt: w.attempt,
-                fresh_attempt: w.fresh_attempt,
-            })
-            .collect::<Vec<_>>();
-        let run_state = if transition.run_state_changed {
-            Some(view.state.as_db_str())
-        } else {
-            None
-        };
-        db::commit_circuit_advance(
-            active.run.id,
-            run_state,
-            Some(&view.context.to_json()?),
-            &ops,
-        )
-        .map_err(|e| format!("commit failed: {}", e))?;
-    }
-
-    if !transition.effects.is_empty() {
-        execute_effects(app, active, view, &transition.effects)?;
-    }
-
-    tracing::info!(
-        "circuits: run {} executed GitHub {:?} on {}/{}",
-        active.run.id,
-        action,
-        owner,
-        repo
-    );
-    Ok(())
-}
-
 /// Find the SpawnAgentNode row whose association owns a CloseAgentNode
 /// target. Explicit targets already name that spawn step; omitted targets
 /// use the same resolved agent as the close effect and find its owning step.
@@ -1993,7 +1699,7 @@ fn continuation_is_current(view: &RunView, node_id: &str, target: i64, status: S
         && revision.is_some() && revision == view.context.get(&format!("node.{node_id}.continuation.revision"))
 }
 
-fn execute_effects(
+pub(super) fn execute_effects(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
@@ -2029,7 +1735,7 @@ fn execute_effects(
         }
         match effect {
             Effect::SpawnAgentNode { node_id } => {
-                spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)?;
+                spawn::spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id)?;
             }
             Effect::InjectPty { node_id, prompt, .. } => {
                 match view.resolve_target_agent(node_id) {
@@ -2195,7 +1901,7 @@ fn execute_effects(
                 );
             }
             Effect::CallGithub { node_id, action, label, comment } => {
-                call_github_effect(app, active, view, node_id, *action, label.as_deref(), comment.as_deref())?;
+                github::call_github_effect(app, active, view, node_id, *action, label.as_deref(), comment.as_deref())?;
             }
         }
     }
@@ -2209,7 +1915,7 @@ fn execute_effects(
 /// effects, while InjectPty is never allowed after completion.
 fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::autopilot::circuit::stepper::Effect) -> bool {
     use crate::autopilot::circuit::stepper::Effect;
-    matches!(state, "pending" | "running" | "paused")
+    RunState::is_live_db_str(state)
         // Synchronous terminal actions are emitted by the same transition
         // that completes the run, and must survive its commit-before-effects.
         // InjectPty is intentionally absent: it starts new work after the
@@ -2219,677 +1925,26 @@ fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &cr
         // concurrently-computed completion, whose Notify would otherwise
         // fire about a run the user just cancelled. Cancellation cleanup
         // runs through the lease/retire path, not stepper effects.
-        || (matches!(state, "completed" | "failed") && completing_transition && matches!(effect,
+        || (matches!(state, s if s == RunState::Completed.as_db_str() || s == RunState::Failed.as_db_str()) && completing_transition && matches!(effect,
             Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
 }
 
-fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
+pub(super) fn run_accepts_effects(run_id: i64) -> Result<bool, String> {
     Ok(matches!(
         db::get_circuit_run(run_id).map_err(|error| error.to_string())?,
-        Some(run) if matches!(run.state.as_str(), "pending" | "running" | "paused")
+        Some(run) if RunState::is_live_db_str(&run.state)
     ))
 }
 
-/// Pure seam of [`spawn_step_agent`] — translates a
-/// [`CircuitNodeKind::SpawnAgentNode`] into the inputs the impure wrapper
-/// threads into `create_pending` (for the `provider` column) and
-/// `SpawnRequest::with_explicit(...)` (for cascade layer-1 model/effort/extra_args).
-///
-/// Mirrors the existing impure-wrapper / pure-core pattern this file uses
-/// for `reconcile_spawn_step` (line ~947) so the cascade + capability-mask
-/// contract can be tested without a Tauri runtime, AppHandle, or DB.
-/// Issue #1358 / slice 3 of #1355 — `provider` / `model` / `effort` /
-/// `extra_args` flow off the v2 AST here.
-fn resolve_circuit_spawn_inputs(
-    kind: &CircuitNodeKind,
-) -> Result<ResolvedCircuitSpawn, String> {
-    let CircuitNodeKind::SpawnAgentNode {
-        prompt,
-        name,
-        provider,
-        model,
-        effort,
-        extra_args,
-    } = kind
-    else {
-        return Err(format!(
-            "node is not a spawn node (got {:?})",
-            std::mem::discriminant(kind)
-        ));
-    };
-    // Provider: preserve the user-authored string for the `agent_nodes.provider`
-    // row column. An unknown id stays as-is — the row carries the
-    // user-authored value, and `Provider::from_db_str`'s Anthropic
-    // fallback in `spawn_with_intent` handles legacy / mistyped ids.
-    let provider_str = provider.clone();
-    let prompt = prompt.clone();
-    let name = name.clone();
-    let explicit = ExplicitSpawnOverrides {
-        model: model
-            .as_deref()
-            .and_then(non_empty_trim)
-            .map(str::to_string),
-        effort: effort
-            .as_deref()
-            .and_then(non_empty_trim)
-            .map(str::to_string),
-        extra_args: extra_args
-            .as_deref()
-            .and_then(non_empty_trim)
-            .map(str::to_string),
-    };
-    Ok(ResolvedCircuitSpawn {
-        prompt,
-        name,
-        provider_str,
-        explicit,
-    })
-}
-
-/// Mirrors `cascade_inputs_for`'s whitespace trim so the seam collapses
-/// "   " / "\t\n" / "" to `None` before reaching the cascade (issue
-/// #1148 AC #32). Inline rather than reaching into `crate::agent::spawn`
-/// — this is the seam boundary for the cascade, not a place to deepen
-/// the dependency surface.
-fn non_empty_trim(s: &str) -> Option<&str> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-fn inherited_review_provider(
-    explicit: Option<&str>,
-    parent_provider: Option<&str>,
-) -> Option<String> {
-    explicit
-        .and_then(non_empty_trim)
-        .or_else(|| parent_provider.and_then(non_empty_trim))
-        .map(str::to_string)
-}
-
-/// Apply the reviewer-specific part of the spawn cascade. Circuit-authored
-/// values remain the highest-precedence layer; node-started review context is
-/// the next layer, and the reviewed agent's provider is the final reviewer
-/// fallback before the ordinary mesh/application cascade.
-fn resolve_review_spawn_inputs(
-    view: &RunView,
-    node_id: &str,
-    provider: Option<String>,
-    mut explicit: ExplicitSpawnOverrides,
-    parent_provider: Option<&str>,
-) -> (Option<String>, ExplicitSpawnOverrides) {
-    if !is_review_spawn_step(view, node_id) {
-        return (provider, explicit);
-    }
-
-    let source_provider = view
-        .context
-        .get("source.provider")
-        .and_then(non_empty_trim)
-        .map(str::to_string);
-    let source_model = view
-        .context
-        .get("source.model")
-        .and_then(non_empty_trim)
-        .map(str::to_string);
-    let source_effort = view
-        .context
-        .get("source.effort")
-        .and_then(non_empty_trim)
-        .map(str::to_string);
-
-    let provider = provider
-        .filter(|value| !value.trim().is_empty())
-        .or(source_provider)
-        .or_else(|| inherited_review_provider(None, parent_provider));
-    explicit.model = explicit.model.or(source_model);
-    explicit.effort = explicit.effort.or(source_effort);
-    (provider, explicit)
-}
-
-struct ReviewSpawnResolution {
-    parent_agent_node_id: Option<i64>,
-    provider: Option<String>,
-    explicit: ExplicitSpawnOverrides,
-}
-
-/// Resolve all reviewer-specific spawn state in one place. Parent provider
-/// observation is supplied by the orchestration layer so this decision seam
-/// stays independent of SQLite and can be tested with an in-memory view.
-fn resolve_review_spawn_configuration(
-    view: &RunView,
-    node_id: &str,
-    provider: Option<String>,
-    explicit: ExplicitSpawnOverrides,
-    parent_provider: Option<&str>,
-) -> ReviewSpawnResolution {
-    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
-    let (provider, explicit) =
-        resolve_review_spawn_inputs(view, node_id, provider, explicit, parent_provider);
-    ReviewSpawnResolution {
-        parent_agent_node_id,
-        provider,
-        explicit,
-    }
-}
-
-fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
-    ((view.context.get("source.review_preset") == Some("1")
-        || view.graph.is_issue_driven_autopilot_review())
-        && node_id == "reviewer")
-        || view.graph.nodes.iter().any(|node| {
-            matches!(
-                &node.kind,
-                CircuitNodeKind::ReviewVerdict { target_node_id }
-                    if target_node_id.as_deref() == Some(node_id)
-            )
-    })
-}
-
-/// Resolve the activity parent agent for a circuit step from its upstream
-/// agent step, falling back to the borrowed source for review steps.
-fn resolve_step_parent_agent_id(view: &RunView, node_id: &str) -> Option<i64> {
-    view.graph
-        .nearest_upstream_agent_step(node_id)
-        .and_then(|parent_step| view.step(&parent_step).and_then(|step| step.agent_node_id))
-        .or_else(|| {
-            is_review_spawn_step(view, node_id)
-                .then(|| view.context.source_agent_id())
-                .flatten()
-        })
-}
-
-/// The output of [`resolve_circuit_spawn_inputs`]: the prompt + name
-/// carried through verbatim, the optional per-step provider string for
-/// `create_pending`, the layer-1 cascade override for
-/// `SpawnRequest::with_explicit(...)`. The orchestrator doesn't
-/// surface a resolved `Provider` here because `spawn_with_intent`
-/// recomputes it from the `agent_nodes.provider` row it just wrote —
-/// carrying a duplicate would be speculative generality.
-#[derive(Debug)]
-struct ResolvedCircuitSpawn {
-    /// Author-authored prompt, carried verbatim — Mustache resolution
-    /// happens in the wrapper against `view.context`.
-    prompt: String,
-    /// Author-authored agent node name, carried verbatim.
-    name: Option<String>,
-    /// User-authored provider string for the `agent_nodes.provider`
-    /// column. `None` = fall through to the mesh's default at spawn.
-    provider_str: Option<String>,
-    /// Per-step cascade layer-1 override; passed to
-    /// `SpawnRequest::with_explicit(...)`.
-    explicit: ExplicitSpawnOverrides,
-}
-
-/// The SpawnAgentNode effect: create the pending row (stage-1), wire it
-/// to the step, then schedule stage-2 in the background — mirroring the
-/// autopilot launch order minus the GitHub ledger.
-fn circuit_spawn_intent(
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
-    prompt: &str,
-) -> crate::agent::spawn::SpawnIntent {
-    use crate::agent::spawn::SpawnIntent;
-    use crate::autopilot::launch::InitialPromptDelivery;
-
-    match delivery {
-        InitialPromptDelivery::Prefill => SpawnIntent::Loop {
-            initial_prompt: prompt.to_string(),
-        },
-        InitialPromptDelivery::Fresh | InitialPromptDelivery::InjectAfterSpawn => {
-            SpawnIntent::Fresh
-        }
-    }
-}
-
-fn deliver_circuit_initial_prompt(
-    app: &AppHandle,
-    node_id: i64,
-    prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
-) {
-    use crate::autopilot::launch::InitialPromptDelivery;
-
-    let result = match delivery {
-        InitialPromptDelivery::Prefill => Ok(()),
-        InitialPromptDelivery::InjectAfterSpawn => {
-            crate::autopilot::pipeline::write_prompt_to_pty(node_id, prompt, app)
-        }
-        InitialPromptDelivery::Fresh => Ok(()),
-    };
-
-    if let Err(error) = result {
-        tracing::error!(
-            "circuits: fallback prompt injection for agent {} failed: {}",
-            node_id,
-            error
-        );
-        let _ = crate::agent::session_lifecycle::on_error(
-            &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-            node_id,
-        );
-    }
-}
-
-fn schedule_circuit_initial_prompt(
-    app: &AppHandle,
-    node_id: i64,
-    prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
-) {
-    if delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
-        crate::autopilot::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
-    }
-}
-
-async fn run_accepts_effects_async(run_id: i64) -> bool {
-    tauri::async_runtime::spawn_blocking(move || run_accepts_effects(run_id).unwrap_or(false))
-        .await
-        .unwrap_or(false)
-}
-
-async fn abort_circuit_spawn_async(run_id: i64, node_id: i64) {
-    let _ = tauri::async_runtime::spawn_blocking(move || abort_circuit_spawn(run_id, node_id))
-        .await;
-}
-
-fn spawn_circuit_agent_in_background(
-    app: &AppHandle,
-    run_id: i64,
-    node_id: i64,
-    permit: CircuitSpawnPermit,
-    explicit: ExplicitSpawnOverrides,
-    worktree_policy: crate::agent::spawn::WorktreePolicy,
-    prompt: String,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
-) {
-    let app_for_spawn = app.clone();
-    tauri::async_runtime::spawn(async move {
-        // Keep the permit alive until every post-launch cancellation check
-        // and compensation path has completed. Merely accepting it as an
-        // unused parameter would drop it when this function returns.
-        let _permit = permit;
-        // The node is attached before this task is queued. Re-check the
-        // durable run state inside the task as well as in the worker effect
-        // loop: cancellation may have won while the task was waiting for a
-        // runtime worker. A cancelled run must never start a new process.
-        if !run_accepts_effects_async(run_id).await {
-            abort_circuit_spawn_async(run_id, node_id).await;
-            return;
-        }
-        let intent = circuit_spawn_intent(delivery, &prompt);
-        if let Err(error) = crate::agent::spawn::spawn_with_intent(
-            &app_for_spawn,
-            crate::agent::spawn::SpawnRequest::new(node_id, intent, Default::default())
-                .with_explicit(explicit)
-                .with_worktree_policy(worktree_policy)
-                .with_lifecycle_lease(),
-        )
-        .await
-        {
-            if !run_accepts_effects_async(run_id).await {
-                abort_circuit_spawn_async(run_id, node_id).await;
-            }
-            tracing::error!("circuits: agent node {} failed: {}", node_id, error);
-            return;
-        }
-        // Cancellation can race with the process launch itself. Retire the
-        // process and clear the step association after the launch completes
-        // if the durable state flipped while the async spawn was in flight.
-        // This compensating check also handles a ledger deletion that raced
-        // before the task acquired the DB row.
-        if !run_accepts_effects_async(run_id).await {
-            abort_circuit_spawn_async(run_id, node_id).await;
-            return;
-        }
-        schedule_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
-        if !run_accepts_effects_async(run_id).await {
-            abort_circuit_spawn_async(run_id, node_id).await;
-            return;
-        }
-        deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
-    });
-}
-
-/// Retire a circuit spawn that lost a cancellation/delete race. The row may
-/// already have been removed by the command layer, so process-registry cleanup
-/// is deliberately attempted even when the normal Agent Node delete cannot
-/// reload the row.
-fn abort_circuit_spawn(run_id: i64, node_id: i64) {
-    crate::agent::process::PROCESS_REGISTRY.kill_session(node_id);
-    let retired = match db::get_agent_node_by_id(node_id) {
-        Ok(_) => crate::services::agent_node::delete(node_id, true)
-            .map_err(|error| error.to_string()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
-        Err(error) => Err(error.to_string()),
-    };
-    if let Err(error) = retired {
-        // Keep the step association intact: the command-side cleanup retry
-        // needs this durable owner id if an OS/worktree lock is transient.
-        tracing::warn!(
-            "circuits: could not retire aborted spawn {} for run {}: {}",
-            node_id, run_id, error
-        );
-        return;
-    }
-    let _ = db::clear_circuit_step_agent_node_by_agent_id(run_id, node_id);
-}
-
-/// Attach a newly-created agent to its circuit step and persist the activity
-/// parent in the same transaction-owned DB seam used by the worker. Keeping
-/// this write beside the in-memory attachment makes the parentage contract
-/// testable without manufacturing circuit rows with ad-hoc SQL.
-fn attach_spawned_agent(
-    run_id: i64,
-    view: &mut RunView,
-    node_id: &str,
-    agent_node_id: i64,
-    parent_agent_node_id: Option<i64>,
-) -> Result<(), String> {
-    if !db::set_circuit_step_agent_node_with_parent(
-        run_id,
-        node_id,
-        agent_node_id,
-        parent_agent_node_id,
-    )
-    .map_err(|error| format!("could not attach agent to step: {}", error))?
-    {
-        return Err("could not attach agent to step: step row no longer exists".to_string());
-    }
-    view.attach_agent_node(node_id, agent_node_id);
-    Ok(())
-}
-
-fn spawn_step_agent(
-    app: &AppHandle,
-    run_id: i64,
-    mesh_id: i64,
-    view: &mut RunView,
-    node_id: &str,
-) -> Result<(), String> {
-    use crate::agent::spawn::WorktreePolicy;
-
-    let kind = view
-        .graph
-        .node(node_id)
-        .map(|n| n.kind.clone())
-        .ok_or_else(|| format!("node {} not in blueprint", node_id))?;
-    // Pure seam (issue #1358): translate the AST kind into the
-    // provider column value + cascade layer-1 overrides that the spawn
-    // pipeline consumes downstream. Whitespace-only model/effort/extra_args
-    // collapse to `None` here so the cascade falls through to the mesh or
-    // application layer (mirrors `cascade_inputs_for`'s trim behaviour).
-    let ResolvedCircuitSpawn {
-        prompt,
-        name,
-        provider_str,
-        explicit,
-    } = resolve_circuit_spawn_inputs(&kind)?;
-    // Activity parentage is derived once from the circuit graph and persisted
-    // with the step association. The DB layer does not inspect graph JSON or
-    // infer special step names.
-    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
-    let source_provider = view
-        .context
-        .get("source.provider")
-        .and_then(non_empty_trim);
-    // The parent provider is an observation, not part of the pure resolver's
-    // policy. Avoid the lookup whenever a circuit or source provider already
-    // determines the reviewer harness.
-    let parent_provider = if is_review_spawn_step(view, node_id)
-        && provider_str.as_deref().and_then(non_empty_trim).is_none()
-        && source_provider.is_none()
-    {
-        parent_agent_node_id.and_then(|parent_id| {
-            db::get_agent_node_by_id(parent_id)
-                .ok()
-                .map(|parent| parent.provider)
-        })
-    } else {
-        None
-    };
-    let ReviewSpawnResolution {
-        parent_agent_node_id,
-        provider: provider_str,
-        explicit,
-    } = resolve_review_spawn_configuration(
-        view,
-        node_id,
-        provider_str,
-        explicit,
-        parent_provider.as_deref(),
-    );
-
-    let resolved_prompt = view.context.resolve(&prompt);
-    let source_issue = view
-        .context
-        .get("issue.number")
-        .and_then(|number| number.parse::<i64>().ok());
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    let provider = provider_str
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
-    let prompt_delivery =
-        crate::autopilot::launch::initial_prompt_delivery(&provider, &resolved_prompt);
-    let worktree_policy = if source_issue.is_some()
-        || view.context.get("source.review_preset") == Some("1")
-    {
-        WorktreePolicy::ForceBranched
-    } else {
-        WorktreePolicy::RespectMesh
-    };
-    let use_worktree_override = match worktree_policy {
-        WorktreePolicy::ForceBranched => Some(true),
-        WorktreePolicy::RespectMesh => None,
-    };
-
-    // Issue-triggered circuit runs share the legacy Autopilot trust boundary:
-    // resolve the same harness/provider chain and reject an incompatible mesh
-    // before a pending Agent Node row is created. Manual circuits remain a
-    // general-purpose graph feature and are intentionally not subject to the
-    // Autopilot compatibility gate.
-    if source_issue.is_some() {
-        let verdict = crate::autopilot::compatibility::compute_for_mesh(
-            Some(provider.as_str()),
-            mesh.default_provider.as_deref(),
-            crate::preferences::default_provider().as_deref(),
-            mesh.use_worktree,
-        );
-        if !verdict.allowed {
-            return Err(format!(
-                "Autopilot circuit cannot spawn on mesh {}: incompatible provider/worktree configuration ({:?})",
-                mesh_id, verdict.reasons
-            ));
-        }
-    }
-
-    // If step already has an agent node attached (e.g. from an earlier loop iteration/retry)
-    if let Some(existing_agent_id) = view.step(node_id).and_then(|s| s.agent_node_id) {
-        if crate::agent::process::PROCESS_REGISTRY.is_alive(&existing_agent_id) {
-            tracing::info!(
-                "circuits: submitting new turn to live agent {} for step {} (run {})",
-                existing_agent_id,
-                node_id,
-                run_id
-            );
-            let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
-            crate::autopilot::evaluator::note_turn_start(existing_agent_id);
-            crate::autopilot::pipeline::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
-                .map_err(|e| format!("PTY write failed on retry: {}", e))?;
-            return Ok(());
-        }
-
-        // Process is dead/exited: reuse its worktree path/branch to spawn a fresh process
-        if let Ok(old_node) = db::get_agent_node_by_id(existing_agent_id) {
-            tracing::info!(
-                "circuits: respawning agent for step {} in existing worktree {}",
-                node_id,
-                old_node.path
-            );
-            let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
-                return Ok(());
-            };
-            let new_node = crate::services::agent_node::create_pending_with_worktree_override(
-                mesh_id,
-                &old_node.path,
-                &old_node.branch,
-                Some(provider.as_str()),
-                source_issue,
-                name.as_deref(),
-                use_worktree_override,
-            )
-            .map_err(|e| e.to_string())?;
-
-            if let Err(error) = crate::agent::session_lifecycle::on_created(
-                &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-                new_node.id,
-            ) {
-                let _ = crate::services::agent_node::delete(new_node.id, true);
-                return Err(error.to_string());
-            }
-
-            if let Err(error) = attach_spawned_agent(
-                run_id,
-                view,
-                node_id,
-                new_node.id,
-                parent_agent_node_id,
-            ) {
-                // Deletion can win the race after create_pending. If its
-                // cascade removed the run, retire the unattached node instead
-                // of leaking a process/worktree outside the circuit ledger.
-                let _ = crate::services::agent_node::delete(new_node.id, true);
-                return Err(error);
-            }
-            if !run_accepts_effects(run_id)? {
-                view.step_mut(node_id).map(|step| step.agent_node_id = None);
-                abort_circuit_spawn(run_id, new_node.id);
-                return Ok(());
-            }
-            crate::autopilot::evaluator::register_circuit(new_node.id);
-            crate::autopilot::evaluator::note_turn_start(new_node.id);
-            let _ = app.emit(
-                "node-created",
-                crate::commands::agent::NodeCreatedPayload { id: new_node.id },
-            );
-            spawn_circuit_agent_in_background(
-                app,
-                run_id,
-                new_node.id,
-                spawn_permit,
-                explicit,
-                worktree_policy,
-                resolved_prompt,
-                prompt_delivery,
-            );
-            return Ok(());
-        }
-    }
-
-    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
-        .unwrap_or_else(|_| "main".to_string());
-
-    let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
-        return Ok(());
-    };
-    let node = crate::services::agent_node::create_pending_with_worktree_override(
-        mesh.id,
-        &mesh.path,
-        &branch,
-        // Issue #1358: per-node provider override flows here.
-        Some(provider.as_str()),
-        source_issue,
-        name.as_deref(),
-        use_worktree_override,
-    )
-    .map_err(|e| e.to_string())?;
-
-    if let Err(error) = crate::agent::session_lifecycle::on_created(
-        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-        node.id,
-    ) {
-        let _ = crate::services::agent_node::delete(node.id, true);
-        return Err(error.to_string());
-    }
-
-    if let Err(error) = attach_spawned_agent(
-        run_id,
-        view,
-        node_id,
-        node.id,
-        parent_agent_node_id,
-    ) {
-        let _ = crate::services::agent_node::delete(node.id, true);
-        return Err(error);
-    }
-    if !run_accepts_effects(run_id)? {
-        view.step_mut(node_id).map(|step| step.agent_node_id = None);
-        abort_circuit_spawn(run_id, node.id);
-        return Ok(());
-    }
-
-    // Track output times for this piloted node (the PTY submit watcher
-    // and future classifiers read them).
-    crate::autopilot::evaluator::register_circuit(node.id);
-    crate::autopilot::evaluator::note_turn_start(node.id);
-
-    let _ = app.emit(
-        "node-created",
-        crate::commands::agent::NodeCreatedPayload { id: node.id },
-    );
-    tracing::info!(
-        "circuits: spawned agent node {} for run {} (step {})",
-        node.id,
-        run_id,
-        node_id
-    );
-
-    // Stage-2 in the background — same two-stage contract as every
-    // other spawn path. An empty prompt starts fresh; a non-empty prompt
-    // uses prefill when supported and otherwise is injected after spawn.
-    // Issue #1358: per-step model / effort / extra_args ride the explicit
-    // layer through to `spawn_with_intent`, where capability masking occurs.
-    spawn_circuit_agent_in_background(
-        app,
-        run_id,
-        node.id,
-        spawn_permit,
-        explicit,
-        worktree_policy,
-        resolved_prompt,
-        prompt_delivery,
-    );
-
-    Ok(())
-}
-
-
-
 // ---------------------------------------------------------------------------
 // Startup reconciliation (milestone 3, issue #1208).
-//
-// Observation repairs most crash states by construction, but one wedge
-// survives it: a Running spawn step whose agent attach never landed
-// (process died between the stepper's commit and stage-1). Nothing in
-// the world maps to an event for that step, so it would sit Running
-// forever. The reconcile pass runs ONCE per launch — before the loop —
-// and resolves every running run against live process + git state.
 // ---------------------------------------------------------------------------
 
 /// What startup reconciliation decides for one Running spawn step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnReconciliation {
-    /// The step's world state is recoverable as-is (node exists, not
-    /// archived, worktree intact) — resume machinery / observation
-    /// carries on from here.
     Leave,
-    /// The piloted agent is unrecoverable (row gone, archived, or its
-    /// git worktree directory vanished) — cancel the step, fail the run.
     Lost,
-    /// The commit-crash gap: a Running spawn step with no attached agent.
-    /// There is nothing to observe or resume; fail the run loudly.
     NeverAttached,
 }
 
@@ -2898,9 +1953,6 @@ enum SpawnReconciliation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReconcileNodeState {
     archived: bool,
-    /// `Some(false)` = the node's worktree directory no longer exists on
-    /// disk (git-state check); `None` = root-repo spawn (no worktree to
-    /// lose) or path unreadable.
     worktree_dir_exists: Option<bool>,
 }
 
@@ -3249,6 +2301,9 @@ fn notification_severity(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::github::*;
+    use super::spawn::*;
+    use crate::agent::spawn::ExplicitSpawnOverrides;
     use crate::autopilot::circuit::model::{CircuitNode, StepOutcome};
     use rusqlite::Connection;
 
@@ -4626,7 +3681,7 @@ mod tests {
     #[test]
     fn open_pr_acknowledges_existing_pr_and_publishes_review_context() {
         let mut run = open_pr_run();
-        let event = ensure_open_pr(&run, "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
+        let event = github::ensure_open_pr(&run, "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |head| { assert_eq!(head, "renamed-implementation"); Ok(Some(implementation_pr())) },
             |_, _| panic!("existing PR must not be created again"),
         ).unwrap();
@@ -4639,7 +3694,7 @@ mod tests {
 
     #[test]
     fn open_pr_review_requires_agent_pr_without_creating_one() {
-        let error = ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
+        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |_| Ok(None), |_, _| panic!("review blueprint delegates creation to its agent"),
         ).unwrap_err();
         assert!(error.contains("did not raise an open pull request"));
@@ -4649,7 +3704,7 @@ mod tests {
     fn open_pr_lookup_error_does_not_create_or_report_missing_pr() {
         let mut run = open_pr_run();
         set_open_pr_policy(&mut run, None);
-        let error = ensure_open_pr(&run, "open_pr", None, pushed_implementation,
+        let error = github::ensure_open_pr(&run, "open_pr", None, pushed_implementation,
             |_| Err("GitHub unavailable".into()), |_, _| panic!("unknown is not absent"),
         ).unwrap_err();
         assert_eq!(error, "GitHub unavailable");
@@ -4664,7 +3719,7 @@ mod tests {
         // Simulate losing the first result before its ledger commit: replay
         // the same Running snapshot against the now-existing remote PR.
         for _ in 0..2 {
-            let event = ensure_open_pr(&run, "open_pr", None, pushed_implementation,
+            let event = github::ensure_open_pr(&run, "open_pr", None, pushed_implementation,
                 |_| Ok(created.borrow().clone()),
                 |head, _| {
                     assert_eq!(head, "renamed-implementation");
@@ -4682,7 +3737,7 @@ mod tests {
 
     #[test]
     fn open_pr_failed_git_observation_does_not_query_github() {
-        let error = ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
+        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
             |_| Err("worktree unavailable".into()),
             |_| panic!("branch identity is unknown"), |_, _| panic!("branch identity is unknown"),
         ).unwrap_err();
@@ -4999,7 +4054,7 @@ mod tests {
         assert!(explicit.model.is_none());
         assert!(explicit.effort.is_none());
 
-        attach_spawned_agent(run_id, &mut view, "reviewer", reviewer.id, parent_id).unwrap();
+        spawn::attach_spawned_agent(run_id, &mut view, "reviewer", reviewer.id, parent_id).unwrap();
         let persisted_parent = db::list_circuit_agent_ownerships()
             .unwrap()
             .into_iter()

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::autopilot::circuit::model::CircuitGraph;
+use crate::autopilot::circuit::vocabulary::StepStatus;
 use crate::models::{EnvType, SessionStatus};
 use rusqlite::{params, Connection};
 
@@ -1073,7 +1074,7 @@ fn concurrency_counters_count_only_running_work() {
             },
             CircuitStepOp {
                 node_id: "second-spawn".into(),
-                status: "pending_slot".into(),
+                status: StepStatus::Queued.as_db_str().into(),
                 outcome: None,
                 error: None,
                 agent_node_id: None,
@@ -1663,7 +1664,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
         None,
         &[CircuitStepOp {
             node_id: "work".into(),
-            status: "pending_slot".into(),
+            status: StepStatus::Queued.as_db_str().into(),
             outcome: Some(None),
             error: None,
             agent_node_id: None,
@@ -1675,7 +1676,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
 
     let steps = list_circuit_run_steps(run_id).unwrap();
     let work = steps.iter().find(|s| s.node_id == "work").unwrap();
-    assert_eq!(work.status, "pending_slot");
+    assert_eq!(work.status, StepStatus::Queued.as_db_str());
     assert_eq!(work.attempt, 2, "the retry's execution count persists");
     assert_eq!(work.outcome, None, "fresh attempt clears the stale outcome");
     assert_eq!(work.error_message, None, "fresh attempt clears the stale error");
