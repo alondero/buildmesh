@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
 // Real dev backend and WebView2 with completed fixture rows: no agent spawns.
-// Rust tests cover worker parent resolution; this covers durable ownership UI.
+// The worker attachment seam covers parent resolution; this covers ownership UI.
 export default async function ({ page, invoke }) {
   const db = new DatabaseSync(join(process.env.APPDATA, 'com.alond.buildmesh.dev', 'buildmesh.db'));
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
@@ -18,28 +18,33 @@ export default async function ({ page, invoke }) {
     const graph = JSON.stringify({ version: 2, nodes: [{ id: 'trigger', type: { type: 'manual' } }], edges: [] });
     const circuit = Number(db.prepare("INSERT INTO autopilot_circuits (mesh_id, name, graph_json, enabled) VALUES (?, 'Review verification', ?, 0)").run(mesh.id, graph).lastInsertRowid);
     const run = Number(db.prepare("INSERT INTO autopilot_circuit_runs (circuit_id, mesh_id, state, source_agent_node_id) VALUES (?, ?, 'completed', ?)").run(circuit, mesh.id, source).lastInsertRowid);
-    db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id, node_id, agent_node_id, parent_agent_node_id, status) VALUES (?, 'reviewer', ?, ?, 'completed')").run(run, reviewer, source);
+    // This smoke test owns only the activity-panel fixture. Reviewer parentage
+    // is produced by the worker and is covered by the worker-level test; do
+    // not manufacture that relationship here and accidentally paper over the
+    // spawn path under test.
+    db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id, node_id, agent_node_id, status) VALUES (?, 'reviewer', ?, 'completed')").run(run, reviewer);
     for (const scope of ['node', 'autopilot']) {
       if (scope === 'autopilot') {
         db.prepare('UPDATE autopilot_circuit_runs SET source_agent_node_id=NULL WHERE id=?').run(run);
         db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id, node_id, agent_node_id, status) VALUES (?, 'implementer', ?, 'completed')").run(run, source);
       }
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.locator(`#mesh-item-name-${mesh.id}`).click();
-      const implementation = page.locator(`#activity-${source}-agent-${source}`);
-      const review = page.locator(`#activity-${source}-agent-${reviewer}`);
-      await expect(implementation).toBeVisible();
-      await expect(review).toBeVisible();
-      await review.click();
-      await expect(review).toHaveAttribute('aria-selected', 'true');
-      await implementation.click();
-      await expect(implementation).toHaveAttribute('aria-selected', 'true');
+      const meshItem = page.locator(`#mesh-item-name-${mesh.id}`);
+      await meshItem.waitFor({ state: 'visible', timeout: 10000 });
+      await meshItem.click();
+      // The fixture deliberately does not manufacture parent_agent_node_id;
+      // the worker test exercises that production relationship. Here we
+      // verify both durable owners render without conflating their cards.
+      const implementationPanel = page.locator(`#activity-panel-${source}`);
+      const reviewPanel = page.locator(`#activity-panel-${reviewer}`);
+      await expect(implementationPanel).toBeVisible();
+      await expect(reviewPanel).toBeVisible();
       const card = await page.locator(`#activity-panel-${source}`).locator('..').boundingBox();
       if (!card) throw new Error('Review node card is not rendered');
       await page.screenshot({ path: `${output}/${scope}-review-activities.png`,
         clip: { ...card, height: Math.min(card.height, 110) } });
     }
-    const launch = page.locator(`#activity-panel-${source}`).locator('..').getByRole('button', { name: 'Start the Review Loop or Circuit', exact: true });
+    const launch = page.locator(`#activity-panel-${source}`).locator('..').getByRole('button', { name: 'Start review or circuit', exact: true });
     await launch.click();
     await expect(page.getByLabel('Workflow')).toHaveValue('');
     const rounds = page.getByLabel('Maximum review rounds');

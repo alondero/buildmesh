@@ -292,6 +292,10 @@ pub(crate) enum AlwaysStep {
     EnsureAgentNodeLifecycleLeases,
 }
 
+const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
+const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
+const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
+
 // ---------------------------------------------------------------------------
 // The registry.
 // ---------------------------------------------------------------------------
@@ -1087,27 +1091,77 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             {
                 return Ok(());
             }
-            let circuits: Vec<(i64, String, bool)> = {
+            let migration_state: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = ?1",
+                    params![REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
+                    |row| row.get(0),
+                )
+                .ok();
+            if migration_state.as_deref() == Some(REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE) {
+                return Ok(());
+            }
+            // A fresh database has no circuits yet. Leave the gate unset so an imported or
+            // restored legacy circuit can still trigger the one-time upgrade later.
+            let has_circuits: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM autopilot_circuits)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_circuits {
+                return Ok(());
+            }
+
+            // Keep the candidate scan in SQL. The old implementation loaded every graph and
+            // then issued one active-run query per row, which made startup cost grow with the
+            // entire circuit history. The sentinel row preserves the distinction between
+            // "nothing legacy remains" and "legacy work is still active" without another scan.
+            let circuits: Vec<(Option<i64>, Option<String>, Option<i64>, bool)> = {
                 let mut stmt = conn.prepare(
-                    "SELECT id, graph_json, is_preset FROM autopilot_circuits ORDER BY id",
+                    "WITH legacy AS (
+                         SELECT c.id, c.graph_json, c.is_preset,
+                                EXISTS(
+                                    SELECT 1
+                                    FROM autopilot_circuit_runs r
+                                    WHERE r.circuit_id = c.id
+                                      AND r.state IN ('pending', 'running', 'paused')
+                                ) AS active
+                         FROM autopilot_circuits c
+                         WHERE c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%'
+                            OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%'
+                            OR c.graph_json LIKE '%review PR {{pr.number}} as%'
+                            OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'
+                     )
+                     SELECT id, graph_json, is_preset, 0 AS deferred
+                     FROM legacy
+                     WHERE NOT EXISTS (
+                         SELECT 1
+                         FROM autopilot_circuit_runs r
+                         WHERE r.circuit_id = legacy.id
+                           AND r.state IN ('pending', 'running', 'paused')
+                     )
+                     UNION ALL
+                     SELECT NULL, NULL, NULL, 1 AS deferred
+                     WHERE EXISTS (SELECT 1 FROM legacy WHERE active)
+                     ORDER BY deferred, id",
                 )?;
                 let rows = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
+                    let id: Option<i64> = row.get(0)?;
+                    let graph_json: Option<String> = row.get(1)?;
+                    let is_preset: Option<i64> = row.get(2)?;
+                    let deferred: i64 = row.get(3)?;
+                    Ok((id, graph_json, is_preset, deferred != 0))
                 })?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
-            for (id, graph_json, is_preset) in circuits {
-                let active: bool = conn.query_row(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM autopilot_circuit_runs
-                         WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused')
-                     )",
-                    [id],
-                    |row| row.get(0),
-                )?;
-                if active {
+            let mut deferred = false;
+            for (id, graph_json, is_preset, is_deferred) in circuits {
+                let Some(id) = id else {
+                    deferred |= is_deferred;
                     continue;
-                }
+                };
+                let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
+                let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
                 let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1132,6 +1186,17 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     )?;
                 }
             }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+                params![
+                    REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG,
+                    if deferred {
+                        REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED
+                    } else {
+                        REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE
+                    }
+                ],
+            )?;
         }
         AlwaysStep::UpgradeIssueReviewFirstTurns | AlwaysStep::UpgradeIssueReviewVerdicts => {
             // v2 also backfills the explicit OpenPr policy on persisted

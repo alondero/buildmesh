@@ -119,7 +119,8 @@ Suggested recovery prompt for an existing PR session:
 - Default issue prompts describe unattended implementation and reserve questions
   for real blockers. Classification explicitly excludes a completed plan or API
   error from implementation completion. Review prompts distinguish actionable
-  blockers from optional preferences and ask for the reviewed commit.
+  blockers from optional preferences and identify the reviewed commit or
+  revision under review.
 
 ## Verification and operational limits
 

@@ -119,16 +119,45 @@ mod tests {
         assert_eq!(unchanged_active, legacy_json);
         let unchanged_custom: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
         assert_eq!(unchanged_custom, custom_json);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "deferred",
+            "an active legacy circuit must defer completion so it can be retried"
+        );
 
         conn.execute("UPDATE autopilot_circuit_runs SET state = 'completed' WHERE id = 10", []).unwrap();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let upgraded: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
         let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&upgraded).unwrap();
         assert_eq!(graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "complete"
+        );
+
+        // Completion is durable: a legacy-looking graph written after the upgrade is not
+        // re-deserialized on every initializer pass.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
+            [&legacy_json],
+        )
+        .unwrap();
         let second = upgraded.clone();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let third: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
         assert_eq!(second, third);
+        let late_legacy: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
+        assert_eq!(late_legacy, legacy_json, "completed migration gate must short-circuit later scans");
     }
 
     #[test]

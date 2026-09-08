@@ -288,14 +288,11 @@ pub(crate) fn format_issue_prefill_with_url(number: i64, title: &str, url: &str)
 
 /// Canonical persona instruction for PR reviews spawned from the PR probe.
 ///
-/// NOTE on divergence from [`crate::autopilot::circuit::model::CircuitGraph::PR_REVIEW_PROMPT`]:
 /// The probe prefill is for an interactive desktop session spawned by a human user:
 /// it is capitalized ("Review PR #..."), appends the canonical PR URL for context,
-/// and omits the automated headless directive ("Add the review comments to the PR as a comment")
-/// because the human user guides the interactive session.
-/// `CircuitGraph::PR_REVIEW_PROMPT` is a headless background circuit template with
-/// `{{pr.number}}` that instructs an autonomous reviewer bot to post findings directly
-/// to GitHub without human supervision.
+/// and omits the automated directive to post findings as a PR comment because the
+/// human user guides the interactive session. The circuit prompt supplies that
+/// delivery instruction separately through `CircuitGraph::PR_REVIEW_PROMPT`.
 const PR_REVIEW_PERSONA: &str =
     "as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture";
 

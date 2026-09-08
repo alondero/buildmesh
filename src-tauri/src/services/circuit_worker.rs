@@ -2228,6 +2228,88 @@ fn inherited_review_provider(
         .map(str::to_string)
 }
 
+/// Apply the reviewer-specific part of the spawn cascade. Circuit-authored
+/// values remain the highest-precedence layer; node-started review context is
+/// the next layer, and the reviewed agent's provider is the final reviewer
+/// fallback before the ordinary mesh/application cascade.
+fn resolve_review_spawn_inputs(
+    view: &RunView,
+    node_id: &str,
+    provider: Option<String>,
+    mut explicit: ExplicitSpawnOverrides,
+    parent_provider: Option<&str>,
+) -> (Option<String>, ExplicitSpawnOverrides) {
+    if !is_review_spawn_step(view, node_id) {
+        return (provider, explicit);
+    }
+
+    let source_provider = view
+        .context
+        .get("source.provider")
+        .and_then(non_empty_trim)
+        .map(str::to_string);
+    let source_model = view
+        .context
+        .get("source.model")
+        .and_then(non_empty_trim)
+        .map(str::to_string);
+    let source_effort = view
+        .context
+        .get("source.effort")
+        .and_then(non_empty_trim)
+        .map(str::to_string);
+
+    let provider = provider
+        .filter(|value| !value.trim().is_empty())
+        .or(source_provider)
+        .or_else(|| inherited_review_provider(None, parent_provider));
+    explicit.model = explicit.model.or(source_model);
+    explicit.effort = explicit.effort.or(source_effort);
+    (provider, explicit)
+}
+
+struct ReviewSpawnResolution {
+    parent_agent_node_id: Option<i64>,
+    provider: Option<String>,
+    explicit: ExplicitSpawnOverrides,
+}
+
+/// Resolve all reviewer-specific spawn state in one place. The parent row is
+/// consulted only when the circuit and source context leave provider
+/// selection open; title-bar review runs therefore do not pay for a lookup
+/// that their source context already answers.
+fn resolve_review_spawn_configuration(
+    view: &RunView,
+    node_id: &str,
+    provider: Option<String>,
+    explicit: ExplicitSpawnOverrides,
+) -> ReviewSpawnResolution {
+    let parent_agent_node_id = review_parent_agent_id(view, node_id);
+    let source_provider = view
+        .context
+        .get("source.provider")
+        .and_then(non_empty_trim);
+    let parent_provider = if is_review_spawn_step(view, node_id)
+        && provider.as_deref().and_then(non_empty_trim).is_none()
+        && source_provider.is_none()
+    {
+        parent_agent_node_id.and_then(|parent_id| {
+            db::get_agent_node_by_id(parent_id)
+                .ok()
+                .map(|parent| parent.provider)
+        })
+    } else {
+        None
+    };
+    let (provider, explicit) =
+        resolve_review_spawn_inputs(view, node_id, provider, explicit, parent_provider.as_deref());
+    ReviewSpawnResolution {
+        parent_agent_node_id,
+        provider,
+        explicit,
+    }
+}
+
 fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
     ((view.context.get("source.review_preset") == Some("1")
         || view.graph.is_issue_driven_autopilot_review())
@@ -2427,6 +2509,31 @@ fn abort_circuit_spawn(run_id: i64, node_id: i64) {
     let _ = db::clear_circuit_step_agent_node_by_agent_id(run_id, node_id);
 }
 
+/// Attach a newly-created agent to its circuit step and persist the activity
+/// parent in the same transaction-owned DB seam used by the worker. Keeping
+/// this write beside the in-memory attachment makes the parentage contract
+/// testable without manufacturing circuit rows with ad-hoc SQL.
+fn attach_spawned_agent(
+    run_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+    agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
+) -> Result<(), String> {
+    if !db::set_circuit_step_agent_node_with_parent(
+        run_id,
+        node_id,
+        agent_node_id,
+        parent_agent_node_id,
+    )
+    .map_err(|error| format!("could not attach agent to step: {}", error))?
+    {
+        return Err("could not attach agent to step: step row no longer exists".to_string());
+    }
+    view.attach_agent_node(node_id, agent_node_id);
+    Ok(())
+}
+
 fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,
@@ -2436,10 +2543,6 @@ fn spawn_step_agent(
 ) -> Result<(), String> {
     use crate::agent::spawn::WorktreePolicy;
 
-    // Activity parentage is derived once from the circuit graph and persisted
-    // with the step association. The DB layer does not inspect graph JSON or
-    // infer special step names.
-    let parent_agent_node_id = review_parent_agent_id(view, node_id);
     let kind = view
         .graph
         .node(node_id)
@@ -2453,33 +2556,17 @@ fn spawn_step_agent(
     let ResolvedCircuitSpawn {
         prompt,
         name,
-        mut provider_str,
-        mut explicit,
+        provider_str,
+        explicit,
     } = resolve_circuit_spawn_inputs(&kind)?;
-
-    // The built-in review graph is shared by all node-started runs in a mesh.
-    // Resolve the source's provider/model/effort from this run's context so a
-    // later invocation cannot inherit configuration from the run that first
-    // created the canonical preset row.
-    if view.context.get("source.review_preset") == Some("1") {
-        if let Some(provider) = view
-            .context
-            .get("source.provider")
-            .and_then(non_empty_trim)
-        {
-            provider_str = Some(provider.to_string());
-        }
-        explicit.model = view
-            .context
-            .get("source.model")
-            .and_then(non_empty_trim)
-            .map(str::to_string);
-        explicit.effort = view
-            .context
-            .get("source.effort")
-            .and_then(non_empty_trim)
-            .map(str::to_string);
-    }
+    // Activity parentage is derived once from the circuit graph and persisted
+    // with the step association. The DB layer does not inspect graph JSON or
+    // infer special step names.
+    let ReviewSpawnResolution {
+        parent_agent_node_id,
+        provider: provider_str,
+        explicit,
+    } = resolve_review_spawn_configuration(view, node_id, provider_str, explicit);
 
     let resolved_prompt = view.context.resolve(&prompt);
     let source_issue = view
@@ -2487,12 +2574,6 @@ fn spawn_step_agent(
         .get("issue.number")
         .and_then(|number| number.parse::<i64>().ok());
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    if is_review_spawn_step(view, node_id) && parent_agent_node_id.is_some() {
-        let parent_provider = parent_agent_node_id
-            .and_then(|id| db::get_agent_node_by_id(id).ok())
-            .map(|node| node.provider);
-        provider_str = inherited_review_provider(provider_str.as_deref(), parent_provider.as_deref());
-    }
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
@@ -2575,21 +2656,19 @@ fn spawn_step_agent(
                 return Err(error.to_string());
             }
 
-            if !db::set_circuit_step_agent_node_with_parent(
+            if let Err(error) = attach_spawned_agent(
                 run_id,
+                view,
                 node_id,
                 new_node.id,
                 parent_agent_node_id,
-            )
-                .map_err(|error| format!("could not attach new agent to step: {}", error))?
-            {
+            ) {
                 // Deletion can win the race after create_pending. If its
                 // cascade removed the run, retire the unattached node instead
                 // of leaking a process/worktree outside the circuit ledger.
                 let _ = crate::services::agent_node::delete(new_node.id, true);
-                return Err("could not attach new agent to step: step row no longer exists".to_string());
+                return Err(error);
             }
-            view.attach_agent_node(node_id, new_node.id);
             if !run_accepts_effects(run_id)? {
                 view.step_mut(node_id).map(|step| step.agent_node_id = None);
                 abort_circuit_spawn(run_id, new_node.id);
@@ -2641,18 +2720,16 @@ fn spawn_step_agent(
         return Err(error.to_string());
     }
 
-    if !db::set_circuit_step_agent_node_with_parent(
+    if let Err(error) = attach_spawned_agent(
         run_id,
+        view,
         node_id,
         node.id,
         parent_agent_node_id,
-    )
-        .map_err(|error| format!("could not attach agent to step: {}", error))?
-    {
+    ) {
         let _ = crate::services::agent_node::delete(node.id, true);
-        return Err("could not attach agent to step: step row no longer exists".to_string());
+        return Err(error);
     }
-    view.attach_agent_node(node_id, node.id);
     if !run_accepts_effects(run_id)? {
         view.step_mut(node_id).map(|step| step.agent_node_id = None);
         abort_circuit_spawn(run_id, node.id);
@@ -4660,6 +4737,47 @@ mod tests {
     }
 
     #[test]
+    fn review_spawn_cascade_preserves_circuit_values_before_source_and_parent() {
+        let mut context = CircuitContext::new();
+        context.set("source.review_preset", "1");
+        context.set("source.provider", "source-provider");
+        context.set("source.model", "source-model");
+        context.set("source.effort", "source-effort");
+        let view = RunView {
+            run_id: 1,
+            graph: CircuitGraph::agent_review("graph-provider", None, None, 2),
+            state: RunState::Running,
+            context,
+            steps: vec![],
+        };
+        let (provider, explicit) = resolve_review_spawn_inputs(
+            &view,
+            "reviewer",
+            Some("circuit-provider".into()),
+            ExplicitSpawnOverrides {
+                model: Some("circuit-model".into()),
+                effort: Some("circuit-effort".into()),
+                extra_args: None,
+            },
+            Some("parent-provider"),
+        );
+        assert_eq!(provider.as_deref(), Some("circuit-provider"));
+        assert_eq!(explicit.model.as_deref(), Some("circuit-model"));
+        assert_eq!(explicit.effort.as_deref(), Some("circuit-effort"));
+
+        let (provider, explicit) = resolve_review_spawn_inputs(
+            &view,
+            "reviewer",
+            None,
+            ExplicitSpawnOverrides::default(),
+            Some("parent-provider"),
+        );
+        assert_eq!(provider.as_deref(), Some("source-provider"));
+        assert_eq!(explicit.model.as_deref(), Some("source-model"));
+        assert_eq!(explicit.effort.as_deref(), Some("source-effort"));
+    }
+
+    #[test]
     fn review_spawn_detection_is_limited_to_review_graphs() {
         let review = CircuitGraph::agent_review("claude", None, None, 2);
         let mut context = CircuitContext::new();
@@ -4717,6 +4835,63 @@ mod tests {
             steps: vec![],
         };
         assert!(!is_review_spawn_step(&plain, "spawn"));
+    }
+
+    #[test]
+    fn issue_review_spawn_seam_persists_parent_and_inherits_provider() {
+        let path = init_temp_db_at("issue-review-parent-provider");
+        let mesh = db::create_mesh("issue-review-parent-provider", "/tmp/issue-review-parent-provider").unwrap();
+        let source = db::create_agent_node(mesh.id, "Implementation", &mesh.path, "main",
+            crate::models::EnvType::Windows, "parent-provider", None, None, None, None, true, None, None, None).unwrap();
+        let reviewer = db::create_agent_node(mesh.id, "Review", &mesh.path, "main",
+            crate::models::EnvType::Windows, "placeholder", None, None, None, None, true, None, None, None).unwrap();
+        let graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
+        let circuit = db::create_autopilot_circuit(mesh.id, "issue-review-parent-provider", "", 2,
+            &graph.to_json().unwrap()).unwrap();
+        let run_id = db::create_circuit_run(circuit.id, mesh.id, "issue:42:ready-for-agent", "{}").unwrap();
+        db::commit_circuit_advance(run_id, Some("running"), None, &[
+            db::CircuitStepOp { node_id: "implementer".into(), status: "completed".into(), outcome: Some(Some("completed".to_string())), error: None,
+                agent_node_id: Some(source.id), attempt: 1, fresh_attempt: false },
+            db::CircuitStepOp { node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
+                agent_node_id: None, attempt: 1, fresh_attempt: false },
+        ]).unwrap();
+
+        let mut view = RunView {
+            run_id,
+            graph,
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView { node_id: "implementer".into(), status: StepStatus::Completed, outcome: Some(StepOutcome::Completed), error: None, agent_node_id: Some(source.id), attempt: 1 },
+                StepView { node_id: "reviewer".into(), status: StepStatus::Running, outcome: None, error: None, agent_node_id: None, attempt: 1 },
+            ],
+        };
+        // Exercise the same production resolver used by spawn_step_agent:
+        // parent discovery, conditional provider inheritance, and the
+        // provider/model/effort cascade all happen inside this call.
+        let ReviewSpawnResolution {
+            parent_agent_node_id: parent_id,
+            provider,
+            explicit,
+        } = resolve_review_spawn_configuration(
+            &view,
+            "reviewer",
+            None,
+            ExplicitSpawnOverrides::default(),
+        );
+        assert_eq!(parent_id, Some(source.id));
+        assert_eq!(provider.as_deref(), Some("parent-provider"));
+        assert!(explicit.model.is_none());
+        assert!(explicit.effort.is_none());
+
+        attach_spawned_agent(run_id, &mut view, "reviewer", reviewer.id, parent_id).unwrap();
+        let persisted_parent = db::list_circuit_agent_ownerships()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.0 == reviewer.id && row.1 == run_id)
+            .and_then(|row| row.5);
+        assert_eq!(persisted_parent, Some(source.id));
+        std::fs::remove_file(path).ok();
     }
 
     /// The cascade layer-1 (explicit) override slot must carry the per-node
