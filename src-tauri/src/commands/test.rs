@@ -135,8 +135,16 @@ async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: Sock
         _ => return,
     };
 
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let response = process_request(&request, app);
+    // The test bridge deliberately exercises real synchronous command/service
+    // seams. Keep SQLite, filesystem cleanup, and any other blocking work off
+    // the Tauri async worker while retaining async socket I/O here.
+    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let app = app.clone();
+    let response = crate::commands::run_blocking("test_server_request", move || {
+        Ok(process_request(&request, &app))
+    })
+    .await
+    .unwrap_or_else(|error| JsonRpcResponse::error(&error));
 
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -171,6 +179,8 @@ fn process_request(request: &str, app: &AppHandle) -> String {
 
         match rpc_req.cmd.as_str() {
             "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
+            "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
+            "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
             "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
             "list_meshes" => handle_list_meshes(),
             "list_agent_nodes" => handle_list_agent_nodes(),
@@ -218,6 +228,25 @@ fn handle_create_test_mesh(args: &serde_json::Value) -> String {
     match crate::db::create_mesh(name, &std::env::temp_dir().to_string_lossy()) {
         Ok(mesh) => JsonRpcResponse::success(&mesh),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+fn handle_create_test_review_fixture(args: &serde_json::Value) -> String {
+    let name = args
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Review consistency verification");
+    match crate::services::test_fixtures::create_review_activity_fixture(name) {
+        Ok(data) => JsonRpcResponse::success(&data),
+        Err(error) => JsonRpcResponse::error(&error),
+    }
+}
+
+fn handle_delete_test_review_fixture(args: &serde_json::Value) -> String {
+    let mesh_id = args.get("meshId").and_then(|value| value.as_i64()).unwrap_or(0);
+    match crate::services::test_fixtures::delete_review_activity_fixture(mesh_id) {
+        Ok(()) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
+        Err(error) => JsonRpcResponse::error(&error),
     }
 }
 

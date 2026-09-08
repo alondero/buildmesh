@@ -280,6 +280,7 @@ pub(crate) enum AlwaysStep {
     /// the explicit OpenPr policy on stored review graphs.
     UpgradeIssueReviewFirstTurns,
     UpgradeIssueReviewVerdicts,
+    UpgradeReviewContractPrompts,
     /// Remove the temporary per-node session-generation keys written by the
     /// pre-v39 recovery implementation after their values have been copied to
     /// `agent_nodes.session_started_at`.
@@ -290,6 +291,12 @@ pub(crate) enum AlwaysStep {
     /// Materialise node lifecycle leases and import legacy cleanup intents.
     EnsureAgentNodeLifecycleLeases,
 }
+
+const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
+const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
+const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
+const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'";
+type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
 // ---------------------------------------------------------------------------
 // The registry.
@@ -659,6 +666,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DropCheckpoints,
     AlwaysStep::UpgradeIssueReviewFirstTurns,
     AlwaysStep::UpgradeIssueReviewVerdicts,
+    AlwaysStep::UpgradeReviewContractPrompts,
     AlwaysStep::RewriteAgentNodeProviderId,
     AlwaysStep::HashCoordinatorTokens,
     AlwaysStep::EnforceCircuitRunCapacityRange,
@@ -1078,6 +1086,127 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     [],
                 )?;
             }
+        }
+        AlwaysStep::UpgradeReviewContractPrompts => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+            {
+                return Ok(());
+            }
+            let migration_state: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = ?1",
+                    params![REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG],
+                    |row| row.get(0),
+                )
+                .ok();
+            if migration_state.as_deref() == Some(REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE) {
+                // Keep the durable gate cheap without making it blind to a legacy graph
+                // imported after the original scan. The EXISTS probe avoids deserializing
+                // anything on the ordinary startup path, while a late import can still be
+                // upgraded safely.
+                let has_late_legacy: bool = conn.query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM autopilot_circuits c WHERE {LEGACY_REVIEW_GRAPH_PREDICATE})"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !has_late_legacy {
+                    return Ok(());
+                }
+            }
+            // A fresh database has no circuits yet. Leave the gate unset so an imported or
+            // restored legacy circuit can still trigger the one-time upgrade later.
+            let has_circuits: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM autopilot_circuits)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_circuits {
+                return Ok(());
+            }
+
+            // Keep the candidate scan in SQL. The old implementation loaded every graph and
+            // then issued one active-run query per row, which made startup cost grow with the
+            // entire circuit history. The sentinel row preserves the distinction between
+            // "nothing legacy remains" and "legacy work is still active" without another scan.
+            let circuits: Vec<ReviewContractCandidate> = {
+                let mut stmt = conn.prepare(&format!(
+                    "WITH legacy AS (
+                         SELECT c.id, c.graph_json, c.is_preset
+                         FROM autopilot_circuits c
+                         WHERE {LEGACY_REVIEW_GRAPH_PREDICATE}
+                     ), active AS (
+                         SELECT DISTINCT r.circuit_id
+                         FROM autopilot_circuit_runs r
+                         JOIN legacy ON legacy.id = r.circuit_id
+                         WHERE r.state IN ('pending', 'running', 'paused')
+                     )
+                     SELECT id, graph_json, is_preset, 0 AS deferred
+                     FROM legacy
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM active WHERE active.circuit_id = legacy.id
+                     )
+                     UNION ALL
+                     SELECT NULL, NULL, NULL, 1 AS deferred
+                     WHERE EXISTS (SELECT 1 FROM active)
+                     ORDER BY deferred, id"
+                ))?;
+                let rows = stmt.query_map([], |row| {
+                    let id: Option<i64> = row.get(0)?;
+                    let graph_json: Option<String> = row.get(1)?;
+                    let is_preset: Option<i64> = row.get(2)?;
+                    let deferred: i64 = row.get(3)?;
+                    Ok((id, graph_json, is_preset, deferred != 0))
+                })?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            let mut deferred = false;
+            let mut retry_required = false;
+            for (id, graph_json, is_preset, is_deferred) in circuits {
+                let Some(id) = id else {
+                    deferred |= is_deferred;
+                    continue;
+                };
+                let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
+                let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
+                let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!("evolve_to: cannot inspect review circuit {}: {}", id, error);
+                        retry_required = true;
+                        continue;
+                    }
+                };
+                let changed = if is_preset {
+                    graph.upgrade_legacy_agent_review_prompts()
+                } else {
+                    graph.upgrade_legacy_issue_review_contract()
+                };
+                if changed {
+                    let upgraded_json = graph.to_json().map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                        ))
+                    })?;
+                    conn.execute(
+                        "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        params![id, upgraded_json],
+                    )?;
+                }
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+                params![
+                    REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG,
+                    if deferred || retry_required {
+                        REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED
+                    } else {
+                        REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE
+                    }
+                ],
+            )?;
         }
         AlwaysStep::UpgradeIssueReviewFirstTurns | AlwaysStep::UpgradeIssueReviewVerdicts => {
             // v2 also backfills the explicit OpenPr policy on persisted

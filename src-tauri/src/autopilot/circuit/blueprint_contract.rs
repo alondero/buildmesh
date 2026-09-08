@@ -447,6 +447,14 @@ mod tests {
                     "reviewer prompt must carry the canonical PR_REVIEW_PROMPT contract"
                 );
                 assert!(
+                    prompt.contains("post the findings as a PR comment"),
+                    "reviewer prompt must retain the PR comment delivery instruction"
+                );
+                assert!(
+                    !CircuitGraph::PR_REVIEW_PROMPT.contains("grumpy senior"),
+                    "PR_REVIEW_PROMPT must rely on REVIEW_POLICY for reviewer persona"
+                );
+                assert!(
                     prompt.contains("{{pr.url}}"),
                     "reviewer prompt must inject the PR URL"
                 );

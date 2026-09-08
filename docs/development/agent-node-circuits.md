@@ -8,10 +8,12 @@ preset waits for the source task to finish.
 The review preset classifies the source's completion report, starts a separate
 reviewer, returns findings to the original agent, waits for fixes, and reviews
 again. Explicit reviewer approval ends the loop. The default limit is three
-review rounds, configurable from one to ten. Reaching the limit reports that
-the latest fixes remain unapproved. An unclear reviewer verdict stops for
-attention. When the source's completion cannot be read or classified, a visible
-approval step lets the user confirm completion before review begins.
+review rounds, configurable from one to ten. Reaching the limit or receiving
+an unclear reviewer verdict ends the run in a failed, recoverable checkpoint;
+it does not claim approval. Resume the saved implementation session to resolve
+the blocker or request a fresh review. When the source's completion cannot be
+read or classified, a visible approval step lets the user confirm completion
+before review begins.
 
 The reviewer uses the source agent's provider plus the Mesh's configured model
 and effort tier, and receives its working directory, Mesh base ref, name, and
@@ -19,6 +21,36 @@ latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
+
+## Review presentation contract
+
+The title-bar review preset and the issue-driven Autopilot review blueprint
+use the same activity presentation and review criteria.
+The source is the **Implementation** activity and each owned reviewer is a
+**Review** activity in the source's node card, selected through the shared
+activity tabs. Selecting a review activity retargets the header actions,
+terminal, input, and changes to that reviewer; the source task title remains
+stable. The All sessions menu remains available when the card is narrow.
+
+Review findings are returned through the circuit run's existing feedback step
+to the source agent. The source's terminal remains the place where that agent
+receives the requested fixes, while the reviewer report remains available in
+the run history and on the reviewer activity. Both flows use explicit approval,
+changes-requested, and blocked verdicts. Only changes-requested reports start
+a fix round. A blocked or exhausted run preserves the reviewer checkpoint,
+including its association and worktree, for recovery; cleanup stops its live
+process and is retryable rather than deleting the review evidence.
+
+By default, reviewers inherit the reviewed agent's harness. Explicit reviewer
+settings in an authored Circuit take precedence; model and effort use the
+existing Mesh/harness cascade. PR reviews inspect the published PR and post
+their findings there as well as returning the terminal report. Local reviews
+include uncommitted work and do not publish comments.
+
+On startup, inactive stock review graphs are upgraded to this contract while
+preserving spawn settings and round limits. Customized issue-review prompts
+or topology are left intact. Active runs retain their saved graph; their
+upgrade is reconsidered on a later startup after they finish.
 
 Runs use the existing Circuits queue, capacity limits, run history, pause,
 approval, and cancellation controls. A repeated start while the source already

@@ -24,7 +24,8 @@ describe('agent workflow title-bar control', () => {
 
   it('starts review for a finished agent and opens its Mesh Circuits', async () => {
     render(<AgentReviewButton node={node} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    expect(screen.getByRole('heading', { name: 'Review or circuit for Fix parser' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value: '5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5));
@@ -39,7 +40,7 @@ describe('agent workflow title-bar control', () => {
       { id: 4, name: 'Interval only', graph_json: JSON.stringify({ nodes: [{ id: 'trigger', type: { type: 'interval', interval_seconds: 60 } }], edges: [] }) },
     ]);
     render(<AgentReviewButton node={node} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     await screen.findByRole('option', { name: 'My workflow' });
     expect(screen.queryByRole('option', { name: 'Interval only' })).toBeNull();
     fireEvent.change(screen.getByLabelText('Workflow'), { target: { value: '3' } });
@@ -50,7 +51,7 @@ describe('agent workflow title-bar control', () => {
   it('keeps an actionable backend error in the dialog', async () => {
     trigger.mockRejectedValue('Resume the agent before starting a review.');
     render(<AgentReviewButton node={node} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     expect((await screen.findByRole('alert')).textContent).toContain('Resume the agent');
     expect(screen.getByRole('dialog')).not.toBeNull();
@@ -59,7 +60,7 @@ describe('agent workflow title-bar control', () => {
   it('opens the active run instead of starting a duplicate', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state: 'running' } } });
     render(<AgentReviewButton node={node} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('button', { name: 'View circuit run #91' }));
     expect(trigger).not.toHaveBeenCalled();
     expect(useUIStore.getState().probeTab).toBe('circuits');
@@ -70,7 +71,7 @@ describe('agent workflow title-bar control', () => {
     const { cancelCircuitRun } = await import('../../src/lib/tauri');
     const cancel = vi.spyOn(await import('../../src/lib/tauri'), 'cancelCircuitRun').mockResolvedValue();
     render(<AgentReviewButton node={node} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start agent workflow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     expect(screen.queryByRole('button', { name: 'Start review' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel active workflow' }));
     await waitFor(() => expect(cancel).toHaveBeenCalledWith(91));
@@ -83,11 +84,11 @@ describe('agent workflow title-bar control', () => {
       42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state },
     } });
     render(<AgentReviewButton node={{ ...node, status: 'error' }} />);
-    expect((screen.getByRole('button', { name: 'Start agent workflow' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it.each(['suspended', 'archived', 'error'])('disables starting for %s agents', status => {
     render(<AgentReviewButton node={{ ...node, status: status as AgentNode['status'] }} />);
-    expect((screen.getByRole('button', { name: 'Start agent workflow' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

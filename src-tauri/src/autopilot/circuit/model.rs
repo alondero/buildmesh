@@ -875,20 +875,96 @@ impl CircuitGraph {
         }
     }
 
-    /// Exact reviewer instruction used by the issue-driven review blueprint.
-    /// Keep this text stable: it is both the user-requested contract and the
-    /// prompt that a reviewer sees after its PTY becomes ready.
-    ///
-    /// Shares the grumpy senior engineer review persona with the interactive PR probe
-    /// prefill ([`crate::agent::spawn::intent`]), but intentionally diverges in structure:
-    /// this is a headless circuit template using `{{pr.number}}` that instructs an
-    /// autonomous agent to post comments back to GitHub, whereas the probe prefill formats
-    /// an interactive session for a human developer with the PR URL on a newline.
-    pub const PR_REVIEW_PROMPT: &'static str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment";
+    /// PR delivery and scope used by the issue-driven review blueprint. Keep
+    /// this text stable because it is also the catalog's user-visible
+    /// contract; [`Self::pr_review_prompt`] adds the shared review policy.
+    pub const PR_REVIEW_PROMPT: &'static str = crate::review_contract::PR_REVIEW_DELIVERY;
 
     const AUTONOMOUS_IMPLEMENTATION_PROMPT: &'static str = "{{issue.prefill}}\nThis is an unattended implementation run. Carry the authorized issue through implementation and verification. Make routine implementation choices and record assumptions. Do not voluntarily enter interactive plan mode or stop after writing a plan. Ask for human input only when the task cannot proceed without a material decision, permission, or missing access; state that blocker clearly. Do not expand the issue's scope.";
 
-    const REVIEW_VERDICT_INSTRUCTION: &'static str = "State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
+    /// Shared review criteria used by both the local node-review loop and the
+    /// issue-driven PR reviewer. The surrounding prompt supplies only the
+    /// surface-specific scope and delivery mechanism.
+    pub const REVIEW_POLICY: &'static str = crate::review_contract::REVIEW_POLICY;
+    pub const REVIEW_FEEDBACK_POLICY: &'static str = crate::review_contract::REVIEW_FEEDBACK_POLICY;
+
+    pub fn local_review_prompt() -> String {
+        format!(
+            "{}\nReview the work of agent {{{{source.agent_id}}}} in {{{{source.path}}}} directly: inspect committed changes from the merge-base {{{{source.base_ref}}}} plus all uncommitted and untracked changes. The source task is {{{{source.name}}}}. Its latest report is {{{{source.output}}}}. Do not modify files, commit, push, post comments, or open a PR. This is review round {{{{retry.attempt}}}} of {{{{retry.max_retries}}}}.",
+            Self::REVIEW_POLICY
+        )
+    }
+
+    pub fn pr_review_prompt() -> String {
+        format!(
+            "{}\n{} The pull request URL is {{{{pr.url}}}}. Provide the same findings and verdict in your final response.",
+            Self::REVIEW_POLICY,
+            Self::PR_REVIEW_PROMPT
+        )
+    }
+
+    pub fn review_feedback_prompt(scope: &str) -> String {
+        format!("{}\n{}", scope, Self::REVIEW_FEEDBACK_POLICY)
+    }
+
+    pub(crate) fn upgrade_legacy_agent_review_prompts(&mut self) -> bool {
+        let old_review = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
+        let old_feedback = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
+        let mut changed = false;
+        for node in &mut self.nodes {
+            match &mut node.kind {
+                CircuitNodeKind::SpawnAgentNode { prompt, .. }
+                    if node.id == "reviewer" && prompt == old_review =>
+                {
+                    *prompt = Self::local_review_prompt();
+                    changed = true;
+                }
+                CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "feedback" && prompt == old_feedback =>
+                {
+                    *prompt = Self::review_feedback_prompt(
+                        "An independent reviewer requested changes to your work.",
+                    );
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn upgrade_legacy_issue_review_contract(&mut self) -> bool {
+        if !self.is_issue_driven_autopilot_review() {
+            return false;
+        }
+        // Match only the two exact prompts shipped before PR_REVIEW_PROMPT
+        // was split from REVIEW_POLICY. A user-authored extension of either
+        // prompt is not stock and must remain intact.
+        let old_feedback = "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.";
+        let mut changed = false;
+        for node in &mut self.nodes {
+            match &mut node.kind {
+                CircuitNodeKind::SpawnAgentNode { prompt, .. }
+                    if node.id == "reviewer"
+                        && (prompt == crate::review_contract::LEGACY_PR_REVIEW_PROMPT
+                            || prompt == crate::review_contract::LEGACY_PR_REVIEW_WITH_VERDICT) =>
+                {
+                    *prompt = Self::pr_review_prompt();
+                    changed = true;
+                }
+                CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "follow_feedback" && prompt == old_feedback =>
+                {
+                    *prompt = Self::review_feedback_prompt(
+                        "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}) and update the PR.",
+                    );
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
 
     /// Build the issue-driven Autopilot blueprint with a post-PR review loop.
     ///
@@ -984,10 +1060,7 @@ impl CircuitGraph {
                 node(
                     "reviewer",
                     CircuitNodeKind::SpawnAgentNode {
-                        prompt: format!(
-                            "{}. The pull request URL is {{{{pr.url}}}}. {}",
-                            Self::PR_REVIEW_PROMPT, Self::REVIEW_VERDICT_INSTRUCTION
-                        ),
+                        prompt: Self::pr_review_prompt(),
                         name: None,
                         provider: None,
                         model: None,
@@ -1004,7 +1077,9 @@ impl CircuitGraph {
                 node(
                     "follow_feedback",
                     CircuitNodeKind::InjectPty {
-                        prompt: "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.".to_string(),
+                        prompt: Self::review_feedback_prompt(
+                            "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}) and update the PR.",
+                        ),
                         target_node_id: Some("implementer".to_string()),
                     },
                 ),
@@ -1821,6 +1896,34 @@ mod tests {
 
         let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
         assert_eq!(parsed, g);
+    }
+
+    #[test]
+    fn review_prompt_keeps_pr_delivery_separate_from_shared_policy() {
+        assert_eq!(
+            CircuitGraph::PR_REVIEW_PROMPT,
+            "Review PR {{pr.number}} and post the findings as a PR comment."
+        );
+        assert!(!CircuitGraph::PR_REVIEW_PROMPT.contains("grumpy senior"));
+        assert!(CircuitGraph::REVIEW_POLICY.contains("reviewed commit or revision under review"));
+        assert!(CircuitGraph::local_review_prompt().contains("reviewed commit or revision under review"));
+        assert!(CircuitGraph::pr_review_prompt().contains("post the findings as a PR comment"));
+    }
+
+    #[test]
+    fn legacy_pr_review_prompt_with_custom_suffix_is_preserved() {
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let custom = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}. Also check our release checklist.";
+        if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == "reviewer") {
+            if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                *prompt = custom.into();
+            }
+        }
+        assert!(!graph.upgrade_legacy_issue_review_contract());
+        assert!(matches!(
+            graph.node("reviewer").map(|node| &node.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { prompt, .. }) if prompt == custom
+        ));
     }
 
     #[test]

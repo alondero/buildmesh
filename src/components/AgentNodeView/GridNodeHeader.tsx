@@ -148,7 +148,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const attentionTone = activity?.tone === 'error' ? 'text-status-error bg-status-error-bg' : 'text-status-warning bg-status-warning/10';
 
   return (
-    <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header"
+    <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header" data-node-id={node.id}
       onDoubleClick={handleToggleSolo}
       title={`Double-click or press ${toggleShortcutHint} to ${isSingleMode ? 'restore grid' : 'maximize'}`}
       className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}

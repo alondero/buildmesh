@@ -9,6 +9,192 @@ mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
     #[test]
+    fn saved_issue_review_contract_upgrades_stock_preserves_custom_and_defers_active_runs() {
+        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id, name, path) VALUES (1, 'review', 'C:/review')", []).unwrap();
+        let fixture: CircuitGraph = serde_json::from_str(include_str!("../../tests/fixtures/legacy-issue-review-circuit.json")).unwrap();
+        // Keep the recovery/topology migration separate from this prompt
+        // migration test by using the current graph with the historically
+        // shipped reviewer and feedback text.
+        let mut legacy = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        for id in ["reviewer", "follow_feedback"] {
+            let previous = &fixture.node(id).unwrap().kind;
+            legacy.nodes.iter_mut().find(|node| node.id == id).unwrap().kind = previous.clone();
+        }
+        legacy.validate().unwrap();
+        let mut configured = legacy.clone();
+        if let K::SpawnAgentNode { provider, model, .. } = &mut configured.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
+            *provider = Some("codex".into());
+            *model = Some("review-model".into());
+        }
+        if let K::RetryLimit { max_retries } = &mut configured.nodes.iter_mut().find(|n| n.id == "review_retry").unwrap().kind {
+            *max_retries = 5;
+        }
+        let mut custom_prompt = legacy.clone();
+        if let K::SpawnAgentNode { prompt, .. } = &mut custom_prompt.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
+            *prompt = "My custom review".into();
+        }
+        let mut custom_edges = legacy.clone();
+        custom_edges.edges.retain(|e| e.to != "close_reviewer");
+        for (id, graph) in [(1, &configured), (2, &custom_prompt), (3, &custom_edges), (4, &legacy)] {
+            conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (?1, 1, 'review', ?2)",
+                rusqlite::params![id, graph.to_json().unwrap()]).unwrap();
+        }
+        conn.execute("INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 4, 1, 'paused')", []).unwrap();
+        let read = |id: i64| -> CircuitGraph {
+            let json: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id=?1", [id], |r| r.get(0)).unwrap();
+            CircuitGraph::from_json(&json).unwrap()
+        };
+        crate::db::init_schema(&conn).unwrap();
+        let upgraded = read(1);
+        upgraded.validate().unwrap();
+        assert!(matches!(&upgraded.node("review_classifier").unwrap().kind, K::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some("reviewer")));
+        assert!(upgraded.edges.iter().any(|e| e.from == "review_classifier" && e.to == "follow_feedback" && e.condition == EdgeCondition::OnOutcome(StepOutcome::Working)));
+        assert!(upgraded.node("close_approved").is_some());
+        assert!(upgraded.node("review_exhausted").is_some());
+        assert!(upgraded.node("review_blocked").is_some());
+        assert!(matches!(&upgraded.node("reviewer").unwrap().kind, K::SpawnAgentNode { provider, model, prompt, .. } if provider.as_deref() == Some("codex") && model.as_deref() == Some("review-model") && prompt == &CircuitGraph::pr_review_prompt()));
+        assert!(matches!(&upgraded.node("review_retry").unwrap().kind, K::RetryLimit { max_retries: 5 }));
+        assert_eq!(read(2).node("reviewer").unwrap().kind, custom_prompt.node("reviewer").unwrap().kind);
+        assert_eq!(read(3).edges, custom_edges.edges);
+        assert_eq!(read(4), legacy);
+        conn.execute("UPDATE autopilot_circuit_runs SET state='completed' WHERE id=10", []).unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let completed = read(4);
+        let canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let expected_feedback = match &canonical.node("follow_feedback").unwrap().kind {
+            K::InjectPty { prompt, .. } => prompt,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            &completed.node("reviewer").unwrap().kind,
+            K::SpawnAgentNode { prompt, .. } if prompt == &CircuitGraph::pr_review_prompt()
+        ));
+        assert!(matches!(
+            &completed.node("follow_feedback").unwrap().kind,
+            K::InjectPty { prompt, .. } if prompt == expected_feedback
+        ));
+        assert_eq!(read(1), upgraded);
+    }
+
+    #[test]
+    fn review_contract_upgrade_skips_active_rows_retries_and_preserves_custom_prompts() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'review-migration', 'C:/review-migration'), (2, 'custom-migration', 'C:/custom-migration')",
+            [],
+        ).unwrap();
+
+        let mut legacy = crate::autopilot::circuit::model::CircuitGraph::agent_review("codex", None, None, 3);
+        let reviewer_prompt = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
+        let feedback_prompt = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
+        for node in &mut legacy.nodes {
+            match &mut node.kind {
+                crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } if node.id == "reviewer" => *prompt = reviewer_prompt.to_string(),
+                crate::autopilot::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } if node.id == "feedback" => *prompt = feedback_prompt.to_string(),
+                _ => {}
+            }
+        }
+        let legacy_json = legacy.to_json().unwrap();
+        let mut custom = legacy.clone();
+        for node in &mut custom.nodes {
+            if let crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+                if node.id == "reviewer" { *prompt = "custom reviewer prompt".to_string(); }
+            }
+            if let crate::autopilot::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
+                if node.id == "feedback" { *prompt = "custom feedback".to_string(); }
+            }
+        }
+        let custom_json = custom.to_json().unwrap();
+        conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'legacy', ?1, 1)", [legacy_json.clone()]).unwrap();
+        conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (2, 2, 'custom', ?1, 1)", [custom_json.clone()]).unwrap();
+        conn.execute("INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running')", []).unwrap();
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)", [crate::db::migrations::SCHEMA_VERSION.to_string()]).unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let unchanged_active: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged_active, legacy_json);
+        let unchanged_custom: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged_custom, custom_json);
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "deferred",
+            "an active legacy circuit must defer completion so it can be retried"
+        );
+
+        conn.execute("UPDATE autopilot_circuit_runs SET state = 'completed' WHERE id = 10", []).unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let upgraded: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&upgraded).unwrap();
+        assert_eq!(graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "complete"
+        );
+
+        // Completion is durable for the ordinary startup path, but a cheap SQL probe still
+        // notices a legacy-looking graph imported after the original upgrade.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
+            [&legacy_json],
+        )
+        .unwrap();
+        let second = upgraded.clone();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let third: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(second, third);
+        let late_legacy: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
+        let late_graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&late_legacy).unwrap();
+        assert_eq!(late_graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+    }
+
+    #[test]
+    fn review_contract_upgrade_defers_unreadable_legacy_graphs() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'malformed-review', 'C:/malformed-review')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'malformed', ?1, 1)",
+            [r#"{"legacy":"Review the work of agent {{source.agent_id}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
+            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "deferred",
+            "an unreadable legacy graph must remain retryable"
+        );
+    }
+
+    #[test]
     fn review_open_pr_policy_migration_is_persistent_and_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::ensure_baseline_tables(&conn).unwrap();
