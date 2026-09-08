@@ -128,7 +128,7 @@ impl SpawnIntent {
     /// | `Resume { .. }`                    | `None`                                          |
     /// | `Issue(context)` w/ title          | `Some("Please work on ... #N — title\n<url>")`  |
     /// | `Issue(context)` blank title       | `Some("Please work on ... #N\n<url>")`          |
-    /// | `PullRequest(context)`             | `Some("Review PR #N as a grumpy...\n<url>")`    |
+    /// | `PullRequest(context)`             | `Some("Review PR #N\n<shared review policy>\n<url>")` |
     /// | `Handover { selected_text }`       | `Some(selected_text)` verbatim                  |
     /// | `Loop { initial_prompt }`          | `Some(initial_prompt)` verbatim                 |
     pub(crate) fn initial_prompt(&self) -> Option<InitialPrompt> {
@@ -286,16 +286,6 @@ pub(crate) fn format_issue_prefill_with_url(number: i64, title: &str, url: &str)
     }
 }
 
-/// Canonical persona instruction for PR reviews spawned from the PR probe.
-///
-/// The probe prefill is for an interactive desktop session spawned by a human user:
-/// it is capitalized ("Review PR #..."), appends the canonical PR URL for context,
-/// and omits the automated directive to post findings as a PR comment because the
-/// human user guides the interactive session. The circuit prompt supplies that
-/// delivery instruction separately through `CircuitGraph::PR_REVIEW_PROMPT`.
-const PR_REVIEW_PERSONA: &str =
-    "as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture";
-
 /// Format the GitHub-PR prefill. Single source of truth (issue #1180, #1561);
 /// see [`format_issue_prefill`] for the parallel doc.
 pub(crate) fn format_pull_request_prefill(
@@ -304,7 +294,10 @@ pub(crate) fn format_pull_request_prefill(
     number: i64,
 ) -> String {
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
-    format!("Review PR #{number} {PR_REVIEW_PERSONA}\n{url}")
+    format!(
+        "Review PR #{number}\n{}\n{url}",
+        crate::autopilot::circuit::model::CircuitGraph::REVIEW_POLICY
+    )
 }
 
 #[cfg(test)]
@@ -334,22 +327,23 @@ https://github.com/alondero/buildmesh/issues/247"
         );
     }
 
-    /// Pin the PR prefill contract (issue #1180 AC #3, #1561):
-    /// `Review PR #N as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture\n<url>`.
+    /// Pin the PR prefill contract (issue #1180 AC #3, #1561): the shared
+    /// review policy is used for both interactive and circuit reviews.
     #[test]
-    fn pull_request_prefill_uses_canonical_pull_url_and_grumpy_engineer_prompt() {
+    fn pull_request_prefill_uses_canonical_pull_url_and_shared_review_policy() {
         let intent = SpawnIntent::PullRequest(PullRequestContext {
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 420,
         });
 
+        let expected = format!(
+            "Review PR #420\n{}\nhttps://github.com/alondero/buildmesh/pull/420",
+            crate::autopilot::circuit::model::CircuitGraph::REVIEW_POLICY
+        );
         assert_eq!(
             intent.initial_prompt().as_ref().map(InitialPrompt::as_str),
-            Some(
-                "Review PR #420 as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture\n\
-https://github.com/alondero/buildmesh/pull/420"
-            )
+            Some(expected.as_str())
         );
     }
 

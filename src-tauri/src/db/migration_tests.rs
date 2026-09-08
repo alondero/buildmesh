@@ -145,8 +145,8 @@ mod tests {
             "complete"
         );
 
-        // Completion is durable: a legacy-looking graph written after the upgrade is not
-        // re-deserialized on every initializer pass.
+        // Completion is durable for the ordinary startup path, but a cheap SQL probe still
+        // notices a legacy-looking graph imported after the original upgrade.
         conn.execute(
             "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
             [&legacy_json],
@@ -157,7 +157,41 @@ mod tests {
         let third: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
         assert_eq!(second, third);
         let late_legacy: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
-        assert_eq!(late_legacy, legacy_json, "completed migration gate must short-circuit later scans");
+        let late_graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&late_legacy).unwrap();
+        assert_eq!(late_graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+    }
+
+    #[test]
+    fn review_contract_upgrade_defers_unreadable_legacy_graphs() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'malformed-review', 'C:/malformed-review')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'malformed', ?1, 1)",
+            [r#"{"legacy":"Review the work of agent {{source.agent_id}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
+            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "deferred",
+            "an unreadable legacy graph must remain retryable"
+        );
     }
 
     #[test]

@@ -1099,7 +1099,24 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 )
                 .ok();
             if migration_state.as_deref() == Some(REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE) {
-                return Ok(());
+                // Keep the durable gate cheap without making it blind to a legacy graph
+                // imported after the original scan. The EXISTS probe avoids deserializing
+                // anything on the ordinary startup path, while a late import can still be
+                // upgraded safely.
+                let has_late_legacy: bool = conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM autopilot_circuits
+                         WHERE graph_json LIKE '%Review the work of agent {{source.agent_id}}%'
+                            OR graph_json LIKE '%An independent reviewer requested changes to your work.%'
+                            OR graph_json LIKE '%review PR {{pr.number}} as%'
+                            OR graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !has_late_legacy {
+                    return Ok(());
+                }
             }
             // A fresh database has no circuits yet. Leave the gate unset so an imported or
             // restored legacy circuit can still trigger the one-time upgrade later.
@@ -1151,6 +1168,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
             let mut deferred = false;
+            let mut retry_required = false;
             for (id, graph_json, is_preset, is_deferred) in circuits {
                 let Some(id) = id else {
                     deferred |= is_deferred;
@@ -1162,6 +1180,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     Ok(graph) => graph,
                     Err(error) => {
                         tracing::warn!("evolve_to: cannot inspect review circuit {}: {}", id, error);
+                        retry_required = true;
                         continue;
                     }
                 };
@@ -1186,7 +1205,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
                 params![
                     REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG,
-                    if deferred {
+                    if deferred || retry_required {
                         REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED
                     } else {
                         REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE

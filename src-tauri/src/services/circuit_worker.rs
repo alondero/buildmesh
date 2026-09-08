@@ -2274,35 +2274,19 @@ struct ReviewSpawnResolution {
     explicit: ExplicitSpawnOverrides,
 }
 
-/// Resolve all reviewer-specific spawn state in one place. The parent row is
-/// consulted only when the circuit and source context leave provider
-/// selection open; title-bar review runs therefore do not pay for a lookup
-/// that their source context already answers.
+/// Resolve all reviewer-specific spawn state in one place. Parent provider
+/// observation is supplied by the orchestration layer so this decision seam
+/// stays independent of SQLite and can be tested with an in-memory view.
 fn resolve_review_spawn_configuration(
     view: &RunView,
     node_id: &str,
     provider: Option<String>,
     explicit: ExplicitSpawnOverrides,
+    parent_provider: Option<&str>,
 ) -> ReviewSpawnResolution {
     let parent_agent_node_id = review_parent_agent_id(view, node_id);
-    let source_provider = view
-        .context
-        .get("source.provider")
-        .and_then(non_empty_trim);
-    let parent_provider = if is_review_spawn_step(view, node_id)
-        && provider.as_deref().and_then(non_empty_trim).is_none()
-        && source_provider.is_none()
-    {
-        parent_agent_node_id.and_then(|parent_id| {
-            db::get_agent_node_by_id(parent_id)
-                .ok()
-                .map(|parent| parent.provider)
-        })
-    } else {
-        None
-    };
     let (provider, explicit) =
-        resolve_review_spawn_inputs(view, node_id, provider, explicit, parent_provider.as_deref());
+        resolve_review_spawn_inputs(view, node_id, provider, explicit, parent_provider);
     ReviewSpawnResolution {
         parent_agent_node_id,
         provider,
@@ -2562,11 +2546,37 @@ fn spawn_step_agent(
     // Activity parentage is derived once from the circuit graph and persisted
     // with the step association. The DB layer does not inspect graph JSON or
     // infer special step names.
+    let parent_agent_node_id = review_parent_agent_id(view, node_id);
+    let source_provider = view
+        .context
+        .get("source.provider")
+        .and_then(non_empty_trim);
+    // The parent provider is an observation, not part of the pure resolver's
+    // policy. Avoid the lookup whenever a circuit or source provider already
+    // determines the reviewer harness.
+    let parent_provider = if is_review_spawn_step(view, node_id)
+        && provider_str.as_deref().and_then(non_empty_trim).is_none()
+        && source_provider.is_none()
+    {
+        parent_agent_node_id.and_then(|parent_id| {
+            db::get_agent_node_by_id(parent_id)
+                .ok()
+                .map(|parent| parent.provider)
+        })
+    } else {
+        None
+    };
     let ReviewSpawnResolution {
         parent_agent_node_id,
         provider: provider_str,
         explicit,
-    } = resolve_review_spawn_configuration(view, node_id, provider_str, explicit);
+    } = resolve_review_spawn_configuration(
+        view,
+        node_id,
+        provider_str,
+        explicit,
+        parent_provider.as_deref(),
+    );
 
     let resolved_prompt = view.context.resolve(&prompt);
     let source_issue = view
@@ -4878,6 +4888,7 @@ mod tests {
             "reviewer",
             None,
             ExplicitSpawnOverrides::default(),
+            Some("parent-provider"),
         );
         assert_eq!(parent_id, Some(source.id));
         assert_eq!(provider.as_deref(), Some("parent-provider"));
