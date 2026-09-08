@@ -2520,21 +2520,6 @@ fn attach_spawned_agent(
     Ok(())
 }
 
-/// Test-server fixture seam for a completed review run. The fixture creates
-/// its rows through the normal DB APIs, then comes through this same resolver
-/// and attachment path as a real SpawnAgentNode effect. Keeping this helper
-/// here prevents a UI smoke test from manufacturing `parent_agent_node_id`
-/// with SQL while still avoiding a provider/process spawn.
-pub(crate) fn attach_fixture_review_agent(
-    run_id: i64,
-    view: &mut RunView,
-    node_id: &str,
-    agent_node_id: i64,
-) -> Result<(), String> {
-    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
-    attach_spawned_agent(run_id, view, node_id, agent_node_id, parent_agent_node_id)
-}
-
 fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,

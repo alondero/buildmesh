@@ -43,7 +43,7 @@ export default async function ({ page, invoke }) {
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
   } finally {
-    await invoke('delete_mesh', { meshId: mesh.id });
+    await invoke('delete_test_review_fixture', { meshId: mesh.id });
     await page.reload({ waitUntil: 'domcontentloaded' });
   }
 }

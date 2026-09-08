@@ -60,8 +60,15 @@ pub fn create_test(name: &str) -> Result<Mesh, MeshError> {
         .as_millis();
     let mesh_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
     std::fs::create_dir_all(&mesh_path)?;
-    let mesh = db::create_mesh(name, &mesh_path.to_string_lossy())?;
-    Ok(mesh)
+    match db::create_mesh(name, &mesh_path.to_string_lossy()) {
+        Ok(mesh) => Ok(mesh),
+        Err(error) => {
+            // This function owns the directory even when persistence fails;
+            // do not leave a half-created test mesh behind.
+            let _ = std::fs::remove_dir_all(&mesh_path);
+            Err(MeshError::Db(error))
+        }
+    }
 }
 
 /// Validate and update a mesh's layout preference.

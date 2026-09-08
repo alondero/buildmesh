@@ -172,6 +172,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
         match rpc_req.cmd.as_str() {
             "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
             "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
+            "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
             "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
             "list_meshes" => handle_list_meshes(),
             "list_agent_nodes" => handle_list_agent_nodes(),
@@ -222,138 +223,22 @@ fn handle_create_test_mesh(args: &serde_json::Value) -> String {
     }
 }
 
-/// Build a completed review activity fixture without starting either agent.
-/// Every row is created through the production circuit/node persistence APIs;
-/// the reviewer association is then made through the circuit worker's real
-/// parent-resolution + attachment seam. This route is intentionally exposed
-/// only by the loopback test bridge, not as a user-facing IPC command.
 fn handle_create_test_review_fixture(args: &serde_json::Value) -> String {
-    use crate::autopilot::circuit::context::CircuitContext;
-    use crate::autopilot::circuit::model::{CircuitGraph, StepOutcome};
-    use crate::autopilot::circuit::stepper::{RunState, RunView, StepStatus, StepView};
-    use crate::db::CircuitStepOp;
-    use crate::models::{EnvType, SessionStatus};
-
     let name = args
         .get("name")
         .and_then(|value| value.as_str())
         .unwrap_or("Review consistency verification");
-    let mesh = match crate::services::mesh::create_test(name) {
-        Ok(mesh) => mesh,
-        Err(error) => return JsonRpcResponse::error(&error.to_string()),
-    };
-
-    let result = (|| -> Result<serde_json::Value, String> {
-        let source = crate::db::create_agent_node(
-            mesh.id,
-            "Review implementation",
-            &mesh.path,
-            "main",
-            EnvType::Windows,
-            "codex",
-            Some("Review implementation"),
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-        crate::db::update_agent_node_status(source.id, SessionStatus::Completed)
-            .map_err(|error| error.to_string())?;
-
-        let reviewer = crate::db::create_agent_node(
-            mesh.id,
-            "Code reviewer",
-            &mesh.path,
-            "main",
-            EnvType::Windows,
-            "codex",
-            Some("Code reviewer"),
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-
-        // This is the same production circuit creation path used by the
-        // node review command: it creates/reuses the canonical review preset
-        // and seeds source.* on the run context.
-        let run_id = crate::db::create_node_circuit_run(source.id, None, 3)?;
-        let run = crate::db::get_circuit_run(run_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("review fixture run {} disappeared", run_id))?;
-        let circuit = crate::db::get_autopilot_circuit(run.circuit_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("review fixture circuit {} disappeared", run.circuit_id))?;
-        let graph = CircuitGraph::from_json(&circuit.graph_json)?;
-        let context = CircuitContext::from_json(&run.context_json)?;
-
-        // Commit the ledger row while terminalising the run. The worker can
-        // never observe this fixture as pending/running and therefore cannot
-        // start a provider process during the screenshot setup.
-        crate::db::commit_circuit_advance(
-            run_id,
-            Some("completed"),
-            None,
-            &[CircuitStepOp {
-                node_id: "reviewer".into(),
-                status: "completed".into(),
-                outcome: Some(Some("completed".into())),
-                error: None,
-                agent_node_id: None,
-                attempt: 1,
-                fresh_attempt: false,
-            }],
-        )
-        .map_err(|error| error.to_string())?;
-
-        let mut view = RunView {
-            run_id,
-            graph,
-            state: RunState::Completed,
-            context,
-            steps: vec![StepView {
-                node_id: "reviewer".into(),
-                status: StepStatus::Completed,
-                outcome: Some(StepOutcome::Completed),
-                error: None,
-                agent_node_id: None,
-                attempt: 1,
-            }],
-        };
-        crate::services::circuit_worker::attach_fixture_review_agent(
-            run_id,
-            &mut view,
-            "reviewer",
-            reviewer.id,
-        )?;
-        crate::db::update_agent_node_status(reviewer.id, SessionStatus::Completed)
-            .map_err(|error| error.to_string())?;
-
-        Ok(serde_json::json!({
-            "mesh": mesh,
-            "source": source.id,
-            "reviewer": reviewer.id,
-            "run": run_id,
-        }))
-    })();
-
-    match result {
+    match crate::services::test_fixtures::create_review_activity_fixture(name) {
         Ok(data) => JsonRpcResponse::success(&data),
-        Err(error) => {
-            // The fixture has no process/worktree ownership, so normal mesh
-            // deletion is safe and keeps a partially-created fixture out of
-            // the shared dev profile if setup fails halfway through.
-            let _ = crate::db::delete_mesh(mesh.id);
-            JsonRpcResponse::error(&error)
-        }
+        Err(error) => JsonRpcResponse::error(&error),
+    }
+}
+
+fn handle_delete_test_review_fixture(args: &serde_json::Value) -> String {
+    let mesh_id = args.get("meshId").and_then(|value| value.as_i64()).unwrap_or(0);
+    match crate::services::test_fixtures::delete_review_activity_fixture(mesh_id) {
+        Ok(()) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
+        Err(error) => JsonRpcResponse::error(&error),
     }
 }
 
