@@ -603,17 +603,145 @@ pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<boo
     Ok(true)
 }
 
+/// Jump one pending run to the front or back of its mesh queue. Returns
+/// false when already at that edge or when the row is no longer pending
+/// (worker promoted/cancelled it between render and command).
+pub fn move_queued_circuit_run_to_edge(run_id: i64, to_front: bool) -> SqlResult<bool> {
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
+        "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
+         WHERE id = ?1 AND state = 'pending'",
+        params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()? else {
+        return Ok(false);
+    };
+    let edge: Option<i64> = tx.query_row(
+        if to_front {
+            "SELECT MIN(queue_position) FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending'"
+        } else {
+            "SELECT MAX(queue_position) FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending'"
+        },
+        params![mesh_id],
+        |row| row.get(0),
+    ).optional()?.flatten();
+    let Some(edge_position) = edge else {
+        return Ok(false);
+    };
+    if (to_front && position <= edge_position) || (!to_front && position >= edge_position) {
+        return Ok(false);
+    }
+    let new_position = if to_front { edge_position - 1 } else { edge_position + 1 };
+    tx.execute(
+        "UPDATE autopilot_circuit_runs SET queue_position = ?2 WHERE id = ?1",
+        params![run_id, new_position],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Rewrite a mesh queue to an explicit front-to-back run-id order (drag-drop
+/// / keyboard reorder seam). The payload must contain exactly the mesh's
+/// current pending set in the desired order — a subset would collide
+/// `queue_position` values with unpassed rows and break adjacent Up/Down
+/// moves, so subsets and stale ids abort with a domain error asking the
+/// caller to refresh. Returns the number of rows repositioned.
+pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> Result<usize, String> {
+    if ordered_run_ids.is_empty() {
+        return Ok(0);
+    }
+    // Reject duplicate ids up front: they would assign two rows the same
+    // position even when the set otherwise matches.
+    {
+        let mut seen = std::collections::HashSet::with_capacity(ordered_run_ids.len());
+        for id in ordered_run_ids {
+            if !seen.insert(id) {
+                return Err("queue order contains a duplicate run id - refresh and retry".to_string());
+            }
+        }
+    }
+    let mut db = super::write_conn();
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    // The full pending set for this mesh: the payload must match it exactly
+    // or positions would collide with rows the caller did not pass.
+    let current: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM autopilot_circuit_runs \
+             WHERE mesh_id = ?1 AND state = 'pending' ORDER BY queue_position, id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![mesh_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let collected: SqlResult<Vec<i64>> = rows.collect();
+        collected.map_err(|e| e.to_string())?
+    };
+    if current.len() != ordered_run_ids.len() {
+        return Err(format!(
+            "queue changed while reordering (expected {} pending runs, got {}) - refresh and retry",
+            current.len(),
+            ordered_run_ids.len()
+        ));
+    }
+    {
+        let mut current_sorted = current.clone();
+        current_sorted.sort_unstable();
+        let mut ordered_sorted = ordered_run_ids.to_vec();
+        ordered_sorted.sort_unstable();
+        if current_sorted != ordered_sorted {
+            return Err("queue changed while reordering (stale or foreign run ids) - refresh and retry".to_string());
+        }
+    }
+    // Anchor on the current minimum so the rewrite never collides with
+    // concurrent MAX+1 mints racing this transaction.
+    let base: i64 = tx.query_row(
+        "SELECT COALESCE(MIN(queue_position), 0) FROM autopilot_circuit_runs \
+         WHERE mesh_id = ?1 AND state = 'pending'",
+        params![mesh_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    for (index, run_id) in ordered_run_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE autopilot_circuit_runs SET queue_position = ?2 \
+             WHERE id = ?1 AND state = 'pending'",
+            params![run_id, base + index as i64],
+        ).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(ordered_run_ids.len())
+}
+
 /// Atomically terminalise one active run and return its attached Agent Nodes
 /// so the command layer can retire their processes/worktrees after the DB
-/// stops the worker from driving the run.
+/// stops the worker from driving the run. A missing row is already gone
+/// (deleted between render and click) and returns an empty agent list —
+/// callers must not string-match the driver error for this case.
 pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     let mut db = super::write_conn();
     let tx = db.transaction()?;
-    let state: String = tx.query_row(
-        "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
+    let result = cancel_circuit_run_inner(&tx, run_id)?;
+    tx.commit()?;
+    Ok(result.agents)
+}
+
+/// One run's cancel writes against an already-open transaction. Shared by
+/// the single and batch paths so both observe identical state transitions.
+struct CancelRunWrite {
+    agents: Vec<i64>,
+    source: Option<i64>,
+    cancelled: bool,
+}
+
+fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRunWrite> {
+    let row: Option<(String, Option<i64>)> = tx.query_row(
+        "SELECT state, source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1",
         params![run_id],
-        |row| row.get(0),
-    )?;
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((state, source)) = row else {
+        return Ok(CancelRunWrite { agents: vec![], source: None, cancelled: false });
+    };
     let agents = {
         let mut stmt = tx.prepare(
             "SELECT DISTINCT agent_node_id FROM autopilot_circuit_run_steps \
@@ -657,8 +785,52 @@ pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
         "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
         params![run_id],
     )?;
+    let cancelled = matches!(state.as_str(), "pending" | "running" | "paused");
+    Ok(CancelRunWrite { agents, source, cancelled })
+}
+
+/// Batch cancel for queue/activity hygiene: every listed run is
+/// terminalised in ONE transaction, so a 50-run "Cancel all" costs one
+/// write txn, one worker wake, and one UI event — not an N+1 storm.
+/// Missing rows are skipped (already gone between render and click).
+/// Returns attached agent ids, source node ids to unregister, and the ids
+/// actually transitioned to cancelled.
+pub struct BatchCancelResult {
+    pub agents: Vec<i64>,
+    pub sources: Vec<i64>,
+    pub cancelled: Vec<i64>,
+}
+
+pub fn cancel_circuit_runs(run_ids: &[i64]) -> SqlResult<BatchCancelResult> {
+    let mut db = super::write_conn();
+    let tx = db.transaction()?;
+    let mut agents: Vec<i64> = Vec::new();
+    let mut sources: Vec<i64> = Vec::new();
+    let mut cancelled: Vec<i64> = Vec::new();
+    // De-duplicate the payload so one id cannot double-count agents.
+    let mut seen = std::collections::HashSet::with_capacity(run_ids.len());
+    for run_id in run_ids {
+        if !seen.insert(run_id) {
+            continue;
+        }
+        let write = cancel_circuit_run_inner(&tx, *run_id)?;
+        agents.extend(write.agents);
+        if let Some(source) = write.source {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+        if write.cancelled {
+            cancelled.push(*run_id);
+        }
+    }
+    agents.sort_unstable();
+    agents.dedup();
+    sources.sort_unstable();
+    sources.dedup();
+    cancelled.sort_unstable();
     tx.commit()?;
-    Ok(agents)
+    Ok(BatchCancelResult { agents, sources, cancelled })
 }
 
 /// Runs whose attached agents may still need retiring while a circuit is

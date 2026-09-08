@@ -32,13 +32,16 @@ pub enum CircuitTriggerKind {
     GithubPrLabel,
 }
 
-/// User-requested adjacent movement in the pending Circuit Run queue.
+/// User-requested movement in the pending Circuit Run queue: adjacent
+/// steps plus jumps to either edge for long queues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitQueueDirection.ts")]
 #[serde(rename_all = "lowercase")]
 pub enum CircuitQueueDirection {
     Up,
     Down,
+    Top,
+    Bottom,
 }
 
 /// One run plus its step ledger, for the Probe tab's run list.
@@ -158,11 +161,11 @@ fn map_queue_rows(
 
 /// Batched single-IPC load for the Circuits Probe tab: every user-authored
 /// circuit (and any active built-in preset) on the mesh with every
-/// running/paused run and up to `limit` newest terminal runs (steps included)
-/// for user-authored circuits; the persisted review preset retains all
-/// terminal runs for recovery,
-/// one command instead of N+1 round-trips. Pending runs are returned by
-/// `list_circuit_queue` so none are hidden behind this limit.
+/// running/paused run (Activity — the exact capacity set) plus up to
+/// `limit` newest terminal runs and a bounded attention window (failed /
+/// needs-review, up to 50/circuit) for History (steps included).
+/// Pending runs are returned by `list_circuit_queue` so none are hidden
+/// behind this limit. One command instead of N+1 round-trips.
 #[command]
 pub fn list_circuits_with_runs(
     mesh_id: i64,
@@ -402,14 +405,83 @@ pub fn cancel_circuit_run(app: AppHandle, run_id: i64) -> Result<(), String> {
 
 #[command]
 pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result<(), String> {
-    let toward_front = match direction {
-        CircuitQueueDirection::Up => true,
-        CircuitQueueDirection::Down => false,
-    };
-    crate::db::move_queued_circuit_run(run_id, toward_front)
-        .map_err(|error| error.to_string())?;
+    match direction {
+        CircuitQueueDirection::Up => {
+            crate::db::move_queued_circuit_run(run_id, true).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Down => {
+            crate::db::move_queued_circuit_run(run_id, false).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Top => {
+            crate::db::move_queued_circuit_run_to_edge(run_id, true).map_err(|error| error.to_string())?;
+        }
+        CircuitQueueDirection::Bottom => {
+            crate::db::move_queued_circuit_run_to_edge(run_id, false).map_err(|error| error.to_string())?;
+        }
+    }
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
+}
+
+/// Drag-drop / keyboard reorder seam: persist an explicit front-to-back
+/// run-id order for one mesh queue. The payload must match the mesh's
+/// current pending set exactly; stale or partial payloads abort with a
+/// domain error so the UI can refresh instead of half-applying.
+#[command]
+pub fn reorder_circuit_queue(mesh_id: i64, ordered_run_ids: Vec<i64>) -> Result<(), String> {
+    crate::db::reorder_queued_circuit_runs(mesh_id, &ordered_run_ids)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    Ok(())
+}
+
+/// Bulk cancel for queue / activity hygiene in ONE write transaction:
+/// every listed run is terminalised together, the worker is woken once,
+/// and a single `circuit-run-updated` event refreshes the Probe once.
+/// Missing rows are already gone and skipped without failing the batch.
+#[command]
+pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), String> {
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    let mut deduped = run_ids;
+    deduped.sort_unstable();
+    deduped.dedup();
+    // Stop future effects first so slow spawns cannot continue after Cancel.
+    for run_id in &deduped {
+        crate::services::circuit_worker::mark_circuit_run_cancelled(*run_id);
+    }
+    // Settle in-flight spawns per run (bounded waits, no wake/emit inside).
+    // A timeout does not fail the batch: the DB txn below terminalises the
+    // runs anyway and late spawns self-compensate.
+    for run_id in &deduped {
+        if let Err(wait_error) = crate::services::circuit_worker::with_circuit_run_spawns_quiesced(
+            *run_id,
+            || Ok::<(), String>(()),
+        ) {
+            tracing::warn!("circuits: batch cancel quiescence for run {}: {}", run_id, wait_error);
+        }
+    }
+    let batch = crate::db::cancel_circuit_runs(&deduped).map_err(|error| error.to_string())?;
+    for run_id in &deduped {
+        crate::services::circuit_worker::finish_circuit_run_cancellation(*run_id);
+        // Source unregister is idempotent; the batch txn already collected
+        // sources, but per-run release covers rows whose source was set
+        // outside the txn window.
+        release_circuit_source(*run_id);
+    }
+    for source in &batch.sources {
+        crate::autopilot::evaluator::unregister(*source);
+    }
+    crate::services::circuit_worker::wake_circuit_worker();
+    let cleanup = retire_cancelled_agents(batch.agents);
+    // One event refreshes the Probe once; the listener ignores the payload
+    // and reloads the snapshot.
+    let signal_run = batch.cancelled.first().copied().or(deduped.first().copied()).unwrap_or(0);
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id: signal_run, state: "cancelled".into() },
+    );
+    cleanup
 }
 
 #[command]

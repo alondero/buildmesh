@@ -16,6 +16,8 @@ import {
   countActiveRuns,
   countRunningSteps,
   circuitActivityStats,
+  isActiveRunState,
+  isRunStale,
   pendingAdmissionDetail,
   queuedReason,
   runActivity,
@@ -61,7 +63,7 @@ describe('run diagnostics', () => {
   });
 
   describe('Probe view model', () => {
-    it('keeps historically completed but exhausted reviews visible for recovery', () => {
+    it('keeps historically completed but exhausted reviews in History (not Activity) for recovery', () => {
       const run = detail(48, 'completed');
       const step = (node_id: string, outcome: string) => ({ id: 1, run_id: 48, node_id,
         agent_node_id: null, parent_agent_node_id: null, status: 'completed', attempt: 3,
@@ -71,15 +73,17 @@ describe('run diagnostics', () => {
       expect(reviewResult(exhausted, reviewCircuit)?.label).toBe('Review limit reached');
       expect(reviewResult(exhausted)).toBeNull();
       expect(runNeedsAttention(exhausted, reviewCircuit)).toBe(true);
-      expect(runBelongsToActivity(exhausted, reviewCircuit)).toBe(true);
+      // Activity is strictly live (running/paused) — exhausted reviews
+      // surface in History attention-first, not in Activity.
+      expect(runBelongsToActivity(exhausted)).toBe(false);
       expect(runBelongsToHistory(exhausted)).toBe(true);
-      expect(circuitActivityStats([{ ...row(), circuit: { ...row().circuit, graph_json: JSON.stringify({ version: 2, nodes: [{ id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } }, { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } }], edges: [] }), is_preset: false }, runs: [exhausted] }], 0)).toMatchObject({ activeCount: 0, attentionCount: 1 });
+      expect(circuitActivityStats([{ ...row(), circuit: { ...row().circuit, graph_json: JSON.stringify({ version: 2, nodes: [{ id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } }, { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } }], edges: [] }), is_preset: false }, runs: [exhausted] }], 0)).toMatchObject({ activeCount: 0, attentionCount: 1, historyCount: 1 });
       const approved = { ...run, run: { ...run.run, context_json: JSON.stringify({
         'node.review_classifier.review_verdict': 'approved', 'node.review_classifier.review_verdict_attempt': '3',
       }) }, steps: [step('review_classifier', 'completed')] };
       expect(reviewResult(approved, reviewCircuit)?.label).toBe('Review approved');
       expect(runNeedsAttention(approved, reviewCircuit)).toBe(false);
-      expect(runBelongsToActivity(approved, reviewCircuit)).toBe(false);
+      expect(runBelongsToActivity(approved)).toBe(false);
       approved.steps[0].outcome = 'working';
       expect(reviewResult(approved, reviewCircuit)?.needsAttention).toBe(true);
       approved.steps[0].outcome = 'completed';
@@ -117,32 +121,78 @@ describe('run diagnostics', () => {
           { id: 2, run_id: 49, node_id: 'loop_guard', agent_node_id: null, parent_agent_node_id: null, status: 'failed', attempt: 3, outcome: 'failed', error_message: null, started_at: null, completed_at: null },
         ],
       };
-      expect(runBelongsToActivity(exhausted, reviewCircuitMetadata(circuit))).toBe(true);
+      expect(runBelongsToActivity(exhausted)).toBe(false);
       expect(reviewResult(exhausted, reviewCircuitMetadata(circuit))?.label).toBe('Review limit reached');
     });
-    it('keeps pending and failed runs in Activity and completed runs in History', () => {
+    it('keeps only live runs in Activity and every terminal run in History', () => {
       const pending = detail(1, 'pending');
+      const running = detail(6, 'running', '2026-08-22 10:01:00');
+      const paused = detail(7, 'paused', '2026-08-22 10:01:30');
       const failed = detail(2, 'failed', '2026-08-22 10:02:00');
       const completed = detail(3, 'completed', '2026-08-22 10:03:00');
       const cancelled = detail(4, 'cancelled', '2026-08-22 10:04:00');
       const offsetCompleted = detail(5, 'completed', '2026-08-22T12:05:00+02:00');
-      expect(runBelongsToActivity(pending)).toBe(true);
-      expect(runBelongsToActivity(failed)).toBe(true);
+      // Activity mirrors the capacity set: running + paused only.
+      expect(runBelongsToActivity(pending)).toBe(false);
+      expect(runBelongsToActivity(failed)).toBe(false);
       expect(runBelongsToActivity(cancelled)).toBe(false);
+      expect(runBelongsToActivity(running)).toBe(true);
+      expect(runBelongsToActivity(paused)).toBe(true);
       expect(runBelongsToHistory(cancelled)).toBe(true);
       expect(runNeedsAttention(failed)).toBe(true);
-      const runs = [pending, failed, completed, cancelled, offsetCompleted];
+      const runs = [pending, failed, completed, cancelled, offsetCompleted, running, paused];
       expect(buildCircuitProbeRows([row(...runs)], 'activity')[0].visibleRuns.map((run) => run.run.id))
-        .toEqual([2, 1]);
+        .toEqual([7, 6]);
+      // History is attention-first (failed) then newest terminal.
       expect(buildCircuitProbeRows([row(...runs)], 'history')[0].visibleRuns.map((run) => run.run.id))
-        .toEqual([5, 4, 3, 2]);
+        .toEqual([2, 5, 4, 3]);
     });
 
     it('summarizes active, attention, and queued work without component heuristics', () => {
       const running = detail(1, 'running');
       const failed = detail(2, 'failed');
       const stats = circuitActivityStats([row(running, failed)], 4);
-      expect(stats).toEqual({ activityCount: 2, activeCount: 1, attentionCount: 1, queuedCount: 4 });
+      expect(stats).toEqual({ activityCount: 1, activeCount: 1, attentionCount: 1, historyAttentionCount: 1, activeAttentionCount: 0, historyCount: 1, queuedCount: 4 });
+    });
+
+    it('splits attention counts so the History filter label never lies', () => {
+      const paused = detail(7, 'paused');
+      const failed = detail(2, 'failed');
+      const historyOnly = circuitActivityStats([row(failed)], 0);
+      expect(historyOnly.historyAttentionCount).toBe(1);
+      expect(historyOnly.activeAttentionCount).toBe(0);
+      const liveOnly = circuitActivityStats([row(paused)], 0);
+      expect(liveOnly.activeAttentionCount).toBe(1);
+      expect(liveOnly.historyAttentionCount).toBe(0);
+      expect(liveOnly.historyCount).toBe(0);
+    });
+
+    it('treats only running/paused as active (capacity set)', () => {
+      expect(isActiveRunState('running')).toBe(true);
+      expect(isActiveRunState('paused')).toBe(true);
+      expect(isActiveRunState('pending')).toBe(false);
+      expect(isActiveRunState('completed')).toBe(false);
+      expect(isActiveRunState('failed')).toBe(false);
+      expect(isActiveRunState('cancelled')).toBe(false);
+    });
+
+    it('filters history by attention and search text', () => {
+      const failed = detail(2, 'failed', '2026-08-22 10:02:00');
+      const completed = detail(3, 'completed', '2026-08-22 10:03:00');
+      const runs = [failed, completed];
+      expect(buildCircuitProbeRows([row(...runs)], 'history', { attentionOnly: true })[0].visibleRuns.map((r) => r.run.id))
+        .toEqual([2]);
+      expect(buildCircuitProbeRows([row(...runs)], 'history', { search: 'run:3' })[0].visibleRuns.map((r) => r.run.id))
+        .toEqual([3]);
+      expect(buildCircuitProbeRows([row(...runs)], 'history', { search: 'nope' })[0].visibleRuns)
+        .toEqual([]);
+    });
+
+    it('flags a live run stale after the quiet window, never a terminal run', () => {
+      const now = new Date('2026-08-22T10:10:00Z');
+      expect(isRunStale({ state: 'running', updated_at: '2026-08-22 10:00:00' }, now)).toBe(true);
+      expect(isRunStale({ state: 'running', updated_at: '2026-08-22 10:09:30' }, now)).toBe(false);
+      expect(isRunStale({ state: 'failed', updated_at: '2026-08-22 10:00:00' }, now)).toBe(false);
     });
   });
 
