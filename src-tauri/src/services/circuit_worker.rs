@@ -2284,7 +2284,7 @@ fn resolve_review_spawn_configuration(
     explicit: ExplicitSpawnOverrides,
     parent_provider: Option<&str>,
 ) -> ReviewSpawnResolution {
-    let parent_agent_node_id = review_parent_agent_id(view, node_id);
+    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
     let (provider, explicit) =
         resolve_review_spawn_inputs(view, node_id, provider, explicit, parent_provider);
     ReviewSpawnResolution {
@@ -2307,7 +2307,9 @@ fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
     })
 }
 
-fn review_parent_agent_id(view: &RunView, node_id: &str) -> Option<i64> {
+/// Resolve the activity parent agent for a circuit step from its upstream
+/// agent step, falling back to the borrowed source for review steps.
+fn resolve_step_parent_agent_id(view: &RunView, node_id: &str) -> Option<i64> {
     view.graph
         .nearest_upstream_agent_step(node_id)
         .and_then(|parent_step| view.step(&parent_step).and_then(|step| step.agent_node_id))
@@ -2518,6 +2520,21 @@ fn attach_spawned_agent(
     Ok(())
 }
 
+/// Test-server fixture seam for a completed review run. The fixture creates
+/// its rows through the normal DB APIs, then comes through this same resolver
+/// and attachment path as a real SpawnAgentNode effect. Keeping this helper
+/// here prevents a UI smoke test from manufacturing `parent_agent_node_id`
+/// with SQL while still avoiding a provider/process spawn.
+pub(crate) fn attach_fixture_review_agent(
+    run_id: i64,
+    view: &mut RunView,
+    node_id: &str,
+    agent_node_id: i64,
+) -> Result<(), String> {
+    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
+    attach_spawned_agent(run_id, view, node_id, agent_node_id, parent_agent_node_id)
+}
+
 fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,
@@ -2546,7 +2563,7 @@ fn spawn_step_agent(
     // Activity parentage is derived once from the circuit graph and persisted
     // with the step association. The DB layer does not inspect graph JSON or
     // infer special step names.
-    let parent_agent_node_id = review_parent_agent_id(view, node_id);
+    let parent_agent_node_id = resolve_step_parent_agent_id(view, node_id);
     let source_provider = view
         .context
         .get("source.provider")
@@ -4788,7 +4805,7 @@ mod tests {
     }
 
     #[test]
-    fn review_spawn_detection_is_limited_to_review_graphs() {
+    fn step_parent_resolution_handles_review_graphs_and_source_fallback() {
         let review = CircuitGraph::agent_review("claude", None, None, 2);
         let mut context = CircuitContext::new();
         context.set("source.review_preset", "1");
@@ -4800,7 +4817,7 @@ mod tests {
             steps: vec![],
         };
         assert!(is_review_spawn_step(&view, "reviewer"));
-        assert_eq!(review_parent_agent_id(&view, "reviewer"), None);
+        assert_eq!(resolve_step_parent_agent_id(&view, "reviewer"), None);
 
         let mut source_context = CircuitContext::new();
         source_context.set("source.review_preset", "1");
@@ -4812,7 +4829,7 @@ mod tests {
             context: source_context,
             steps: vec![],
         };
-        assert_eq!(review_parent_agent_id(&source_view, "reviewer"), Some(77));
+        assert_eq!(resolve_step_parent_agent_id(&source_view, "reviewer"), Some(77));
 
         let issue_graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let issue_steps = issue_graph
@@ -4834,7 +4851,7 @@ mod tests {
             context: CircuitContext::new(),
             steps: issue_steps,
         };
-        assert_eq!(review_parent_agent_id(&issue_view, "reviewer"), Some(42));
+        assert_eq!(resolve_step_parent_agent_id(&issue_view, "reviewer"), Some(42));
 
         let ordinary = CircuitGraph::walking_skeleton("work");
         let plain = RunView {
