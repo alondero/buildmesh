@@ -24,7 +24,7 @@
 //! platform-agnostic by design — the upstream host is reachable on every
 //! OS, even though the credential sink isn't.
 
-use crate::services::usage::UsageError;
+use crate::services::usage::types::UsageError;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -1083,7 +1083,7 @@ pub(crate) fn read_opencode_console_full_credential()
         Ok(blob) => parse_opencode_console_full_credential(&blob)
             .map(Some)
             .map_err(|e| e.to_string()),
-        Err(crate::services::usage::UsageError::NoCredential(_)) => Ok(None),
+        Err(crate::services::usage::types::UsageError::NoCredential(_)) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }

@@ -29,7 +29,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::usage::{logged_out, unavailable, BillingBalance, ProviderUsage, UsageError, UsageWindow};
+use crate::services::usage::types::{
+    logged_out, unavailable, BillingBalance, ProviderUsage, UsageError, UsageWindow,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -101,7 +103,7 @@ fn freebuff_credential_paths() -> Vec<PathBuf> {
 
     // 2. XDG-style default — `<home>/.config/manicode/credentials.json`.
     paths.push(
-        super::usage::home_dir()
+        crate::services::usage::types::home_dir()
             .join(".config")
             .join("manicode")
             .join("credentials.json"),

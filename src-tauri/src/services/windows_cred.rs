@@ -6,7 +6,7 @@
 //! `cfg(windows)` only — non-Windows callers see "not available" via the
 //! `NoCredential` return path rather than via a conditional sibling module, so
 //! every call site stays one-statement-uniform.
-use crate::services::usage::UsageError;
+use crate::services::usage::types::UsageError;
 use std::os::windows::ffi::OsStrExt;
 
 #[repr(C)]
