@@ -79,6 +79,13 @@ describe('PrPill merge menu', () => {
     expect(screen.getByText('PR #123')).toBeTruthy();
   });
 
+  it('collapses to an icon trigger without the PR number label', () => {
+    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} compact />);
+    expect(screen.queryByText('PR #123')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open pull request #123 options' }));
+    expect(screen.getByRole('menu')).toBeTruthy();
+  });
+
   it('clicking the pill opens a menu instead of opening the browser directly', () => {
     render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
     openPillMenu();

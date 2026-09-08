@@ -11,6 +11,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const uiShot = resolve(repoRoot, 'scripts', 'ui-shot.mjs');
 const circuitSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.steps.mjs');
 const circuitFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-circuit.fixtures.mjs');
+const nodeHeaderSteps = resolve(repoRoot, 'tests', 'integration', 'ui-shot-node-header.steps.mjs');
+const nodeHeaderFixtures = resolve(repoRoot, 'tests', 'integration', 'ui-shot-node-header.fixtures.mjs');
 
 async function freePort() {
   const server = createTcpServer();
@@ -79,6 +81,29 @@ describe('ui-shot mock mode', () => {
       ]);
 
       expect(result.code).toBe(0);
+      expect(result.stdout).toContain('Saved');
+      expect((await stat(output)).size).toBeGreaterThan(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, 90000);
+
+  it('keeps the node title and trailing close visible in a 240px pane', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-header-'));
+    try {
+      const port = await freePort();
+      const output = join(folder, 'header.png');
+      const result = await runUiShot([
+        '--out', output,
+        '--mock',
+        '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--fixtures', nodeHeaderFixtures,
+        '--steps', nodeHeaderSteps,
+        '--selector', '[data-testid=grid-node-header]',
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
       expect(result.stdout).toContain('Saved');
       expect((await stat(output)).size).toBeGreaterThan(0);
     } finally {

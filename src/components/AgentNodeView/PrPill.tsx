@@ -14,6 +14,7 @@ interface PrPillProps {
   nodeId: number;
   gitPath: string | null;
   openPr: OpenPr;
+  compact?: boolean;
 }
 
 /**
@@ -25,7 +26,7 @@ interface PrPillProps {
  * A merge failure keeps the menu open with the error; the error
  * persists across close/reopen until the next merge attempt.
  */
-export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
+export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [merging, setMerging] = useState(false);
@@ -177,9 +178,18 @@ export function PrPill({ nodeId, gitPath, openPr }: PrPillProps) {
         aria-label={`Open pull request #${openPr.number} options`}
         title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
         data-testid="pr-pill-trigger"
-        className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0"
+        className={compact
+          ? 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 hover:brightness-125 transition-colors'
+          : 'text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0'}
       >
-        PR #{openPr.number}
+        {compact ? (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="18" cy="18" r="3" />
+            <circle cx="6" cy="6" r="3" />
+            <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+            <line x1="6" x2="6" y1="9" y2="21" />
+          </svg>
+        ) : `PR #${openPr.number}`}
       </button>
 
       {/* Escape the title's clipping and transformed node containing blocks. */}

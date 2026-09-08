@@ -84,7 +84,6 @@ function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership
 export const HEADER_TIER_BREAKPOINTS = {
   compact: 380,
   attentionLabel: 500,
-  pr: 640,
   menuWidth: 240,
 } as const;
 
@@ -152,7 +151,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header"
       onDoubleClick={handleToggleSolo}
       title={`Double-click or press ${toggleShortcutHint} to ${isSingleMode ? 'restore grid' : 'maximize'}`}
-      className={`flex shrink-0 min-w-0 items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}14` }}>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span role="status" aria-label={activity?.label ?? getStatusConfig(node.status).label}
@@ -177,24 +176,15 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
-        {width >= HEADER_TIER_BREAKPOINTS.pr && openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} />}
+        {openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} compact={compactHeader} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <AgentReviewButton node={node} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
           data-testid="grid-resume-button" className="flex h-7 w-7 items-center justify-center rounded-md text-accent-violet hover:bg-accent-violet/10">↻</button>}
-        <button type="button" onClick={handleToggleSolo} aria-label={isSingleMode ? 'Restore grid layout' : 'Maximize agent node'}
-          title={`${isSingleMode ? 'Restore grid' : 'Maximize'} (${toggleShortcutHint})`}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-base hover:text-text-primary">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d={isSingleMode ? 'M9 3v6H3m12 12v-6h6M9 9 3 3m12 12 6 6' : 'M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7'} />
-          </svg>
-        </button>
-        <KebabActions key={node.id} isSingleMode={isSingleMode} isPinned={node.is_pinned} toggleShortcutHint={toggleShortcutHint}
-          onToggleSolo={event => { event.stopPropagation(); handleToggleSolo(); }} onTogglePin={handleTogglePin}
-          onClose={handleClose} onOpenInExplorer={handleOpenInExplorer} canResume={canResume} onResume={handleResume}
-          node={node} providerList={providerList} isRegenerateDisabled={regen.isRegenerateDisabled}
-          hasRegenerateTargets={regen.hasRegenerateTargets} onPickRegenerate={regen.pickRegenerateProvider}
-          onDetails={showDetails} onChanges={showChanges}
+        <KebabActions key={node.id} isPinned={node.is_pinned} onTogglePin={handleTogglePin}
+          onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
+          isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}
+          onPickRegenerate={regen.pickRegenerateProvider} onDetails={showDetails} onChanges={showChanges}
           details={<>
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
@@ -210,6 +200,20 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
               <span className={summary.deleted ? 'text-accent-red' : 'text-text-muted'}>-{summary.deleted}</span>
             </div>}
           </>} />
+        <button type="button" onClick={handleToggleSolo} aria-label={isSingleMode ? 'Restore grid layout' : 'Maximize agent node'}
+          title={`${isSingleMode ? 'Restore grid' : 'Maximize'} (${toggleShortcutHint})`}
+          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-base hover:text-text-primary">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d={isSingleMode ? 'M9 3v6H3m12 12v-6h6M9 9 3 3m12 12 6 6' : 'M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7'} />
+          </svg>
+        </button>
+        <button type="button" onClick={handleClose} aria-label="Close agent node" title="Close agent node"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-status-error-bg hover:text-status-error transition-colors">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
       </div>
       {regen.pendingRegenerate && <ConfirmDialog title="Regenerate this node?"
         message={`Agent is currently working. Regenerate with ${regen.pendingRegenerate.providerLabel}?`}
@@ -249,16 +253,10 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
  * unit because the menu now lives at body level.
  */
 interface KebabActionsProps {
-  isSingleMode: boolean;
   isPinned: boolean;
-  toggleShortcutHint: string;
-  onToggleSolo: (e: React.MouseEvent) => void;
   onTogglePin: (e: React.MouseEvent) => void;
-  onClose: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  canResume: boolean;
-  onResume: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'id' | 'name' | 'provider' | 'status'>;
+  node: Pick<AgentNode, 'provider'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -270,7 +268,7 @@ interface KebabActionsProps {
 
 const KEBAB_MIN_WIDTH = 160;
 
-function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo, onTogglePin, onClose, onOpenInExplorer, canResume, onResume, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
+function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -404,9 +402,8 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
               context-menu order). Hover or ArrowRight/click opens the
               provider picker submenu pinned with `Current (<label>)` on
               top for in-place kick-start. The submenu opens to the LEFT
-              (`right-full`) because the kebab itself hugs the header's
-              right edge — opening to the right would overflow the
-              viewport. Same `data-dropdown-for` scoping as the parent so
+              (`right-full`) so it does not cover Maximize/Close on the
+              trailing edge. Same `data-dropdown-for` scoping as the parent so
               `useClickOutside` treats both as "inside". */}
           <div
             role="presentation"
@@ -483,43 +480,9 @@ function KebabActions({ isSingleMode, isPinned, toggleShortcutHint, onToggleSolo
             </svg>
             {isPinned ? 'Unpin node' : 'Pin node'}
           </button>
-          <button
-            role="menuitem" data-aria-menu-item
-            onClick={(e) => { closeAndReturnFocus(); onToggleSolo(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              {isSingleMode ? (
-                <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
-              ) : (
-                <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
-              )}
-            </svg>
-            {isSingleMode ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
-          </button>
-          <button
-            role="menuitem" data-aria-menu-item
-            aria-label={`Close session · ${node.name}`}
-            onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-          >
-            <span className="text-text-muted" aria-hidden="true">×</span>
-            Close session
-          </button>
-          {canResume && (
-            <button
-              role="menuitem" data-aria-menu-item
-              onClick={(e) => { closeAndReturnFocus(); onResume(e); }}
-              data-testid="grid-resume-button"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-            >
-              <span className="text-accent-violet" aria-hidden="true">↻</span>
-              Resume agent
-            </button>
-          )}
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onDetails(); }}
-            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">Session details</button>
+            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">Agent node details</button>
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
             className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">View changes</button>

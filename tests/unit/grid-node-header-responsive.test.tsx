@@ -168,26 +168,45 @@ function renderHeader(width: number) {
 
 describe('GridNodeHeader compact layout behaviour', () => {
   beforeEach(setupCommonState);
-  it.each([200, 240, 300, 400, 600, 700])('keeps title, maximize and actions accessible at %ipx without metadata rows', width => {
+  it.each([200, 240, 300, 400, 600, 700])('keeps title, PR, maximize, close and actions accessible at %ipx without metadata rows', width => {
     setupWithSummaryAndPr();
     const { root } = renderHeader(width);
     expect(root.textContent).toContain(NODE.name);
+    expect(screen.getByTestId('pr-pill-trigger')).toBeTruthy();
+    expect(screen.queryByText('PR #123') !== null).toBe(width >= HEADER_TIER_BREAKPOINTS.compact);
     expect(screen.getByRole('button', { name: 'Maximize agent node' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Close agent node' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Agent node actions' })).toBeTruthy();
     expect(root.textContent).not.toContain('Repository root');
     expect(root.textContent).not.toContain('changed files');
-    expect(screen.queryByText('PR #123') !== null).toBe(width >= 640);
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
-    expect(screen.getByRole('menuitem', { name: /Close session/ })).toBeTruthy();
-    expect(screen.getByRole('menuitem', { name: 'Session details' })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: /Maximize/ })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Close session/ })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Resume agent' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Agent node details' })).toBeTruthy();
+  });
+
+  it('places overflow before maximize, with close as the trailing window control', () => {
+    setupWithSummaryAndPr();
+    renderHeader(700);
+    const labels = [...screen.getByTestId('grid-node-header').querySelectorAll('button')]
+      .map(button => button.getAttribute('aria-label'));
+    expect(labels.slice(-3)).toEqual([
+      'Agent node actions',
+      'Maximize agent node',
+      'Close agent node',
+    ]);
+    const close = screen.getByRole('button', { name: 'Close agent node' });
+    expect(close.querySelector('svg')).toBeTruthy();
+    expect(close.textContent).not.toMatch(/×|x/i);
   });
 
   it('keeps an open menu and its commands available when a pane changes width', () => {
     const { root } = renderHeader(700);
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     fireResize(root, 240);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Maximize (Alt+G)' }));
-    expect(useUIStore.getState().viewMode).toBe('single');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pin node' }));
+    expect(toggleNodePinnedMock).toHaveBeenCalledWith(NODE.id);
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
@@ -226,9 +245,16 @@ describe('GridNodeHeader width contracts', () => {
     expect(root.querySelector('[aria-label="Missing session ID"]')).toBeNull();
   });
 
-  it('uses named attention and PR thresholds instead of inline literals', () => {
+  it('uses named attention and menu-width thresholds instead of inline literals', () => {
     expect(HEADER_TIER_BREAKPOINTS.attentionLabel).toBe(500);
-    expect(HEADER_TIER_BREAKPOINTS.pr).toBe(640);
     expect(HEADER_TIER_BREAKPOINTS.menuWidth).toBe(240);
+  });
+
+  it('closes the node from the always-visible title-bar control', async () => {
+    const deleteAgentNode = vi.fn().mockResolvedValue(undefined);
+    useAgentNodeStore.setState({ deleteAgentNode });
+    renderHeader(240);
+    fireEvent.click(screen.getByRole('button', { name: 'Close agent node' }));
+    await waitFor(() => expect(deleteAgentNode).toHaveBeenCalledWith(NODE.id));
   });
 });
