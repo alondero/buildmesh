@@ -73,96 +73,17 @@ use crate::autopilot::evaluator::Classification;
 
 // ---------------------------------------------------------------------------
 // State model — the pure mirror of the three ledger tables.
+//
+// The canonical enum bodies live in [`super::vocabulary`]. This module
+// re-exports them so call sites (`services::circuit_worker`,
+// `db::circuit::ledger`, the TS generated twins) keep saying
+// `stepper::RunState` while only one owner defines the wire strings
+// (issue #1660).
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunState {
-    /// Run row exists, trigger not yet processed.
-    Pending,
-    Running,
-    /// Graceful pause (#1207): the current step may finish but the graph
-    /// does not advance until resumed.
-    Paused,
-    Completed,
-    Failed,
-    /// Terminal cancel (user or worker). Present in the DB vocabulary and
-    /// the terminal predicate; previously missing here, which made
-    /// `from_db_str("cancelled")` resurrect a cancelled row as Pending.
-    Cancelled,
-}
-
-impl RunState {
-    pub fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Paused => "paused",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    pub fn from_db_str(s: &str) -> Self {
-        match s {
-            "running" => Self::Running,
-            "paused" => Self::Paused,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
-        }
-    }
-
-    /// Terminal states the worker never moves out of. Mirrors
-    /// `db::is_terminal_run_state` and the frontend `isTerminalRunState`.
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepStatus {
-    /// Parked because a concurrency/agent-slot limit blocked it; promotes
-    /// FIFO when capacity frees (stored as `pending_slot`).
-    Queued,
-    Running,
-    /// Parked on a CollaboratorCheck RequireApproval gate (#1207):
-    /// waiting for the user's Approve click. Not terminal.
-    Blocked,
-    Completed,
-    Failed,
-    Cancelled,
-}
+pub use super::vocabulary::{RunState, StepStatus};
 
 impl StepStatus {
-    pub fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Queued => "pending_slot",
-            Self::Running => "running",
-            Self::Blocked => "blocked",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    pub fn from_db_str(s: &str) -> Self {
-        match s {
-            "pending_slot" => Self::Queued,
-            "running" => Self::Running,
-            "blocked" => Self::Blocked,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Queued,
-        }
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-
     pub fn outcome(self) -> Option<StepOutcome> {
         match self {
             Self::Completed => Some(StepOutcome::Completed),
@@ -235,28 +156,13 @@ impl RunView {
     }
 
     /// Check if any upstream ancestor of `node_id` in the graph satisfies a predicate.
+    /// Thin wrapper over [`CircuitGraph::has_ancestor_matching`] (issue #1660).
     pub fn has_upstream_node_of_kind<F>(&self, node_id: &str, predicate: F) -> bool
     where
         F: Fn(&CircuitNodeKind) -> bool,
     {
-        let mut visited = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(node_id);
-        visited.insert(node_id);
-        while let Some(curr) = queue.pop_front() {
-            for edge in self.graph.incoming(curr) {
-                let from = edge.from.as_str();
-                if visited.insert(from) {
-                    if let Some(node) = self.graph.node(from) {
-                        if predicate(&node.kind) {
-                            return true;
-                        }
-                    }
-                    queue.push_back(from);
-                }
-            }
-        }
-        false
+        self.graph
+            .has_ancestor_matching(node_id, |node| predicate(&node.kind))
     }
 
     /// Resolve the target agent node for an `InjectPty`, `SetNodeStatus`,

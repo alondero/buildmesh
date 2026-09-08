@@ -6,7 +6,9 @@
 
 use super::*;
 use crate::autopilot::circuit::model::CircuitGraph;
-use rusqlite::Connection;
+use crate::autopilot::circuit::vocabulary::StepStatus;
+use crate::models::{EnvType, SessionStatus};
+use rusqlite::{params, Connection};
 
 /// Temp-dir DB init, serialised by unique filename (`mesh_tests`
 /// pattern). Tests in this file share the process-global DB, so they
@@ -843,15 +845,36 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         None,
     )
     .unwrap();
+    // Both helpers below are global (not mesh-scoped). The shared
+    // process-global DB holds other tests' rows too, so assert the
+    // *delta* this test contributes rather than an absolute total —
+    // see buildmesh-gh1655-circuit-tests-isolation.
+    let active_before = count_active_circuit_agent_nodes_total().unwrap();
     set_circuit_step_agent_node_with_parent(run_id, "spawn", agent.id, None).unwrap();
-
-    assert_eq!(count_active_circuit_agent_nodes_total().unwrap(), 1);
-    commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
-    assert_eq!(count_retained_circuit_agent_nodes_total().unwrap(), 1);
-
     assert_eq!(
-        list_circuit_agent_ownerships().unwrap(),
-        vec![(agent.id, run_id, circuit.id, "issue autopilot".to_string(), "completed".to_string(), None)]
+        count_active_circuit_agent_nodes_total().unwrap(),
+        active_before + 1,
+        "setting the spawn step's agent_node_id increments the active count by 1"
+    );
+    let retained_before = count_retained_circuit_agent_nodes_total().unwrap();
+    commit_circuit_advance(run_id, Some("completed"), None, &[]).unwrap();
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total().unwrap(),
+        retained_before + 1,
+        "moving the run to `completed` shifts our agent from active to retained"
+    );
+
+    let ownerships = list_circuit_agent_ownerships().unwrap();
+    assert!(
+        ownerships.iter().any(|row| {
+            row.0 == agent.id
+                && row.1 == run_id
+                && row.2 == circuit.id
+                && row.3 == "issue autopilot"
+                && row.4 == "completed"
+                && row.5.is_none()
+        }),
+        "ownerships for THIS test's run include our agent; saw {ownerships:?}"
     );
 
     clear_circuit_step_agent_node(run_id, "spawn").unwrap();
@@ -862,7 +885,11 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
             .all(|(owned_agent_id, ..)| *owned_agent_id != agent.id),
         "clearing this step removes this agent's ownership without assuming other parallel tests are idle"
     );
-    assert_eq!(count_retained_circuit_agent_nodes_total().unwrap(), 0);
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total().unwrap(),
+        retained_before,
+        "clearing the step drops the retained count back to the pre-terminal baseline"
+    );
 
     let _ = get();
     std::fs::remove_file(&path).ok();
@@ -1012,6 +1039,13 @@ fn concurrency_counters_count_only_running_work() {
     let c2 = create_autopilot_circuit(mesh_a.id, "two", "", 4, "{}").unwrap();
     let cb = create_autopilot_circuit(mesh_b.id, "bee", "", 4, "{}").unwrap();
 
+    // `count_active_circuit_agent_nodes_total` is global. The shared
+    // process-global DB holds other tests' rows too, so capture the
+    // baseline BEFORE we add anything and assert the *delta* (3 distinct
+    // agents — 101, 102, 999) rather than an absolute total — see
+    // buildmesh-gh1655-circuit-tests-isolation.
+    let active_before = count_active_circuit_agent_nodes_total().unwrap();
+
     // Circuit one: one completed step + one running step piloting agent
     // 101 + one queued step (must not count).
     let r1 = create_circuit_run(c1.id, mesh_a.id, "", "{}").unwrap();
@@ -1040,7 +1074,7 @@ fn concurrency_counters_count_only_running_work() {
             },
             CircuitStepOp {
                 node_id: "second-spawn".into(),
-                status: "pending_slot".into(),
+                status: StepStatus::Queued.as_db_str().into(),
                 outcome: None,
                 error: None,
                 agent_node_id: None,
@@ -1091,8 +1125,8 @@ let r2 = create_circuit_run(c2.id, mesh_a.id, "", "{}").unwrap();
     assert_eq!(count_running_circuit_steps(c2.id).unwrap(), 1);
     assert_eq!(
         count_active_circuit_agent_nodes_total().unwrap(),
-        3,
-        "distinct piloted agents across all active circuit runs"
+        active_before + 3,
+        "three distinct piloted agents (101, 102, 999) appear across all active circuit runs"
     );
 
     let _ = get();
@@ -1630,7 +1664,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
         None,
         &[CircuitStepOp {
             node_id: "work".into(),
-            status: "pending_slot".into(),
+            status: StepStatus::Queued.as_db_str().into(),
             outcome: Some(None),
             error: None,
             agent_node_id: None,
@@ -1642,7 +1676,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
 
     let steps = list_circuit_run_steps(run_id).unwrap();
     let work = steps.iter().find(|s| s.node_id == "work").unwrap();
-    assert_eq!(work.status, "pending_slot");
+    assert_eq!(work.status, StepStatus::Queued.as_db_str());
     assert_eq!(work.attempt, 2, "the retry's execution count persists");
     assert_eq!(work.outcome, None, "fresh attempt clears the stale outcome");
     assert_eq!(work.error_message, None, "fresh attempt clears the stale error");

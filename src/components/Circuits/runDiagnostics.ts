@@ -19,6 +19,15 @@ import { isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGrap
 import type { StepLike } from './circuitGraphModel';
 import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
+import {
+  isAdmittedRunState,
+  isTerminalStepStatus,
+  pendingRunBind,
+  queuedStepBind,
+  STEP_STATUS_QUEUED,
+} from './circuitVocabulary';
+
+export { runStateLabel, stepStatusLabel } from './circuitVocabulary';
 
 export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 
@@ -262,55 +271,6 @@ export function isRunStale(
 }
 
 /**
- * Display label for a run state. The DB vocabulary is lower-case and
- * `pending` reads as "nothing has happened yet" rather than "admitted,
- * waiting its turn" — which is what it means.
- */
-export function runStateLabel(state: string): string {
-  switch (state) {
-    case 'pending':
-      return 'Queued';
-    case 'running':
-      return 'Running';
-    case 'paused':
-      return 'Paused';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return state;
-  }
-}
-
-/**
- * Display label for a step status. `pending_slot` is the one that most
- * needed this: it is scheduler-internal shorthand for "eligible, but
- * every slot is taken", and issue #1468 was filed because users could
- * not tell that from the raw string.
- */
-export function stepStatusLabel(status: string): string {
-  switch (status) {
-    case 'pending_slot':
-      return 'Queued';
-    case 'running':
-      return 'Running';
-    case 'blocked':
-      return 'Needs approval';
-    case 'completed':
-      return 'Done';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return status;
-  }
-}
-
-/**
  * Three distinct capacity budgets a stuck run can be bound by, kept
  * verbally distinct in the UI copy per the AC on issue #1467:
  *
@@ -386,8 +346,7 @@ export function countActiveRuns(
   runs: Array<{ run: { state: string } }>
 ): number {
   return runs.reduce(
-    (total, { run }) =>
-      total + (run.state === 'running' || run.state === 'paused' ? 1 : 0),
+    (total, { run }) => total + (isAdmittedRunState(run.state) ? 1 : 0),
     0
   );
 }
@@ -427,7 +386,7 @@ export function runActivity(
   const firstWith = (status: string) => steps.find((s) => s.status === status) ?? null;
   const running = firstWith('running');
   const blocked = firstWith('blocked');
-  const queued = firstWith('pending_slot');
+  const queued = firstWith(STEP_STATUS_QUEUED);
 
   if (run.state === 'paused') {
     return {
@@ -531,17 +490,19 @@ export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
   if (meshRunCapacity <= 0) {
     return "Waiting for a circuit-run slot — this mesh's run budget is not configured.";
   }
-  if (meshActiveRuns >= meshRunCapacity) {
-    return meshRunCapacity === 1
-      ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
-      : `Waiting for a circuit-run slot — all ${meshRunCapacity} of this mesh's circuit-run slots are busy.`;
+  switch (pendingRunBind(meshRunCapacity, meshActiveRuns)) {
+    case 'mesh_run_admission':
+      return meshRunCapacity === 1
+        ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
+        : `Waiting for a circuit-run slot — all ${meshRunCapacity} of this mesh's circuit-run slots are busy.`;
+    default:
+      // A `pending` run with spare mesh capacity is a transient state (mid
+      // worker tick) — the worker re-checks admission every 2 s. State
+      // what we observe rather than fabricate an explanation.
+      return meshRunCapacity === 1
+        ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run (admission is re-checked every 2 s).'
+        : `Waiting for a circuit-run slot — this mesh allows ${meshRunCapacity} concurrent runs (admission is re-checked every 2 s).`;
   }
-  // A `pending` run with spare mesh capacity is a transient state (mid
-  // worker tick) — the worker re-checks admission every 2 s. State what
-  // we observe rather than fabricate an explanation.
-  return meshRunCapacity === 1
-    ? 'Waiting for a circuit-run slot — this mesh allows 1 concurrent run (admission is re-checked every 2 s).'
-    : `Waiting for a circuit-run slot — this mesh allows ${meshRunCapacity} concurrent runs (admission is re-checked every 2 s).`;
 }
 
 /**
@@ -554,13 +515,17 @@ export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
  * with a capacity contract the ledger can state outright.
  */
 export function queuedReason(capacity: CircuitCapacity): string {
-  const { concurrencyLimit, runningSteps } = capacity;
-  if (concurrencyLimit > 0 && runningSteps >= concurrencyLimit) {
-    return concurrencyLimit === 1
-      ? "Waiting for a slot — this circuit runs one step at a time, and that slot is busy."
-      : `Waiting for a slot — all ${concurrencyLimit} of this circuit's step slots are busy.`;
+  const { concurrencyLimit } = capacity;
+  switch (queuedStepBind(capacity.concurrencyLimit, capacity.runningSteps)) {
+    case 'circuit_step_slots':
+      return concurrencyLimit === 1
+        ? "Waiting for a slot — this circuit runs one step at a time, and that slot is busy."
+        : `Waiting for a slot — all ${concurrencyLimit} of this circuit's step slots are busy.`;
+    case 'circuit_agent_lease':
+      return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
+    default:
+      return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
   }
-  return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
 }
 
 /** Terminal-vs-live progress through the ledger, for the card's counter. */
@@ -568,9 +533,7 @@ export function runStepProgress(steps: Array<Pick<StepLike, 'status'>>): {
   finished: number;
   total: number;
 } {
-  const finished = steps.filter(
-    (s) => s.status === 'completed' || s.status === 'failed' || s.status === 'cancelled'
-  ).length;
+  const finished = steps.filter((s) => isTerminalStepStatus(s.status)).length;
   return { finished, total: steps.length };
 }
 
@@ -586,7 +549,7 @@ export function activityStatusToken(kind: RunActivityKind, runState: string): st
     case 'awaiting_approval':
       return 'blocked';
     case 'queued':
-      return 'pending_slot';
+      return STEP_STATUS_QUEUED;
     case 'terminal':
       return runState;
     default:

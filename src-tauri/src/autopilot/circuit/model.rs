@@ -43,13 +43,30 @@ pub enum CircuitBlueprintKind {
     IssueDrivenAutopilotReview,
 }
 
+/// The trigger vocabulary of circuit creation (issue #1208). Lives in
+/// the domain model so the AST does not import the IPC adapter (issue #1660).
+/// Generated to `CircuitTriggerKind.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitTriggerKind.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitTriggerKind {
+    /// Fire-by-hand only (Trigger Now).
+    Manual,
+    /// Fire on a fixed cadence (`interval_seconds`, cooldown-paced).
+    Interval,
+    /// Fire when an open issue gains `trigger_label`.
+    GithubIssueLabel,
+    /// Fire when an open PR gains `trigger_label`.
+    GithubPrLabel,
+}
+
 impl CircuitBlueprintKind {
     /// The trigger vocabulary this blueprint accepts. The IPC boundary
     /// (`commands::circuit::create_circuit`) consults this; the domain
     /// model owns the truth so internal services, the background worker,
     /// and a future CLI all share the same restriction.
-    pub const fn allowed_triggers(self) -> &'static [crate::commands::circuit::CircuitTriggerKind] {
-        use crate::commands::circuit::CircuitTriggerKind as T;
+    pub const fn allowed_triggers(self) -> &'static [CircuitTriggerKind] {
+        use CircuitTriggerKind as T;
         match self {
             // Spec #1205's "Issue-Driven PR Flow" and "Continuous Looping
             // Pacer" presets share this skeleton under different trigger
@@ -584,6 +601,32 @@ impl CircuitGraph {
     /// Incoming edges targeting `node_id`, in blueprint order.
     pub fn incoming(&self, node_id: &str) -> Vec<&CircuitEdge> {
         self.edges.iter().filter(|e| e.to == node_id).collect()
+    }
+
+    /// True if any ancestor of `node_id` satisfies `predicate`. Walks
+    /// incoming edges; the start node itself is not tested.
+    pub fn has_ancestor_matching<F>(&self, node_id: &str, predicate: F) -> bool
+    where
+        F: Fn(&CircuitNode) -> bool,
+    {
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        queue.push_back(node_id);
+        visited.insert(node_id);
+        while let Some(curr) = queue.pop_front() {
+            for edge in self.incoming(curr) {
+                let from = edge.from.as_str();
+                if let Some(node) = self.node(from) {
+                    if predicate(node) {
+                        return true;
+                    }
+                }
+                if visited.insert(from) {
+                    queue.push_back(from);
+                }
+            }
+        }
+        false
     }
 
     /// True if `ancestor` lies upstream of `descendant` via incoming
@@ -1160,12 +1203,12 @@ impl CircuitGraph {
 /// pool; the model refuses here so the runtime can never deadlock it.
 pub fn validate_circuit_request(
     blueprint: CircuitBlueprintKind,
-    trigger_kind: Option<crate::commands::circuit::CircuitTriggerKind>,
+    trigger_kind: Option<CircuitTriggerKind>,
     trigger_label: Option<&str>,
     interval_seconds: Option<i64>,
     concurrency_limit: i64,
 ) -> Result<ValidatedCircuitRequest, String> {
-    use crate::commands::circuit::CircuitTriggerKind as T;
+    use CircuitTriggerKind as T;
 
     let selected_trigger = trigger_kind.unwrap_or(T::Manual);
     if !blueprint.allowed_triggers().contains(&selected_trigger) {
@@ -1211,19 +1254,19 @@ pub fn validate_circuit_request(
 /// field the IPC + DB write need, decoupled from the original inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedCircuitRequest {
-    pub trigger_kind: crate::commands::circuit::CircuitTriggerKind,
+    pub trigger_kind: CircuitTriggerKind,
     pub trigger_label: Option<String>,
     pub interval_seconds: Option<i64>,
     pub concurrency_limit: i64,
 }
 
-/// Convert a validated [`crate::commands::circuit::CircuitTriggerKind`]
+/// Convert a validated [`CircuitTriggerKind`]
 /// into the [`CircuitNodeKind`] the graph builder expects. The model
 /// has already enforced label-required-for-github inside
 /// [`validate_circuit_request`], so this is infallible for the GitHub
 /// variants — `unreachable!` documents the invariant.
 pub fn trigger_kind_to_node_kind(req: &ValidatedCircuitRequest) -> CircuitNodeKind {
-    use crate::commands::circuit::CircuitTriggerKind as T;
+    use CircuitTriggerKind as T;
     match req.trigger_kind {
         T::Manual => CircuitNodeKind::Manual,
         T::Interval => CircuitNodeKind::Interval {
@@ -2098,5 +2141,102 @@ mod tests {
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. })
                 if prompt == "Use our internal security checklist and preserve this wording."
         ));
+    }
+}
+
+#[cfg(test)]
+mod has_ancestor_matching_tests {
+    use super::*;
+
+    fn linear_graph() -> CircuitGraph {
+        CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "b".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "c".into(), kind: CircuitNodeKind::Manual },
+            ],
+            edges: vec![
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "b".into(), to: "c".into(), condition: EdgeCondition::Always },
+            ],
+        }
+    }
+
+    fn diamond_graph() -> CircuitGraph {
+        CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "spawn_a".into(), kind: CircuitNodeKind::SpawnAgentNode {
+                    prompt: "a".into(), name: None, provider: None, model: None, effort: None, extra_args: None,
+                } },
+                CircuitNode { id: "spawn_b".into(), kind: CircuitNodeKind::SpawnAgentNode {
+                    prompt: "b".into(), name: None, provider: None, model: None, effort: None, extra_args: None,
+                } },
+                CircuitNode { id: "join".into(), kind: CircuitNodeKind::AllCompleted },
+                CircuitNode { id: "c".into(), kind: CircuitNodeKind::Manual },
+            ],
+            edges: vec![
+                CircuitEdge { from: "t".into(), to: "spawn_a".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "t".into(), to: "spawn_b".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "spawn_a".into(), to: "join".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "spawn_b".into(), to: "join".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "join".into(), to: "c".into(), condition: EdgeCondition::Always },
+            ],
+        }
+    }
+
+    #[test]
+    fn finds_kind_in_immediate_parent() {
+        let g = diamond_graph();
+        assert!(g.has_ancestor_matching("join", |node| matches!(
+            node.kind,
+            CircuitNodeKind::SpawnAgentNode { .. }
+        )));
+    }
+
+    #[test]
+    fn finds_kind_through_multiple_hops() {
+        let g = linear_graph();
+        assert!(g.has_ancestor_matching("c", |node| node.id == "a"));
+    }
+
+    #[test]
+    fn returns_false_when_no_ancestor_matches() {
+        let g = linear_graph();
+        assert!(!g.has_ancestor_matching("c", |node| matches!(
+            node.kind,
+            CircuitNodeKind::SpawnAgentNode { .. }
+        )));
+    }
+
+    #[test]
+    fn does_not_test_the_start_node_itself() {
+        let g = diamond_graph();
+        assert!(!g.has_ancestor_matching("join", |node| node.id == "join"));
+    }
+
+    #[test]
+    fn is_cycle_safe() {
+        // a -> b -> a. The walk visits each node at most once; it must
+        // terminate rather than spin between a and b.
+        let g = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "a".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "b".into(), kind: CircuitNodeKind::Manual },
+            ],
+            edges: vec![
+                CircuitEdge { from: "a".into(), to: "b".into(), condition: EdgeCondition::Always },
+                CircuitEdge { from: "b".into(), to: "a".into(), condition: EdgeCondition::Always },
+            ],
+        };
+        // Predicate matches nothing; if the walk terminates the result is false.
+        let r = g.has_ancestor_matching("b", |node| node.id == "ghost");
+        assert!(!r);
     }
 }

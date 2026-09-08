@@ -1485,6 +1485,9 @@ export type { CircuitBlueprintKind } from '../types/generated/CircuitBlueprintKi
 export type { CircuitEdge } from '../types/generated/CircuitEdge';
 export type { EdgeCondition } from '../types/generated/EdgeCondition';
 export type { StepOutcome } from '../types/generated/StepOutcome';
+export type { RunState } from '../types/generated/RunState';
+export type { StepStatus } from '../types/generated/StepStatus';
+export type { CapacityBind } from '../types/generated/CapacityBind';
 export type { GithubActionKind } from '../types/generated/GithubActionKind';
 export type { OpenPrPolicy } from '../types/generated/OpenPrPolicy';
 export type { SessionStatusKind } from '../types/generated/SessionStatusKind';
