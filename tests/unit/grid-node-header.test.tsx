@@ -110,7 +110,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(details.textContent).toContain('demo');
     expect(details.textContent).toContain('Repository root');
     expect(details.textContent).toContain('6 changed files');
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Session details' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Agent node details' }));
     expect(useUIStore.getState().probeTab).toBe('properties');
     expect(useUIStore.getState().probeOpen).toBe(true);
   });
@@ -538,6 +538,9 @@ describe('GridNodeHeader resume affordance', () => {
     seedAgentNodes([node], node.id);
     const { getByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
     expect(getByTestId('grid-resume-button')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    expect(screen.queryByRole('menuitem', { name: 'Resume agent' })).toBeNull();
+    expect(screen.getAllByTestId('grid-resume-button')).toHaveLength(1);
   });
 
   it('does NOT render a Resume button when Suspended but cli_session_id is null (autopilot gate)', () => {

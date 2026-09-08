@@ -172,7 +172,8 @@ describe('GridNodeHeader compact layout behaviour', () => {
     setupWithSummaryAndPr();
     const { root } = renderHeader(width);
     expect(root.textContent).toContain(NODE.name);
-    expect(screen.getByText('PR #123')).toBeTruthy();
+    expect(screen.getByTestId('pr-pill-trigger')).toBeTruthy();
+    expect(screen.queryByText('PR #123') !== null).toBe(width >= HEADER_TIER_BREAKPOINTS.compact);
     expect(screen.getByRole('button', { name: 'Maximize agent node' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Close agent node' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Agent node actions' })).toBeTruthy();
@@ -181,7 +182,23 @@ describe('GridNodeHeader compact layout behaviour', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
     expect(screen.queryByRole('menuitem', { name: /Maximize/ })).toBeNull();
     expect(screen.queryByRole('menuitem', { name: /Close session/ })).toBeNull();
-    expect(screen.getByRole('menuitem', { name: 'Session details' })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: 'Resume agent' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Agent node details' })).toBeTruthy();
+  });
+
+  it('places overflow before maximize, with close as the trailing window control', () => {
+    setupWithSummaryAndPr();
+    renderHeader(700);
+    const labels = [...screen.getByTestId('grid-node-header').querySelectorAll('button')]
+      .map(button => button.getAttribute('aria-label'));
+    expect(labels.slice(-3)).toEqual([
+      'Agent node actions',
+      'Maximize agent node',
+      'Close agent node',
+    ]);
+    const close = screen.getByRole('button', { name: 'Close agent node' });
+    expect(close.querySelector('svg')).toBeTruthy();
+    expect(close.textContent).not.toMatch(/×|x/i);
   });
 
   it('keeps an open menu and its commands available when a pane changes width', () => {
@@ -231,7 +248,6 @@ describe('GridNodeHeader width contracts', () => {
   it('uses named attention and menu-width thresholds instead of inline literals', () => {
     expect(HEADER_TIER_BREAKPOINTS.attentionLabel).toBe(500);
     expect(HEADER_TIER_BREAKPOINTS.menuWidth).toBe(240);
-    expect('pr' in HEADER_TIER_BREAKPOINTS).toBe(false);
   });
 
   it('closes the node from the always-visible title-bar control', async () => {
