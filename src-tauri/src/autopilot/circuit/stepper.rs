@@ -114,8 +114,9 @@ impl RunState {
         }
     }
 
-    /// Terminal states the worker never moves out of. Mirrors
-    /// `db::is_terminal_run_state` and the frontend `isTerminalRunState`.
+    /// Terminal states the worker never moves out of. The persistence
+    /// ledger (`db::circuit::ledger::is_terminal_run_state`) and the
+    /// frontend `isTerminalRunState` both defer to this predicate.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
