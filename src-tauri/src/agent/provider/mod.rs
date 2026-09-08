@@ -433,6 +433,19 @@ pub trait AgentProvider: Send + Sync {
     /// (free-form selected text from a parent terminal, often multi-line).
     fn supports_prefill(&self) -> bool;
 
+    /// Whether this prompt should be delivered through the live PTY instead
+    /// of being placed on the automated launch command line. Harnesses may
+    /// accept a positional prompt for short text while still mis-parsing
+    /// arbitrary multiline review/diff content as extra CLI arguments.
+    ///
+    /// This is deliberately adapter-owned so callers do not grow provider
+    /// name checks. Automated launchers consult it through the shared prompt
+    /// delivery policy; ordinary user-facing spawn intents retain their
+    /// existing startup-prefill semantics.
+    fn prefill_requires_pty(&self, _text: &str) -> bool {
+        false
+    }
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 

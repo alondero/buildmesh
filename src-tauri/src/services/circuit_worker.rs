@@ -2341,10 +2341,29 @@ fn resolve_review_spawn_inputs(
         .and_then(non_empty_trim)
         .map(str::to_string);
 
-    let provider = provider
-        .filter(|value| !value.trim().is_empty())
-        .or(source_provider)
-        .or_else(|| inherited_review_provider(None, parent_provider));
+    let configured_review_provider = view
+        .context
+        .get("review.provider")
+        .and_then(non_empty_trim)
+        .map(str::to_string);
+
+    // The built-in node-review preset is reused across runs. Its graph row is
+    // deliberately shared, so a provider persisted there is historical state
+    // from whichever agent first created the row, not a reviewer preference.
+    // A configured reviewer provider is the independent adversarial default;
+    // the source agent is the fallback. Authored Circuits keep their explicit
+    // reviewer provider as the highest-precedence layer.
+    let provider = if view.context.get("source.review_preset") == Some("1") {
+        configured_review_provider
+            .or(source_provider)
+            .or_else(|| inherited_review_provider(None, parent_provider))
+    } else {
+        provider
+            .filter(|value| !value.trim().is_empty())
+            .or(configured_review_provider)
+            .or(source_provider)
+            .or_else(|| inherited_review_provider(None, parent_provider))
+    };
     explicit.model = explicit.model.or(source_model);
     explicit.effort = explicit.effort.or(source_effort);
     (provider, explicit)
@@ -2428,11 +2447,11 @@ struct ResolvedCircuitSpawn {
 /// to the step, then schedule stage-2 in the background — mirroring the
 /// autopilot launch order minus the GitHub ledger.
 fn circuit_spawn_intent(
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
     prompt: &str,
 ) -> crate::agent::spawn::SpawnIntent {
     use crate::agent::spawn::SpawnIntent;
-    use crate::autopilot::launch::InitialPromptDelivery;
+    use crate::agent::launch::InitialPromptDelivery;
 
     match delivery {
         InitialPromptDelivery::Prefill => SpawnIntent::Loop {
@@ -2448,9 +2467,9 @@ fn deliver_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
     prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
-    use crate::autopilot::launch::InitialPromptDelivery;
+    use crate::agent::launch::InitialPromptDelivery;
 
     let result = match delivery {
         InitialPromptDelivery::Prefill => Ok(()),
@@ -2477,9 +2496,9 @@ fn schedule_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
     prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
-    if delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
+    if delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
         crate::autopilot::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
     }
 }
@@ -2503,7 +2522,7 @@ fn spawn_circuit_agent_in_background(
     explicit: ExplicitSpawnOverrides,
     worktree_policy: crate::agent::spawn::WorktreePolicy,
     prompt: String,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
     let app_for_spawn = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -2672,7 +2691,7 @@ fn spawn_step_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
     let prompt_delivery =
-        crate::autopilot::launch::initial_prompt_delivery(&provider, &resolved_prompt);
+        crate::agent::launch::initial_prompt_delivery(&provider, &resolved_prompt);
     let worktree_policy = if source_issue.is_some()
         || view.context.get("source.review_preset") == Some("1")
     {
@@ -3367,7 +3386,7 @@ mod tests {
     #[test]
     fn circuit_old_close_cannot_retire_next_review_round() {
         let view = RunView {
-            run_id: 1, graph: CircuitGraph::agent_review("claude", None, None, 3), state: RunState::Running,
+            run_id: 1, graph: CircuitGraph::agent_review(None, None, 3), state: RunState::Running,
             context: CircuitContext::new(), steps: vec![
                 StepView { node_id: "reviewer".into(), agent_node_id: Some(101), attempt: 2,
                     status: StepStatus::Running, outcome: None, error: None },
@@ -4789,7 +4808,7 @@ mod tests {
 
     #[test]
     fn circuit_first_turn_prefills_when_the_harness_supports_it() {
-        use crate::autopilot::launch::{initial_prompt_delivery, InitialPromptDelivery};
+        use crate::agent::launch::{initial_prompt_delivery, InitialPromptDelivery};
         assert_eq!(
             initial_prompt_delivery("claude", "implement the issue"),
             InitialPromptDelivery::Prefill
@@ -4798,11 +4817,19 @@ mod tests {
             initial_prompt_delivery("codex:custom-provider", "review the PR"),
             InitialPromptDelivery::Prefill
         );
+        assert_eq!(
+            initial_prompt_delivery("codex:custom-provider", "review the diff\n+ details"),
+            InitialPromptDelivery::InjectAfterSpawn
+        );
+        assert_eq!(
+            initial_prompt_delivery("codex:custom-provider", "implement the issue"),
+            InitialPromptDelivery::Prefill
+        );
     }
 
     #[test]
     fn circuit_first_turn_falls_back_to_pty_injection_without_prefill() {
-        use crate::autopilot::launch::{initial_prompt_delivery, InitialPromptDelivery};
+        use crate::agent::launch::{initial_prompt_delivery, InitialPromptDelivery};
         assert_eq!(
             initial_prompt_delivery("kimi", "implement the issue"),
             InitialPromptDelivery::InjectAfterSpawn
@@ -4815,7 +4842,7 @@ mod tests {
 
     #[test]
     fn circuit_empty_first_turn_stays_fresh() {
-        use crate::autopilot::launch::{initial_prompt_delivery, InitialPromptDelivery};
+        use crate::agent::launch::{initial_prompt_delivery, InitialPromptDelivery};
         assert_eq!(
             initial_prompt_delivery("claude", "  \n\t"),
             InitialPromptDelivery::Fresh
@@ -4853,13 +4880,17 @@ mod tests {
     #[test]
     fn review_spawn_cascade_preserves_circuit_values_before_source_and_parent() {
         let mut context = CircuitContext::new();
-        context.set("source.review_preset", "1");
         context.set("source.provider", "source-provider");
         context.set("source.model", "source-model");
         context.set("source.effort", "source-effort");
         let view = RunView {
             run_id: 1,
-            graph: CircuitGraph::agent_review("graph-provider", None, None, 2),
+            graph: CircuitGraph::agent_review_with_provider(
+                Some("graph-provider"),
+                None,
+                None,
+                2,
+            ),
             state: RunState::Running,
             context,
             steps: vec![],
@@ -4879,8 +4910,23 @@ mod tests {
         assert_eq!(explicit.model.as_deref(), Some("circuit-model"));
         assert_eq!(explicit.effort.as_deref(), Some("circuit-effort"));
 
+        let mut configured_context = view.context.clone();
+        configured_context.set("review.provider", "reviewer-provider");
+        let configured_view = RunView { context: configured_context, ..view.clone() };
+        let (provider, _) = resolve_review_spawn_inputs(
+            &configured_view,
+            "reviewer",
+            None,
+            ExplicitSpawnOverrides::default(),
+            Some("parent-provider"),
+        );
+        assert_eq!(provider.as_deref(), Some("reviewer-provider"));
+
+        let mut preset_context = view.context.clone();
+        preset_context.set("source.review_preset", "1");
+        let preset_view = RunView { context: preset_context, ..view };
         let (provider, explicit) = resolve_review_spawn_inputs(
-            &view,
+            &preset_view,
             "reviewer",
             None,
             ExplicitSpawnOverrides::default(),
@@ -4889,11 +4935,44 @@ mod tests {
         assert_eq!(provider.as_deref(), Some("source-provider"));
         assert_eq!(explicit.model.as_deref(), Some("source-model"));
         assert_eq!(explicit.effort.as_deref(), Some("source-effort"));
+
+        let mut configured_preset_context = preset_view.context.clone();
+        configured_preset_context.set("review.provider", "reviewer-provider");
+        let configured_preset_view = RunView {
+            context: configured_preset_context,
+            ..preset_view.clone()
+        };
+        let (provider, _) = resolve_review_spawn_inputs(
+            &configured_preset_view,
+            "reviewer",
+            None,
+            ExplicitSpawnOverrides::default(),
+            Some("parent-provider"),
+        );
+        assert_eq!(provider.as_deref(), Some("reviewer-provider"));
+
+        let mut stale_preset_context = CircuitContext::new();
+        stale_preset_context.set("source.review_preset", "1");
+        let stale_preset_view = RunView {
+            run_id: 2,
+            graph: preset_view.graph.clone(),
+            state: RunState::Running,
+            context: stale_preset_context,
+            steps: vec![],
+        };
+        let (provider, _) = resolve_review_spawn_inputs(
+            &stale_preset_view,
+            "reviewer",
+            None,
+            ExplicitSpawnOverrides::default(),
+            Some("parent-provider"),
+        );
+        assert_eq!(provider.as_deref(), Some("parent-provider"));
     }
 
     #[test]
     fn step_parent_resolution_handles_review_graphs_and_source_fallback() {
-        let review = CircuitGraph::agent_review("claude", None, None, 2);
+        let review = CircuitGraph::agent_review(None, None, 2);
         let mut context = CircuitContext::new();
         context.set("source.review_preset", "1");
         let view = RunView {
@@ -4911,7 +4990,7 @@ mod tests {
         source_context.set("source.agent_id", "77");
         let source_view = RunView {
             run_id: 3,
-            graph: CircuitGraph::agent_review("claude", None, None, 2),
+            graph: CircuitGraph::agent_review(None, None, 2),
             state: RunState::Running,
             context: source_context,
             steps: vec![],

@@ -1163,6 +1163,14 @@ impl AgentProvider for CodexAdapter {
         true
     }
 
+    fn prefill_requires_pty(&self, text: &str) -> bool {
+        // Codex accepts a short positional prompt, but multiline review text
+        // has been observed to reach its clap parser as separate arguments
+        // (notably diff lines beginning with `+`). The PTY path preserves the
+        // prompt as one pasted turn and is the safe automated-launch mode.
+        text.contains('\n') || text.contains('\r')
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Macos, Platform::Windows, Platform::Linux]
     }
@@ -1241,6 +1249,13 @@ impl AgentProvider for CodexAdapter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn multiline_automated_prefill_uses_pty_transport() {
+        assert!(!CODEX.prefill_requires_pty("review the PR"));
+        assert!(CODEX.prefill_requires_pty("review the diff\n+ added line"));
+        assert!(CODEX.prefill_requires_pty("review the diff\r+ added line"));
+    }
 
     #[test]
     fn stable_profile_identity_survives_endpoint_and_model_edits() {

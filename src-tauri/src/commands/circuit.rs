@@ -589,6 +589,7 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     );
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
+    context.with_app_reviewer_provider();
     let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
     context.with_autopilot_finish_prompt(None, Some(action.as_str()));
     let run_id = crate::db::create_circuit_run(

@@ -53,6 +53,20 @@ impl CircuitContext {
         self
     }
 
+    /// Snapshot the app-wide adversarial-review provider for this run. An
+    /// empty value means the worker should inherit the source/parent harness;
+    /// storing it in the run context keeps queued work stable if Settings
+    /// changes before admission.
+    pub fn with_app_reviewer_provider(&mut self) -> &mut Self {
+        self.set(
+            "review.provider",
+            crate::preferences::reviewer_provider()
+                .as_deref()
+                .unwrap_or(""),
+        );
+        self
+    }
+
     /// Populate the per-run identity (`circuit.run_id`).
     pub fn with_run(&mut self, run_id: i64) -> &mut Self {
         self.set("circuit.run_id", run_id.to_string());

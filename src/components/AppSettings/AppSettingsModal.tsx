@@ -649,7 +649,9 @@ function humanResourceName(resource: ResourceKey): string {
 export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
+  const [reviewerProvider, setReviewerProvider] = useState<string>(NO_OVERRIDE);
   const [saving, setSaving] = useState(false);
+  const [reviewerSaving, setReviewerSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Issue #1534 — replace the global `loaded: boolean` with per-resource
   // status. The previous flag was set true even on full failure (the
@@ -685,6 +687,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     onPreferencesLoaded: (prefs) => {
       const stored = prefs.default_provider;
       setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+      const storedReviewer = prefs.reviewer_provider;
+      setReviewerProvider(storedReviewer && storedReviewer.length > 0 ? storedReviewer : NO_OVERRIDE);
       const storedNaming = prefs.naming_provider;
       setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
       const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
@@ -1206,6 +1210,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // The reviewer default is deliberately a separate preference from the
+  // ordinary spawn default. Reviews are often adversarial, so the useful
+  // configuration is "use this independent Spawn Option" while preserving
+  // the source-agent fallback when the selector is cleared.
+  const handleSaveReviewer = async (newValue: string) => {
+    const previous = reviewerProvider;
+    setReviewerProvider(newValue);
+    setReviewerSaving(true);
+    setError(null);
+    try {
+      const providerArg = newValue === NO_OVERRIDE ? null : newValue;
+      await api.setAppReviewerProvider(providerArg);
+      await loadPreferences();
+    } catch (e) {
+      setReviewerProvider(previous);
+      setError(formatError(e));
+    } finally {
+      setReviewerSaving(false);
+    }
+  };
+
   // Issue #824: persist the rename backend. Distinct from `handleSave`
   // above — auto-naming runs frequently on trivial content, so it lives
   // on its own picker with its own optimistic-rollback ref. Empty
@@ -1718,6 +1743,31 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             {providers.map(p => (
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
+          </select>
+        </div>
+
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label className="block text-lg font-medium text-text-secondary">
+            Reviewer provider
+          </label>
+          <p className="text-base text-text-muted">
+            Used by the built-in review circuit for adversarial review. Leave it
+            on the source-agent fallback to use the reviewed agent's provider.
+            Authored Circuits can still override this in their reviewer node.
+          </p>
+          <select
+            aria-label="Reviewer provider"
+            value={reviewerProvider}
+            disabled={!prefsLoaded || !providersLoaded || reviewerSaving}
+            onChange={e => handleSaveReviewer(e.target.value)}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          >
+            <option value={NO_OVERRIDE}>Source agent provider</option>
+            {providers
+              .filter((p) => p.id !== 'terminal')
+              .map(p => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
           </select>
         </div>
 

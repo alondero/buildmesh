@@ -696,7 +696,7 @@ function SpawnAgentNodeFields({
         />
       </Field>
 
-      <Field label="Provider (default = mesh autopilot)">
+      <Field label="Provider (explicit override; otherwise Reviewer provider/source agent)">
         <select
           value={harnessId ?? ''}
           aria-label="Provider"

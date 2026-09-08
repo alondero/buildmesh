@@ -8,7 +8,18 @@ impl CircuitGraph {
     /// reads its working directory, including uncommitted changes, from its
     /// own workspace and never writes to the source tree.
     pub fn agent_review(
-        provider: &str,
+        model: Option<String>,
+        effort: Option<String>,
+        max_rounds: i32,
+    ) -> Self {
+        Self::agent_review_with_provider(None, model, effort, max_rounds)
+    }
+
+    /// Build a review graph with an explicit reviewer provider. The built-in
+    /// title-bar preset uses [`Self::agent_review`] so its shared graph does
+    /// not retain the provider of whichever source agent created it first.
+    pub fn agent_review_with_provider(
+        provider: Option<&str>,
         model: Option<String>,
         effort: Option<String>,
         max_rounds: i32,
@@ -22,7 +33,7 @@ impl CircuitGraph {
             ("source_ready", K::AnyCompleted),
             ("reviewer", K::SpawnAgentNode {
                 prompt: CircuitGraph::local_review_prompt(),
-                name: Some("Code reviewer".into()), provider: Some(provider.into()),
+                name: Some("Code reviewer".into()), provider: provider.map(str::to_owned),
                 model, effort, extra_args: None,
             }),
             ("verdict", K::ReviewVerdict { target_node_id: reviewer() }),
@@ -110,7 +121,7 @@ mod tests {
     }
 
     fn reviewing(rounds: i32) -> RunView {
-        let graph = CircuitGraph::agent_review("claude", None, None, rounds);
+        let graph = CircuitGraph::agent_review(None, None, rounds);
         graph.validate().unwrap();
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "42");
@@ -134,6 +145,17 @@ mod tests {
         assert!(run.steps.iter().all(|s| s.agent_node_id != Some(42)));
         finish_review_turn(&mut run, 100);
         run
+    }
+
+    #[test]
+    fn built_in_review_graph_does_not_bind_a_source_provider() {
+        let graph = CircuitGraph::agent_review(None, None, 3);
+        match &graph.node("reviewer").expect("reviewer node").kind {
+            K::SpawnAgentNode { provider, .. } => {
+                assert_eq!(provider, &None);
+            }
+            other => panic!("reviewer must be a SpawnAgentNode, got {other:?}"),
+        }
     }
 
     fn finish_review_turn(run: &mut RunView, id: i64) {

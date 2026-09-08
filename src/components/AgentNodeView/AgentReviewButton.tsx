@@ -109,7 +109,9 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
         {circuitId === null ? <><p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
-          The reviewer uses this agent's provider and the Mesh's configured review model and effort.
+          The reviewer uses the app-wide Reviewer provider when configured;
+          otherwise it falls back to this agent's provider. Reviewer model and
+          effort still follow the Mesh/harness configuration.
           You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">
