@@ -424,38 +424,64 @@ pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result
 }
 
 /// Drag-drop / keyboard reorder seam: persist an explicit front-to-back
-/// run-id order for one mesh queue. Stale ids (promoted/cancelled between
-/// render and drop) abort the write so the UI refetches instead of
-/// half-applying.
+/// run-id order for one mesh queue. The payload must match the mesh's
+/// current pending set exactly; stale or partial payloads abort with a
+/// domain error so the UI can refresh instead of half-applying.
 #[command]
 pub fn reorder_circuit_queue(mesh_id: i64, ordered_run_ids: Vec<i64>) -> Result<(), String> {
-    crate::db::reorder_queued_circuit_runs(mesh_id, &ordered_run_ids)
-        .map_err(|error| error.to_string())?;
+    crate::db::reorder_queued_circuit_runs(mesh_id, &ordered_run_ids)?;
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(())
 }
 
-/// Bulk cancel for queue / activity hygiene: terminalise every listed run
-/// through the same single-run path (leases retired, worker woken, one
-/// `circuit-run-updated` event per run). Unknown ids are skipped; at least
-/// one failure returns the joined error.
+/// Bulk cancel for queue / activity hygiene in ONE write transaction:
+/// every listed run is terminalised together, the worker is woken once,
+/// and a single `circuit-run-updated` event refreshes the Probe once.
+/// Missing rows are already gone and skipped without failing the batch.
 #[command]
 pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), String> {
-    let mut failures = Vec::new();
-    for run_id in run_ids {
-        if let Err(error) = cancel_run_and_cleanup(&app, run_id) {
-            // A run that vanished between render and click is already gone —
-            // not a failure worth surfacing.
-            if !error.contains("does not exist") && !error.contains("QueryReturnedNoRows") {
-                failures.push(format!("run {}: {}", run_id, error));
-            }
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    let mut deduped = run_ids;
+    deduped.sort_unstable();
+    deduped.dedup();
+    // Stop future effects first so slow spawns cannot continue after Cancel.
+    for run_id in &deduped {
+        crate::services::circuit_worker::mark_circuit_run_cancelled(*run_id);
+    }
+    // Settle in-flight spawns per run (bounded waits, no wake/emit inside).
+    // A timeout does not fail the batch: the DB txn below terminalises the
+    // runs anyway and late spawns self-compensate.
+    for run_id in &deduped {
+        if let Err(wait_error) = crate::services::circuit_worker::with_circuit_run_spawns_quiesced(
+            *run_id,
+            || Ok::<(), String>(()),
+        ) {
+            tracing::warn!("circuits: batch cancel quiescence for run {}: {}", run_id, wait_error);
         }
     }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
+    let batch = crate::db::cancel_circuit_runs(&deduped).map_err(|error| error.to_string())?;
+    for run_id in &deduped {
+        crate::services::circuit_worker::finish_circuit_run_cancellation(*run_id);
+        // Source unregister is idempotent; the batch txn already collected
+        // sources, but per-run release covers rows whose source was set
+        // outside the txn window.
+        release_circuit_source(*run_id);
     }
+    for source in &batch.sources {
+        crate::autopilot::evaluator::unregister(*source);
+    }
+    crate::services::circuit_worker::wake_circuit_worker();
+    let cleanup = retire_cancelled_agents(batch.agents);
+    // One event refreshes the Probe once; the listener ignores the payload
+    // and reloads the snapshot.
+    let signal_run = batch.cancelled.first().copied().or(deduped.first().copied()).unwrap_or(0);
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id: signal_run, state: "cancelled".into() },
+    );
+    cleanup
 }
 
 #[command]

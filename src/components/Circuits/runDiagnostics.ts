@@ -183,9 +183,16 @@ export interface CircuitActivityStats {
   activityCount: number;
   /** Runs holding a circuit-run slot (`running` + `paused`). */
   activeCount: number;
-  /** Terminal runs needing attention (failed / blocked / unapproved
-   * review) across the fetched History window. */
+  /** All runs needing attention (live + terminal). Drives the header
+   * status line. Do NOT use for the History-only filter label — a paused
+   * run would make the History checkbox lie. */
   attentionCount: number;
+  /** Terminal runs needing attention (failed / unapproved review).
+   * Drives the History filter checkbox so the label always matches what
+   * checking the box will show. */
+  historyAttentionCount: number;
+  /** Live runs needing attention (paused / blocked running). */
+  activeAttentionCount: number;
   /** Terminal runs in the fetched History window. */
   historyCount: number;
   queuedCount: number;
@@ -198,6 +205,8 @@ export function circuitActivityStats(
 ): CircuitActivityStats {
   let activeCount = 0;
   let attentionCount = 0;
+  let historyAttentionCount = 0;
+  let activeAttentionCount = 0;
   let historyCount = 0;
   for (const row of rows) {
     const { runs, circuit } = row;
@@ -207,18 +216,21 @@ export function circuitActivityStats(
     for (const detail of runs) {
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
+        if (runNeedsAttention(detail, reviewCircuit)) {
+          activeAttentionCount += 1;
+          attentionCount += 1;
+        }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-        if (runNeedsAttention(detail, reviewCircuit)) attentionCount += 1;
-      } else if (runNeedsAttention(detail, reviewCircuit) && isActiveRunState(detail.run.state)) {
-        // Live attention (paused / blocked running) also counts — a
-        // paused run needing Resume is both active and actionable.
-        attentionCount += 1;
+        if (runNeedsAttention(detail, reviewCircuit)) {
+          historyAttentionCount += 1;
+          attentionCount += 1;
+        }
       }
     }
   }
-  return { activityCount: activeCount, activeCount, attentionCount, historyCount, queuedCount };
+  return { activityCount: activeCount, activeCount, attentionCount, historyAttentionCount, activeAttentionCount, historyCount, queuedCount };
 }
 
 /** Quiet threshold before a live run reads as stalled. Matches the

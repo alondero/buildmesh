@@ -559,8 +559,74 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![third, second, first]);
 
-    // Stale payload (unknown id) aborts instead of half-applying.
-    assert!(reorder_queued_circuit_runs(mesh.id, &[first, 999_999]).is_err());
+    // Stale payload (unknown id) aborts with a domain error the UI can show,
+    // never a raw SQLite syntax error.
+    let err = reorder_queued_circuit_runs(mesh.id, &[first, 999_999]).unwrap_err();
+    assert!(err.contains("refresh and retry"), "unexpected error: {}", err);
+    assert!(!err.contains("not valid"), "raw SQLite error leaked: {}", err);
+
+    // Partial subset aborts: reordering 2 of 3 would collide positions with
+    // the unpassed row.
+    let err = reorder_queued_circuit_runs(mesh.id, &[first, second]).unwrap_err();
+    assert!(err.contains("expected 3 pending runs"), "unexpected error: {}", err);
+    // Queue order is unchanged after both aborts.
+    let ids = list_queued_circuit_runs(mesh.id)
+        .unwrap()
+        .into_iter()
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![third, second, first]);
+
+    // Duplicate ids abort.
+    let err = reorder_queued_circuit_runs(mesh.id, &[first, first, second]).unwrap_err();
+    assert!(err.contains("duplicate"), "unexpected error: {}", err);
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn cancelling_a_missing_run_is_a_quiet_noop_not_an_error() {
+    let path = init_temp_db("cancel_missing");
+    let mesh = create_mesh("circuit-cancel-missing", "/tmp/circuit-cancel-missing").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "cancel-missing", "", 2, &sample_graph_json()).unwrap();
+    let run_id = create_circuit_run(circuit.id, mesh.id, "manual:gone", "{}").unwrap();
+    // Single cancel of a live run works, second cancel of the now-terminal
+    // row still succeeds, and an unknown id returns empty without error.
+    let agents = cancel_circuit_run(run_id).unwrap();
+    assert!(agents.is_empty());
+    let agents = cancel_circuit_run(run_id).unwrap();
+    assert!(agents.is_empty());
+    let agents = cancel_circuit_run(999_999).unwrap();
+    assert!(agents.is_empty());
+
+    // Batch skips missing rows and dedupes without failing.
+    let batch = cancel_circuit_runs(&[run_id, 999_999, run_id]).unwrap();
+    assert!(batch.agents.is_empty());
+    assert!(batch.cancelled.is_empty());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn batch_cancel_terminalises_every_run_in_one_transaction() {
+    let path = init_temp_db("batch_cancel");
+    let mesh = create_mesh("circuit-batch-cancel", "/tmp/circuit-batch-cancel").unwrap();
+    let circuit =
+        create_autopilot_circuit(mesh.id, "batch", "", 2, &sample_graph_json()).unwrap();
+    let first = create_circuit_run(circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second = create_circuit_run(circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third = create_circuit_run(circuit.id, mesh.id, "manual:3", "{}").unwrap();
+
+    let batch = cancel_circuit_runs(&[first, second, third]).unwrap();
+    assert_eq!(batch.cancelled, vec![first, second, third]);
+    assert!(list_queued_circuit_runs(mesh.id).unwrap().is_empty());
+    for run_id in [first, second, third] {
+        let run = get_circuit_run(run_id).unwrap().expect("run row survives as ledger");
+        assert_eq!(run.state, "cancelled");
+    }
 
     let _ = get();
     std::fs::remove_file(&path).ok();

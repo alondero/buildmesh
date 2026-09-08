@@ -671,6 +671,22 @@ fn run_pass(app: &AppHandle) {
     }
 }
 
+/// Synthesize a ledger step carrying a corrupt-payload failure. The runs
+/// table has no error column — cards render the first failed step's
+/// message — so every poisoned-row path must write one of these rather
+/// than advancing with empty step ops.
+fn corrupt_payload_step_op(node_id: &str, reason: &str) -> db::CircuitStepOp {
+    db::CircuitStepOp {
+        node_id: node_id.to_string(),
+        status: "failed".to_string(),
+        outcome: Some(Some("failed".to_string())),
+        error: Some(Some(reason.to_string())),
+        agent_node_id: None,
+        attempt: 1,
+        fresh_attempt: false,
+    }
+}
+
 fn drive_run(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
@@ -678,21 +694,16 @@ fn drive_run(
     // Undrivable-graph fail-closed: a corrupt `graph_json` previously
     // returned Err every 2s forever, holding the run's capacity slot with
     // no state change. Fail the run once with the parse error so the
-    // ledger explains itself and the slot frees.
+    // ledger explains itself and the slot frees. The runs table has no
+    // error column, so every corrupt-payload path synthesizes a failure
+    // step op (`__graph__` / `__context__`) — the card renders the first
+    // failed step's message as the run's reason.
     let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
         Ok(graph) => graph,
         Err(error) => {
             let reason = format!("circuit graph is unreadable: {}", error);
             tracing::warn!("circuits: run {} {}", active.run.id, reason);
-            let op = db::CircuitStepOp {
-                node_id: "__graph__".to_string(),
-                status: "failed".to_string(),
-                outcome: Some(Some("failed".to_string())),
-                error: Some(Some(reason.clone())),
-                agent_node_id: None,
-                attempt: 1,
-                fresh_attempt: false,
-            };
+            let op = corrupt_payload_step_op("__graph__", &reason);
             // Best-effort: even if the commit fails, return Ok so run_pass
             // does not log-and-retry this poisoned row at full tick rate —
             // the next pass will retry the commit anyway.
@@ -712,11 +723,12 @@ fn drive_run(
         Err(error) => {
             let reason = format!("circuit context is unreadable: {}", error);
             tracing::warn!("circuits: run {} {}", active.run.id, reason);
+            let op = corrupt_payload_step_op("__context__", &reason);
             let _ = db::commit_circuit_advance(
                 active.run.id,
                 Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
                 None,
-                &[],
+                &[op],
             );
             let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
             wake_circuit_worker();
@@ -859,12 +871,12 @@ fn drive_run(
 
         // Terminal review runs release processes while retaining recovery
         // checkpoints. Ordinary completed graphs opt out via cleanup intent.
-        if matches!(view.state, RunState::Completed | RunState::Failed) {
+        if view.state.is_terminal() {
             close_run_agents(app, &view);
             break;
         }
     }
-    if matches!(view.state, RunState::Completed | RunState::Failed) {
+    if view.state.is_terminal() {
         if let Some(source) = active.run.source_agent_node_id {
             crate::autopilot::evaluator::unregister(source);
         }
@@ -2202,6 +2214,11 @@ fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &cr
         // that completes the run, and must survive its commit-before-effects.
         // InjectPty is intentionally absent: it starts new work after the
         // run has durably finished and would leave an untracked command.
+        // A DB state of "cancelled" blocks everything even when the
+        // in-memory transition is completing: cancellation wins over a
+        // concurrently-computed completion, whose Notify would otherwise
+        // fire about a run the user just cancelled. Cancellation cleanup
+        // runs through the lease/retire path, not stepper effects.
         || (matches!(state, "completed" | "failed") && completing_transition && matches!(effect,
             Effect::Notify { .. } | Effect::SetNodeStatus { .. } | Effect::CloseAgentNode { .. }))
 }
@@ -2807,12 +2824,13 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
         let graph = match CircuitGraph::from_json(&active.circuit_graph_json) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!("circuits: run {} unreadable graph_json, failing: {}", active.run.id, e);
+                let reason = format!("unreadable graph_json, failing: {}", e);
+                tracing::warn!("circuits: run {} {}", active.run.id, reason);
                 let _ = db::commit_circuit_advance(
                     active.run.id,
                     Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
                     None,
-                    &[],
+                    &[corrupt_payload_step_op("__graph__", &reason)],
                 );
                 let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
                 continue;
@@ -2827,7 +2845,18 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
         };
         let context = match CircuitContext::from_json(&active.run.context_json) {
             Ok(context) => context,
-            Err(_) => continue,
+            Err(e) => {
+                let reason = format!("unreadable context_json, failing: {}", e);
+                tracing::warn!("circuits: run {} {}", active.run.id, reason);
+                let _ = db::commit_circuit_advance(
+                    active.run.id,
+                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    None,
+                    &[corrupt_payload_step_op("__context__", &reason)],
+                );
+                let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
+                continue;
+            }
         };
         let view = RunView { run_id: active.run.id, graph, context, steps, state: RunState::from_db_str(&active.run.state) };
         for step in view.steps.iter().filter(|s| s.status == StepStatus::Running) {

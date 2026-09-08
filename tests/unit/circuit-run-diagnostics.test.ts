@@ -152,7 +152,19 @@ describe('run diagnostics', () => {
       const running = detail(1, 'running');
       const failed = detail(2, 'failed');
       const stats = circuitActivityStats([row(running, failed)], 4);
-      expect(stats).toEqual({ activityCount: 1, activeCount: 1, attentionCount: 1, historyCount: 1, queuedCount: 4 });
+      expect(stats).toEqual({ activityCount: 1, activeCount: 1, attentionCount: 1, historyAttentionCount: 1, activeAttentionCount: 0, historyCount: 1, queuedCount: 4 });
+    });
+
+    it('splits attention counts so the History filter label never lies', () => {
+      const paused = detail(7, 'paused');
+      const failed = detail(2, 'failed');
+      const historyOnly = circuitActivityStats([row(failed)], 0);
+      expect(historyOnly.historyAttentionCount).toBe(1);
+      expect(historyOnly.activeAttentionCount).toBe(0);
+      const liveOnly = circuitActivityStats([row(paused)], 0);
+      expect(liveOnly.activeAttentionCount).toBe(1);
+      expect(liveOnly.historyAttentionCount).toBe(0);
+      expect(liveOnly.historyCount).toBe(0);
     });
 
     it('treats only running/paused as active (capacity set)', () => {
