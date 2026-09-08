@@ -1166,9 +1166,15 @@ impl AgentProvider for CodexAdapter {
     fn prefill_requires_pty(&self, text: &str) -> bool {
         // Codex accepts a short positional prompt, but multiline review text
         // has been observed to reach its clap parser as separate arguments
-        // (notably diff lines beginning with `+`). The PTY path preserves the
-        // prompt as one pasted turn and is the safe automated-launch mode.
-        text.contains('\n') || text.contains('\r')
+        // (notably diff lines beginning with `+`). A single-line prompt that
+        // begins with a CLI flag is also unsafe as a positional argument. The
+        // PTY path preserves the prompt as one pasted turn and is the safe
+        // automated-launch mode.
+        let trimmed = text.trim_start();
+        text.contains('\n')
+            || text.contains('\r')
+            || trimmed.starts_with('-')
+            || trimmed.starts_with('+')
     }
 
     fn available_on(&self) -> &'static [Platform] {
@@ -1255,6 +1261,8 @@ mod tests {
         assert!(!CODEX.prefill_requires_pty("review the PR"));
         assert!(CODEX.prefill_requires_pty("review the diff\n+ added line"));
         assert!(CODEX.prefill_requires_pty("review the diff\r+ added line"));
+        assert!(CODEX.prefill_requires_pty("- review this change"));
+        assert!(CODEX.prefill_requires_pty("+ review this change"));
     }
 
     #[test]

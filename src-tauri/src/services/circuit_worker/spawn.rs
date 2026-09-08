@@ -443,6 +443,11 @@ pub(super) fn spawn_step_agent(
     let parent_provider = if is_review_spawn_step(view, node_id)
         && provider_str.as_deref().and_then(non_empty_trim).is_none()
         && source_provider.is_none()
+        && view
+            .context
+            .get("review.provider")
+            .and_then(non_empty_trim)
+            .is_none()
     {
         parent_agent_node_id.and_then(|parent_id| {
             db::get_agent_node_by_id(parent_id)

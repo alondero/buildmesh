@@ -415,6 +415,13 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const { node, onChange } = props;
   const kind = node.type;
   const accent = categoryAccent(categoryOf(kind));
+  const isReviewerSpawn =
+    kind.type === 'spawn_agent_node' &&
+    props.graph?.nodes.some(
+      (candidate) =>
+        candidate.type.type === 'review_verdict' &&
+        candidate.type.target_node_id === node.id,
+    ) === true;
   // Upstream spawn nodes for the target dropdown — derived from the
   // same reachability memo, so no second BFS walk.
   const upstreamSpawns: string[] = reachable?.nodeOutputIds ?? [];
@@ -442,7 +449,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
       </div>
 
       {kind.type === 'spawn_agent_node' && (
-        <SpawnAgentNodeFields kind={kind} onChange={onChange} reachable={reachable} />
+        <SpawnAgentNodeFields
+          kind={kind}
+          onChange={onChange}
+          reachable={reachable}
+          isReviewerSpawn={isReviewerSpawn}
+        />
       )}
 
       {kind.type === 'inject_pty' && (
@@ -666,10 +678,12 @@ function SpawnAgentNodeFields({
   kind,
   onChange,
   reachable,
+  isReviewerSpawn,
 }: {
   kind: Extract<CircuitNodeKind, { type: 'spawn_agent_node' }>;
   onChange: (kind: CircuitNodeKind) => void;
   reachable: ReachableContext | undefined;
+  isReviewerSpawn: boolean;
 }) {
   const harnessId = harnessIdFromProvider(kind.provider);
   const caps = getCapabilitiesFor(harnessId);
@@ -696,7 +710,13 @@ function SpawnAgentNodeFields({
         />
       </Field>
 
-      <Field label="Provider (explicit override; otherwise Reviewer provider/source agent)">
+      <Field
+        label={
+          isReviewerSpawn
+            ? 'Provider (explicit override; otherwise Reviewer provider/source agent)'
+            : 'Provider override'
+        }
+      >
         <select
           value={harnessId ?? ''}
           aria-label="Provider"
@@ -725,7 +745,11 @@ function SpawnAgentNodeFields({
           }}
           className={inputClass}
         >
-          <option value="">Default (mesh autopilot)</option>
+          <option value="">
+            {isReviewerSpawn
+              ? 'Default (Reviewer provider/source agent)'
+              : 'Default (mesh autopilot)'}
+          </option>
           {HARNESS_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}

@@ -716,4 +716,36 @@ mod tests {
         assert!(p.env_remove.is_empty());
         assert!(p.env_set.is_empty());
     }
+
+    #[test]
+    fn initial_prompt_delivery_keeps_empty_prompts_fresh() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "  \n\t"),
+            InitialPromptDelivery::Fresh
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_prefills_single_line_supported_prompts() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "Review the PR"),
+            InitialPromptDelivery::Prefill
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_injects_codex_multiline_prompts_after_spawn() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "Review the diff\n+ added line"),
+            InitialPromptDelivery::InjectAfterSpawn
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_injects_for_harnesses_without_prefill() {
+        assert_eq!(
+            initial_prompt_delivery("terminal", "Run the verification command"),
+            InitialPromptDelivery::InjectAfterSpawn
+        );
+    }
 }

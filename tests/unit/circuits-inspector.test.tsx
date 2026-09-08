@@ -50,6 +50,7 @@ beforeAll(async () => {
 });
 
 import type { CircuitNode } from '../../src/types/generated/CircuitNode';
+import type { CircuitGraph } from '../../src/types/generated/CircuitGraph';
 
 function spawnNode(
   overrides: Partial<Extract<CircuitNode['type'], { type: 'spawn_agent_node' }>> = {},
@@ -159,6 +160,32 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     const select = screen.getByTestId('inspector-provider-select');
     expect(select).toBeTruthy();
     expect((select as HTMLSelectElement).value).toBe('');
+  });
+
+  it('uses generic provider wording for ordinary spawn nodes', () => {
+    renderNode(spawnNode());
+    expect(screen.getByText('Provider override')).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Default (mesh autopilot)' })).toBeTruthy();
+  });
+
+  it('uses reviewer fallback wording only for a spawn targeted by ReviewVerdict', () => {
+    const reviewNode = { ...spawnNode(), id: 'reviewer' };
+    const graph: CircuitGraph = {
+      version: 2,
+      blueprint: null,
+      nodes: [
+        reviewNode,
+        { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      ],
+      edges: [],
+    };
+    render(<InspectorPanel node={reviewNode} graph={graph} onChange={vi.fn()} />);
+    expect(
+      screen.getByText('Provider (explicit override; otherwise Reviewer provider/source agent)'),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('option', { name: 'Default (Reviewer provider/source agent)' }),
+    ).toBeTruthy();
   });
 
   it('hides model/effort/extra-args inputs when no provider is selected', () => {
