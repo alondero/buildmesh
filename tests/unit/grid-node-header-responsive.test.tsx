@@ -241,8 +241,9 @@ describe('GridNodeHeader width contracts', () => {
     expect(root.querySelector('[aria-label="Missing session ID"]')).toBeTruthy();
     expect(root.querySelector('[aria-label="Attention signal unavailable"]')).toBeTruthy();
     fireResize(root, HEADER_TIER_BREAKPOINTS.compact + 1);
-    expect(root.textContent).toContain('Missing session ID');
-    expect(root.querySelector('[aria-label="Missing session ID"]')).toBeNull();
+    expect(root.textContent).toContain('No session');
+    expect(root.textContent).not.toContain('Missing session ID');
+    expect(root.querySelector('[aria-label="Missing session ID"]')).toBeTruthy();
   });
 
   it('uses named attention and menu-width thresholds instead of inline literals', () => {

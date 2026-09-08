@@ -1,12 +1,21 @@
-/** Shared status badge for suspended nodes whose provider identity is absent. */
+/** Shared status badge for suspended nodes whose provider identity is absent.
+ *
+ * Mirrors `SignalHealthBadge`'s shape: inline-flex glyph + short label, with
+ * the full explanation in the tooltip. The accessible name stays descriptive
+ * in both tiers ("Missing session ID" — it explains *why* resume failed);
+ * only the visible label is shortened, because a missing session ID is a
+ * resume-failure reason, not a headline, and does not need prominent pixels.
+ */
 export function MissingSessionIdBadge({ compact = false }: { compact?: boolean }) {
   return (
     <span
-      className="text-status-warning text-xs shrink-0"
-      aria-label={compact ? 'Missing session ID' : undefined}
+      role="img"
+      aria-label="Missing session ID"
       title="This node has no saved session ID. Use Regenerate to start a new conversation in this node."
+      className="inline-flex shrink-0 items-center gap-1 text-xs text-status-warning"
     >
-      {compact ? '⚠' : 'Missing session ID'}
+      <span aria-hidden="true">⚠</span>
+      {!compact && <span>No session</span>}
     </span>
   );
 }

@@ -172,7 +172,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     seedAgentNodes([{ ...NODE, status: 'suspended', cli_session_id: null, signal_health: 'unavailable' }], NODE.id);
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
 
-    expect(screen.getByText('Missing session ID')).toBeTruthy();
+    expect(screen.getByText('No session')).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Attention signal unavailable' })).toBeTruthy();
   });
 
@@ -516,7 +516,7 @@ describe('GridNodeHeader resume affordance', () => {
     seedAgentNodes([node], node.id);
     useAgentNodeStore.setState({ autopilotStates: {} });
     const { getByText, queryByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
-    expect(getByText('Missing session ID')).toBeTruthy();
+    expect(getByText('No session')).toBeTruthy();
     expect(queryByTestId('grid-resume-button')).toBeNull();
   });
 
@@ -526,7 +526,7 @@ describe('GridNodeHeader resume affordance', () => {
     useAgentNodeStore.setState({ circuitOwnerships: {
       1: { node_id: 1, run_id: 2, circuit_id: 9, circuit_name: 'Review workflow', state: 'completed', parent_node_id: null },
     } });
-    expect(render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />).getByText('Missing session ID')).toBeTruthy();
+    expect(render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />).getByText('No session')).toBeTruthy();
   });
 
   it('renders an inline Resume button when Suspended AND cli_session_id is set', () => {
