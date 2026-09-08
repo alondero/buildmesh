@@ -12,25 +12,8 @@ use tauri::{command, AppHandle, Emitter};
 use crate::autopilot::circuit::model::{
     trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
 };
-pub use crate::autopilot::circuit::model::CircuitBlueprintKind;
+pub use crate::autopilot::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
-
-/// The trigger vocabulary of [`create_circuit`] (issue #1208). Generated
-/// to `src/types/generated/CircuitTriggerKind.ts` — the TS side imports
-/// this type rather than hand-declaring the union (issue #359 rule).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "CircuitTriggerKind.ts")]
-#[serde(rename_all = "snake_case")]
-pub enum CircuitTriggerKind {
-    /// Fire-by-hand only (Trigger Now).
-    Manual,
-    /// Fire on a fixed cadence (`interval_seconds`, cooldown-paced).
-    Interval,
-    /// Fire when an open issue gains `trigger_label`.
-    GithubIssueLabel,
-    /// Fire when an open PR gains `trigger_label`.
-    GithubPrLabel,
-}
 
 /// User-requested movement in the pending Circuit Run queue: adjacent
 /// steps plus jumps to either edge for long queues.

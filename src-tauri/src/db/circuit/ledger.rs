@@ -3,6 +3,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::autopilot::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
@@ -17,18 +18,24 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
     let existing: Option<i64> = tx.query_row(
-        "SELECT id FROM autopilot_circuit_runs
-         WHERE source_agent_node_id = ?1 AND state IN ('pending','running','paused')
-         LIMIT 1",
+        &format!(
+            "SELECT id FROM autopilot_circuit_runs
+             WHERE source_agent_node_id = ?1 AND state IN ({})
+             LIMIT 1",
+            RunState::SQL_IN_LIVE
+        ),
         params![node_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(id) = existing { return Ok(id); }
     let owned: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
-         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         WHERE s.agent_node_id = ?1 AND r.state IN ('pending','running','paused')) \
-         OR EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id = ?1 \
-         AND state IN ('implementing','finishing','suffix_pending'))",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
+             JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+             WHERE s.agent_node_id = ?1 AND r.state IN ({})) \
+             OR EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id = ?1 \
+             AND state IN ('implementing','finishing','suffix_pending'))",
+            RunState::SQL_IN_LIVE
+        ),
         params![node_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     if owned { return Err("This agent is already controlled by an active Autopilot run.".into()); }
@@ -290,7 +297,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
                     c.is_preset, c.graph_json, ROW_NUMBER() OVER (PARTITION BY r.circuit_id ORDER BY r.id DESC) AS history_rank \
              FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id \
              WHERE r.circuit_id IN ({}) \
-               AND r.state NOT IN ('pending', 'running', 'paused') \
+               AND r.state IN ({}) \
          ), attention_candidates AS ( \
              SELECT DISTINCT terminal.id, terminal.circuit_id, terminal.mesh_id, terminal.trigger_identity, terminal.state, \
                     terminal.context_json, terminal.source_agent_node_id, terminal.created_at, terminal.updated_at \
@@ -309,7 +316,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
              FROM autopilot_circuit_runs \
-             WHERE circuit_id IN ({}) AND state IN ('running', 'paused') \
+             WHERE circuit_id IN ({}) AND state IN ({}) \
              UNION ALL \
              SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                     context_json, source_agent_node_id, created_at, updated_at \
@@ -323,7 +330,9 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
                 context_json, source_agent_node_id, created_at, updated_at \
          FROM visible ORDER BY circuit_id, id DESC",
         ids.join(","),
-        ids.join(",")
+        RunState::SQL_IN_TERMINAL,
+        ids.join(","),
+        RunState::SQL_IN_ADMITTED
     ))?;
     let visible_runs: Vec<AutopilotCircuitRun> = stmt
         .query_map(params![runs_per_circuit.max(0), RECOVERY_RUNS_PER_CIRCUIT], |row| {
@@ -526,11 +535,14 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
             .collect::<SqlResult<Vec<i64>>>()?;
         rows
     };
-    if matches!(state.as_str(), "pending" | "running" | "paused") {
+    if RunState::is_live_db_str(&state) {
         tx.execute(
-            "UPDATE autopilot_circuit_runs SET state = 'cancelled', context_json = json_remove(context_json, '$.\"cleanup.pending\"'), updated_at = datetime('now') \
-             WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
-            params![run_id],
+            &format!(
+                "UPDATE autopilot_circuit_runs SET state = ?2, context_json = json_remove(context_json, '$.\"cleanup.pending\"'), updated_at = datetime('now') \
+                 WHERE id = ?1 AND state IN ({})",
+                RunState::SQL_IN_LIVE
+            ),
+            params![run_id, RunState::Cancelled.as_db_str()],
         )?;
         tx.execute(
             "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
@@ -547,19 +559,22 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
     // Terminalise the ledger in the same transaction as the run state. A
     // stale worker commit is rejected after this point, so incomplete steps
     // must not remain frozen as `running`/`queued` in the audit UI.
-    if !matches!(state.as_str(), "completed" | "failed") {
+    if !RunState::is_terminal_db_str(&state) {
         tx.execute(
-            "UPDATE autopilot_circuit_run_steps \
-             SET status = 'cancelled', outcome = 'cancelled', completed_at = datetime('now') \
-             WHERE run_id = ?1 AND status IN ('pending_slot', 'queued', 'running', 'blocked')",
-            params![run_id],
+            &format!(
+                "UPDATE autopilot_circuit_run_steps \
+                 SET status = ?2, outcome = ?2, completed_at = datetime('now') \
+                 WHERE run_id = ?1 AND status IN ({})",
+                StepStatus::SQL_IN_IN_FLIGHT
+            ),
+            params![run_id, StepStatus::Cancelled.as_db_str()],
         )?;
     }
     tx.execute(
         "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
         params![run_id],
     )?;
-    let cancelled = matches!(state.as_str(), "pending" | "running" | "paused");
+    let cancelled = RunState::is_live_db_str(&state);
     Ok(CancelRunWrite { agents, source, cancelled })
 }
 

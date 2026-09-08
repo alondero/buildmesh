@@ -31,7 +31,7 @@
 use super::model::{
     CircuitBlueprintKind, CircuitGraph, CircuitNodeKind, EdgeCondition, StepOutcome,
 };
-use crate::commands::circuit::CircuitTriggerKind;
+use super::model::CircuitTriggerKind;
 
 /// One per-blueprint contract entry. The catalog iterates these and
 /// exercises every field against the canonical builder so a drift in any

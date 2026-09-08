@@ -53,7 +53,8 @@ pub struct AutopilotCircuitRun {
     /// milestones). Scoped per-circuit so two circuits may process the
     /// same source independently.
     pub trigger_identity: String,
-    /// `pending` | `running` | `completed` | `failed`.
+    /// RunState wire token (`pending` | `running` | `paused` | `completed` |
+    /// `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
     pub state: String,
     /// The run's resolved template context (`circuit.*`, `node.*`), JSON.
     pub context_json: String,
@@ -74,7 +75,8 @@ pub struct AutopilotCircuitRunStep {
     /// The mesh agent node this step spawned/piloted, when any.
     #[ts(as = "Option<i32>")]
     pub agent_node_id: Option<i64>,
-    /// `pending_slot` | `running` | `completed` | `failed` | `cancelled`.
+    /// StepStatus wire token (`pending_slot` | `running` | `blocked` |
+    /// `completed` | `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
     pub status: String,
     #[ts(as = "i32")]
     pub attempt: i32,

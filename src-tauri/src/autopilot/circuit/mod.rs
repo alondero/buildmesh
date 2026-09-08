@@ -4,6 +4,9 @@
 //! Sub-modules:
 //! - [`model`] — the Graph Blueprint AST (serialised as
 //!   `autopilot_circuits.graph_json`).
+//! - [`vocabulary`] — run/step ledger strings, `Queued` ↔ `pending_slot`,
+//!   terminal predicates (issue #1660).
+//! - [`capacity`] — admission + step-slot + pool arithmetic (ADR-0028).
 //! - [`context`] — Mustache-style template context (`circuit.*`,
 //!   `node.*`; milestone-2 namespaces resolve empty today).
 //! - [`stepper`] — the pure decision core: `advance(run, event) →
@@ -12,10 +15,12 @@
 //! The impure seam (worker thread + effect execution) lives in
 //! `services::circuit_worker`.
 
+pub mod capacity;
 pub mod context;
 pub mod model;
+pub mod model_node_review;
 pub mod stepper;
-mod node_review;
+pub mod vocabulary;
 
 #[cfg(test)]
 mod blueprint_contract;
