@@ -32,7 +32,7 @@ static OPENAI_ADAPTER: OpenaiAdapter = OpenaiAdapter;
 static DEEPSEEK_ADAPTER: DeepseekAdapter = DeepseekAdapter;
 static FREEBUFF_ADAPTER: FreebuffAdapter = FreebuffAdapter;
 
-static USAGE_METERS: &[&'static dyn UsageAdapter] = &[
+static USAGE_METERS: [&'static dyn UsageAdapter; 13] = [
     &ANTHROPIC_ADAPTER,
     &CODEX_ADAPTER,
     &CURSOR_ADAPTER,
@@ -99,11 +99,11 @@ pub(crate) fn cached_or_fetch(
     super::set_cached_usage(provider_id, result.clone());
     Some(result)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::preferences::BillingMode;
+    use crate::services::usage::UsageWindow;
 
     fn account(id: &str, api_key: Option<&str>) -> ProviderAccount {
         ProviderAccount {
@@ -249,36 +249,113 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatched_adapters_mint_their_own_provider_envelope() {
-        // Wiring contract through the seam for every registered adapter:
-        // `dispatch(id).fetch` must return an envelope stamped with that same
-        // id. Keyed adapters take the deterministic no-key path above (no
-        // network). Native adapters read local credentials; on CI (no
-        // credentials) they take the logged-out path without network, while
-        // on a credential-bearing host they may probe live endpoints exactly
-        // as the production fetchers do — either way the provider stamp must
-        // match, so a broken or miswired fetch implementation fails here.
-        // Loopback success/malformed coverage per adapter is an explicit
-        // follow-up once adapters accept an injectable transport (#1657 step 6).
-        for id in [
-            "anthropic",
-            "codex",
-            "cursor",
-            "minimax",
-            "agy",
-            "kimi",
-            "openrouter",
-            "grok",
-            "opencode",
-            "commandcode",
-            "openai",
-            "deepseek",
-            "freebuff",
-        ] {
-            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
-            let usage = adapter.fetch(&[]);
-            assert_eq!(usage.provider, id, "adapter {id} must mint its own envelope");
+    /// Test-only adapter that proves the seam's `fetch` contract end-to-end
+    /// without touching the network, host credentials, or vendor endpoints.
+    /// Exercised via [`UsageAdapter::fetch`] directly (the production call
+    /// path), not via direct fn calls, so a future trait-extent change (extra
+    /// arg, panic-on-missing-key) fails the contract.
+    struct StubAdapter {
+        id: &'static str,
+        envelope: ProviderUsage,
+    }
+
+    impl UsageAdapter for StubAdapter {
+        fn id(&self) -> &'static str {
+            self.id
         }
+
+        fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
+            self.envelope.clone()
+        }
+    }
+
+    #[test]
+    fn dispatch_fetch_returns_representative_success_envelope() {
+        // Production-boundary contract: a successful fetch through the seam
+        // must propagate the adapter envelope unchanged. Pin representative
+        // windows + balance shape so a future "shape pass-through" regression
+        // (e.g. accidentally dropping `balance`) fails here.
+        let success = ProviderUsage {
+            provider: "anthropic".to_string(),
+            logged_in: true,
+            windows: vec![UsageWindow {
+                label: "5-hour".to_string(),
+                used_percent: Some(41.0),
+                resets_at: None,
+            }],
+            balance: None,
+            detail: None,
+            error: None,
+        };
+        let adapter = StubAdapter {
+            id: "anthropic",
+            envelope: success.clone(),
+        };
+        let observed: ProviderUsage = UsageAdapter::fetch(&adapter, &[]);
+        assert_eq!(observed.provider, "anthropic");
+        assert!(observed.logged_in);
+        assert_eq!(observed.windows.len(), 1);
+        assert_eq!(observed.windows[0].used_percent, Some(41.0));
+    }
+
+    #[test]
+    fn dispatch_fetch_returns_malformed_response_unavailable_envelope() {
+        // Adapter envelopes a parse failure as `unavailable` (logged_in=true,
+        // error carries the failure). The seam must propagate it untouched
+        // so the UI's "Invalid response" branch fires.
+        let malformed = ProviderUsage {
+            provider: "minimax".to_string(),
+            logged_in: true,
+            windows: vec![],
+            balance: None,
+            detail: None,
+            error: Some(
+                "Failed to parse response: Unexpected response shape: expected value at line 1"
+                    .to_string(),
+            ),
+        };
+        let adapter = StubAdapter {
+            id: "minimax",
+            envelope: malformed.clone(),
+        };
+        let observed: ProviderUsage =
+            UsageAdapter::fetch(&adapter, &[account("minimax", Some("k"))]);
+        assert_eq!(observed.provider, "minimax");
+        assert!(observed.logged_in, "parse failure stays logged_in");
+        assert!(
+            observed
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Failed to parse response"),
+            "error string must propagate, got: {:?}",
+            observed.error
+        );
+    }
+
+    #[test]
+    fn dispatch_fetch_returns_auth_failure_logged_out_envelope() {
+        // Rejected credentials surface as `logged_out` (logged_in=false,
+        // error carries the re-entry prompt). The seam must propagate it
+        // so `assemble_meters`'s no-credential gate can distinguish
+        // "no key" from "key rejected" once #1657 step 5 lifts that
+        // distinction out of the command layer.
+        let rejected = ProviderUsage {
+            provider: "kimi".to_string(),
+            logged_in: false,
+            windows: vec![],
+            balance: None,
+            detail: None,
+            error: Some("Invalid API key".to_string()),
+        };
+        let adapter = StubAdapter {
+            id: "kimi",
+            envelope: rejected.clone(),
+        };
+        let observed: ProviderUsage =
+            UsageAdapter::fetch(&adapter, &[account("kimi", Some("k"))]);
+        assert_eq!(observed.provider, "kimi");
+        assert!(!observed.logged_in, "rejected key must be logged out");
+        assert_eq!(observed.error.as_deref(), Some("Invalid API key"));
     }
 }

@@ -167,4 +167,40 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn shared_client_applies_a_15_second_timeout() {
+        // The shared client centralises the Freebuff fetcher's 15s timeout
+        // onto every adapter path. Pin the timeout via a deliberately-slow
+        // TCP listener that accepts the connection then idles without ever
+        // producing an HTTP response, so reqwest must hit its configured
+        // timeout. reqwest's default is unbounded, which previously matched
+        // per-fetcher inline construction.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().unwrap().port();
+        let _idle = std::thread::spawn(move || {
+            // Accept one connection then hold it open without writing a
+            // response; reqwest's read timeout will fire on the client side.
+            if let Ok((stream, _)) = listener.accept() {
+                let _hold = stream; // Dropped when the test thread ends.
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+        let start = std::time::Instant::now();
+        let result = fetch_usage(
+            "anthropic",
+            |c| c.get(&format!("http://127.0.0.1:{port}/usage")),
+            |body| Ok((vec![], Some(body.to_string()))),
+        );
+        let elapsed = start.elapsed();
+        let error = result.error.as_deref().unwrap_or_default();
+        assert!(
+            error.starts_with("Request failed:"),
+            "expected reqwest timeout envelope, got: {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "15s timeout should fire well under 20s; took {elapsed:?}"
+        );
+    }
 }
