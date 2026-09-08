@@ -6,7 +6,7 @@
       "id": "trigger",
       "type": {
         "type": "github_issue_label",
-        "label": "buildmesh:run"
+        "label": "ready-for-agent"
       }
     },
     {
@@ -39,8 +39,8 @@
       "id": "finish",
       "type": {
         "type": "inject_pty",
-        "target_node_id": "implementer",
-        "prompt": "{{autopilot.finish_prompt}}"
+        "prompt": "{{autopilot.finish_prompt}}",
+        "target_node_id": "implementer"
       }
     },
     {
@@ -77,8 +77,8 @@
       "id": "wrapup_correction",
       "type": {
         "type": "inject_pty",
-        "target_node_id": "implementer",
-        "prompt": "{{autopilot.wrapup_correction}}"
+        "prompt": "{{autopilot.wrapup_correction}}",
+        "target_node_id": "implementer"
       }
     },
     {
@@ -87,7 +87,7 @@
         "type": "spawn_agent_node",
         "prompt": "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}.",
         "name": null,
-        "provider": null,
+        "provider": "agy",
         "model": null,
         "effort": null,
         "extra_args": null
@@ -104,8 +104,8 @@
       "id": "follow_feedback",
       "type": {
         "type": "inject_pty",
-        "target_node_id": "implementer",
-        "prompt": "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed."
+        "prompt": "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.",
+        "target_node_id": "implementer"
       }
     },
     {

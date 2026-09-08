@@ -23,6 +23,7 @@ fn spawn_request_carries_explicit_overrides() {
             extra_args: None,
         },
         worktree_policy: WorktreePolicy::RespectMesh,
+        lifecycle_lease: false,
     };
     assert_eq!(req.explicit.model.as_deref(), Some("opus-4-1"));
     assert_eq!(req.explicit.effort.as_deref(), Some("high"));

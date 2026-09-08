@@ -906,6 +906,14 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     }
                 }
                 if let Some(classification) = classification {
+                    if matches!(run.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
+                        run.context.set(&format!("node.{node_id}.review_verdict_attempt"), attempt.to_string());
+                        run.context.set(&format!("node.{node_id}.review_verdict"), match classification {
+                            Classification::Completed => "approved",
+                            Classification::Working | Classification::Continue => "changes_requested",
+                            Classification::Blocked => "blocked",
+                        });
+                    }
                     run.context.set(&format!("node.{node_id}.classifier_failures.{attempt}"), "0");
                     let outcome = match classification {
                         Classification::Completed => StepOutcome::Completed,
@@ -1379,6 +1387,9 @@ fn is_eligible(run: &RunView, node_id: &str) -> bool {
         run.step(&edge.from)
             .map(|parent| {
                 parent.status.is_terminal()
+                    && (parent.outcome != Some(StepOutcome::Completed)
+                        || !matches!(run.graph.node(&parent.node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. }))
+                        || has_current_review_approval(run, parent))
                     && match edge.condition {
                         EdgeCondition::Always => true,
                         EdgeCondition::OnOutcome(o) => parent.outcome == Some(o),
@@ -1791,8 +1802,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
         reset_step_for_retry(run, t, &target, next_attempt);
         complete_with_outcome(run, t, node_id, StepOutcome::Completed);
     } else if is_feedback_cycle {
-        // The review blueprint has no semantic PR-approval event yet, so
-        // its bounded loop reports exhaustion through the graph's explicit
+        // A review loop reports exhaustion through the graph's explicit
         // Failed route instead of silently leaving a completed gate with no
         // successor. Ordinary RetryLimit gates retain fail-fast semantics.
         complete_with_outcome(run, t, node_id, StepOutcome::Failed);
@@ -1884,6 +1894,11 @@ fn cascade_after_completion(run: &mut RunView, t: &mut Transition, budget: usize
 /// Terminal check: the run completes when all active branches are terminal
 /// and no further steps are eligible (and at least one step completed).
 /// Cancelled steps flip the run Failed instead of Completed.
+fn has_current_review_approval(run: &RunView, step: &StepView) -> bool {
+    run.context.get(&format!("node.{}.review_verdict", step.node_id)) == Some("approved")
+        && run.context.get(&format!("node.{}.review_verdict_attempt", step.node_id)) == Some(step.attempt.to_string().as_str())
+}
+
 fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     // A Failed run sweeps its leftovers: sibling Running/Queued steps are
     // cancelled so the ledger reflects reality and the concurrency
@@ -1927,7 +1942,20 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
         matches!(effect, Effect::InjectPty { .. } | Effect::ContinueAgentTurn { .. })
     });
     if any_completed && !has_eligible && !has_pending_injection {
-        run.state = RunState::Completed;
+        // A handled failure may have run its notification, but exhausting a
+        // retry budget still needs attention. Likewise a blocked review is
+        // not approval merely because its notification finished.
+        let has_review = run.steps.iter().any(|step| matches!(run.graph.node(&step.node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })));
+        let unresolved = run.steps.iter().any(|step| match run.graph.node(&step.node_id).map(|n| &n.kind) {
+            Some(CircuitNodeKind::RetryLimit { .. }) => has_review && step.outcome == Some(StepOutcome::Failed),
+            Some(CircuitNodeKind::ReviewVerdict { .. }) => !has_current_review_approval(run, step),
+            _ => false,
+        });
+        run.state = if unresolved { RunState::Failed } else { RunState::Completed };
+        if has_review {
+            run.context.set("cleanup.pending", "1");
+            t.context_changed = true;
+        }
         t.run_state_changed = true;
     }
 }
@@ -4079,45 +4107,70 @@ mod tests {
         assert!(retry.effects.is_empty());
     }
 
-    #[test]
-    fn issue_review_approved_verdict_closes_reviewer_without_feedback() {
-        let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(&mut run, &CircuitEvent::GithubActionResult {
-            node_id: "open_pr".into(), success: true, pr_number: Some(1),
-            pr_url: Some("https://example/pr/1".into()), pr_head_ref: Some("b".into()),
-            pr_title: Some("t".into()), error: None,
-        });
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance(&mut run, &agent_finished(9001, true));
-        let t = advance(&mut run, &classified_with_output("review_classifier", Some(Classification::Completed), Some("APPROVED")));
-        assert!(t.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "reviewer")));
-        assert!(run.step("follow_feedback").is_none());
-        advance(&mut run, &tick(8, 8));
-        assert_eq!(status_of(&run, "review_approved"), StepStatus::Completed);
-    }
-
-    #[test]
-    fn issue_review_blocked_verdict_closes_reviewer_and_notifies_attention() {
-        let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(&mut run, &CircuitEvent::GithubActionResult {
-            node_id: "open_pr".into(), success: true, pr_number: Some(1),
-            pr_url: Some("https://example/pr/1".into()), pr_head_ref: Some("b".into()),
-            pr_title: Some("t".into()), error: None,
-        });
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance(&mut run, &agent_finished(9001, true));
-        let t = advance(&mut run, &classified_with_output("review_classifier", Some(Classification::Blocked), Some("BLOCKED")));
-        assert!(t.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "reviewer")));
-        advance(&mut run, &tick(8, 8));
-        assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
-        assert!(run.step("follow_feedback").is_none());
-    }
-
     // -- issue-driven Autopilot review blueprint contract (#1469) -----------
+
+    #[test]
+    fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(), success: true, pr_number: Some(314),
+            pr_url: Some("https://example/pr/314".into()), pr_head_ref: Some("branch".into()),
+            pr_title: Some("Fix".into()), error: None,
+        });
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 701);
+        advance(&mut run, &agent_finished(701, true));
+        advance(&mut run, &classified_with_output("review_classifier",
+            Some(Classification::Completed), Some("Approved. No remaining findings.")));
+        let t = advance(&mut run, &tick(8, 8));
+        assert_eq!(run.state, RunState::Completed);
+        assert_eq!(run.context.get("cleanup.pending"), Some("1"));
+        assert!(run.step("follow_feedback").is_none());
+        assert!(t.effects.iter().any(|e| matches!(e, Effect::Notify { message }
+            if message.contains("approved") && message.contains("314"))));
+    }
+
+    #[test]
+    fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        advance(&mut run, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(), success: true, pr_number: Some(314),
+            pr_url: Some("https://example/pr/314".into()), pr_head_ref: Some("branch".into()),
+            pr_title: Some("Fix".into()), error: None,
+        });
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("reviewer", 702);
+        advance(&mut run, &agent_finished(702, true));
+        let transition = advance(&mut run, &classified_with_output(
+            "review_classifier", Some(Classification::Blocked),
+            Some("Cannot review: provider access is unavailable."),
+        ));
+        let terminal = advance(&mut run, &tick(8, 8));
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
+        assert!(transition.effects.iter().chain(&terminal.effects).any(|effect| matches!(effect,
+            Effect::Notify { message } if message.contains("Review is blocked"))));
+    }
+
+    #[test]
+    fn issue_review_legacy_completed_classifier_cannot_become_approval_after_upgrade() {
+        let mut run = issue_review_run();
+        issue_review_to_open_pr(&mut run);
+        for step in &mut run.steps { step.status = StepStatus::Completed; }
+        let mut old = StepView::new("review_classifier", StepStatus::Completed);
+        old.outcome = Some(StepOutcome::Completed);
+        run.steps.push(old);
+        run.context.set("node.review_classifier.classification", "completed");
+        run.context.set("node.reviewer.output", "Changes requested.");
+        let t = advance(&mut run, &tick(8, 8));
+        assert!(run.step("close_approved").is_none());
+        assert!(run.step("complete").is_none());
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(run.context.get("cleanup.pending"), Some("1"));
+        assert!(!t.effects.iter().any(|e| matches!(e, Effect::Notify { message } if message.contains("Review approved"))));
+    }
     //
     // The contract pins these paths in `blueprint_contract.rs`; the
     // stepper tests here exercise them through the actual decision
@@ -4399,7 +4452,7 @@ mod tests {
         advance(&mut run, &tick(8, 8));
         run.attach_agent_node("reviewer", 9001);
         advance(&mut run, &agent_finished(9001, true));
-        // review_classifier Completed → cascade schedules follow_feedback.
+        // A changes-requested verdict schedules follow_feedback.
         let review_done = advance(
             &mut run,
             &classified_with_output(
@@ -4439,83 +4492,50 @@ mod tests {
         let _ = review_done;
     }
 
-    /// `review_retry` is `RetryLimit { max_retries: 3 }`. After 3 failed
-    /// feedback classifier turns, the gate's Failed branch routes to
-    /// `complete` (the user-visible Notify) rather than looping
-    /// forever — the contract acceptance: "retry exhaustion".
     #[test]
-    fn issue_review_retry_exhaustion_runs_complete_notify_not_another_loop() {
+    fn issue_review_three_real_rounds_exhaust_without_claiming_approval() {
         let mut run = issue_review_run();
         issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(1),
-                pr_url: Some("https://example/pr/1".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("t".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance(&mut run, &agent_finished(9001, true));
-        // Drive the feedback loop once so `review_retry` becomes a
-        // step in the ledger — the gate only schedules after the
-        // close_reviewer → feedback_classifier cascade.
-        let _ = advance(
-            &mut run,
-            &classified_with_output(
-                "review_classifier",
-                Some(Classification::Working),
-                Some("fix"),
-            ),
-        );
-        let _ = advance(
-            &mut run,
-            &CircuitEvent::AgentReady {
-                node_id: "follow_feedback".into(),
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        let _ = advance(
-            &mut run,
-            &classified("feedback_classifier", Some(Classification::Completed)),
-        );
-        assert!(
-            run.step("review_retry").is_some(),
-            "review_retry must be a step after the first feedback round"
-        );
-
-        // The retry-exhaustion contract pins: review_retry Failed →
-        // complete (a Notify), NOT back to finish. Simulating the
-        // budget's end by flipping the gate's terminal outcome to
-        // Failed directly — the worker seam surfaces "budget
-        // exhausted" this way. We bind the step reference once and
-        // mutate both fields, rather than calling .iter_mut().find()
-        // twice on the same slice (which is also a refactor trap:
-        // refactoring `steps` into a HashMap would silently change
-        // the borrow scope here).
-        let retry_step = run
-            .steps
-            .iter_mut()
-            .find(|s| s.node_id == "review_retry")
-            .expect("review_retry step exists after one feedback loop");
-        retry_step.status = StepStatus::Failed;
-        retry_step.outcome = Some(StepOutcome::Failed);
-
-        let t = advance(&mut run, &tick(8, 8));
-        assert_eq!(
-            run.step("complete").map(|s| s.status),
-            Some(StepStatus::Completed),
-            "review_retry Failed MUST route to `complete` (the user-visible notify)"
-        );
-        assert!(
-            t.effects.iter().any(|e| matches!(e, Effect::Notify { message } if message.contains("PR #1"))),
-            "complete notify must carry the PR number from the run context"
-        );
+        for round in 1..=3 {
+            assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+            advance(&mut run, &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(), success: true, pr_number: Some(1),
+                pr_url: Some("https://example/pr/1".into()), pr_head_ref: Some("branch".into()),
+                pr_title: Some("Fix".into()), error: None,
+            });
+            let spawn = advance(&mut run, &tick(8, 8));
+            assert!(spawn.effects.iter().any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+            run.attach_agent_node("reviewer", 9000 + round);
+            advance(&mut run, &agent_finished(9000 + round, true));
+            advance(&mut run, &classified_with_output("review_classifier",
+                Some(Classification::Working), Some("Changes requested: fix the race.")));
+            let feedback = advance(&mut run, &CircuitEvent::AgentReady { node_id: "follow_feedback".into() });
+            assert!(feedback.effects.iter().any(|e| matches!(e, Effect::InjectPty { prompt, .. } if prompt.contains("fix the race"))));
+            // The worker clears this association after the close effect.
+            run.step_mut("reviewer").unwrap().agent_node_id = None;
+            advance(&mut run, &tick(8, 8));
+            let result = advance(&mut run, &classified("feedback_classifier", Some(Classification::Completed)));
+            if round < 3 {
+                assert_eq!(run.state, RunState::Running);
+                assert_eq!(status_of(&run, "finish"), StepStatus::Queued);
+                let next = advance(&mut run, &tick(8, 8));
+                assert!(!next.effects.iter().any(|e| matches!(e, Effect::SpawnAgentNode { .. } | Effect::CallGithub { .. })),
+                    "a new round must wait for the new finish response: {:?}", next.effects);
+                advance(&mut run, &CircuitEvent::AgentReady { node_id: "finish".into() });
+                advance(&mut run, &tick(8, 8));
+                advance(&mut run, &classified("finish_classifier", Some(Classification::Completed)));
+            } else {
+                let last = advance(&mut run, &tick(8, 8));
+                assert_eq!(run.state, RunState::Failed);
+                assert!(run.step("complete").is_none());
+                assert!(
+                    result.effects.iter().chain(&last.effects).any(|e| matches!(e,
+                        Effect::Notify { message } if message.contains("not been approved"))),
+                    "terminal effects: {:?} / {:?}; state={:?}; exhausted={:?}; retry={:?}",
+                    result.effects, last.effects, run.state, run.step("review_exhausted"), run.step("review_retry")
+                );
+            }
+        }
     }
 
     /// The retry path's `Completed` outcome re-queues `finish` for

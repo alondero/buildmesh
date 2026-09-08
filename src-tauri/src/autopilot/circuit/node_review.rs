@@ -212,7 +212,7 @@ mod tests {
         assert!(!effects
             .iter()
             .any(|e| matches!(e, Effect::SpawnAgentNode { .. })));
-        assert_eq!(run.state, RunState::Completed);
+        assert_eq!(run.state, RunState::Failed);
     }
 
     #[test]
@@ -224,6 +224,7 @@ mod tests {
             |e| matches!(e, Effect::Notify { message } if message.contains("needs attention"))
         ));
         assert!(run.step("feedback").is_none());
+        assert_eq!(run.state, RunState::Failed);
     }
 
     #[test]

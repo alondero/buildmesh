@@ -321,10 +321,9 @@ pub async fn regenerate_agent_node(
         SpawnIntent::Fresh
     };
 
-    spawn_with_intent(
-        &app,
-        SpawnRequest::new(node_id, intent, TerminalSize::default()),
-    )
+    let spawn_request = SpawnRequest::new(node_id, intent, TerminalSize::default())
+        .with_lifecycle_lease();
+    spawn_with_intent(&app, spawn_request)
     .await
     .map_err(|e| e.to_string())?;
 

@@ -8,10 +8,12 @@ preset waits for the source task to finish.
 The review preset classifies the source's completion report, starts a separate
 reviewer, returns findings to the original agent, waits for fixes, and reviews
 again. Explicit reviewer approval ends the loop. The default limit is three
-review rounds, configurable from one to ten. Reaching the limit reports that
-the latest fixes remain unapproved. An unclear reviewer verdict stops for
-attention. When the source's completion cannot be read or classified, a visible
-approval step lets the user confirm completion before review begins.
+review rounds, configurable from one to ten. Reaching the limit or receiving
+an unclear reviewer verdict ends the run in a failed, recoverable checkpoint;
+it does not claim approval. Resume the saved implementation session to resolve
+the blocker or request a fresh review. When the source's completion cannot be
+read or classified, a visible approval step lets the user confirm completion
+before review begins.
 
 The reviewer uses the source agent's provider plus the Mesh's configured model
 and effort tier, and receives its working directory, Mesh base ref, name, and
@@ -33,9 +35,11 @@ stable. The All sessions menu remains available when the card is narrow.
 Review findings are returned through the circuit run's existing feedback step
 to the source agent. The source's terminal remains the place where that agent
 receives the requested fixes, while the reviewer report remains available in
-the run history and on the reviewer activity until the existing retention or
-cleanup policy removes it. Both flows use explicit approval, changes-requested,
-and blocked verdicts. Only changes-requested reports start a fix round.
+the run history and on the reviewer activity. Both flows use explicit approval,
+changes-requested, and blocked verdicts. Only changes-requested reports start
+a fix round. A blocked or exhausted run preserves the reviewer checkpoint,
+including its association and worktree, for recovery; cleanup stops its live
+process and is retryable rather than deleting the review evidence.
 
 By default, reviewers inherit the reviewed agent's harness. Explicit reviewer
 settings in an authored Circuit take precedence; model and effort use the
