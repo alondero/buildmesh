@@ -296,7 +296,7 @@ pub(crate) fn format_pull_request_prefill(
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
     format!(
         "Review PR #{number}\n{}\n{url}",
-        crate::autopilot::circuit::model::CircuitGraph::REVIEW_POLICY
+        crate::review_contract::REVIEW_POLICY
     )
 }
 
@@ -339,7 +339,7 @@ https://github.com/alondero/buildmesh/issues/247"
 
         let expected = format!(
             "Review PR #420\n{}\nhttps://github.com/alondero/buildmesh/pull/420",
-            crate::autopilot::circuit::model::CircuitGraph::REVIEW_POLICY
+            crate::review_contract::REVIEW_POLICY
         );
         assert_eq!(
             intent.initial_prompt().as_ref().map(InitialPrompt::as_str),

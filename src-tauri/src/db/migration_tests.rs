@@ -89,8 +89,8 @@ mod tests {
         ).unwrap();
 
         let mut legacy = crate::autopilot::circuit::model::CircuitGraph::agent_review("codex", None, None, 3);
-        let reviewer_prompt = "Review the work of agent {{source.agent_id}} in {{source.path}}. Read that directory directly: review committed changes from the merge-base with {{source.base_ref}} and all uncommitted/untracked changes. The source task is {{source.name}}. Its latest report is: {{source.output}}\nInspect the code and relevant project instructions. Do not modify files, commit, push, post comments, or open a PR. Report actionable findings with file locations in your final response. If the work is satisfactory, explicitly state that you approve and have no remaining findings. Otherwise explicitly state that changes are requested. If you cannot assess the work, explain the blocker. This is review round {{retry.attempt}} of {{retry.max_retries}}.";
-        let feedback_prompt = "An independent reviewer requested changes to your work. Review report:\n{{node.reviewer.output}}\nAddress every valid finding, run relevant checks, and report your changes. Explain any finding you disagree with. Another independent review will follow. Do not start another review loop yourself.";
+        let reviewer_prompt = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
+        let feedback_prompt = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
         for node in &mut legacy.nodes {
             match &mut node.kind {
                 crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } if node.id == "reviewer" => *prompt = reviewer_prompt.to_string(),

@@ -878,15 +878,15 @@ impl CircuitGraph {
     /// PR delivery and scope used by the issue-driven review blueprint. Keep
     /// this text stable because it is also the catalog's user-visible
     /// contract; [`Self::pr_review_prompt`] adds the shared review policy.
-    pub const PR_REVIEW_PROMPT: &'static str = "Review PR {{pr.number}} and post the findings as a PR comment.";
+    pub const PR_REVIEW_PROMPT: &'static str = crate::review_contract::PR_REVIEW_DELIVERY;
 
     const AUTONOMOUS_IMPLEMENTATION_PROMPT: &'static str = "{{issue.prefill}}\nThis is an unattended implementation run. Carry the authorized issue through implementation and verification. Make routine implementation choices and record assumptions. Do not voluntarily enter interactive plan mode or stop after writing a plan. Ask for human input only when the task cannot proceed without a material decision, permission, or missing access; state that blocker clearly. Do not expand the issue's scope.";
 
     /// Shared review criteria used by both the local node-review loop and the
     /// issue-driven PR reviewer. The surrounding prompt supplies only the
     /// surface-specific scope and delivery mechanism.
-    pub const REVIEW_POLICY: &'static str = "Review the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the reviewed commit or revision under review and the complete change, including relevant project instructions, tests, and previous findings. Report actionable correctness, specification, and verification findings with file locations and impact. Treat optional style suggestions as non-blocking. State the reviewed commit or revision under review and an explicit final verdict: approve only if no actionable findings remain; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code.";
-    pub const REVIEW_FEEDBACK_POLICY: &'static str = "Reviewer report:\n{{node.reviewer.output}}\nAddress every valid finding, run the relevant tests, and report what you changed. Explain any finding you disagree with. Do not start another review loop yourself.";
+    pub const REVIEW_POLICY: &'static str = crate::review_contract::REVIEW_POLICY;
+    pub const REVIEW_FEEDBACK_POLICY: &'static str = crate::review_contract::REVIEW_FEEDBACK_POLICY;
 
     pub fn local_review_prompt() -> String {
         format!(
@@ -908,8 +908,8 @@ impl CircuitGraph {
     }
 
     pub(crate) fn upgrade_legacy_agent_review_prompts(&mut self) -> bool {
-        let old_review = "Review the work of agent {{source.agent_id}} in {{source.path}}. Read that directory directly: review committed changes from the merge-base with {{source.base_ref}} and all uncommitted/untracked changes. The source task is {{source.name}}. Its latest report is: {{source.output}}\nInspect the code and relevant project instructions. Do not modify files, commit, push, post comments, or open a PR. Report actionable findings with file locations in your final response. If the work is satisfactory, explicitly state that you approve and have no remaining findings. Otherwise explicitly state that changes are requested. If you cannot assess the work, explain the blocker. This is review round {{retry.attempt}} of {{retry.max_retries}}.";
-        let old_feedback = "An independent reviewer requested changes to your work. Review report:\n{{node.reviewer.output}}\nAddress every valid finding, run relevant checks, and report your changes. Explain any finding you disagree with. Another independent review will follow. Do not start another review loop yourself.";
+        let old_review = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
+        let old_feedback = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
@@ -940,20 +940,14 @@ impl CircuitGraph {
         // Match only the two exact prompts shipped before PR_REVIEW_PROMPT
         // was split from REVIEW_POLICY. A user-authored extension of either
         // prompt is not stock and must remain intact.
-        const LEGACY_PR_REVIEW_PROMPT: &str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}.";
-        const LEGACY_REVIEW_VERDICT: &str = "State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
-        let legacy_pr_review_with_verdict = format!(
-            "{} {}",
-            LEGACY_PR_REVIEW_PROMPT, LEGACY_REVIEW_VERDICT
-        );
         let old_feedback = "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.";
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
                 CircuitNodeKind::SpawnAgentNode { prompt, .. }
                     if node.id == "reviewer"
-                        && (prompt == LEGACY_PR_REVIEW_PROMPT
-                            || prompt == &legacy_pr_review_with_verdict) =>
+                        && (prompt == crate::review_contract::LEGACY_PR_REVIEW_PROMPT
+                            || prompt == crate::review_contract::LEGACY_PR_REVIEW_WITH_VERDICT) =>
                 {
                     *prompt = Self::pr_review_prompt();
                     changed = true;

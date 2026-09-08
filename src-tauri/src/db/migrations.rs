@@ -295,6 +295,7 @@ pub(crate) enum AlwaysStep {
 const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
+const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'";
 
 // ---------------------------------------------------------------------------
 // The registry.
@@ -1104,13 +1105,9 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 // anything on the ordinary startup path, while a late import can still be
                 // upgraded safely.
                 let has_late_legacy: bool = conn.query_row(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM autopilot_circuits
-                         WHERE graph_json LIKE '%Review the work of agent {{source.agent_id}}%'
-                            OR graph_json LIKE '%An independent reviewer requested changes to your work.%'
-                            OR graph_json LIKE '%review PR {{pr.number}} as%'
-                            OR graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'
-                     )",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM autopilot_circuits c WHERE {LEGACY_REVIEW_GRAPH_PREDICATE})"
+                    ),
                     [],
                     |row| row.get(0),
                 )?;
@@ -1134,14 +1131,11 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             // entire circuit history. The sentinel row preserves the distinction between
             // "nothing legacy remains" and "legacy work is still active" without another scan.
             let circuits: Vec<(Option<i64>, Option<String>, Option<i64>, bool)> = {
-                let mut stmt = conn.prepare(
+                let mut stmt = conn.prepare(&format!(
                     "WITH legacy AS (
                          SELECT c.id, c.graph_json, c.is_preset
                          FROM autopilot_circuits c
-                         WHERE c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%'
-                            OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%'
-                            OR c.graph_json LIKE '%review PR {{pr.number}} as%'
-                            OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'
+                         WHERE {LEGACY_REVIEW_GRAPH_PREDICATE}
                      ), active AS (
                          SELECT DISTINCT r.circuit_id
                          FROM autopilot_circuit_runs r
@@ -1156,8 +1150,8 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                      UNION ALL
                      SELECT NULL, NULL, NULL, 1 AS deferred
                      WHERE EXISTS (SELECT 1 FROM active)
-                     ORDER BY deferred, id",
-                )?;
+                     ORDER BY deferred, id"
+                ))?;
                 let rows = stmt.query_map([], |row| {
                     let id: Option<i64> = row.get(0)?;
                     let graph_json: Option<String> = row.get(1)?;

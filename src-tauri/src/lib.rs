@@ -20,6 +20,7 @@ pub mod process_util;
 mod pty;
 pub mod sandbox;
 pub mod secret_scrubber;
+mod review_contract;
 mod services;
 mod session_capture;
 mod session_naming;
