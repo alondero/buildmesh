@@ -2,12 +2,17 @@
 
 /**
  * Payload of the per-session `build-run-exited-{sessionId}` Tauri event.
- * Emitted when the PTY reader sees EOF on the build/run shell. Empty
- * payload — the exit is a sentinel, not a state carrier. The event name
- * encodes the sessionId (one event family per spawned shell) so the
- * listener can match it without a payload field.
+ * Emitted when the PTY reader sees EOF on the build/run shell. The
+ * `generation` field identifies which incarnation exited (the same
+ * monotonic token [`BuildRunProcess::generation`]). The event name
+ * encodes the sessionId; the payload encodes the generation so the
+ * frontend can tell whether the exit event applies to the current
+ * instance or to a previous incarnation whose late EOF crossed paths
+ * with a replacement spawn.
  *
  * Generated to `src/types/generated/BuildRunExitedPayload.ts`; the TS half
  * is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
+ * The TS half uses `i32` because `ts-rs` does not support `u64`
+ * natively in TS — see `ts(as = "i32")` annotation per CLAUDE.md.
  */
-export type BuildRunExitedPayload = Record<symbol, never>;
+export type BuildRunExitedPayload = { generation: number, };
