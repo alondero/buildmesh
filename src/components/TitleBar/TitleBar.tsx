@@ -8,6 +8,7 @@ import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
 import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
+import { UsageIcon } from '../Probe/probeIcons';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
@@ -90,18 +91,6 @@ function SearchIcon({ className }: IconProps) {
     <Svg className={className}>
       <circle cx="11" cy="11" r="8" />
       <path d="m21 21-4.3-4.3" />
-    </Svg>
-  );
-}
-
-/** Gauge glyph for the Usage action (semi-dial + needle), drawn locally so
-    the title bar keeps its icons self-contained like Settings/Mobile. */
-function UsageIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <path d="M4 19a8 8 0 1 1 16 0" />
-      <path d="M12 11v4" />
-      <path d="M12 19h.01" />
     </Svg>
   );
 }
