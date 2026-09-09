@@ -9,10 +9,12 @@ use crate::db;
 use crate::env;
 use crate::models::EnvType;
 use crate::services::commandcode_session;
-use crate::services::transcript_reader::{
-    commandcode_project_slug, cursor_workspace_slug, encode_path, first_text_block,
-    is_synthetic_message, truncate,
+use crate::services::transcript_paths::{
+    encode_path, first_text_block, is_synthetic_message,
 };
+use crate::services::transcript_reader::adapters::commandcode::commandcode_project_slug;
+use crate::services::transcript_reader::adapters::cursor::cursor_workspace_slug;
+use crate::services::transcript_reader::types::truncate;
 use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};

@@ -22,6 +22,7 @@ pub mod provider_verification;
 pub mod session_recovery;
 pub mod sync_lock;
 pub(crate) mod test_fixtures;
+pub mod transcript_paths;
 pub mod transcript_reader;
 pub mod usage;
 pub mod warm_pool;

@@ -202,7 +202,7 @@ pub fn start_for_session(
     app: &AppHandle,
 ) -> Result<(), String> {
     let sessions_dir =
-        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_path)
+        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_path)
             .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     start(node_id, session_id, transcript_path, app, None)
@@ -220,7 +220,7 @@ pub fn start_for_resumed_session(
     app: &AppHandle,
 ) -> Result<(), String> {
     let sessions_dir =
-        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_path)
+        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_path)
             .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
     let transcript_path = sessions_dir.join(format!("{session_id}.jsonl"));
     let offset = std::fs::metadata(&transcript_path)
@@ -587,17 +587,17 @@ fn transcript_activity(line: &str) -> Option<TranscriptActivityInfo> {
 }
 
 fn message_activity(message: &serde_json::Value) -> Option<TranscriptActivity> {
-    match crate::services::transcript_reader::commandcode_message_activity(message)? {
-        crate::services::transcript_reader::CommandCodeMessageActivity::UserTurn => {
+    match crate::services::transcript_reader::adapters::commandcode::commandcode_message_activity(message)? {
+        crate::services::transcript_reader::adapters::commandcode::CommandCodeMessageActivity::UserTurn => {
             Some(TranscriptActivity::UserTurn)
         }
-        crate::services::transcript_reader::CommandCodeMessageActivity::ToolUse => {
+        crate::services::transcript_reader::adapters::commandcode::CommandCodeMessageActivity::ToolUse => {
             Some(TranscriptActivity::ToolUse)
         }
-        crate::services::transcript_reader::CommandCodeMessageActivity::ToolResult => {
+        crate::services::transcript_reader::adapters::commandcode::CommandCodeMessageActivity::ToolResult => {
             Some(TranscriptActivity::ToolResult)
         }
-        crate::services::transcript_reader::CommandCodeMessageActivity::AssistantResponse => {
+        crate::services::transcript_reader::adapters::commandcode::CommandCodeMessageActivity::AssistantResponse => {
             Some(TranscriptActivity::AssistantResponse)
         }
     }

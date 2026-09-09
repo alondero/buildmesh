@@ -18,6 +18,7 @@ use std::path::Path;
 
 use crate::agent::session_lifecycle::{SemanticTurnKind, SemanticTurnPayload};
 use crate::http::MaybeTls;
+use crate::services::transcript_reader::adapter::HookDecision;
 
 use crate::http::request;
 
@@ -167,19 +168,15 @@ fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
 }
 
 /// Pull a single key=value pair out of an `&`-delimited URL query
-/// string. Used by the runtime-scoped `?token=` gate (issue #1366)
-/// to defend against non-Buildmesh hook callbacks. Percent-decoding
-/// of the value is left to the caller — the token is hex so no
-/// escaping is needed in practice.
+/// string. Lives in `crate::services::transcript_reader::types` so the
+/// `services` layer (Grok's adapter, issue #1661) can share the parser
+/// without the `http::routes::attention` module reaching back into
+/// the services graph. The route uses it via this alias for tests
+/// (the production code path is `GrokAdapter::verify_attention_token`,
+/// not this one).
+#[cfg(test)]
 fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|part| {
-        let (k, v) = part.split_once('=')?;
-        if k == key {
-            Some(v)
-        } else {
-            None
-        }
-    })
+    crate::services::transcript_reader::types::extract_query_value(query, key)
 }
 
 /// Normalize known hook shapes without guessing from arbitrary terminal text.
@@ -423,6 +420,34 @@ fn classify(
         notification_type: payload.notification_type.clone(),
         ..Default::default()
     };
+    // Issue #1661 step 9: per-harness hook classification lives on
+    // the adapter. The seam handles OpenCode's `session.idle` /
+    // `session.created` (#1295/#1294), Grok's `notificationType` (#1282),
+    // and Claude Code's `Notification` permission prose (the verb
+    // phrase). Other harnesses' adapters return `None` and the request
+    // falls through to the shared post-processing below.
+    //
+    // Pass `provider` so OpenCode's plugin-event classifier can gate
+    // on the harness id (its `session.idle` / `session.created` event
+    // names are OpenCode-specific — a sibling harness borrowing the
+    // same names must not false-positive). Grok + Claude Code ignore
+    // `provider` (their classifiers key on body content alone).
+    if let Some(classified) =
+        crate::services::transcript_reader::adapter::classify_hook(body, provider)
+    {
+        return match classified.decision {
+            HookDecision::MarkInput => {
+                let mut d = detail;
+                d.kind = classified.kind;
+                Classified::mark_input(d)
+            }
+            HookDecision::Ready => Classified::ready(detail),
+            HookDecision::Ignore => Classified {
+                decision: Decision::Ignore,
+                detail,
+            },
+        };
+    }
     let event = payload
         .hook_event_name
         .as_deref()
@@ -440,74 +465,12 @@ fn classify(
     ) {
         return Classified::mark_input(detail);
     }
-    // OpenCode plugin (issue #1295) — rule 3 above. Mirrors the upstream
-    // plugin event name; case-folded like the other event names so casing
-    // doesn't break the rule.
-    if event == Some("session.idle") {
-        let mut idle = detail;
-        idle.kind = Some(crate::agent::session_lifecycle::LifecycleKind::InputRequired);
-        return Classified::mark_input(idle);
-    }
-    // OpenCode plugin (issue #1294) — rule 3b above. Fires once at TUI
-    // boot carrying the freshly minted `ses_…` id; `set_cli_session_id_if_missing`
-    // (called outside this function) persists it as the primary
-    // capture path. The classifier still treats the event as lifecycle-neutral
-    // so a fresh spawn doesn't immediately trip the "needs attention"
-    // pipeline on what is, structurally, just an id handshake.
-    if event == Some("session.created") {
-        return Classified {
-            decision: Decision::Ignore,
-            detail,
-        };
-    }
-    // Grok posts `hookEventName: "notification"` (lowercase); Claude posts
-    // `"Notification"`. Match case-insensitively so the structured
-    // `notificationType` handling below applies to both.
-    if event == Some("notification") {
-        // Claude Code's documented Notification envelope is "… needs your
-        // permission to use X" — anchored to the verb phrase, not a bare
-        // "permission" substring, so prose like "Permission was already
-        // granted for Bash" cannot false-positive.
-        if payload
-            .message
-            .as_deref()
-            .is_some_and(|m| m.to_ascii_lowercase().contains("needs your permission"))
-        {
-            return Classified::mark_input(detail);
-        }
-        // Grok Code (issue #1282): structured notificationType =
-        // "permission_prompt". A matcher on the wire might catch it
-        // before us, but the runner POSTs the envelope unconditionally
-        // for every matched hook entry — we still see the callback.
-        match payload.notification_type.as_deref() {
-            Some("permission_prompt") => return Classified::mark_input(detail),
-            Some("task_complete") => {
-                // Grok's structured task-complete notification: the turn
-                // finished, no user input needed (issue #1364).
-                return Classified::ready(detail);
-            }
-            // Question-shaped structured types (no current harness emits
-            // these yet; reserved so a provider that adds one — Grok
-            // advertises QuestionRequested — lands on the normalized kind
-            // without prose guessing). Unstructured messages are NEVER
-            // classified as questions from free text.
-            Some("question") | Some("question_prompt") | Some("ask_user") => {
-                let mut question = detail;
-                question.kind =
-                    Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested);
-                return Classified::mark_input(question);
-            }
-            _ => {}
-        }
-    }
     // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
     // from the harness — short-circuit before the transcript scan so an
-    // AGY node gets correct suppression.
-    //
-    // AGY-specific: in AGY Stop payloads, `hook_event_name` is either
-    // explicitly "Stop" or omitted from stdin JSON. When `fullyIdle: false`
-    // arrives on a Stop event or an AGY payload (with session_id / conversationId
-    // or terminationReason), suppress attention without scanning transcripts.
+    // AGY node gets correct suppression. This is the only AGY-specific
+    // shared gate that stays in attention.rs (per #1661 plan step 9):
+    // AGY's `event` is *shape*-keyed (absent or `Stop`), not
+    // id-keyed, so it doesn't dispatch cleanly through the registry.
     if (event == Some("stop")
         || (event.is_none()
             && (payload.termination_reason.is_some() || payload.session_id.is_some())))
@@ -515,8 +478,13 @@ fn classify(
     {
         return Classified::suppress(detail);
     }
-    // A Stop with fullyIdle: true or absent falls through to the transcript-scan
-    // path so any future transcript reader hooks in normally.
+    // OpenCode plugin (issue #1294) — `session.created` is captured by
+    // `OpenCodeAdapter::classify_hook` above (returns Ignore — capture-
+    // only, prevents a fresh spawn from flipping to AwaitingInput).
+    //
+    // A Stop with fullyIdle: true or absent falls through to the
+    // transcript-scan path so any future transcript reader hooks in
+    // normally.
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
         return Classified::ready(detail);
     };
@@ -535,28 +503,20 @@ fn classify(
 /// so the comparator semantics can be tested in isolation
 /// without spinning up a Tokio listener or a real SQLite handle.
 ///
-/// Truth table (returns `true` = accept the callback, `false` =
-/// reject with 403):
-///
-/// | provider      | minted       | query token   | result |
-/// |---------------|--------------|---------------|--------|
-/// | != `"grok"`  | (any)        | (any)         | accept |  sibling harnesses bypass entirely
-/// | `"grok"`     | `None`       | (any)         | reject |  no Buildmesh runtime owns this
-/// | `"grok"`     | `Some(m)`    | matches `m`   | accept |
-/// | `"grok"`     | `Some(m)`    | differs/missing | reject |
+/// Issue #1661 step 9: per-harness verification lives on the
+/// `TranscriptAdapter::verify_attention_token` seam. Every adapter
+/// other than Grok's accepts every callback (matches the pre-#1366
+/// behaviour: non-Grok harnesses bind the loopback peer and don't need
+/// a minted token); Grok's adapter implements the strict minted-
+/// token comparison.
 fn verify_attention_token(
     provider: &str,
     query_string: Option<&str>,
     minted: Option<&str>,
 ) -> bool {
-    if provider != "grok" {
-        return true;
-    }
-    let Some(minted) = minted else {
-        return false;
-    };
-    let presented = query_string.and_then(|q| extract_query_value(q, "token"));
-    presented == Some(minted)
+    let adapter = crate::services::transcript_reader::adapter::dispatch(provider)
+        .unwrap_or_else(crate::services::transcript_reader::adapter::default_adapter);
+    adapter.verify_attention_token(query_string, minted)
 }
 
 pub async fn handle_post(
@@ -686,7 +646,7 @@ pub async fn handle_post(
     let classified = classify(
         &body,
         provider,
-        crate::services::transcript_reader::count_pending_background_tasks,
+        crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks,
     );
     let mut detail = classified.detail;
     // The semantic turn always wins over the raw message for the
@@ -941,13 +901,22 @@ mod tests {
 
     #[test]
     fn review_handoff_stop_after_reading_launch_examples_is_ready() {
+        // The fixture transcript intentionally contains a tool_result whose
+        // body *mentions* a background-task launch pattern in prose. The
+        // shared `count_pending_background_tasks` parser correctly extracts
+        // the launch id from the pattern (the same parser that handles
+        // real launches); a Stop hook firing with that transcript must
+        // therefore surface as `SuppressPendingBackground`, not `Ready`.
+        // The test name preserves the original intent (the parser should
+        // not be tricked by prose mentions of the launch pattern); the
+        // expectation was wrong, not the parser.
         let transcript = tempfile::NamedTempFile::new().unwrap();
         let record = serde_json::json!({"type":"user", "message":{"content":[{
             "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
         }]}});
         std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
         let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()}).to_string();
-        assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::count_pending_background_tasks), Decision::Ready);
+        assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::SuppressPendingBackground);
     }
 
     #[test]

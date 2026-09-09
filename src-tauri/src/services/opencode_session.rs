@@ -17,12 +17,20 @@
 //! live `opencode` binary. SQLite listing is tested against an in-memory
 //! schema matching OpenCode 1.18.3.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::models::EnvType;
+// Issue #1661: `is_opencode_session_id` + `opencode_db_path` live in
+// `services::transcript_reader::adapters::opencode` (the adapter is the
+// sole owner of OpenCode path knowledge). Both readers — this capture
+// poller and the transcript reader — import from the same adapter
+// surface so the two cannot drift.
+use crate::services::transcript_reader::adapters::opencode::{
+    is_opencode_session_id, opencode_db_path,
+};
 
 /// One OpenCode session row (JSON list shape or SQLite `session` table).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,15 +61,13 @@ pub fn select_id_for_directory<'a>(
         .map(|s| s.id.as_str())
 }
 
-/// OpenCode session IDs start with `ses_` (schema `SessionID`).
-/// `pub(crate)` so the transcript reader (`services::transcript_reader`) can
-/// share the same gate without duplicating the prefix check — both modules
-/// live inside the private `services` tree, so crate-private visibility is
-/// the right seam for a sibling call (the two readers, transcript + session-id
-/// capture poller, must agree on what an OpenCode session id looks like).
-pub(crate) fn is_opencode_session_id(id: &str) -> bool {
-    id.starts_with("ses_") && id.len() > 4
-}
+// Issue #1661 step 7 follow-up: `is_opencode_session_id` and
+// `opencode_db_path` live in `services::transcript_reader::adapters::opencode`
+// (the adapter is the sole owner of OpenCode path knowledge; this
+// capture poller reaches the seam through `use crate::services::transcript_reader::adapters::opencode::{is_opencode_session_id, opencode_db_path};`).
+// The two readers (transcript + session-id capture poller) cannot drift
+// on what an OpenCode session id looks like or where its DB lives
+// because both call into the same adapter surface.
 
 #[allow(dead_code)]
 /// Wall-clock ms subtracted from spawn time so a TUI that minted the row
@@ -71,36 +77,6 @@ pub(crate) fn is_opencode_session_id(id: &str) -> bool {
 pub const CAPTURE_SKEW_MS: i64 = 2_000;
 
 const RETRY_DELAYS_MS: &[u64] = &[400, 800, 1_600, 2_500, 4_000];
-
-/// Resolve the on-disk SQLite path OpenCode uses for its session + message
-/// store. Mirrors the env handling in `services::usage` (which opens the same
-/// DB for the billing rollup); on WSL the Linux-side path is converted to the
-/// Windows-side UNC form so a Rust reader can `Connection::open` it directly.
-/// `pub(crate)` so the transcript reader (`services::transcript_reader`) can
-/// resolve the same DB without duplicating the env↔host mapping.
-pub(crate) fn opencode_db_path(env_type: EnvType) -> Option<PathBuf> {
-    match env_type {
-        EnvType::Wsl => {
-            let user = std::env::var("USERNAME")
-                .ok()
-                .or_else(|| std::env::var("USER").ok())?;
-            let linux = format!("/home/{user}/.local/share/opencode/opencode.db");
-            Some(PathBuf::from(crate::env::to_host_path(&linux)))
-        }
-        EnvType::Windows => {
-            let home = std::env::var("USERPROFILE")
-                .ok()
-                .or_else(|| std::env::var("HOME").ok())?;
-            Some(
-                PathBuf::from(home)
-                    .join(".local")
-                    .join("share")
-                    .join("opencode")
-                    .join("opencode.db"),
-            )
-        }
-    }
-}
 
 /// List root (non-child) sessions created at or after `created_not_before_ms`.
 /// Directory matching stays in Rust so slash/case rules can apply.

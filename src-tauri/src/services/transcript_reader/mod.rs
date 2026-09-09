@@ -28,33 +28,44 @@
 //! than someone else's lossy summary. Truncation only bounds payload size.
 //!
 //! [`Unavailable`]: UnavailableReason
-use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+pub(crate) mod types;
+// `TranscriptTail` and `UnavailableReason` are used by the reader's
+// own entry points below (return types of the public fns); re-exported
+// at `pub` so the public surface `crate::services::transcript_reader::TranscriptTail`
+// resolves for downstream IPC consumers (tauri commands, generated
+// TS bindings).
+// `ToolCall` / `Turn` are used externally by `coordinator::enrichment`
+// (test fixtures + `scrub_tail_masks_secrets_in_all_content_surfaces`);
+// `TranscriptTail` / `UnavailableReason` are the public return types of
+// the reader's `pub fn`s. Suppress the local unused-import warning —
+// Rust's lint doesn't track cross-module use of a `pub use` re-export.
+#[allow(unused_imports)]
+pub use types::{ToolCall, TranscriptTail, Turn, UnavailableReason};
+// `AssistantReport` is `pub(crate)` in `types` (it's a circuit-side
+// wire type, not part of the public IPC surface) — re-export at the
+// same `pub(crate)` visibility so `coordinator::enrichment::assistant_report`
+// can return it via `crate::services::transcript_reader::AssistantReport`.
+pub(crate) use types::AssistantReport;
+// Internal helpers used by the reader's own entry points below (NOT
+// re-exported — external callers reach the seam directly via the
+// adapter modules, issue #1661 step 10).
+use types::{Parsed, build_tail, effective_tail, empty_or_shape_changed};
+use adapters::claude_code::parse_turns;
+use adapters::opencode::{
+    opencode_resolve, parse_opencode_messages, read_opencode_digest,
+    read_opencode_message_rows, read_opencode_tail, OPENCODE_DIGEST_WINDOW,
+};
 
-use crate::env;
-use crate::models::EnvType;
-/// Per-turn text cap. Generous (this is the deep drill-in, not the scan) but
-/// bounded so a single huge assistant message can't dominate the payload.
-const MAX_TURN_TEXT: usize = 4000;
-/// Per-turn tool-call cap. Within one `message.id` the count is naturally small
-/// (parallel calls usually span separate message ids → separate turns), so this
-/// is defensive only — but it honours the same "no single turn dominates the
-/// payload" intent as [`MAX_TURN_TEXT`] (issue #335). Generous so a real turn is
-/// never clipped; a turn that hits it was already pathological.
-const MAX_TURN_TOOL_CALLS: usize = 50;
-/// Cap applied to every string leaf inside a tool call's raw `input`, so a
-/// `Write` carrying a whole file body doesn't blow up the response while the
-/// input's *structure* is still delivered raw.
-const MAX_TOOL_STRING: usize = 1000;
-/// Default tail length when the caller supplies none.
-pub const DEFAULT_TAIL: usize = 20;
-/// Hard ceiling on the caller-supplied tail, so a `?tail=100000` can't ask the
-/// reader to hold an unbounded transcript in memory.
-pub const MAX_TAIL: usize = 200;
+// Per-harness adapters + the registry seam. Issue #1661 step 1: Claude Code
+// is the first real adapter; the other six are thin wrappers around the
+// existing free functions in this module. Each harness migrates end-to-end
+// in its own commit (steps 2-8 of #1661).
+pub(crate) mod adapter;
+pub(crate) mod adapters;
 
 /// Which harness's on-disk JSONL shape a transcript uses. Selected once at the
 /// enrichment boundary (from the node's resolved harness adapter id) and passed
@@ -117,205 +128,17 @@ impl TranscriptFormat {
     }
 }
 // --- Shared Claude-Code JSONL primitives (also used by session_discovery) ---
-/// Encode a filesystem path the same way Claude Code does for its
-/// `~/.claude/projects/<encoded>` directory names: replace every
-/// non-alphanumeric character with `-`. On Windows this collapses the drive
-/// colon and `\` separators (and `.` in `.claude`); on Unix it covers `/`.
-/// So `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
-/// `X--src-buildmesh--claude-worktrees-foo`.
-pub(crate) fn encode_path(path: &str) -> String {
-    path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-/// Encode a filesystem path the way Command Code does for its
-/// `~/.commandcode/projects/<slug>` directory names: lowercase, replace every
-/// non-alphanumeric character with `-`, collapse consecutive `-` runs, and
-/// trim leading/trailing `-` (issue #1500).
-///
-/// For example `F:\src\buildmesh\.claude\worktrees\foo` becomes
-/// `f-src-buildmesh-claude-worktrees-foo`, and `/home/user/project` becomes
-/// `home-user-project`. This matches the on-disk layout observed in Command
-/// Code v1.43.0 and the `c-users-user` / `home-...` slugs reported upstream.
-/// Pass the CLI cwd form; for raw paths that may be WSL UNC
-/// (`\\wsl$\...`), normalize with `env::normalize_unc_to_wsl` first.
-pub(crate) fn commandcode_project_slug(path: &str) -> String {
-    let mut slug = String::with_capacity(path.len());
-    let mut last_was_dash = false;
-    for c in path.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash && !slug.is_empty() {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
-}
-/// True when raw message text is a synthetic Claude Code injection rather than
-/// genuine user input (e.g. the `local-command-caveat` wrapper). Such lines are
-/// not real turns and must be skipped.
-pub(crate) fn is_synthetic_message(text: &str) -> bool {
-    text.trim_start().starts_with("<local-command-caveat>")
-}
-/// Pull the text out of a message `content` field, which Claude Code writes
-/// either as a bare string (user prompts) or as an array of typed blocks
-/// (assistant output, tool results). Only `text` blocks contribute; `thinking`,
-/// `tool_use`, `tool_result`, `image`, etc. are not text. Multiple text blocks
-/// are joined with newlines.
-pub(crate) fn concat_text_blocks(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-/// Pull the text of only the **first** `text` block out of a message `content`
-/// field (or the whole string for a bare-string content). Unlike
-/// [`concat_text_blocks`] this never joins multiple blocks: `session_discovery`
-/// wants a single-line session *title* from the opening prompt, and joining all
-/// blocks with `\n` (which its `strip_tags` doesn't collapse) would corrupt the
-/// title for a multi-text-block user message (issue #335). For the common
-/// single-block message the two functions are identical.
-pub(crate) fn first_text_block(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .find_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("")
-            .to_string(),
-        _ => String::new(),
-    }
-}
-/// Truncate to at most `max` *bytes* (the right unit for bounding payload
-/// size), appending `…` if cut. Respects UTF-8 boundaries so we never split a
-/// multi-byte character "— for non-ASCII text the result is therefore fewer than
-/// `max` characters. `pub(crate)` so the sibling Claude-Code JSONL consumers
-/// (`agent_node_discovery`, formerly `session_discovery`) share one truncation
-/// rule "— divergence here is how the two copies of this fn used to drift
-/// silently (issue #340).
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-/// Recursively truncate every string leaf in a JSON value to `max` chars. Keeps
-/// the value's *shape* (so the Coordinator sees the real structure of a tool's
-/// input) while bounding the bytes any single string contributes.
-fn truncate_json_strings(value: serde_json::Value, max: usize) -> serde_json::Value {
-    use serde_json::Value;
-    match value {
-        Value::String(s) => Value::String(truncate(&s, max)),
-        Value::Array(arr) => Value::Array(
-            arr.into_iter()
-                .map(|v| truncate_json_strings(v, max))
-                .collect(),
-        ),
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, truncate_json_strings(v, max)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
+// `encode_path` / `is_synthetic_message` / `concat_text_blocks` /
+// `first_text_block` live in `services::transcript_paths` (issue #1661
+// step 5); `commandcode_project_slug` lives in
+// `adapters::commandcode`. All external callers have been updated
+// to import from those locations directly.
+
 // --- Wire types ---
-/// A single tool invocation the agent made, delivered raw (input structure
-/// preserved, individual string leaves truncated to [`MAX_TOOL_STRING`]).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ToolCall {
-    pub name: String,
-    pub input: serde_json::Value,
-}
-/// One logical transcript turn: a genuine user prompt, or one assistant message
-/// (Claude Code splits an assistant message across several JSONL lines that
-/// share a `message.id`; the reader coalesces them so a turn is the whole
-/// message "— text plus any tool calls it made).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Turn {
-    /// `"user"` or `"assistant"`.
-    pub role: String,
-    /// Concatenated text content, truncated to [`MAX_TURN_TEXT`]. May be empty
-    /// for an assistant turn that only made tool calls.
-    pub text: String,
-    /// Tool calls made in this turn (assistant turns only).
-    pub tool_calls: Vec<ToolCall>,
-}
-/// Why a transcript could not be read. Typed so the Coordinator can tell a
-/// genuinely-quiet node from a degraded rich layer (ADR-0008 Â§3) "— never a
-/// panic, never a silent empty result.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnavailableReason {
-    /// The provider doesn't produce a readable transcript at all (capability
-    /// flag off "— e.g. OpenCode, Agy, Terminal). Distinct from `NoSession` so a
-    /// Coordinator can tell "this provider never has a transcript" from "this
-    /// supported provider hasn't captured a session yet". The reader never
-    /// emits this itself; a route gates on the provider capability and returns
-    /// it before reading.
-    Unsupported,
-    /// The node has no captured CLI session id "— e.g. a supported provider that
-    /// never spawned or whose session id wasn't captured yet.
-    NoSession,
-    /// No transcript file exists at the expected on-disk location.
-    NoTranscript,
-    /// The transcript file exists but could not be opened or read (I/O error).
-    Unreadable,
-    /// The file was read and its lines were *structurally well-formed*, but it
-    /// carried no recognizable turns yet — a genuinely quiet/new session whose
-    /// only lines are deliberately-skipped ones (synthetic `local-command-caveat`
-    /// injections, tool-result echoes, thinking-only assistant lines) plus
-    /// non-message lines (`mode`/`system`/summary). Distinct from `ShapeChanged`
-    /// so a Coordinator can tell "nothing has happened yet" from "the rich layer
-    /// is broken, page me" (issue #335). Low-probability in practice (a spawned
-    /// node's first user prompt is itself a turn) but the two are now distinct.
-    Empty,
-    /// The file was read but a structurally-malformed `user`/`assistant` line was
-    /// seen (renamed/missing `message`/`role`/`content`) and no recognizable
-    /// turns could be parsed "— the Claude Code JSONL shape has changed. A busy
-    /// node must never look quiet, so this degrades loudly rather than returning
-    /// `[]` or the quieter `Empty`.
-    ShapeChanged,
-}
-/// The reader's result: either an available tail, or a typed unavailable
-/// reason. Serializes to a `{"status": "available" | "unavailable", ...}`
-/// envelope so it is `curl`-inspectable and shaped for a later MCP wrap.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum TranscriptTail {
-    Available {
-        /// The last N turns, oldest first.
-        turns: Vec<Turn>,
-        /// The most recent assistant text. When the node is `awaiting_input`
-        /// this *is the question it is blocked on* (ADR-0008 Â§4). `None` if no
-        /// assistant turn in the tail carried text.
-        last_assistant_message: Option<String>,
-    },
-    Unavailable {
-        reason: UnavailableReason,
-    },
-}
-impl TranscriptTail {
-    fn unavailable(reason: UnavailableReason) -> Self {
-        TranscriptTail::Unavailable { reason }
-    }
-}
+// Wire types (`ToolCall`, `Turn`, `UnavailableReason`, `TranscriptTail`,
+// `AssistantReport`) live in `super::types` and are re-exported at the top of
+// this file so existing call sites continue to resolve.
+
 // --- Public entry points ---
 /// Locate and read the tail of a node's transcript. `session_id` is the node's
 /// `cli_session_id`; `node_path` is its working directory (used by the Claude
@@ -353,159 +176,25 @@ fn locate_transcript(
     session_id: &str,
     node_path: &str,
 ) -> Option<PathBuf> {
-    // File-based formats only. OpenCode's per-session data lives in a
-    // shared SQLite DB rather than a transcript file (issue #1296), so
-    // `read_tail` / `read_last_assistant_message` short-circuit before
-    // this dispatch runs. The wildcard keeps the match exhaustive when
-    // new file-based formats are added later.
-    match format {
-        TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
-        TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
-        TranscriptFormat::Codex => find_codex_rollout(session_id),
-        TranscriptFormat::Agy => find_agy_transcript(session_id),
-        TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
-        TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
-        // OpenCode's per-session data lives in a shared SQLite DB
-        // rather than a transcript file (issue #1296), so `read_tail` /
-        // `read_last_assistant_message` short-circuit before this
-        // dispatch runs. Explicit arm so a future file-based variant
-        // added to `TranscriptFormat` triggers a compile error here
-        // and forces the map to be updated.
-        TranscriptFormat::OpenCode => None,
-    }
+    // Issue #1661: per-harness dispatch via the registry seam. Each
+    // adapter owns its own locator; the reader never holds per-format
+    // path knowledge. OpenCode's adapter returns `None` because its
+    // data lives in a shared SQLite DB (issue #1296); the reader's
+    // OpenCode path short-circuits before this is called.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.locate(adapter::LocateCtx {
+        session_id,
+        node_path,
+    })
 }
 
-/// Find the on-disk JSONL for an AGY conversation. AGY keeps the
-/// token-efficient `transcript.jsonl` first and the untruncated
-/// `transcript_full.jsonl` as a fallback (issue #1283); both live at
-/// `<brain_dir>/<conversation-id>/.system_generated/logs/`. The session id
-/// itself is the `conversation-id` and the brain root comes from
-/// `env::agy_brain_dir()` — globally keyed (not project-scoped).
-fn find_agy_transcript(session_id: &str) -> Option<PathBuf> {
-    agy_locator_in(&env::agy_brain_dir(), session_id)
-}
-
-/// Pure AGY locator — split from [`find_agy_transcript`] so the contract
-/// test drives the resolve against a temp brain root instead of touching
-/// `~/.gemini`. `pub(crate)` so the AGY capture poller
-/// (`services::agy_session`) resolves the same path rather than duplicating
-/// the layout. The path it returns (when both files exist) is
-/// `transcript.jsonl` first, falling back to `transcript_full.jsonl` when
-/// the short variant is missing — issue #1283 acceptance criterion #2.
-pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<PathBuf> {
-    let logs = brain_root
-        .join(session_id)
-        .join(".system_generated")
-        .join("logs");
-    let short = logs.join("transcript.jsonl");
-    if short.exists() {
-        return Some(short);
-    }
-    let full = logs.join("transcript_full.jsonl");
-    if full.exists() {
-        return Some(full);
-    }
-    None
-}
-
-/// The host-accessible Command Code session directory for an agent
-/// environment: `<home>/.commandcode/projects/<encoded-cwd>/` (issue #1500).
-/// Mirrors [`transcript_path`] (Claude Code): the transcript-format module
-/// composes the slug, while `env` owns the host-accessible projects base
-/// (including WSL translation). `spawn_path` is the CLI cwd form; raw WSL UNC
-/// paths are normalized first so `\\wsl$\<distro>\home\user\repo` resolves to
-/// the same slug the in-WSL CLI wrote (`home-user-repo`).
-pub(crate) fn commandcode_sessions_dir(
-    env_type: EnvType,
-    spawn_path: &str,
-) -> Option<PathBuf> {
-    let normalized = env::normalize_unc_to_wsl(spawn_path);
-    let projects = env::commandcode_projects_dir(env_type, &normalized)?;
-    let slug = commandcode_project_slug(&normalized);
-    if slug.is_empty() {
-        return None;
-    }
-    Some(projects.join(slug))
-}
-
-/// Find the Command Code session transcript for the node's runtime
-/// environment. Command Code stores one file per session under
-/// `<commandcode-home>/projects/<encoded-cwd>/<session-id>.jsonl` (issue
-/// #1500); WSL homes are converted to host-readable paths by the shared
-/// environment path module.
-fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
-    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let sessions_dir = commandcode_sessions_dir(env_type, node_path)?;
-    let path = commandcode_transcript_path_in(&sessions_dir, session_id);
-    path.exists().then_some(path)
-}
-
-/// Pure Command Code locator used by the contract test and kept separate from
-/// process-global home/environment discovery.
-pub(crate) fn commandcode_transcript_path_in(
-    sessions_root: &Path,
-    session_id: &str,
-) -> PathBuf {
-    sessions_root.join(format!("{session_id}.jsonl"))
-}
-/// Build the expected on-disk path of a Claude Code session transcript:
-/// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
-fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
-    env::claude_dir()
-        .join("projects")
-        .join(encode_path(node_path))
-        .join(format!("{session_id}.jsonl"))
-}
-
-/// Build the expected on-disk path of a Cursor CLI session transcript:
-/// `<cursor_dir>/projects/<workspace-slug>/agent-transcripts/<session>/<session>.jsonl`.
-fn cursor_transcript_path(session_id: &str, node_path: &str) -> PathBuf {
-    cursor_transcript_path_in(&env::cursor_dir(), session_id, node_path)
-}
-
-/// Pure path builder for Cursor transcripts, split from the environment lookup
-/// so the workspace layout can be tested without process-global state.
-pub(crate) fn cursor_transcript_path_in(
-    cursor_home: &Path,
-    session_id: &str,
-    node_path: &str,
-) -> PathBuf {
-    cursor_home
-        .join("projects")
-        .join(cursor_workspace_slug(node_path))
-        .join("agent-transcripts")
-        .join(session_id)
-        .join(format!("{session_id}.jsonl"))
-}
-
-/// Convert a workspace path into Cursor's lossy project directory slug.
-/// Cursor drops a leading separator, removes a Windows drive colon, and uses
-/// dashes for path separators and other non-alphanumeric characters.
-pub(crate) fn cursor_workspace_slug(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    let mut parts = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if let Some(first) = parts.first_mut() {
-        if first.len() == 2 && first.as_bytes()[1] == b':' {
-            first.truncate(1);
-            first.make_ascii_lowercase();
-        }
-    }
-
-    parts
-        .into_iter()
-        .map(|part| {
-            part.chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("-")
-}
+// `agy_locator_in` lives in `adapters::agy`; `commandcode_*` in
+// `adapters::commandcode`; `cursor_*` in `adapters::cursor`;
+// `claude_code::*` in `adapters::claude_code`; `codex::*` in
+// `adapters::codex`; `opencode::*` in `adapters::opencode`. All
+// external callers have been updated to import directly from the
+// adapter modules (issue #1661 step 10).
 
 // --- OpenCode transcript reader (issue #1296) ---
 //
@@ -550,431 +239,14 @@ pub(crate) fn cursor_workspace_slug(path: &str) -> String {
 // second query and the contract test
 // (`opencode_locator_reads_messages_from_file_backed_db`) is the pin.
 
-/// Fixed-row window for the Coordinator digest path. Chosen to be wide
-/// enough to span a typical user → assistant exchange (a few turns each
-/// with reasoning + tool + text parts) but bounded so a 10k-row session
-/// doesn't full-scan on every poll. Tuned so the digest finds the blocking
-/// question even when the latest row is a user reply.
-const OPENCODE_DIGEST_WINDOW: usize = 50;
+// `find_codex_rollout`, `find_codex_rollout_in`, `subdirs_sorted_desc`
+// moved to `adapters::codex` (issue #1661 step 6). Test-module
+// references below import directly from the adapter.
+// `read_opencode_*` / `parse_opencode_*` / OpenCode constants moved to
+// `adapters::opencode` (issue #1661 step 7). The reader's OpenCode
+// short-circuits in `read_tail` / `read_last_assistant_message` /
+// `read_assistant_report` import directly from the adapter.
 
-/// Row-to-turn factor for the full /log read path. OpenCode rows are
-/// message events, not turns — assistant turn coalescing, reasoning-only
-/// drop, and tool-only drop mean `factor` rows typically produce 1 turn.
-/// Factor > 1 ensures the caller can always extract `tail` turns once the
-/// parser has coalesced/dropped, even on dense conversations.
-const OPENCODE_TURN_TO_MESSAGE_FACTOR: usize = 3;
-
-/// SQLite busy_timeout the OpenCode reader applies on every open: lets a
-/// concurrent writer (the live OpenCode CLI) hold the lock briefly instead
-/// of returning `SQLITE_BUSY` to a Coordinator poll. **Bounded to 100 ms**
-/// so a `GET /nodes` poll over N OpenCode nodes cannot park a Tokio worker
-/// thread for longer than `100 ms × N` if every node hits a writer-held
-/// lock — the same worst-case bound every other adapter already accepts
-/// from `cwrap` / Claude-Code JSONL reads on the Tokio pool (issue #1380).
-///
-/// **Future project-wide fix.** A `run_blocking` wrapper around the sync
-/// SQLite I/O would offload this from the Tokio pool to the blocking
-/// worker pool, eliminating the per-poll stall entirely. The Coordinator
-/// already offloads `commands::pr` / `commands::github` / `commands::preferences`
-/// via the same pattern; applying it to all transcript readers (including
-/// the file-based ones) is the right scope — OpenCode-only would diverge
-/// the API without solving the wider exposure. Tracked as a follow-up.
-const OPENCODE_READER_BUSY_TIMEOUT_MS: u64 = 100;
-
-/// Read the row tail of an OpenCode session's `message` table. Returns the
-/// up-to-`row_budget` newest rows in chronological order (oldest → newest),
-/// matching how `opencode export <id>` orders them. Returns `None` on any
-/// I/O or query failure so callers can degrade to `Unreadable`.
-///
-/// `Limit` is bound as a real SQL parameter (`?2`) — no `format!` SQL,
-/// even though `limit` is server-controlled. The shape matches the rest
-/// of the reader's prepared statements and stays parameter-bound for the
-/// case where the upstream schema adds a filter column we don't control
-/// yet.
-fn read_opencode_messages(
-    db_path: &Path,
-    session_id: &str,
-    row_budget: usize,
-) -> Option<Vec<serde_json::Value>> {
-    Some(read_opencode_message_rows(db_path, session_id, row_budget)?
-        .into_iter().map(|(_, message)| message).collect())
-}
-
-fn read_opencode_message_rows(
-    db_path: &Path,
-    session_id: &str,
-    row_budget: usize,
-) -> Option<Vec<(String, serde_json::Value)>> {
-    use rusqlite::{Connection, OpenFlags};
-    use std::time::Duration;
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    if let Err(error) = conn.busy_timeout(Duration::from_millis(OPENCODE_READER_BUSY_TIMEOUT_MS)) {
-        // Busytimeout is best-effort — log but don't fail the read;
-        // a non-zero busy_timeout simply means concurrent writers will
-        // surface as SQLITE_BUSY (the previous behaviour).
-        tracing::debug!(
-            "opencode transcript reader: busy_timeout set failed ({error}); \
-             concurrent writes may degrade to Unreadable"
-        );
-    }
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, data FROM message \
-             WHERE session_id = ?1 \
-             ORDER BY time_created DESC \
-             LIMIT ?2",
-        )
-        .ok()?;
-    let mut latest = Vec::new();
-    let mut rows = stmt
-        .query(rusqlite::params![session_id, row_budget as i64])
-        .ok()?;
-    while let Some(row) = rows.next().ok()? {
-        let id: String = row.get(0).ok()?;
-        let data: String = row.get(1).ok()?;
-        // Each row's `data` is one message record. We accept any JSON shape
-        // here — structural validation lives in the parser so an unknown
-        // shape degrades as `ShapeChanged`, not a panic. Rows that aren't
-        // valid JSON are silently dropped (graceful failure on bad rows).
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-            latest.push((id, value));
-        }
-    }
-    // The query returned DESC; the parser consumes ASC (matches the
-    // natural timeline that `opencode export` orders by). Reverse once
-    // here so the parser never has to know about the bound direction.
-    latest.reverse();
-    Some(latest)
-}
-
-/// Pure tail reader over a Vec of OpenCode message values. Splits
-/// parse + result shaping so tests can drive the dispatch (env path
-/// resolution) and the parsing semantics independently — same split the
-/// `agy_locator_in` / `agy_locator` pair uses for the AGY adapter. The
-/// `tail` argument flows through `effective_tail` to the parser's
-/// rolling-buffer keep.
-pub(crate) fn read_opencode_tail_from_messages(
-    messages: &[serde_json::Value],
-    tail: usize,
-) -> TranscriptTail {
-    build_tail(parse_opencode_messages(messages, effective_tail(tail)))
-}
-
-/// Pure digest reader. Always returns `turns: Vec::new()` so the
-/// digest consumer's bounded-memory optimisation holds for OpenCode
-/// (issue #1296 review finding A — a pre-review implementation
-/// returned `Vec<Turn>` from this path and broke the digest contract).
-///
-/// **The degrade gate is on `turns.is_empty()`, NOT on
-/// `last_assistant_message.is_none()`.** A node that has only user
-/// turns (no assistant reply yet — actively running, or the user
-/// repeatedly typed prompts) must NOT degrade as `Empty`: that would
-/// mask an `awaiting_input` or in-flight node from the Coordinator
-/// digest. The digest returns `Available { turns: Vec::new(),
-/// last_assistant_message: None }` for an actively-working node and the
-/// Coordinator renders the spine fields (status, needs_feedback)
-/// regardless of the digest content.
-pub(crate) fn read_opencode_digest_from_messages(
-    messages: &[serde_json::Value],
-) -> TranscriptTail {
-    let parsed = parse_opencode_messages(messages, 1);
-    // Only degrade when the parser saw no turns at all — i.e., empty
-    // window (brand-new session before the user's first prompt) or
-    // every line was malformed (ShapeChanged). An active node with
-    // `parsed.turns = [user turn]` is fine: the digest records `None`
-    // for `last_assistant_message` until the agent speaks.
-    if parsed.turns.is_empty() {
-        return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
-    }
-    TranscriptTail::Available {
-        turns: Vec::new(),
-        last_assistant_message: parsed.last_assistant_message,
-    }
-}
-
-/// Open the OpenCode SQLite DB and read the latest `tail` turns (with a
-/// `factor` row budget to span assistant coalescing) for a session_id.
-/// Wraps [`read_opencode_tail_from_messages`] over the rows the locator
-/// returns, and degrades through the same [`UnavailableReason`] ladder
-/// as every other harness so the Coordinator's `/nodes/{id}/log`
-/// endpoint sees a uniform error surface.
-pub(crate) fn read_opencode_tail(
-    session_id: Option<&str>,
-    node_path: &str,
-    tail: usize,
-) -> TranscriptTail {
-    let (db_path, session_id) = match opencode_resolve(session_id, node_path) {
-        Ok(pair) => pair,
-        Err(reason) => return TranscriptTail::unavailable(reason),
-    };
-    let row_budget = effective_tail(tail).saturating_mul(OPENCODE_TURN_TO_MESSAGE_FACTOR);
-    let Some(messages) = read_opencode_messages(&db_path, &session_id, row_budget) else {
-        return TranscriptTail::unavailable(UnavailableReason::Unreadable);
-    };
-    read_opencode_tail_from_messages(&messages, tail)
-}
-
-/// Coordinator digest read path (`GET /nodes`). Resolves the env-aware
-/// DB path, fetches a fixed-size window (independent of the caller-
-/// supplied `tail`, which is ignored on every digest path), and shapes
-/// the result through [`read_opencode_digest_from_messages`]. Mirrors
-/// the AGY split: test the semantics with explicit messages, drive the
-/// dispatch through this.
-pub(crate) fn read_opencode_digest(
-    session_id: Option<&str>,
-    node_path: &str,
-) -> TranscriptTail {
-    let (db_path, session_id) = match opencode_resolve(session_id, node_path) {
-        Ok(pair) => pair,
-        Err(reason) => return TranscriptTail::unavailable(reason),
-    };
-    let Some(messages) =
-        read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
-    else {
-        return TranscriptTail::unavailable(UnavailableReason::Unreadable);
-    };
-    read_opencode_digest_from_messages(&messages)
-}
-
-/// Shared session-id + DB-path resolver for both OpenCode read paths.
-/// Returns `Some((PathBuf, String))` on success; `None` on NoSession /
-/// NoTranscript, with `session_id: None` on the error path so the caller
-/// can map back to the right [`UnavailableReason`] via
-/// [`opencode_unavailable_reason`].
-fn opencode_resolve<'a>(
-    session_id: Option<&'a str>,
-    node_path: &str,
-) -> Result<(PathBuf, &'a str), UnavailableReason> {
-    let session_id = session_id
-        .filter(|s| !s.is_empty())
-        .ok_or(UnavailableReason::NoSession)?;
-    if !crate::services::opencode_session::is_opencode_session_id(session_id) {
-        // A non-`ses_` id cannot match any OpenCode row; degrade quietly
-        // rather than opening the DB to find nothing. The gate is shared
-        // with `services::opencode_session::is_opencode_session_id` so
-        // the two readers (transcript + capture poller) cannot drift on
-        // what an OpenCode session id looks like.
-        return Err(UnavailableReason::NoTranscript);
-    }
-    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let db_path = crate::services::opencode_session::opencode_db_path(env_type)
-        .ok_or(UnavailableReason::NoTranscript)?;
-    if !db_path.exists() {
-        return Err(UnavailableReason::NoTranscript);
-    }
-    Ok((db_path, session_id))
-}
-/// Parse a slice of OpenCode message envelopes into the shared [`Parsed`]
-/// contract: rolling `keep`-bounded turn window, whole-stream
-/// last-assistant-message tracking, malformed-flag so a renamed-field
-/// message degrades as `ShapeChanged`. Maps each message's `parts` array
-/// onto text + tool calls:
-///
-/// - `text` parts → concatenated into `Turn.text`
-/// - `reasoning` parts → silently dropped (chain-of-thought, not dialogue)
-/// - `tool` parts → converted to [`ToolCall`]s using `state.input` and
-///   `state.title` as the tool name (falling back to the part's `name`)
-/// - `step-start` / `step-finish` / unknown parts → silently skipped, never
-///   flagged (the "graceful failure on unknown event types" rule)
-///
-/// A user turn with no `text` parts, or an assistant turn with neither
-/// text nor tool calls, is dropped — same as Claude's thinking-only line.
-pub(crate) fn parse_opencode_messages(
-    messages: &[serde_json::Value],
-    keep: usize,
-) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-
-    for message in messages {
-        // Each message envelope is `{"info": {role, ...}, "parts": [...]}`. A
-        // missing `info.role` is a structural break on a recognized message
-        // shape — flag malformed. A missing `parts` is empty (no text, no
-        // tool calls); the message is then dropped as a no-op.
-        let Some(info) = message.get("info") else {
-            saw_malformed = true;
-            continue;
-        };
-        let Some(role) = info.get("role").and_then(|r| r.as_str()) else {
-            saw_malformed = true;
-            continue;
-        };
-        if role != "user" && role != "assistant" {
-            // Unknown role on a recognized envelope — flag as malformed so a
-            // future "system" or "tool" role doesn't silently degrade.
-            saw_malformed = true;
-            continue;
-        }
-        let parts = message
-            .get("parts")
-            .and_then(|p| p.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
-
-        let text = concat_opencode_text_parts(parts);
-        let mut tool_calls = extract_opencode_tool_calls(parts);
-
-        if role == "user" {
-            // Empty user prompts (e.g. a file-only attachment with no text)
-            // are dropped — mirrors Claude's empty `user` line rule.
-            if text.trim().is_empty() {
-                continue;
-            }
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-            continue;
-        }
-
-        // Assistant turn: drop thinking-only (text empty AND no tool calls).
-        if text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-        cap_tool_calls(&mut tool_calls);
-        let turn = Turn {
-            role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
-            tool_calls,
-        };
-        if !turn.text.is_empty() {
-            last_assistant_message = Some(turn.text.clone());
-        }
-        push_bounded(&mut turns, turn, keep);
-    }
-
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
-
-/// Parse the on-disk export JSON shape (`{info, messages}`) used by the
-/// fixture + the `opencode export <id>` CLI. Pure: passes the `messages`
-/// slice straight to [`parse_opencode_messages`]. A missing `messages`
-/// array is a structural break — `ShapeChanged`, not `Empty`. An empty
-/// `messages` array is a brand-new session — `Empty`.
-///
-/// **Test-only helper** — the production runtime path uses
-/// [`read_opencode_messages`] (which returns `Vec<serde_json::Value>`
-/// directly, with no envelope) and feeds that to
-/// [`parse_opencode_messages`] without going through this wrapper. The
-/// fixture + parser contract tests are the only callers; cargo's
-/// `dead_code` analysis doesn't see `#[cfg(test)]` use-sites in some
-/// versions, hence the `#[allow(dead_code)]`.
-#[allow(dead_code)]
-pub(crate) fn parse_opencode_export(
-    export: &serde_json::Value,
-    keep: usize,
-) -> Parsed {
-    match export.get("messages").and_then(|m| m.as_array()) {
-        Some(messages) => parse_opencode_messages(messages, keep),
-        None => Parsed {
-            turns: Vec::new(),
-            last_assistant_message: None,
-            saw_malformed: true,
-        },
-    }
-}
-
-/// Concatenate the `text` parts of an OpenCode message, separated by
-/// newlines. Reasoning parts are deliberately excluded — chain-of-thought is
-/// transport plumbing, not Coordinator dialogue (matches Claude's
-/// `thinking`-block skip). Returns the empty string when no `text` parts
-/// exist (an assistant turn then degrades to "tool calls only").
-fn concat_opencode_text_parts(parts: &[serde_json::Value]) -> String {
-    parts
-        .iter()
-        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
-        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Pull `tool` parts out of an OpenCode message into the shared
-/// [`ToolCall`] wire shape (`{name, input}`). The OpenCode export places the
-/// tool name on `state.title` (e.g. `"read_file"`, `"search_replace"`) and
-/// the raw input on `state.input`; output lives on `state.output` but the
-/// Coordinator only consumes `input` — output re-emission is a future
-/// harness-shape addition. Unknown part types (`file`, `patch`, `agent`, …)
-/// are silently dropped, mirroring Grok's "graceful failure on unknown event
-/// types" rule (#1281).
-fn extract_opencode_tool_calls(parts: &[serde_json::Value]) -> Vec<ToolCall> {
-    parts
-        .iter()
-        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool"))
-        .filter_map(|p| {
-            let state = p.get("state")?;
-            let name = state
-                .get("title")
-                .and_then(|n| n.as_str())
-                .or_else(|| p.get("name").and_then(|n| n.as_str()))
-                .unwrap_or("")
-                .to_string();
-            let input = state.get("input").cloned().unwrap_or(serde_json::Value::Null);
-            Some(ToolCall {
-                name,
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            })
-        })
-        .collect()
-}
-/// Locate a Codex rollout file `rollout-<timestamp>-<session_id>.jsonl` under
-/// `<codex home>/sessions/YYYY/MM/DD/`. Codex cannot relocate its sessions dir
-/// per-project (issue #885), so the global one is walked — fixed depth 3,
-/// at most a few hundred day dirs, <10ms cold.
-fn find_codex_rollout(session_id: &str) -> Option<PathBuf> {
-    find_codex_rollout_in(&env::codex_dir().join("sessions"), session_id)
-}
-/// Pure walk over an explicit sessions root, split from [`find_codex_rollout`]
-/// so tests drive it against a temp directory instead of `~/.codex`. Walks
-/// newest-first (years, months, days each sorted descending) so the common
-/// case — a recent session — terminates after a handful of dirs.
-fn find_codex_rollout_in(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    let suffix = format!("-{session_id}.jsonl");
-    for year in subdirs_sorted_desc(sessions_dir) {
-        for month in subdirs_sorted_desc(&year) {
-            for day in subdirs_sorted_desc(&month) {
-                let Ok(entries) = fs::read_dir(&day) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let matches = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.ends_with(&suffix));
-                    if matches {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-/// Immediate subdirectories of `dir`, sorted by name descending. Date-named
-/// dirs (`2026`, `07`, `18`) sort chronologically, so descending = newest first.
-fn subdirs_sorted_desc(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-    dirs
-}
 /// Parse the tail directly from a JSONL file. Split out from [`read_tail`] so
 /// the contract test can point it at a checked-in fixture without touching
 /// `~/.claude`. Opens the file, parses turns, and returns the last `tail` of
@@ -1000,26 +272,31 @@ fn parse_transcript(
     keep: usize,
 ) -> Parsed {
     // JSONL pipeline only. OpenCode never reaches this dispatch — see
-    // the comment on `locate_transcript`. The wildcard arm returns an
-    // empty `Parsed` (no turns, no digest message) so a future file-based
-    // harness that ends up routed here in error degrades as `Empty`,
-    // not a panic.
+    // Issue #1661: parse dispatch goes through the registry seam. Every
+    // registered adapter (claude_code, agy, codex, cursor, commandcode,
+    // grok) handles its own parser; OpenCode short-circuits before this
+    // is reached so its adapter's `parse` is unreachable in practice.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.parse(Box::new(lines), keep)
+}
+
+/// Map a [`TranscriptFormat`] to its adapter's harness id (issue #1661).
+/// Will collapse to a direct `&'static str` once the enum is replaced in
+/// a later step; for now this is the bridge from the public `TranscriptFormat`
+/// API to the registry's `&str` keys.
+fn adapter_id_for_format(format: TranscriptFormat) -> &'static str {
     match format {
-        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
-        TranscriptFormat::Codex => parse_codex_turns(lines, keep),
-        TranscriptFormat::Agy => parse_agy_turns(lines, keep),
-        TranscriptFormat::Grok => parse_grok_turns(lines, keep),
-        TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
-        // OpenCode short-circuits before `read_tail_from_file` is
-        // reached (issue #1296) — every other adapter is JSONL-backed
-        // and parses line-shaped input. Explicit arm keeps the match
-        // exhaustive; a future file-based harness added to the enum
-        // will trigger a compile error here.
-        TranscriptFormat::OpenCode => Parsed {
-            turns: Vec::new(),
-            last_assistant_message: None,
-            saw_malformed: false,
-        },
+        TranscriptFormat::ClaudeCode => "claude_code",
+        TranscriptFormat::Agy => "agy",
+        TranscriptFormat::Codex => "codex",
+        TranscriptFormat::Cursor => "cursor",
+        TranscriptFormat::CommandCode => "commandcode",
+        TranscriptFormat::Grok => "grok",
+        // OpenCode's adapter's `parse` is unreachable (the reader
+        // short-circuits to `read_opencode_*` before `parse_transcript`
+        // runs); routing through the registry still resolves correctly.
+        TranscriptFormat::OpenCode => "opencode",
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -1056,11 +333,8 @@ pub fn read_last_assistant_message(
     }
     read_last_assistant_message_from_file(&path, format)
 }
-#[derive(Debug, Clone)]
-pub(crate) struct AssistantReport {
-    pub text: String,
-    pub revision: String,
-}
+// `AssistantReport` moved to `super::types` (a wire type used by the reader's
+// circuit-report path; not harness-specific).
 
 /// A circuit needs the identity of the assistant response, not the file's
 /// mtime: a new user prompt or tool event also changes the transcript file.
@@ -1135,68 +409,11 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
 /// over the collected window below, avoiding the old O(lines × full-parser)
 /// loop on large transcript tails.
 fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
-    };
-    match format {
-        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => {
-            value.get("type").and_then(|kind| kind.as_str()) == Some("assistant")
-                && value
-                    .get("message")
-                    .and_then(|message| message.get("role"))
-                    .and_then(|role| role.as_str())
-                    == Some("assistant")
-                && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
-                    .trim()
-                    .is_empty()
-        }
-        TranscriptFormat::Codex => {
-            matches!(
-                value.get("type").and_then(|kind| kind.as_str()),
-                Some("response_item") | Some("event_msg")
-            ) && value
-                .get("payload")
-                .is_some_and(|payload| {
-                    payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
-                        && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !payload
-                            .get("content")
-                            .map(codex_concat_text)
-                            .unwrap_or_default()
-                            .trim()
-                            .is_empty()
-                })
-        }
-        TranscriptFormat::CommandCode => {
-            value.get("type").and_then(|kind| kind.as_str()) == Some("message")
-                && value.get("message").is_some_and(|message| {
-                    message.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !concat_text_blocks(message.get("content"))
-                            .trim()
-                            .is_empty()
-                })
-        }
-        TranscriptFormat::Agy => {
-            value.get("source").and_then(|source| source.as_str()) == Some("MODEL")
-                && value
-                    .get("content")
-                    .and_then(|content| content.as_str())
-                    .is_some_and(|text| !text.trim().is_empty())
-        }
-        TranscriptFormat::Grok => {
-            value.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                && value.get("content").is_some_and(|content| match content {
-                    serde_json::Value::String(text) => !text.trim().is_empty(),
-                    serde_json::Value::Array(blocks) => blocks
-                        .iter()
-                        .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
-                        .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
-                        .any(|text| !text.trim().is_empty()),
-                    _ => false,
-                })
-        }
-        TranscriptFormat::OpenCode => false,
-    }
+    // Issue #1661: per-harness dispatch via the registry seam. Each adapter
+    // owns its own line predicate; the reader never holds per-format logic.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.line_has_assistant_text(line)
 }
 
 /// Cheap file-level reader. See [`read_last_assistant_message`].
@@ -1267,220 +484,16 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
     let _ = buf_reader.read_until(b'\n', &mut discard);
     Some(parse_transcript(format, buf_reader.lines().map_while(Result::ok), 1))
 }
-/// Effective tail length: `0` …"™ default, otherwise clamp to the ceiling.
-fn effective_tail(tail: usize) -> usize {
-    if tail == 0 {
-        DEFAULT_TAIL
-    } else {
-        tail.min(MAX_TAIL)
-    }
-}
-/// The outcome of parsing JSONL lines into turns. Carries the *bounded* tail of
-/// turns (the last `keep`, so memory is O(keep) even for a many-MB transcript —
-/// issue #335), the last assistant message text seen across the **whole** stream
-/// (not just the retained window, so a small tail still surfaces the blocking
-/// question), and whether any structurally-malformed `user`/`assistant` line was
-/// seen (issue #335: lets [`empty_or_shape_changed`] tell a broken Claude Code
-/// shape from a genuinely-quiet session that simply has no turns yet).
-#[derive(Debug, PartialEq)]
-pub(crate) struct Parsed {
-    turns: Vec<Turn>,
-    last_assistant_message: Option<String>,
-    saw_malformed: bool,
-}
-/// Build the wire result from a [`Parsed`]: an `Available` tail, or — for a file
-/// that yielded no turns — the typed empty-vs-shape-changed degrade.
-fn build_tail(parsed: Parsed) -> TranscriptTail {
-    if parsed.turns.is_empty() {
-        return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
-    }
-    TranscriptTail::Available {
-        turns: parsed.turns,
-        last_assistant_message: parsed.last_assistant_message,
-    }
-}
-/// The degrade reason for a file that opened but yielded no turns: `ShapeChanged`
-/// (loud) when a malformed message line proves the recognizable shape is gone,
-/// else `Empty` (quiet) for a genuinely-new/quiet session (issue #335).
-fn empty_or_shape_changed(saw_malformed: bool) -> UnavailableReason {
-    if saw_malformed {
-        UnavailableReason::ShapeChanged
-    } else {
-        UnavailableReason::Empty
-    }
-}
-/// Parse JSONL lines into logical turns, retaining only the last `keep` of them
-/// in a rolling buffer (issue #335: bounds held memory regardless of transcript
-/// size). Skips every non-message line type (`mode`, `queue-operation`,
-/// `file-history-snapshot`, `system`, summaries, …), synthetic injections, and
-/// pure tool-result echoes. Consecutive assistant lines sharing a `message.id`
-/// are coalesced into one turn (Claude Code splits one assistant message "—
-/// thinking / text / tool_use "— across several lines).
-fn parse_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    // Always retain at least the open turn so a split assistant message can
-    // still coalesce its continuation lines (the open turn is never evicted —
-    // eviction only drops the front).
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    // Tracks the message.id of the in-progress assistant turn so the next line
-    // of the same message merges instead of starting a new turn.
-    let mut open_assistant_id: Option<String> = None;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let entry_type = val.get("type").and_then(|t| t.as_str());
-        if entry_type != Some("user") && entry_type != Some("assistant") {
-            continue;
-        }
-        // From here the line claims to be a user/assistant message. A missing or
-        // renamed `message`/`role`/`content` is a structural break in the Claude
-        // Code shape (issue #335) — flag it so an all-broken file degrades loudly
-        // as `ShapeChanged`, while a file whose only non-turn lines were
-        // *deliberately* skipped (synthetic/echo/thinking) degrades as `Empty`.
-        let Some(message) = val.get("message") else {
-            saw_malformed = true;
-            continue;
-        };
-        let role = message.get("role").and_then(|r| r.as_str());
-        if role != Some("user") && role != Some("assistant") {
-            saw_malformed = true;
-            continue;
-        }
-        let role = role.unwrap();
-        let Some(content) = message.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        let content = Some(content);
-        let text = concat_text_blocks(content);
-        let mut tool_calls = extract_tool_calls(content);
-        // Skip synthetic user injections (local-command-caveat) and pure
-        // tool-result echoes (a user line carrying only tool output). These are
-        // well-formed lines we choose not to surface — never `ShapeChanged`.
-        if role == "user" {
-            if is_synthetic_message(&text) {
-                open_assistant_id = None;
-                continue;
-            }
-            if text.trim().is_empty() {
-                // No real text and (user lines never carry tool_use) …"™ echo.
-                open_assistant_id = None;
-                continue;
-            }
-        }
-        // An assistant line with neither text nor tool calls (e.g. a lone
-        // `thinking` block) carries nothing the Coordinator can use.
-        if role == "assistant" && text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-        if role == "assistant" {
-            let id = message
-                .get("id")
-                .and_then(|i| i.as_str())
-                .map(|s| s.to_string());
-            // Coalesce with the open assistant turn iff the ids match and are
-            // non-empty; otherwise this starts a fresh turn.
-            if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
-                if id == open {
-                    if let Some(last) = turns.back_mut() {
-                        merge_into(last, &text, tool_calls);
-                        if !last.text.is_empty() {
-                            last_assistant_message = Some(last.text.clone());
-                        }
-                        continue;
-                    }
-                }
-            }
-            open_assistant_id = id;
-            cap_tool_calls(&mut tool_calls);
-            let turn = Turn {
-                role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
-                tool_calls,
-            };
-            if !turn.text.is_empty() {
-                last_assistant_message = Some(turn.text.clone());
-            }
-            push_bounded(&mut turns, turn, keep);
-        } else {
-            open_assistant_id = None;
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
-/// Push a turn into the rolling buffer, evicting the oldest if it now exceeds
-/// `keep`. Only the front is dropped, so the most-recent (open) turn always
-/// survives for a continuation line to coalesce into.
-fn push_bounded(turns: &mut VecDeque<Turn>, turn: Turn, keep: usize) {
-    turns.push_back(turn);
-    while turns.len() > keep {
-        turns.pop_front();
-    }
-}
-/// Bound a turn's tool-call count to [`MAX_TURN_TOOL_CALLS`] (issue #335), so no
-/// single turn dominates the payload even if a message carries a pathological
-/// number of parallel tool calls.
-fn cap_tool_calls(tool_calls: &mut Vec<ToolCall>) {
-    tool_calls.truncate(MAX_TURN_TOOL_CALLS);
-}
-/// Merge a continuation line of the same assistant message into the open turn:
-/// append any text (re-truncating the combined result) and add its tool calls
-/// (re-capping the combined list so a turn split across many lines still honours
-/// [`MAX_TURN_TOOL_CALLS`]).
-fn merge_into(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>) {
-    if !more_text.trim().is_empty() {
-        let combined = if turn.text.is_empty() {
-            more_text.to_string()
-        } else {
-            format!("{}\n{}", turn.text, more_text)
-        };
-        turn.text = truncate(&combined, MAX_TURN_TEXT);
-    }
-    turn.tool_calls.append(&mut more_tools);
-    cap_tool_calls(&mut turn.tool_calls);
-}
-/// Pull `tool_use` blocks out of a message `content` array into [`ToolCall`]s,
-/// truncating string leaves in each raw `input`.
-fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<ToolCall> {
-    let Some(serde_json::Value::Array(blocks)) = content else {
-        return Vec::new();
-    };
-    blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-        .map(|b| {
-            let name = b
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
-            ToolCall {
-                name,
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            }
-        })
-        .collect()
-}
+// `effective_tail`, `Parsed`, `build_tail`, `empty_or_shape_changed` moved to
+// `super::types` (format-agnostic, shared by every TranscriptAdapter).
+// `parse_turns` + `extract_tool_calls` moved to
+// `adapters::claude_code` (issue #1661 step 8). The Claude Code
+// adapter is the sole owner of its message-id-coalescing parser; the
+// test module imports each parser directly.
+
+// `push_bounded`, `cap_tool_calls`, `merge_into` moved to `super::types`
+// (format-agnostic rolling-buffer helpers).
+
 // --- Codex rollout parser (issue #885 / #887) ---
 //
 // Codex writes `rollout-<timestamp>-<session-id>.jsonl` files whose lines are
@@ -1498,174 +511,8 @@ fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<ToolCall> {
 // arrives — mapping onto the same "one turn = text + its tool calls" shape the
 // Claude parser produces.
 
-/// True for Codex's injected context messages (`<user_instructions>` /
-/// `<environment_context>` wrappers) — session plumbing, not genuine user
-/// turns, mirroring [`is_synthetic_message`] for Claude Code.
-fn is_codex_synthetic(text: &str) -> bool {
-    let t = text.trim_start();
-    t.starts_with("<user_instructions>") || t.starts_with("<environment_context>")
-}
-
-/// Pull the text out of a Codex message `content` array. Codex types its
-/// blocks `input_text` (user) / `output_text` (assistant); accept both plus a
-/// plain `text` for defensive breadth. Multiple blocks join with newlines.
-fn codex_concat_text(content: &serde_json::Value) -> String {
-    match content {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(blocks) => blocks
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b.get("type").and_then(|t| t.as_str()),
-                    Some("input_text") | Some("output_text") | Some("text")
-                )
-            })
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// A Codex `function_call`'s `arguments` is either a JSON object or a
-/// string-encoded JSON blob (the OpenAI wire form). Decode the string form so
-/// the Coordinator sees the input's structure, not an escaped blob; a string
-/// that isn't valid JSON is delivered as-is.
-fn codex_tool_input(arguments: Option<&serde_json::Value>) -> serde_json::Value {
-    match arguments {
-        Some(serde_json::Value::String(s)) => {
-            serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
-        }
-        Some(v) => v.clone(),
-        None => serde_json::Value::Null,
-    }
-}
-
-/// Parse Codex rollout JSONL lines into logical turns, honouring the same
-/// [`Parsed`] contract as [`parse_turns`]: rolling `keep`-bounded turn window,
-/// whole-stream last-assistant-message tracking, and a malformed flag so a
-/// Codex format drift degrades loudly as `ShapeChanged`, never as a quiet
-/// `Empty`. Dispatches on the *payload* type rather than the envelope type
-/// (`response_item` vs `event_msg`) — Codex has carried `function_call`
-/// under both across versions.
-fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    // The trailing turn is an assistant turn opened by function_call events;
-    // the turn's closing assistant message merges into it.
-    let mut assistant_open = false;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let outer = val.get("type").and_then(|t| t.as_str());
-        if outer != Some("response_item") && outer != Some("event_msg") {
-            // session_meta, turn_context, compaction markers, … — not turns.
-            continue;
-        }
-        let Some(payload) = val.get("payload") else {
-            saw_malformed = true;
-            continue;
-        };
-        match payload.get("type").and_then(|t| t.as_str()) {
-            Some("message") => {
-                let role = payload.get("role").and_then(|r| r.as_str());
-                if role != Some("user") && role != Some("assistant") {
-                    saw_malformed = true;
-                    continue;
-                }
-                let Some(content) = payload.get("content") else {
-                    saw_malformed = true;
-                    continue;
-                };
-                let text = codex_concat_text(content);
-                if role == Some("user") {
-                    assistant_open = false;
-                    if is_codex_synthetic(&text) || text.trim().is_empty() {
-                        continue;
-                    }
-                    push_bounded(
-                        &mut turns,
-                        Turn {
-                            role: "user".to_string(),
-                            text: truncate(&text, MAX_TURN_TEXT),
-                            tool_calls: Vec::new(),
-                        },
-                        keep,
-                    );
-                } else {
-                    if text.trim().is_empty() {
-                        assistant_open = false;
-                        continue;
-                    }
-                    if assistant_open {
-                        if let Some(last) = turns.back_mut() {
-                            merge_into(last, &text, Vec::new());
-                            if !last.text.is_empty() {
-                                last_assistant_message = Some(last.text.clone());
-                            }
-                        }
-                    } else {
-                        let turn = Turn {
-                            role: "assistant".to_string(),
-                            text: truncate(&text, MAX_TURN_TEXT),
-                            tool_calls: Vec::new(),
-                        };
-                        last_assistant_message = Some(turn.text.clone());
-                        push_bounded(&mut turns, turn, keep);
-                    }
-                    // The assistant's text message closes the turn; later
-                    // function_calls belong to the next one.
-                    assistant_open = false;
-                }
-            }
-            Some("function_call") => {
-                let name = payload
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let call = ToolCall {
-                    name,
-                    input: truncate_json_strings(
-                        codex_tool_input(payload.get("arguments")),
-                        MAX_TOOL_STRING,
-                    ),
-                };
-                if assistant_open {
-                    if let Some(last) = turns.back_mut() {
-                        last.tool_calls.push(call);
-                        cap_tool_calls(&mut last.tool_calls);
-                    }
-                } else {
-                    push_bounded(
-                        &mut turns,
-                        Turn {
-                            role: "assistant".to_string(),
-                            text: String::new(),
-                            tool_calls: vec![call],
-                        },
-                        keep,
-                    );
-                    assistant_open = true;
-                }
-            }
-            // function_call_output (tool results), reasoning, token_count, … —
-            // deliberately skipped, like Claude's tool_result echoes.
-            _ => {}
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
+// `is_codex_synthetic`, `codex_concat_text`, `codex_tool_input`,
+// `parse_codex_turns` moved to `adapters::codex` (issue #1661 step 6).
 
 // --- Command Code transcript parser (issue #1407) ---
 //
@@ -1685,155 +532,9 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
 /// definition of a real user/assistant turn cannot drift from the transcript
 /// reader's. In particular, thinking/reasoning-only and tool-result records
 /// are deliberately absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandCodeMessageActivity {
-    UserTurn,
-    ToolUse,
-    ToolResult,
-    AssistantResponse,
-}
-
-/// Classify a Command Code message payload using the canonical text and tool
-/// extraction rules. Empty, synthetic, tool-result, thinking, and reasoning
-/// records are classified separately so the watcher can clear pending tool
-/// calls, while the digest parser still omits them from normalized turns.
-pub(crate) fn commandcode_message_activity(
-    message: &serde_json::Value,
-) -> Option<CommandCodeMessageActivity> {
-    let role = message.get("role")?.as_str()?;
-    let content = message.get("content")?;
-    let text = concat_text_blocks(Some(content));
-    let tool_calls = extract_tool_calls(Some(content));
-
-    match role {
-        "user" if contains_tool_result(content) => Some(CommandCodeMessageActivity::ToolResult),
-        "user" if is_synthetic_message(&text) || text.trim().is_empty() => None,
-        "user" => Some(CommandCodeMessageActivity::UserTurn),
-        "assistant" if !tool_calls.is_empty() => Some(CommandCodeMessageActivity::ToolUse),
-        "assistant" if !text.trim().is_empty() => Some(CommandCodeMessageActivity::AssistantResponse),
-        _ => None,
-    }
-}
-
-fn contains_tool_result(content: &serde_json::Value) -> bool {
-    content.as_array().is_some_and(|blocks| {
-        blocks
-            .iter()
-            .any(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("tool_result"))
-    })
-}
-
-/// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
-/// assistant digest, malformed-shape signal, and assistant-id coalescing all
-/// follow the shared transcript-reader contract used by Claude Code/Cursor.
-fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    let mut open_assistant_id: Option<String> = None;
-
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-
-        // Metadata and future event kinds are deliberately ignored. A
-        // recognized message envelope with a broken payload is different: it
-        // should degrade to ShapeChanged when no usable turns remain.
-        if value.get("type").and_then(|kind| kind.as_str()) != Some("message") {
-            continue;
-        }
-        let Some(message) = value.get("message") else {
-            saw_malformed = true;
-            continue;
-        };
-
-        let Some(role) = message.get("role").and_then(|role| role.as_str()) else {
-            saw_malformed = true;
-            continue;
-        };
-        if role != "user" && role != "assistant" {
-            saw_malformed = true;
-            continue;
-        }
-        let Some(raw_content) = message.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        if !matches!(
-            raw_content,
-            serde_json::Value::String(_) | serde_json::Value::Array(_) | serde_json::Value::Null
-        ) {
-            saw_malformed = true;
-            continue;
-        }
-        let text = concat_text_blocks(Some(raw_content));
-        let mut tool_calls = extract_tool_calls(Some(raw_content));
-
-        if role == "user" {
-            open_assistant_id = None;
-            if is_synthetic_message(&text) || text.trim().is_empty() {
-                continue;
-            }
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-            continue;
-        }
-
-        // An assistant message containing only internal blocks has no
-        // user-facing normalized content. Keep the open id so a split
-        // assistant message can still merge a following continuation.
-        if text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-
-        let id = value
-            .get("id")
-            .or_else(|| message.get("id"))
-            .and_then(|id| id.as_str())
-            .map(str::to_string);
-        if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
-            if id == open {
-                if let Some(last) = turns.back_mut() {
-                    merge_into(last, &text, tool_calls);
-                    if !last.text.trim().is_empty() {
-                        last_assistant_message = Some(last.text.clone());
-                    }
-                    continue;
-                }
-            }
-        }
-
-        open_assistant_id = id;
-        cap_tool_calls(&mut tool_calls);
-        let turn = Turn {
-            role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
-            tool_calls,
-        };
-        if !turn.text.trim().is_empty() {
-            last_assistant_message = Some(turn.text.clone());
-        }
-        push_bounded(&mut turns, turn, keep);
-    }
-
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
+// `CommandCodeMessageActivity`, `commandcode_message_activity`,
+// `contains_tool_result`, `parse_commandcode_turns` moved to
+// `adapters::commandcode` (issue #1661 step 3).
 
 // --- Antigravity transcript parser (issue #1283) ---
 //
@@ -1859,123 +560,8 @@ fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> 
 // drift degrades loudly as `ShapeChanged` instead of silently surfacing
 // nothing.
 
-/// Parse Antigravity JSONL lines into logical turns, honouring the same
-/// [`Parsed`] contract as [`parse_turns`] (rolling `keep`-bounded turn window,
-/// whole-stream last-assistant-message tracking, malformed flag). Each line
-/// is one self-contained turn — no message-id coalescing is needed for AGY
-/// because its emission shape never splits a single assistant message across
-/// multiple JSONL lines.
-fn parse_agy_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        // SYSTEM-side TASK_NOTIFICATION injections are harness plumbing, not
-        // a turn — skip before the role gate, so a session whose only lines
-        // are notifications degrades as `Empty`, not `ShapeChanged`.
-        match val.get("source").and_then(|s| s.as_str()) {
-            Some("USER_EXPLICIT") => {
-                let Some(text) = val.get("content").and_then(|c| c.as_str()) else {
-                    saw_malformed = true;
-                    continue;
-                };
-                if is_agy_synthetic(text) || text.trim().is_empty() {
-                    continue;
-                }
-                push_bounded(
-                    &mut turns,
-                    Turn {
-                        role: "user".to_string(),
-                        text: truncate(text, MAX_TURN_TEXT),
-                        tool_calls: Vec::new(),
-                    },
-                    keep,
-                );
-            }
-            Some("MODEL") => {
-                // AGY emits one assistant line per turn (the `type` field is
-                // typically `PLANNER_RESPONSE`; we don't gate on it — a
-                // renamed type would still be a recognized assistant turn,
-                // only the role-by-source gate flags the shape break).
-                let text = val
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
-                let mut tool_calls = extract_agy_tool_calls(val.get("tool_calls"));
-                if text.trim().is_empty() && tool_calls.is_empty() {
-                    // thinking-only turn — nothing the Coordinator can use.
-                    continue;
-                }
-                cap_tool_calls(&mut tool_calls);
-                let turn = Turn {
-                    role: "assistant".to_string(),
-                    text: truncate(text, MAX_TURN_TEXT),
-                    tool_calls,
-                };
-                if !turn.text.is_empty() {
-                    last_assistant_message = Some(turn.text.clone());
-                }
-                push_bounded(&mut turns, turn, keep);
-            }
-            // SYSTEM (TASK_NOTIFICATION) and unknown sources are silently
-            // skipped — the source gate is the only place we recognize a
-            // turn, so a missing `source` on a line that would otherwise be
-            // one falls through here without flagging malformed. Real shape
-            // breaks (renamed USER_EXPLICIT, etc.) are detected via the
-            // explicit guards above.
-            _ => {}
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
-
-/// Synthetic AGY user injections — the AGY equivalent of Claude Code's
-/// `<local-command-caveat>` wrapper. Today's transcripts don't carry
-/// any of these (issue #1283 research); the predicate is a forward-
-/// compat shim so an environment-injected row never masquerades as a
-/// real user prompt.
-fn is_agy_synthetic(text: &str) -> bool {
-    let t = text.trim_start();
-    t.starts_with("<local-command-caveat>")
-        || t.starts_with("<system>")
-        || t.starts_with("<environment_context>")
-        || t.starts_with("<task-notification>")
-}
-
-/// Pull AGY `tool_calls` (`{name, args}`) into the same [`ToolCall`] wire
-/// shape Claude / Codex emit: `{name, input}`. Each `args` object's
-/// string leaves are truncated via the shared [`truncate_json_strings`]
-/// helper so a `run_command` carrying a multi-megabyte body doesn't blow
-/// up the payload while the args *structure* is still delivered raw.
-fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
-    let Some(serde_json::Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
-            Some(ToolCall {
-                name: name.to_string(),
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            })
-        })
-        .collect()
-}
-
+// `parse_agy_turns`, `is_agy_synthetic`, `extract_agy_tool_calls` moved
+// to `adapters::agy` (issue #1661 step 5).
 
 // --- Grok Code parser (issue #1281) ---
 //
@@ -1996,266 +582,49 @@ fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
 // silently skipped — issue #1281 acceptance criterion: "graceful failure on
 // unknown event types". They are never flagged as malformed.
 
-/// Resolve a Grok session directory to its primary transcript file.
-///
-/// `sessions_root` is the `~/.grok/sessions` directory (split from the env
-/// lookup so the layout can be tested with a temp dir). The result prefers
-/// `chat_history.jsonl` (the per-message log, which carries the assistant
-/// text the Coordinator reasons over) and falls back to `updates.jsonl`
-/// (event-level telemetry is still better than nothing). Neither file
-/// present yields `None` (→ `NoTranscript` degrade).
-pub(crate) fn grok_locator_in(
-    sessions_root: &Path,
-    session_id: &str,
-    node_path: &str,
-) -> Option<PathBuf> {
-    let session = sessions_root
-        .join(grok_urlencode_cwd(node_path))
-        .join(session_id);
-    let chat = session.join("chat_history.jsonl");
-    if chat.exists() {
-        return Some(chat);
-    }
-    let updates = session.join("updates.jsonl");
-    if updates.exists() {
-        return Some(updates);
-    }
-    None
-}
-
-/// Wrapper that mixes the env lookup back in. Env-keyed so a process-global
-/// `GROK_HOME` override reaches the reader without a signature change.
-fn find_grok_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
-    grok_locator_in(&env::grok_dir().join("sessions"), session_id, node_path)
-}
-
-/// Percent-encode the harness-cwd path Grok uses as its session-directory
-/// segment. Distinct from Claude Code's `encode_path` (which replaces
-/// non-alphanumeric with `-`): Grok carries the Windows drive colon and
-/// backslashes through as `%3A`/`%5C` etc. so a `C:\Users\…` cwd round-trips
-/// deterministically. Reserved characters `-_.~` stay literal (RFC 3986);
-/// space becomes `%20`. `pub(crate)` so tests can pin the encoding scheme.
-pub(crate) fn grok_urlencode_cwd(node_path: &str) -> String {
-    let mut out = String::with_capacity(node_path.len());
-    for byte in node_path.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(*byte as char);
-        } else {
-            out.push_str(&format!("%{:02X}", byte));
-        }
-    }
-    out
-}
-
-/// Pull tool calls out of a Grok assistant line's `tool_calls` array. Grok
-/// names the input field `args` (not `input` like Claude), and the parser
-/// honours the same shared `MAX_TOOL_STRING` truncation so a `Write` carrying
-/// a multi-MB body doesn't blow up the payload.
-fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
-    let Some(serde_json::Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let name = obj
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
-            Some(ToolCall {
-                name,
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            })
-        })
-        .collect()
-}
-
-/// Parse Grok Code JSONL lines into logical turns, honouring the same
-/// [`Parsed`] contract as the other parsers: rolling `keep`-bounded turn
-/// window, whole-stream last-assistant-message tracking, malformed flag so a
-/// renamed-shape line degrades loudly as `ShapeChanged`. Unknown event
-/// types (tool echoes, telemetry, status, …) are silently skipped — never
-/// flagged.
-fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        // Grok lines are not gated on an outer `type` discriminator (no
-        // Codex-style envelope), so dispatch on the inner `role` field.
-        let role = match val.get("role").and_then(|r| r.as_str()) {
-            Some("user") => "user",
-            Some("assistant") => "assistant",
-            // `tool` (tool-result echoes), `system`, plus every unknown event
-            // type — silently dropped, never flagged as malformed. This is
-            // the "graceful failure on unknown event types" clause of #1281.
-            _ => continue,
-        };
-        let Some(content) = val.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        let text = match content {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Null => String::new(),
-            // Defensive: if Grok ever switches to a block-array `content`
-            // shape, fall back to joining all `text` blocks — same convention
-            // as the Claude/Codex parsers.
-            serde_json::Value::Array(blocks) => blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => {
-                saw_malformed = true;
-                continue;
-            }
-        };
-        let mut tool_calls = extract_grok_tool_calls(val.get("tool_calls"));
-        // An assistant line with neither text nor tool calls is a no-op
-        // (e.g. a heartbeat variant that picked up `role: "assistant"`
-        // somehow) — silently skip without flagging malformed.
-        if role == "assistant" && text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-        if role == "assistant" {
-            cap_tool_calls(&mut tool_calls);
-            let turn = Turn {
-                role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
-                tool_calls,
-            };
-            if !turn.text.is_empty() {
-                last_assistant_message = Some(turn.text.clone());
-            }
-            push_bounded(&mut turns, turn, keep);
-        } else {
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
-
 // --- Pending background tasks (issue #878) ---
 //
-// Claude Code ends its turn when it launches background work (a
-// `run_in_background` Bash call, or a foreground command that outlives its
-// timeout and is moved to the background) and auto-resumes itself when the
-// task's `<task-notification>` arrives. A Stop hook that fires with such work
-// still pending is NOT "the user is needed". The transcript records both ends
-// deterministically:
-//
-//   launch  — a `tool_result` whose text says "…background… (ID: xyz) …
-//             You will be notified when it completes."
-//   finish  — a line (queue-operation, or the queued_command attachment that
-//             re-invokes the agent) carrying `<task-id>xyz</task-id>`.
-//
-// Pending = launched minus notified.
-
-/// Matches the task id in either launch phrasing:
-/// `Command running in background with ID: xyz.` and
-/// `…was moved to the background (ID: xyz).`
-static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    // Match the harness's result envelope, not examples printed by Read,
-    // grep, or a test command that happens to include our launch marker.
-    regex::Regex::new(
-        r"\ACommand (?:running in background with ID: |did not complete within its [^\r\n]+ timeout and was moved to the background \(ID: )([A-Za-z0-9_-]+)\)?\. Output is being written to: "
-    ).unwrap()
-});
-/// A task-notification's id paired with its status, non-greedy so several
-/// notifications on one line pair correctly. Real transcripts carry
-/// `<status>running</status>` notifications too (e.g. a foreground command
-/// moved to the background) — only a terminal status means the wait is over.
-static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>").unwrap()
-});
-/// Both known launch envelopes carry this promise. It must accompany the
-/// anchored launch header; either fragment alone can occur in printed code.
-const LAUNCH_MARKER: &str = "You will be notified when it completes";
-
-/// Count background tasks launched but not yet notified in a Claude Code
-/// transcript. `None` = the file could not be read — the caller must treat
-/// that as "unknown" and fall back to its pre-#878 behaviour, never as "no
-/// pending work".
-pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    Some(pending_background_task_ids(reader.lines().map_while(Result::ok)).len())
-}
-
-/// Pure scan over JSONL lines: launched-task ids with no matching
-/// `<task-id>` notification, in launch order. Split from the I/O wrapper so
-/// tests drive it with inline fixtures.
-fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<String> {
-    let mut launched: Vec<String> = Vec::new();
-    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in lines {
-        // The notification marker is matched on the raw line: it appears in
-        // `queue-operation` lines and in the queued_command attachment that
-        // re-invokes the agent, and caring which one carries it would couple
-        // us to more of the shape than we need.
-        for cap in NOTIFIED_ID.captures_iter(&line) {
-            if &cap[2] != "running" {
-                notified.insert(cap[1].to_string());
-            }
-        }
-        // Launches only count inside a tool_result block — free text merely
-        // *mentioning* the promise (e.g. an agent quoting these docs) must not
-        // register a phantom task.
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let Some(serde_json::Value::Array(blocks)) =
-            val.get("message").and_then(|m| m.get("content"))
-        else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
-                continue;
-            }
-            let text = match block.get("content") {
-                Some(serde_json::Value::String(s)) => s.clone(),
-                other => concat_text_blocks(other),
-            };
-            if !text.contains(LAUNCH_MARKER) {
-                continue;
-            }
-            if let Some(cap) = LAUNCH_ID.captures(&text) {
-                launched.push(cap[1].to_string());
-            }
-        }
-    }
-    launched.retain(|id| !notified.contains(id));
-    launched
-}
+// `count_pending_background_tasks`, `pending_background_task_ids`,
+// `LAUNCH_ID` / `NOTIFIED_ID` regex statics, and `LAUNCH_MARKER`
+// moved to `adapters::claude_code` (issue #1661 step 8). Re-exported
+// from this module so the reader's test module's references keep
+// resolving.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The reader module no longer re-exports per-harness helpers from
+    // the adapter modules (issue #1661 step 10) — every external
+    // caller now imports from the adapter directly. The test module
+    // pulls each parser through its own path so the contract tests
+    // exercise the seam, not a legacy facade.
+    use crate::services::transcript_paths::{
+        concat_text_blocks, encode_path, first_text_block, is_synthetic_message,
+    };
+    use crate::services::transcript_reader::types::{
+        MAX_TOOL_STRING, MAX_TURN_TOOL_CALLS, truncate_json_strings,
+    };
+    use crate::services::transcript_reader::adapters::agy::{agy_locator_in, parse_agy_turns};
+    use crate::services::transcript_reader::adapters::claude_code::{
+        count_pending_background_tasks, parse_turns, pending_background_task_ids,
+    };
+    use crate::services::transcript_reader::adapters::codex::{find_codex_rollout_in, parse_codex_turns};
+    use crate::services::transcript_reader::adapters::commandcode::{
+        commandcode_project_slug, commandcode_sessions_dir, commandcode_transcript_path_in,
+        parse_commandcode_turns,
+    };
+    use crate::services::transcript_reader::adapters::cursor::{
+        cursor_transcript_path_in, cursor_workspace_slug,
+    };
+    use crate::services::transcript_reader::adapters::opencode::{
+        parse_opencode_export, parse_opencode_messages, read_opencode_digest_from_messages,
+        read_opencode_messages, read_opencode_tail_from_messages,
+    };
+    // Reader-internal EnvType (used by the commandcode_sessions_dir test
+    // and the cursor_workspace_slug test). The reader's own entry
+    // points no longer need it after the migrations, but the tests
+    // do.
+    use crate::models::EnvType;
     use std::path::Path;
 
     #[test]
@@ -3594,7 +1963,7 @@ mod tests {
             r#"{"role":"assistant","content":"real reply"}"#.to_string(),
             r#"{"role":"heartbeat","seq":7}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert_eq!(parsed.turns.len(), 2);
         assert!(!parsed.saw_malformed, "unknown event types must not flag malformed");
         assert_eq!(parsed.last_assistant_message.as_deref(), Some("real reply"));
@@ -3614,7 +1983,7 @@ mod tests {
             r#"{"role":"assistant","content":{"unexpected":"object"}}"#.to_string(),
             r#"{"role":"assistant","content":42}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty());
         assert!(parsed.saw_malformed, "recognized role with wrong content type is malformed");
         assert_eq!(
@@ -3633,7 +2002,7 @@ mod tests {
             r#"{"type":"command_status","status":"running"}"#.to_string(),
             r#"{"latency_ms":42,"transport":"stream"}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty(), "no recognized-role lines yields no turns");
         assert!(
             !parsed.saw_malformed,
@@ -3671,7 +2040,7 @@ mod tests {
             lines.push(format!(r#"{{"role":"user","content":"prompt {i}"}}"#));
             lines.push(format!(r#"{{"role":"assistant","content":"reply {i}"}}"#));
         }
-        let parsed = parse_grok_turns(lines.into_iter(), 3);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 3);
         assert_eq!(parsed.turns.len(), 3, "buffer never exceeds keep");
         assert_eq!(parsed.turns[2].text, "reply 49");
         assert_eq!(
@@ -3689,7 +2058,7 @@ mod tests {
         let lines = vec![format!(
             r#"{{"role":"assistant","content":"with a big tool call","tool_calls":[{{"name":"Read","args":{{"file_path":"a","content":"{big}"}}}}]}}"#
         )];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert_eq!(parsed.turns.len(), 1);
         let call = &parsed.turns[0].tool_calls[0];
         assert_eq!(call.name, "Read");
@@ -3712,7 +2081,7 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("chat_history.jsonl"), "{}").unwrap();
         std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
-        let found = grok_locator_in(&temp, "session-abc", "");
+        let found = super::adapters::grok::grok_locator_in(&temp, "session-abc", "");
         assert_eq!(
             found.as_deref(),
             Some(session.join("chat_history.jsonl").as_path()),
@@ -3732,7 +2101,7 @@ mod tests {
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
-        let found = grok_locator_in(&temp, "session-abc", "");
+        let found = super::adapters::grok::grok_locator_in(&temp, "session-abc", "");
         assert_eq!(
             found.as_deref(),
             Some(session.join("updates.jsonl").as_path()),
@@ -3750,7 +2119,7 @@ mod tests {
             .join(format!("buildmesh_test_grok_locator_none_{suffix}"));
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
-        assert!(grok_locator_in(&temp, "session-abc", "").is_none());
+        assert!(super::adapters::grok::grok_locator_in(&temp, "session-abc", "").is_none());
         std::fs::remove_dir_all(&temp).ok();
     }
 
@@ -3766,30 +2135,30 @@ mod tests {
     /// silently drops (say) the colon encoding produces a compile-time test
     /// failure rather than silently misrouting sessions on Windows drives.
     #[test]
-    fn grok_urlencode_cwd_matches_rfc3986_unreserved_only() {
+    fn grok_urlencode_cwd_test_pin() {
         // RFC 3986 unreserved set: ALPHA / DIGIT / "-" / "." / "_" / "~".
         // Everything else becomes %XX, uppercase hex (the form Grok emits).
         assert_eq!(
-            grok_urlencode_cwd(r"C:\Users\adam\src\buildmesh"),
+            super::adapters::grok::grok_urlencode_cwd(r"C:\Users\adam\src\buildmesh"),
             "C%3A%5CUsers%5Cadam%5Csrc%5Cbuildmesh",
             "Windows drive colon and backslashes must be percent-encoded so the \
              session-directory segment is filesystem-safe"
         );
         assert_eq!(
-            grok_urlencode_cwd("/home/adam/src/buildmesh"),
+            super::adapters::grok::grok_urlencode_cwd("/home/adam/src/buildmesh"),
             "%2Fhome%2Fadam%2Fsrc%2Fbuildmesh",
             "POSIX slashes also percent-encoded"
         );
         // Unreserved per RFC 3986 stays literal; the locator only encodes
         // non-unreserved bytes.
         assert_eq!(
-            grok_urlencode_cwd("project-with_under.dots~tildas"),
+            super::adapters::grok::grok_urlencode_cwd("project-with_under.dots~tildas"),
             "project-with_under.dots~tildas",
             "RFC 3986 unreserved chars pass through unchanged"
         );
-        assert_eq!(grok_urlencode_cwd(""), "");
+        assert_eq!(super::adapters::grok::grok_urlencode_cwd(""), "");
         assert_eq!(
-            grok_urlencode_cwd("with space"),
+            super::adapters::grok::grok_urlencode_cwd("with space"),
             "with%20space",
             "space encodes to %20, not '+' (RFC 3986, not form-style)"
         );
@@ -4358,19 +2727,6 @@ mod tests {
                 "session-id filter leaked a row from the other session id"
             );
         }
-    }
-
-    #[test]
-    fn review_handoff_source_code_in_tool_results_does_not_launch_background_tasks() {
-        // Run 85 read and grepped this module. The old scan registered the
-        // example id in a source comment as a live task.
-        let read = serde_json::json!({"type":"user", "message":{"content":[{
-            "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n669\tstatic LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
-        }]}}).to_string();
-        let grep = serde_json::json!({"type":"user", "message":{"content":[{
-            "type":"tool_result", "content":"6 matches in 1 files:\nmod.rs:669:static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =\nmod.rs:681:const LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
-        }]}}).to_string();
-        assert_eq!(pending_background_task_ids(vec![read, grep, launch_line("real_task")].into_iter()), vec!["real_task"]);
     }
 
     #[test]

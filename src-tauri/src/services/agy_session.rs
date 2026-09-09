@@ -184,7 +184,7 @@ fn read_conversation_candidate(
     // Shared with the transcript reader so the layout never drifts between
     // the two (`transcript.jsonl` first, `transcript_full.jsonl` fallback).
     let transcript =
-        crate::services::transcript_reader::agy_locator_in(brain_dir, conv_id)?;
+        crate::services::transcript_reader::adapters::agy::agy_locator_in(brain_dir, conv_id)?;
     debug_assert!(
         transcript.starts_with(conv_dir),
         "locator resolved outside the scanned conversation dir"
