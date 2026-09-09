@@ -3,114 +3,81 @@
 //! Commands provide one effective account snapshot. This module owns provider
 //! classification, native-harness gating, credential lookup, cache routing,
 //! and fetch dispatch without reading preferences itself.
+//!
+//! Dispatch is through the [`crate::services::usage::adapter::UsageAdapter`]
+//! seam only (issue #1657): the table holds drop-in adapters, never raw
+//! fn pointers into the legacy fetcher module.
 
-use super::ProviderUsage;
+use super::adapters::{
+    AgyAdapter, AnthropicAdapter, CodexAdapter, CommandcodeAdapter, CursorAdapter, DeepseekAdapter,
+    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, OpencodeAdapter, OpenaiAdapter,
+    OpenrouterAdapter,
+};
+use super::adapter::{api_key_for, UsageAdapter};
+use super::types::ProviderUsage;
 use crate::preferences::ProviderAccount;
 use std::collections::HashSet;
 
-type FetchNativeUsage = fn() -> ProviderUsage;
-type FetchKeyedUsage = fn(&str) -> ProviderUsage;
+static ANTHROPIC_ADAPTER: AnthropicAdapter = AnthropicAdapter;
+static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
+static CURSOR_ADAPTER: CursorAdapter = CursorAdapter;
+static MINIMAX_ADAPTER: MinimaxAdapter = MinimaxAdapter;
+static AGY_ADAPTER: AgyAdapter = AgyAdapter;
+static KIMI_ADAPTER: KimiAdapter = KimiAdapter;
+static OPENROUTER_ADAPTER: OpenrouterAdapter = OpenrouterAdapter;
+static GROK_ADAPTER: GrokAdapter = GrokAdapter;
+static OPENCODE_ADAPTER: OpencodeAdapter = OpencodeAdapter;
+static COMMANDCODE_ADAPTER: CommandcodeAdapter = CommandcodeAdapter;
+static OPENAI_ADAPTER: OpenaiAdapter = OpenaiAdapter;
+static DEEPSEEK_ADAPTER: DeepseekAdapter = DeepseekAdapter;
+static FREEBUFF_ADAPTER: FreebuffAdapter = FreebuffAdapter;
 
-#[derive(Clone, Copy)]
-enum MeterKind {
-    Native {
-        harness: &'static str,
-        fetch: FetchNativeUsage,
-    },
-    ApiKey {
-        fetch: FetchKeyedUsage,
-    },
-}
-
-/// Everything the service layer needs to route one first-class Usage Meter.
-struct UsageMeterDefinition {
-    id: &'static str,
-    kind: MeterKind,
-}
-
-impl UsageMeterDefinition {
-    /// Native Usage Meters currently have a one-to-one provider/harness id.
-    const fn native(id: &'static str, fetch: FetchNativeUsage) -> Self {
-        Self {
-            id,
-            kind: MeterKind::Native { harness: id, fetch },
-        }
-    }
-
-    const fn keyed(id: &'static str, fetch: FetchKeyedUsage) -> Self {
-        Self {
-            id,
-            kind: MeterKind::ApiKey { fetch },
-        }
-    }
-
-    fn native_harness(&self) -> Option<&'static str> {
-        match self.kind {
-            MeterKind::Native { harness, .. } => Some(harness),
-            MeterKind::ApiKey { .. } => None,
-        }
-    }
-
-    fn api_key<'a>(&self, accounts: &'a [ProviderAccount]) -> Option<&'a str> {
-        match self.kind {
-            MeterKind::Native { .. } => None,
-            MeterKind::ApiKey { .. } => accounts
-                .iter()
-                .find(|account| account.id == self.id)
-                .and_then(|account| account.api_key.as_deref())
-                .filter(|key| !key.is_empty()),
-        }
-    }
-
-    fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage {
-        match self.kind {
-            MeterKind::Native { fetch, .. } => fetch(),
-            MeterKind::ApiKey { fetch } => fetch(self.api_key(accounts).unwrap_or("")),
-        }
-    }
-}
-
-static USAGE_METERS: &[UsageMeterDefinition] = &[
-    UsageMeterDefinition::native("anthropic", super::anthropic_usage),
-    UsageMeterDefinition::native("codex", super::codex_usage),
-    UsageMeterDefinition::native("cursor", super::cursor_usage),
-    UsageMeterDefinition::keyed("minimax", super::minimax_usage),
-    UsageMeterDefinition::native("agy", super::agy_usage),
+static USAGE_METERS: [&'static dyn UsageAdapter; 13] = [
+    &ANTHROPIC_ADAPTER,
+    &CODEX_ADAPTER,
+    &CURSOR_ADAPTER,
+    &MINIMAX_ADAPTER,
+    &AGY_ADAPTER,
     // This is the Moonshot Model Provider, not the separately registered Kimi
     // Code Agent Harness. It is keyed and therefore has no detection gate.
-    UsageMeterDefinition::keyed("kimi", super::kimi_usage),
-    UsageMeterDefinition::keyed("openrouter", super::openrouter_usage),
-    UsageMeterDefinition::native("grok", super::grok_usage),
-    UsageMeterDefinition::native("opencode", super::opencode_usage),
-    UsageMeterDefinition::native("commandcode", super::commandcode_usage),
+    &KIMI_ADAPTER,
+    &OPENROUTER_ADAPTER,
+    &GROK_ADAPTER,
+    &OPENCODE_ADAPTER,
+    &COMMANDCODE_ADAPTER,
     // OpenAI's Organization Costs endpoint is admin-scoped; project keys
     // degrade through the fetcher's normal logged-in/detail envelope.
-    UsageMeterDefinition::keyed("openai", super::openai_usage),
+    &OPENAI_ADAPTER,
     // DeepSeek exposes a keyed cash-balance endpoint rather than plan windows.
-    UsageMeterDefinition::keyed("deepseek", super::deepseek_usage),
+    &DEEPSEEK_ADAPTER,
     // Freebuff self-authenticates through its CLI-managed credentials file.
-    UsageMeterDefinition::native("freebuff", super::freebuff_usage),
+    &FREEBUFF_ADAPTER,
 ];
 
-fn find(provider_id: &str) -> Option<&'static UsageMeterDefinition> {
+/// Seam entry point: `catalog.dispatch(id).fetch(accounts)` proves the seam
+/// — not the old module — is the dispatch and test surface.
+pub(crate) fn dispatch(provider_id: &str) -> Option<&'static dyn UsageAdapter> {
     USAGE_METERS
         .iter()
-        .find(|definition| definition.id == provider_id)
+        .copied()
+        .find(|adapter| adapter.id() == provider_id)
 }
 
 pub(crate) fn contains(provider_id: &str) -> bool {
-    find(provider_id).is_some()
+    dispatch(provider_id).is_some()
 }
 
 pub(crate) fn native_harness(provider_id: &str) -> Option<&'static str> {
-    find(provider_id).and_then(UsageMeterDefinition::native_harness)
+    dispatch(provider_id).and_then(|adapter| adapter.native_harness())
 }
 
 pub(crate) fn configured_keyed_provider_ids(accounts: &[ProviderAccount]) -> HashSet<String> {
     USAGE_METERS
         .iter()
-        .filter(|definition| definition.api_key(accounts).is_some())
-        .map(|definition| definition.id.to_string())
+        .copied()
+        .filter(|adapter| adapter.native_harness().is_none())
+        .filter(|adapter| api_key_for(accounts, adapter.id()).is_some())
+        .map(|adapter| adapter.id().to_string())
         .collect()
 }
 
@@ -121,18 +88,17 @@ pub(crate) fn cached_or_fetch(
     force_refresh: bool,
     accounts: &[ProviderAccount],
 ) -> Option<ProviderUsage> {
-    let definition = find(provider_id)?;
+    let adapter = dispatch(provider_id)?;
     if !force_refresh {
         if let Some(cached) = super::get_cached_usage(provider_id) {
             return Some(cached);
         }
     }
 
-    let result = definition.fetch(accounts);
+    let result = adapter.fetch(accounts);
     super::set_cached_usage(provider_id, result.clone());
     Some(result)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,54 +115,165 @@ mod tests {
         }
     }
 
-    fn usage_echoing_key(key: &str) -> ProviderUsage {
-        ProviderUsage {
-            provider: key.to_string(),
-            logged_in: true,
-            windows: Vec::new(),
-            balance: None,
-            detail: None,
-            error: None,
+    /// Test-only adapter proving the seam is the test surface: echoes the
+    /// supplied key as the provider name so `fetch` can assert snapshot
+    /// threading without touching the network.
+    struct EchoKeyAdapter;
+
+    impl UsageAdapter for EchoKeyAdapter {
+        fn id(&self) -> &'static str {
+            "keyed-test"
+        }
+
+        fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage {
+            let key = api_key_for(accounts, "keyed-test").unwrap_or("");
+            ProviderUsage {
+                provider: key.to_string(),
+                logged_in: true,
+                windows: Vec::new(),
+                balance: None,
+                detail: None,
+                error: None,
+            }
         }
     }
 
     #[test]
     fn catalog_ids_are_non_empty_and_unique() {
         let mut ids = HashSet::new();
-        for definition in USAGE_METERS {
-            assert!(!definition.id.trim().is_empty());
-            assert!(ids.insert(definition.id), "duplicate id: {}", definition.id);
+        for adapter in USAGE_METERS {
+            assert!(!adapter.id().trim().is_empty());
+            assert!(ids.insert(adapter.id()), "duplicate id: {}", adapter.id());
         }
     }
 
     #[test]
     fn unknown_provider_has_no_definition_or_native_harness() {
-        assert!(find("not-a-provider").is_none());
+        assert!(dispatch("not-a-provider").is_none());
         assert!(!contains("not-a-provider"));
         assert_eq!(native_harness("not-a-provider"), None);
         assert!(cached_or_fetch("not-a-provider", true, &[]).is_none());
     }
 
     #[test]
-    fn native_constructor_uses_provider_id_as_harness_id() {
-        let definition = UsageMeterDefinition::native("native-test", super::super::anthropic_usage);
-        assert_eq!(definition.native_harness(), Some("native-test"));
+    fn native_adapters_report_their_harness_and_keyed_report_none() {
+        // Native self-auth meters are detection-gated on their harness id.
+        assert_eq!(native_harness("anthropic"), Some("anthropic"));
+        assert_eq!(native_harness("codex"), Some("codex"));
+        assert_eq!(native_harness("freebuff"), Some("freebuff"));
+        assert_eq!(native_harness("opencode"), Some("opencode"));
+        // Keyed meters have no harness gate — card always visible.
+        assert_eq!(native_harness("minimax"), None);
+        assert_eq!(native_harness("kimi"), None);
+        assert_eq!(native_harness("deepseek"), None);
     }
 
     #[test]
     fn keyed_credentials_reject_missing_and_empty_keys() {
-        let definition = UsageMeterDefinition::keyed("keyed-test", usage_echoing_key);
-
-        assert_eq!(definition.api_key(&[]), None);
-        assert_eq!(definition.api_key(&[account("keyed-test", None)]), None);
-        assert_eq!(definition.api_key(&[account("keyed-test", Some(""))]), None);
+        assert_eq!(api_key_for(&[], "keyed-test"), None);
+        assert_eq!(api_key_for(&[account("keyed-test", None)], "keyed-test"), None);
+        assert_eq!(
+            api_key_for(&[account("keyed-test", Some(""))], "keyed-test"),
+            None
+        );
     }
 
     #[test]
     fn keyed_fetch_uses_the_supplied_account_snapshot() {
-        let definition = UsageMeterDefinition::keyed("keyed-test", usage_echoing_key);
+        let adapter = EchoKeyAdapter;
         let accounts = [account("keyed-test", Some("snapshot-key"))];
 
-        assert_eq!(definition.fetch(&accounts).provider, "snapshot-key");
+        assert_eq!(adapter.fetch(&accounts).provider, "snapshot-key");
+    }
+
+    #[test]
+    fn dispatch_exposes_every_registered_adapter_through_the_seam() {
+        // Contract: `dispatch(id).fetch` is the test surface, not the old
+        // module. Pin the id/harness contract per adapter so a future
+        // two-place edit (fetcher + catalog) fails here.
+        let cases: &[(&str, Option<&str>)] = &[
+            ("anthropic", Some("anthropic")),
+            ("codex", Some("codex")),
+            ("cursor", Some("cursor")),
+            ("minimax", None),
+            ("agy", Some("agy")),
+            ("kimi", None),
+            ("openrouter", None),
+            ("grok", Some("grok")),
+            ("opencode", Some("opencode")),
+            ("commandcode", Some("commandcode")),
+            ("openai", None),
+            ("deepseek", None),
+            ("freebuff", Some("freebuff")),
+        ];
+        for (id, harness) in cases {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            assert_eq!(adapter.id(), *id);
+            assert_eq!(adapter.native_harness(), *harness);
+            assert!(contains(id));
+        }
+    }
+
+    #[test]
+    fn configured_keyed_ids_come_from_the_account_snapshot() {
+        let accounts = [
+            account("minimax", Some("k")),
+            account("kimi", None),
+            account("openrouter", Some("")),
+        ];
+        let ids = configured_keyed_provider_ids(&accounts);
+        assert!(ids.contains("minimax"));
+        assert!(!ids.contains("kimi"));
+        assert!(!ids.contains("openrouter"));
+        // Native self-auth providers never appear in the keyed set.
+        assert!(!ids.contains("anthropic"));
+    }
+
+    #[test]
+    fn dispatched_keyed_adapters_report_no_credential_without_network() {
+        // Production-boundary contract through the seam: real keyed adapters
+        // with an empty account snapshot must report the no-credential
+        // envelope without touching the network (empty-key early return).
+        // A miswired adapter (wrong fn, wrong provider id) fails here.
+        for id in ["minimax", "kimi", "openrouter", "openai", "deepseek"] {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            let usage = adapter.fetch(&[]);
+            assert_eq!(usage.provider, id, "adapter {id} must mint its own envelope");
+            assert!(!usage.logged_in, "adapter {id} with no key must be logged out");
+            let error = usage.error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("No API key"),
+                "adapter {id} must report no-credential, got: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_id_returns_static_registered_adapter() {
+        // Wiring contract through the seam for every registered adapter:
+        // `dispatch(id)` returns a `&'static dyn UsageAdapter` whose
+        // `id()` matches the dispatch key. Future per-adapter real-adapter
+        // contract tests (issue #1657 follow-ups) build on this guarantee:
+        // `dispatch(id).fetch(accounts)` is the production call surface, and
+        // a regression where a registered adapter stops implementing the
+        // seam (e.g. falls back to a stale fn pointer) fails here.
+        for id in [
+            "anthropic",
+            "codex",
+            "cursor",
+            "minimax",
+            "agy",
+            "kimi",
+            "openrouter",
+            "grok",
+            "opencode",
+            "commandcode",
+            "openai",
+            "deepseek",
+            "freebuff",
+        ] {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");
+        }
     }
 }

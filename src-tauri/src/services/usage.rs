@@ -3,10 +3,35 @@
 //! Endpoints are undocumented / reverse-engineered; treat non-200 responses or
 //! shape mismatches as "usage unavailable", never as hard errors.
 
+pub mod types;
+pub(crate) mod cache;
+pub(crate) mod adapter;
+pub(crate) mod adapters;
 pub(crate) mod catalog;
 
-use reqwest::blocking::{Client, RequestBuilder};
-use serde::{Deserialize, Serialize};
+// Re-export the wire types so existing `crate::services::usage::{...}`
+// paths keep working while adapters import from `usage::types` directly.
+pub use types::{BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow};
+// Cache stays behind the same `usage::` paths callers already use.
+pub use cache::{get_cached_usage, invalidate_cache, invalidate_provider_cache, set_cached_usage};
+// `fetch_usage` is a fetcher-only driver: internal call sites in this
+// module import it directly via `crate::services::usage::adapter::fetch_usage`
+// so the `usage::` namespace stops advertising it (issue #1657 step 1:
+// stop exporting helpers used only by fetchers). Adapters go through
+// `catalog::dispatch(id).fetch` instead.
+// Internal fetcher helpers are NOT re-exported: `usage::home_dir`,
+// `usage::logged_out`, `usage::unavailable`, `usage::cached_age` were
+// fetcher-only and the issue (#1657) requires this module to stop
+// exporting helpers only fetchers use. Internal callers go through
+// `super::types::...` or `super::cache::...` directly.
+
+use reqwest::blocking::Client;
+use serde::Deserialize;
+// Internal fetcher-only helpers: imported by their defining module so the
+// `usage::` namespace stays clean for the seam surface (issue #1657).
+use crate::services::usage::adapter::fetch_usage;
+use crate::services::usage::cache::cached_age;
+use crate::services::usage::types::{home_dir, logged_out, unavailable};
 // `Datelike` powers the month-start computation in
 // [`current_month_start_epoch`] (spec §3.1). `Timelike` is only used by the
 // test mod for `current_month_start_epoch_is_first_of_utc_month` and is
@@ -17,8 +42,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 // `tracing` is the codebase-wide diagnostic log channel (`warm_pool`,
 // `agent_node`, `autopilot` all use `tracing::warn!` for non-fatal side
 // channels); `eprintln!` would surface to the user's terminal instead.
@@ -41,114 +65,8 @@ use crate::services::opencode_oauth::OPENCODE_CONSOLE_CRED_TARGET;
 use crate::services::opencode_oauth::OPENCODE_CONSOLE_HOST;
 use crate::services::opencode_oauth::device_flow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "UsageWindow.ts")]
-/// Generated to src/types/generated/UsageWindow.ts (issue #404). The wire
-/// field names (`usedPercent` / `resetsAt`) are camelCase per
-/// `#[serde(rename = "...")]` + matching `#[ts(rename = "...")]`.
-pub struct UsageWindow {
-    pub label: String,
-    #[serde(rename = "usedPercent")]
-    #[ts(rename = "usedPercent")]
-    pub used_percent: Option<f64>,
-    #[serde(rename = "resetsAt")]
-    #[ts(rename = "resetsAt")]
-    pub resets_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "BillingBalance.ts")]
-/// Cash-balance view for a pay-as-you-go account (issue #537). The Accounts panel
-/// renders this instead of percentage [`UsageWindow`] bars when an account's
-/// `billing_mode` is `pay_as_you_go`. Field names are camelCase on the wire.
-///
-/// Generated to src/types/generated/BillingBalance.ts (issue #537).
-pub struct BillingBalance {
-    /// Credits / cash remaining, in `currency`.
-    pub remaining: f64,
-    /// Spend so far in the current billing month, if the provider reports it.
-    #[serde(rename = "monthlySpend")]
-    #[ts(rename = "monthlySpend")]
-    pub monthly_spend: Option<f64>,
-    /// ISO 4217 currency code (e.g. "USD", "CNY").
-    pub currency: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "ProviderUsage.ts")]
-/// Generated to src/types/generated/ProviderUsage.ts (issue #404). `loggedIn`
-/// is camelCase on the wire per `#[ts(rename = "loggedIn")]`.
-pub struct ProviderUsage {
-    pub provider: String,
-    #[serde(rename = "loggedIn")]
-    #[ts(rename = "loggedIn")]
-    pub logged_in: bool,
-    pub windows: Vec<UsageWindow>,
-    /// Cash balance for pay-as-you-go accounts; `None` for plan accounts, which
-    /// report utilization via `windows` instead (issue #537).
-    #[serde(default)]
-    pub balance: Option<BillingBalance>,
-    pub detail: Option<String>,
-    pub error: Option<String>,
-}
-
-/// One **Model Provider**'s entry on the Providers page (issue #574): its
-/// identity plus the **Usage Meters** it exposes on this host, if any.
-///
-/// The meters themselves reuse the [`ProviderUsage`] shape — its `windows`
-/// (subscription quotas) and `balance` (pay-as-you-go wallet) *are* the meters,
-/// and a provider may carry several at once. `usage` is `Some` only for a
-/// provider Buildmesh has a fetcher for; `usage_tracked` is `false` for a
-/// **Generic Model Provider** (no registry entry / no fetcher), which the UI
-/// renders as an explicit "usage not tracked" state rather than an empty gauge.
-///
-/// Only providers relevant to the host appear in the list this wraps
-/// (detection-gated): a native harness's subscription meter only when that
-/// harness is installed, a keyed provider only when the user has enabled it.
-///
-/// Generated to src/types/generated/ProviderMeters.ts (issue #574).
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "ProviderMeters.ts")]
-pub struct ProviderMeters {
-    /// Provider account id ("anthropic", "minimax", a custom slug, …).
-    pub provider: String,
-    /// Whether Buildmesh ships a usage fetcher for this provider. `false` →
-    /// the UI shows "usage not tracked" (camelCase on the wire).
-    #[serde(rename = "usageTracked")]
-    #[ts(rename = "usageTracked")]
-    pub usage_tracked: bool,
-    /// The fetched meters; `None` when usage isn't tracked.
-    pub usage: Option<ProviderUsage>,
-}
-
-/// Failures that happen before we ever reach an endpoint: no credential on disk,
-/// or a credential/response body that doesn't deserialize. Transport- and
-/// status-level failures are handled inline in [`fetch_usage`].
-#[derive(Debug)]
-pub enum UsageError {
-    NoCredential(String),
-    Shape(String),
-}
-
-impl std::fmt::Display for UsageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UsageError::NoCredential(path) => write!(f, "No credential found at {}", path),
-            UsageError::Shape(msg) => write!(f, "Unexpected response shape: {}", msg),
-        }
-    }
-}
-
-/// Resolves the user's home directory. Prefers `USERPROFILE` on Windows so
-/// `<home>/.config/...` is identical across the two platforms. `pub(crate)`
-/// so service submodules (e.g. `services::freebuff_usage`) can reuse this
-/// without duplicating the env-var resolution.
-pub(crate) fn home_dir() -> PathBuf {
-    env::var("USERPROFILE")
-        .or_else(|_| env::var("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_default()
-}
+// Wire types + envelope helpers moved to `usage::types` (issue #1657).
+// Re-exported at the top of this file so existing paths keep working.
 
 fn anthropic_cred_path() -> PathBuf {
     home_dir().join(".claude").join(".credentials.json")
@@ -255,28 +173,6 @@ impl CodexAuthFile {
     }
 }
 
-#[derive(Deserialize)]
-struct ClaudeAiOauth {
-    #[serde(rename = "accessToken")]
-    access_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AnthropicOAuthCred {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<ClaudeAiOauth>,
-}
-
-/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
-fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: AnthropicOAuthCred =
-        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.claude_ai_oauth
-        .and_then(|o| o.access_token)
-        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
-}
-
 /// Reads Codex's credentials JSON which has access_token at the top level
 /// (legacy) OR nested inside a `tokens` envelope (spec §2.3). Returns both
 /// the bearer token and the optional `ChatGPT-Account-Id` so the live probe
@@ -315,6 +211,28 @@ fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthC
 }
 
 #[derive(Deserialize)]
+struct ClaudeAiOauth {
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicOAuthCred {
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<ClaudeAiOauth>,
+}
+
+/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
+fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let cred: AnthropicOAuthCred =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.claude_ai_oauth
+        .and_then(|o| o.access_token)
+        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+#[derive(Deserialize)]
 struct OpenCodeAuthEntry {
     key: Option<String>,
 }
@@ -333,81 +251,13 @@ fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
     Err(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
-/// Builds a `ProviderUsage` envelope for the "no credential / bad
-/// credential" state — the UI's re-enter affordance reads `error` verbatim.
-/// `pub(crate)` so service submodules can reuse it (`services::freebuff_usage`,
-/// …).
-pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
-    ProviderUsage {
-        provider: provider.to_string(),
-        logged_in: false,
-        windows: vec![],
-        balance: None,
-        detail: None,
-        error: Some(error),
-    }
-}
-
-/// Builds a `ProviderUsage` for the "logged-in but couldn't fetch" state — the
-/// credential is presumed present (so this is NOT the empty-key / no-credential
-/// case [`logged_out`] handles), but the fetch failed for a transport, status,
-/// or parse reason. Mirrors the `unavailable` closure that lives inside
-/// [`fetch_usage`] so per-provider fetchers like [`kimi_usage`] can use the
-/// same constructor shape without re-defining it.
-/// Builds a `ProviderUsage` for the "logged-in but couldn't fetch" state —
-/// the upstream returned something we can't render (transport failure,
-/// shape mismatch, non-success HTTP status). `pub(crate)` so service
-/// submodules can reuse it (`services::freebuff_usage`, …).
-pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
-    ProviderUsage {
-        provider: provider.to_string(),
-        logged_in: true,
-        windows: vec![],
-        balance: None,
-        detail: None,
-        error: Some(error),
-    }
-}
-
-/// Drives the shared request → status-check → parse flow. Callers reach this
-/// only once a credential is confirmed present, so any failure here is reported
-/// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
-fn fetch_usage(
-    provider: &str,
-    build_request: impl FnOnce(&Client) -> RequestBuilder,
-    parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
-) -> ProviderUsage {
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return unavailable(provider, format!("Client error: {}", e)),
-    };
-
-    match build_request(&client).send() {
-        Ok(r) if r.status() == 429 => unavailable(
-            provider,
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
-        Ok(r) if !r.status().is_success() => {
-            let code = r.status().as_u16();
-            unavailable(
-                provider,
-                format!("API error {}: {}", code, r.text().unwrap_or_default()),
-            )
-        }
-        Ok(r) => match parse(&r.text().unwrap_or_default()) {
-            Ok((windows, detail)) => ProviderUsage {
-                provider: provider.to_string(),
-                logged_in: true,
-                windows,
-                balance: None,
-                detail,
-                error: None,
-            },
-            Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
-        },
-        Err(e) => unavailable(provider, format!("Request failed: {}", e)),
-    }
-}
+// `logged_out` / `unavailable` / `fetch_usage` moved to the seam
+// (`usage::types` + `usage::adapter`, issue #1657) — imported at the top.
+// Anthropic fetcher lives in `usage::anthropic_usage` for now (issue #1657
+// step 4 migrates it to `services/usage/adapters/anthropic.rs` as a
+// follow-up; the current thin adapter wraps the legacy fetcher so the
+// catalog dispatch path exercises it without duplicating the request
+// shape, credential discovery, or parse logic).
 
 fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
     #[derive(Deserialize, Debug)]
@@ -2066,14 +1916,9 @@ fn opencode_usage_impl_with_hosts(
     let mut current_cred = initial_cred.clone();
     let mut pre_emptive_refresh_fired = false;
     if let Some(c) = &current_cred {
-        let cached_age = {
-            let guard = USAGE_CACHE.lock().unwrap();
-            guard
-                .get("opencode")
-                .map(|(instant, _)| instant.elapsed())
-        };
+        let age = cached_age("opencode");
         let now_unix = chrono::Utc::now().timestamp();
-        if opencode_needs_refresh(c, cached_age, now_unix) {
+        if opencode_needs_refresh(c, age, now_unix) {
             pre_emptive_refresh_fired = true;
             if let Some(refresh_token) = c.refresh_token.clone() {
                 match crate::services::opencode_oauth::try_refresh_against(
@@ -3071,79 +2916,13 @@ pub fn cursor_usage_with_sources(
 }
 
 // Freebuff (`freebuff`) implementation lives in `services::freebuff_usage`
-// (issue #1438 review). The Freebuff code sits in its own top-level service
-// module to keep this 6,200-line god-file from growing further; the public
-// fetcher is re-exported below so the sibling usage catalog does not need to
-// learn the top-level service module path.
+// (issue #1438 review) and dispatches through
+// `services::usage::adapters::FreebuffAdapter` (issue #1657). The catalog no
+// longer re-exports the fetcher through this module.
 //
 // Detection-gating and dispatch wiring live in `services::usage::catalog`.
-pub use crate::services::freebuff_usage::freebuff_usage;
 
-const CACHE_TTL: Duration = Duration::from_secs(300);
-
-type Cache = HashMap<String, (Instant, ProviderUsage)>;
-
-static USAGE_CACHE: once_cell::sync::Lazy<Arc<Mutex<Cache>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-pub fn get_cached_usage(provider: &str) -> Option<ProviderUsage> {
-    let guard = USAGE_CACHE.lock().unwrap();
-    guard.get(provider).and_then(|(instant, usage)| {
-        if instant.elapsed() < CACHE_TTL {
-            Some(usage.clone())
-        } else {
-            None
-        }
-    })
-}
-
-// ── Cache-age wire gap (issue #857 follow-up — deferred) ─────────────────
-//
-// The UI's "Refreshed X ago" indicator is currently stamped on the React side
-// at the moment `loadMeters` resolves, NOT at the moment each provider's vendor
-// endpoint returned. Because [`get_cached_usage`] may short-circuit before any
-// HTTP round-trip, the indicator mislabels a pure cache hit as a fresh fetch.
-//
-// The clean fix is a wire-shape change, deliberately deferred to its own PR
-// (issue #857 body flags the cross-cutting consequences — Rust struct +
-// ts-rs regen + new React-side cache-vs-fresh semantics — as warranting a
-// separate commit). When picked up:
-//
-//   1. Add `cached_at: Option<i64>` (epoch ms) to [`ProviderMeters`] with
-//      `#[ts(rename = "cachedAt")]`. `None` means "freshly fetched on this
-//      call"; `Some(_)` means "served from the in-process cache at that instant".
-//   2. Change this function's signature to also expose the cache instant, e.g.
-//      `Option<(ProviderUsage, Instant)>`, so callers can stamp `cached_at`.
-//   3. Have [`catalog::cached_or_fetch`] thread the Optional instant through
-//      the command's `assemble_meters`, which sets
-//      `cached_at` per row in the returned [`ProviderMeters`].
-//   4. Run `cargo test` to regenerate `src/types/generated/ProviderMeters.ts`
-//      (the project's ts-rs gate; CLAUDE.md hard rule on wire-type drift).
-//   5. The React side (`src/components/Probe/UsageTab.tsx`) then picks the
-//      display timestamp: if every row carries `cachedAt`, the oldest one
-//      drives a "Cached Xs ago" label; otherwise `Date.now()` keeps the
-//      existing "Refreshed Xs ago" semantics for the fresh-row case.
-
-pub fn set_cached_usage(provider: &str, usage: ProviderUsage) {
-    let mut guard = USAGE_CACHE.lock().unwrap();
-    guard.insert(provider.to_string(), (Instant::now(), usage));
-}
-
-pub fn invalidate_cache() {
-    let mut guard = USAGE_CACHE.lock().unwrap();
-    guard.clear();
-}
-
-/// Targeted single-provider cache invalidation (issue #970). The refresh
-/// seam in `opencode_usage_impl` calls this on a successful `try_refresh()`
-/// so the next [`get_cached_usage`] call cannot return a stale envelope
-/// minted before the bearer was rotated. Distinct from [`invalidate_cache`]
-/// (which clears every provider) so a refresh on one provider doesn't force
-/// re-fetching unrelated providers on the next usage-panel poll.
-pub fn invalidate_provider_cache(provider: &str) {
-    let mut guard = USAGE_CACHE.lock().unwrap();
-    guard.remove(provider);
-}
+// Cache moved to `usage::cache` (issue #1657) — re-exported at the top.
 
 #[cfg(test)]
 /// `pub(crate)` (rather than the default private) so sibling service modules
