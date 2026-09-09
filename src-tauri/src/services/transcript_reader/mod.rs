@@ -133,34 +133,11 @@ pub(crate) fn encode_path(path: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
-/// Encode a filesystem path the way Command Code does for its
-/// `~/.commandcode/projects/<slug>` directory names: lowercase, replace every
-/// non-alphanumeric character with `-`, collapse consecutive `-` runs, and
-/// trim leading/trailing `-` (issue #1500).
-///
-/// For example `F:\src\buildmesh\.claude\worktrees\foo` becomes
-/// `f-src-buildmesh-claude-worktrees-foo`, and `/home/user/project` becomes
-/// `home-user-project`. This matches the on-disk layout observed in Command
-/// Code v1.43.0 and the `c-users-user` / `home-...` slugs reported upstream.
-/// Pass the CLI cwd form; for raw paths that may be WSL UNC
-/// (`\\wsl$\...`), normalize with `env::normalize_unc_to_wsl` first.
-pub(crate) fn commandcode_project_slug(path: &str) -> String {
-    let mut slug = String::with_capacity(path.len());
-    let mut last_was_dash = false;
-    for c in path.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash && !slug.is_empty() {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
-}
+// `commandcode_project_slug` moved to `adapters::commandcode` (issue #1661
+// step 3). Re-exported for `commandcode_session`, `commandcode_watcher`, and
+// `agent_node_discovery` until step 10 collapses those callers onto the
+// adapter.
+pub(crate) use crate::services::transcript_reader::adapters::commandcode::commandcode_project_slug;
 /// True when raw message text is a synthetic Claude Code injection rather than
 /// genuine user input (e.g. the `local-command-caveat` wrapper). Such lines are
 /// not real turns and must be skipped.
@@ -297,46 +274,14 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
     None
 }
 
-/// The host-accessible Command Code session directory for an agent
-/// environment: `<home>/.commandcode/projects/<encoded-cwd>/` (issue #1500).
-/// Mirrors [`transcript_path`] (Claude Code): the transcript-format module
-/// composes the slug, while `env` owns the host-accessible projects base
-/// (including WSL translation). `spawn_path` is the CLI cwd form; raw WSL UNC
-/// paths are normalized first so `\\wsl$\<distro>\home\user\repo` resolves to
-/// the same slug the in-WSL CLI wrote (`home-user-repo`).
-pub(crate) fn commandcode_sessions_dir(
-    env_type: EnvType,
-    spawn_path: &str,
-) -> Option<PathBuf> {
-    let normalized = env::normalize_unc_to_wsl(spawn_path);
-    let projects = env::commandcode_projects_dir(env_type, &normalized)?;
-    let slug = commandcode_project_slug(&normalized);
-    if slug.is_empty() {
-        return None;
-    }
-    Some(projects.join(slug))
-}
-
-/// Find the Command Code session transcript for the node's runtime
-/// environment. Command Code stores one file per session under
-/// `<commandcode-home>/projects/<encoded-cwd>/<session-id>.jsonl` (issue
-/// #1500); WSL homes are converted to host-readable paths by the shared
-/// environment path module.
-fn find_commandcode_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
-    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let sessions_dir = commandcode_sessions_dir(env_type, node_path)?;
-    let path = commandcode_transcript_path_in(&sessions_dir, session_id);
-    path.exists().then_some(path)
-}
-
-/// Pure Command Code locator used by the contract test and kept separate from
-/// process-global home/environment discovery.
-pub(crate) fn commandcode_transcript_path_in(
-    sessions_root: &Path,
-    session_id: &str,
-) -> PathBuf {
-    sessions_root.join(format!("{session_id}.jsonl"))
-}
+// `commandcode_sessions_dir`, `commandcode_transcript_path_in`, and
+// `find_commandcode_transcript` moved to `adapters::commandcode` (issue
+// #1661 step 3). Re-exported here for `commandcode_session` and
+// `commandcode_watcher` until those callers are routed through the
+// adapter seam in step 10.
+pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
+    commandcode_sessions_dir, commandcode_transcript_path_in,
+};
 /// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
 fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
@@ -1455,155 +1400,14 @@ fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed
 /// definition of a real user/assistant turn cannot drift from the transcript
 /// reader's. In particular, thinking/reasoning-only and tool-result records
 /// are deliberately absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandCodeMessageActivity {
-    UserTurn,
-    ToolUse,
-    ToolResult,
-    AssistantResponse,
-}
-
-/// Classify a Command Code message payload using the canonical text and tool
-/// extraction rules. Empty, synthetic, tool-result, thinking, and reasoning
-/// records are classified separately so the watcher can clear pending tool
-/// calls, while the digest parser still omits them from normalized turns.
-pub(crate) fn commandcode_message_activity(
-    message: &serde_json::Value,
-) -> Option<CommandCodeMessageActivity> {
-    let role = message.get("role")?.as_str()?;
-    let content = message.get("content")?;
-    let text = concat_text_blocks(Some(content));
-    let tool_calls = extract_tool_calls(Some(content));
-
-    match role {
-        "user" if contains_tool_result(content) => Some(CommandCodeMessageActivity::ToolResult),
-        "user" if is_synthetic_message(&text) || text.trim().is_empty() => None,
-        "user" => Some(CommandCodeMessageActivity::UserTurn),
-        "assistant" if !tool_calls.is_empty() => Some(CommandCodeMessageActivity::ToolUse),
-        "assistant" if !text.trim().is_empty() => Some(CommandCodeMessageActivity::AssistantResponse),
-        _ => None,
-    }
-}
-
-fn contains_tool_result(content: &serde_json::Value) -> bool {
-    content.as_array().is_some_and(|blocks| {
-        blocks
-            .iter()
-            .any(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("tool_result"))
-    })
-}
-
-/// Parse Command Code JSONL lines into normalized turns. The rolling buffer,
-/// assistant digest, malformed-shape signal, and assistant-id coalescing all
-/// follow the shared transcript-reader contract used by Claude Code/Cursor.
-fn parse_commandcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    let mut open_assistant_id: Option<String> = None;
-
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-
-        // Metadata and future event kinds are deliberately ignored. A
-        // recognized message envelope with a broken payload is different: it
-        // should degrade to ShapeChanged when no usable turns remain.
-        if value.get("type").and_then(|kind| kind.as_str()) != Some("message") {
-            continue;
-        }
-        let Some(message) = value.get("message") else {
-            saw_malformed = true;
-            continue;
-        };
-
-        let Some(role) = message.get("role").and_then(|role| role.as_str()) else {
-            saw_malformed = true;
-            continue;
-        };
-        if role != "user" && role != "assistant" {
-            saw_malformed = true;
-            continue;
-        }
-        let Some(raw_content) = message.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        if !matches!(
-            raw_content,
-            serde_json::Value::String(_) | serde_json::Value::Array(_) | serde_json::Value::Null
-        ) {
-            saw_malformed = true;
-            continue;
-        }
-        let text = concat_text_blocks(Some(raw_content));
-        let mut tool_calls = extract_tool_calls(Some(raw_content));
-
-        if role == "user" {
-            open_assistant_id = None;
-            if is_synthetic_message(&text) || text.trim().is_empty() {
-                continue;
-            }
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-            continue;
-        }
-
-        // An assistant message containing only internal blocks has no
-        // user-facing normalized content. Keep the open id so a split
-        // assistant message can still merge a following continuation.
-        if text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-
-        let id = value
-            .get("id")
-            .or_else(|| message.get("id"))
-            .and_then(|id| id.as_str())
-            .map(str::to_string);
-        if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
-            if id == open {
-                if let Some(last) = turns.back_mut() {
-                    merge_into(last, &text, tool_calls);
-                    if !last.text.trim().is_empty() {
-                        last_assistant_message = Some(last.text.clone());
-                    }
-                    continue;
-                }
-            }
-        }
-
-        open_assistant_id = id;
-        cap_tool_calls(&mut tool_calls);
-        let turn = Turn {
-            role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
-            tool_calls,
-        };
-        if !turn.text.trim().is_empty() {
-            last_assistant_message = Some(turn.text.clone());
-        }
-        push_bounded(&mut turns, turn, keep);
-    }
-
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
+// `CommandCodeMessageActivity`, `commandcode_message_activity`,
+// `contains_tool_result`, `parse_commandcode_turns` moved to
+// `adapters::commandcode` (issue #1661 step 3). Re-exported for
+// `commandcode_watcher` (and tests in this module) until those callers
+// are routed through the seam in step 10.
+pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
+    commandcode_message_activity, parse_commandcode_turns, CommandCodeMessageActivity,
+};
 
 // --- Antigravity transcript parser (issue #1283) ---
 //
