@@ -1,0 +1,49 @@
+{
+  "plan_type": "business",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 10.0,
+      "limit_window_seconds": 18000,
+      "reset_at": 1755288000
+    },
+    "secondary_window": {
+      "used_percent": 20.0,
+      "limit_window_seconds": 604800,
+      "reset_at": 1755892800
+    }
+  },
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "balance": "42.00"
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": {
+      "limit": "10000",
+      "used": "2500.5",
+      "remaining": "7499.5",
+      "used_percent": 25,
+      "remaining_percent": 75,
+      "reset_after_seconds": 1209600,
+      "reset_at": 1755892800
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "codex_other",
+      "metered_feature": "codex_other",
+      "rate_limit": {
+        "allowed": true,
+        "limit_reached": false,
+        "primary_window": {
+          "used_percent": 30.0,
+          "limit_window_seconds": 3600,
+          "reset_at": 1755288000
+        }
+      }
+    }
+  ]
+}

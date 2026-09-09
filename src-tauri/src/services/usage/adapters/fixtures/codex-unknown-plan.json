@@ -1,0 +1,13 @@
+{
+  "plan_type": "future_workspace_plan",
+  "rate_limit": null,
+  "credits": {
+    "has_credits": false,
+    "unlimited": true,
+    "balance": null
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": null
+  }
+}

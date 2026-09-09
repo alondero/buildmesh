@@ -9,7 +9,7 @@ Dual-track usage metering for OpenAI and Codex: passive read-only discovery of C
 Buildmesh displays real-time usage meters for AI providers across two primary billing modes: subscription quota windows (e.g. 5-hour rolling windows with reset timers) and pay-as-you-go balances.
 
 OpenAI and Codex present distinct metering architectures:
-1. **Codex CLI (ChatGPT Subscription Quota):** Users authenticated via ChatGPT (Plus/Team/Pro) have access to a private rate-limit usage endpoint returning rolling quota consumption and reset timestamps. Authentication is stored locally on disk by the Codex CLI.
+1. **Codex CLI (ChatGPT Subscription Quota):** Users authenticated via ChatGPT have access to a private rate-limit usage endpoint. Consumer plans (Plus/Pro and similar) typically return rolling quota windows. Business and Enterprise plans may omit those windows (`rate_limit: null`) and instead report a plan label, credit balance, and an individual monthly spend or credit control. Authentication is stored locally on disk by the Codex CLI.
 2. **OpenAI Platform API (Pay-As-You-Go Wallet / Spend):** OpenAI does not provide a public programmatic API for real-time prepaid credit balances using standard API keys. Monthly spend is accessible exclusively through the Organization Costs API, requiring an Organization Admin API Key (`sk-admin-...`). Standard Project API Keys (`sk-proj-...`) are restricted to inference endpoints and return `401`/`403` on organization billing routes.
 
 ## Decision
@@ -22,7 +22,7 @@ OpenAI and Codex present distinct metering architectures:
      2. Windows Host Standard: `%USERPROFILE%/.codex/auth.json` (or `%HOME%/.codex/auth.json`).
      3. WSL Fallback: If no host credentials exist and WSL is active, resolve the default WSL distribution via `env::get_default_wsl_distro()` and construct the host UNC path via `env::to_host_path("/home/<user>/.codex/auth.json")` (`\\wsl$\<distro>\home\<user>\.codex\auth.json`).
    - **Passive Read-Only Policy:** The fetcher is strictly read-only. It never writes to `auth.json` or invokes OAuth refresh grants. On HTTP 401/403 (token expiry), it marks `logged_in: false` and prompts the user to re-authenticate via the CLI (`Run 'codex' in terminal to log in`).
-   - **Schema & DTO Parsing:** Deserializes `rate_limit.primary_window`, `secondary_window`, and `additional_rate_limits`. Parses `used_percent` (f64 consumption 0.0–100.0), `limit_window_seconds` (dynamic label resolution: 18,000s → `"5-hour"`, 604,800s → `"Weekly"`), and `reset_at` (Unix epoch seconds converted to RFC3339).
+   - **Schema & DTO Parsing:** Deserializes the provider-reported `plan_type` verbatim (unknown names are kept, not rejected). `rate_limit` is optional: a null or absent object is valid. When present, parses `primary_window`, `secondary_window`, and nested `additional_rate_limits`. Also maps top-level `additional_rate_limits` (named extra buckets), `credits` (optional remaining balance and unlimited flag), and `spend_control.individual_limit` (used/limit/remaining/percent/reset, often as decimal strings). Window `used_percent` is consumption 0.0–100.0; `limit_window_seconds` drives labels (18,000s → `"5-hour"`, 604,800s → `"Weekly"`); `reset_at` is Unix epoch seconds converted to RFC3339. Mixed replies may carry both rolling windows and budget meters.
 
 2. **OpenAI Platform API Spend & Degradation:**
    - **Endpoint:** `GET https://api.openai.com/v1/organization/costs?start_time=<month_start_epoch>&bucket_width=1d`
@@ -36,7 +36,7 @@ OpenAI and Codex present distinct metering architectures:
 
 ## Consequences
 
-- Buildmesh surfaces Codex subscription limits automatically across native Windows and WSL development environments without requiring manual credential entry.
+- Buildmesh surfaces Codex subscription limits, credit balances, and individual spend controls automatically across native Windows and WSL development environments without requiring manual credential entry. Consumer rolling windows continue to render; spend-only Business and Enterprise replies are accepted rather than treated as malformed.
 - Expired Codex sessions cleanly direct the user to CLI re-auth without throwing uncaught UI errors or corrupting CLI auth files.
 - OpenAI project API keys remain fully functional for agent execution without surfacing noisy billing errors, while organization admins gain visibility into monthly spend.
 - The `ProviderUsage` and `UsageWindow` wire contracts remain backwards-compatible and consistent across all provider implementations.
