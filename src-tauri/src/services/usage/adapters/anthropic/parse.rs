@@ -13,6 +13,9 @@ use serde_json::Value;
 pub(crate) struct ParsedAnthropicUsage {
     pub windows: Vec<UsageWindow>,
     pub meters: Vec<UsageMeter>,
+    /// Plan fields occasionally appear on the usage body; prefer credentials /
+    /// profile when present, then fall back to these.
+    pub plan: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -52,6 +55,14 @@ struct Resp {
     spend: Option<Spend>,
     #[serde(default)]
     extra_usage: Option<ExtraUsage>,
+    #[serde(default, rename = "subscription_type")]
+    subscription_type: Option<String>,
+    #[serde(default, rename = "subscriptionType")]
+    subscription_type_camel: Option<String>,
+    #[serde(default, rename = "rate_limit_tier")]
+    rate_limit_tier: Option<String>,
+    #[serde(default, rename = "rateLimitTier")]
+    rate_limit_tier_camel: Option<String>,
 }
 
 pub(crate) fn parse_anthropic_usage(body: &str) -> Result<ParsedAnthropicUsage, UsageError> {
@@ -73,7 +84,57 @@ pub(crate) fn parse_anthropic_usage(body: &str) -> Result<ParsedAnthropicUsage, 
         meters.push(UsageMeter::Unavailable);
     }
 
-    Ok(ParsedAnthropicUsage { windows, meters })
+    let plan = plan_label(
+        resp.subscription_type
+            .as_deref()
+            .or(resp.subscription_type_camel.as_deref()),
+        resp.rate_limit_tier
+            .as_deref()
+            .or(resp.rate_limit_tier_camel.as_deref()),
+    );
+
+    Ok(ParsedAnthropicUsage {
+        windows,
+        meters,
+        plan,
+    })
+}
+
+/// Parse `GET /api/oauth/profile` for the account plan belonging to the token.
+pub(crate) fn parse_oauth_profile_plan(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Org {
+        #[serde(default)]
+        organization_type: Option<String>,
+        #[serde(default)]
+        rate_limit_tier: Option<String>,
+        #[serde(default, rename = "subscriptionType")]
+        subscription_type: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Profile {
+        #[serde(default)]
+        organization: Option<Org>,
+        #[serde(default)]
+        subscription_type: Option<String>,
+        #[serde(default, rename = "subscriptionType")]
+        subscription_type_camel: Option<String>,
+        #[serde(default)]
+        rate_limit_tier: Option<String>,
+        #[serde(default, rename = "rateLimitTier")]
+        rate_limit_tier_camel: Option<String>,
+    }
+    let profile: Profile = serde_json::from_str(body).ok()?;
+    let org = profile.organization.as_ref();
+    plan_label(
+        org.and_then(|org| org.organization_type.as_deref())
+            .or(org.and_then(|org| org.subscription_type.as_deref()))
+            .or(profile.subscription_type.as_deref())
+            .or(profile.subscription_type_camel.as_deref()),
+        org.and_then(|org| org.rate_limit_tier.as_deref())
+            .or(profile.rate_limit_tier.as_deref())
+            .or(profile.rate_limit_tier_camel.as_deref()),
+    )
 }
 
 fn push_window(windows: &mut Vec<UsageWindow>, label: &str, bucket: Option<UsageBucket>) {
@@ -158,10 +219,7 @@ fn parse_money(value: &Value) -> Option<(f64, String)> {
         Value::Number(number) => Some((number.as_f64()?, "USD".to_string())),
         Value::Object(object) => {
             let minor = object.get("amount_minor")?.as_f64()?;
-            let exponent = object
-                .get("exponent")
-                .and_then(Value::as_i64)
-                .unwrap_or(2) as i32;
+            let exponent = object.get("exponent").and_then(Value::as_i64).unwrap_or(2) as i32;
             let currency = object
                 .get("currency")
                 .and_then(Value::as_str)
@@ -188,7 +246,11 @@ pub(crate) fn plan_label(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         })?;
-    Some(match raw.to_ascii_lowercase().as_str() {
+    let normalized = raw
+        .strip_prefix("claude_")
+        .or_else(|| raw.strip_prefix("Claude_"))
+        .unwrap_or(raw);
+    Some(match normalized.to_ascii_lowercase().as_str() {
         "pro" => "Pro".to_string(),
         "max" => "Max".to_string(),
         "team" => "Team".to_string(),
@@ -214,6 +276,23 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "7-day");
         assert_eq!(parsed.windows[1].used_percent, Some(33.0));
         assert!(parsed.meters.is_empty());
+        assert!(parsed.plan.is_none());
+    }
+
+    #[test]
+    fn usage_body_plan_fields_are_recovered() {
+        let json = r#"{"spend":{"used":{"amount_minor":100,"currency":"USD","exponent":2}},"subscription_type":"enterprise"}"#;
+        let parsed = parse_anthropic_usage(json).unwrap();
+        assert_eq!(parsed.plan.as_deref(), Some("Enterprise"));
+    }
+
+    #[test]
+    fn oauth_profile_plan_uses_organization_type() {
+        let json = r#"{"organization":{"organization_type":"claude_enterprise","rate_limit_tier":"default"}}"#;
+        assert_eq!(
+            parse_oauth_profile_plan(json).as_deref(),
+            Some("Enterprise")
+        );
     }
 
     #[test]
@@ -226,7 +305,8 @@ mod tests {
 
     #[test]
     fn seven_day_sonnet_window_is_kept() {
-        let json = r#"{"seven_day_sonnet":{"utilization":12.5,"resets_at":"2026-06-01T00:00:00Z"}}"#;
+        let json =
+            r#"{"seven_day_sonnet":{"utilization":12.5,"resets_at":"2026-06-01T00:00:00Z"}}"#;
         let parsed = parse_anthropic_usage(json).unwrap();
         assert_eq!(parsed.windows[0].label, "7-day Sonnet");
         assert_eq!(parsed.windows[0].used_percent, Some(12.5));
@@ -388,13 +468,20 @@ mod tests {
 
     #[test]
     fn unknown_plan_names_pass_through() {
-        assert_eq!(plan_label(Some("enterprise"), None).as_deref(), Some("Enterprise"));
+        assert_eq!(
+            plan_label(Some("enterprise"), None).as_deref(),
+            Some("Enterprise")
+        );
         assert_eq!(plan_label(Some("pro"), None).as_deref(), Some("Pro"));
+        assert_eq!(plan_label(Some("claude_max"), None).as_deref(), Some("Max"));
         assert_eq!(
             plan_label(Some("Business Plus"), None).as_deref(),
             Some("Business Plus")
         );
-        assert_eq!(plan_label(None, Some("default_claude_max_20x")).as_deref(), Some("default_claude_max_20x"));
+        assert_eq!(
+            plan_label(None, Some("default_claude_max_20x")).as_deref(),
+            Some("default_claude_max_20x")
+        );
         assert_eq!(plan_label(Some(""), Some("")).as_deref(), None);
     }
 }

@@ -14,10 +14,11 @@ use crate::services::usage::types::{logged_out, unavailable, ProviderUsage, Usag
 use auth::{
     cache_identity_from, resolve_claude_auth, AuthLookup, ClaudeAuthSource, ProductionLookup,
 };
-use parse::parse_anthropic_usage;
+use parse::{parse_anthropic_usage, parse_oauth_profile_plan};
 
 const PROVIDER: &str = "anthropic";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 
 pub(crate) struct AnthropicAdapter;
 
@@ -40,6 +41,14 @@ impl UsageAdapter for AnthropicAdapter {
 }
 
 fn anthropic_usage_with(lookup: &impl AuthLookup, usage_url: &str) -> ProviderUsage {
+    anthropic_usage_with_urls(lookup, usage_url, &profile_url_for(usage_url))
+}
+
+fn anthropic_usage_with_urls(
+    lookup: &impl AuthLookup,
+    usage_url: &str,
+    profile_url: &str,
+) -> ProviderUsage {
     match resolve_claude_auth(lookup) {
         ClaudeAuthSource::Managed { platform, .. } => ProviderUsage {
             provider: PROVIDER.to_string(),
@@ -54,11 +63,31 @@ fn anthropic_usage_with(lookup: &impl AuthLookup, usage_url: &str) -> ProviderUs
             error: None,
         },
         ClaudeAuthSource::Missing { error } => logged_out(PROVIDER, error.to_string()),
-        ClaudeAuthSource::Oauth { token, plan } => fetch_oauth_usage(usage_url, &token, plan),
+        ClaudeAuthSource::Oauth { token, plan } => {
+            fetch_oauth_usage(usage_url, profile_url, &token, plan)
+        }
     }
 }
 
-fn fetch_oauth_usage(usage_url: &str, token: &str, plan: Option<String>) -> ProviderUsage {
+fn profile_url_for(usage_url: &str) -> String {
+    if usage_url == USAGE_URL {
+        return PROFILE_URL.to_string();
+    }
+    if let Some(base) = usage_url.strip_suffix("/oauth/usage") {
+        return format!("{base}/oauth/profile");
+    }
+    if let Some(base) = usage_url.strip_suffix("/usage") {
+        return format!("{base}/profile");
+    }
+    PROFILE_URL.to_string()
+}
+
+fn fetch_oauth_usage(
+    usage_url: &str,
+    profile_url: &str,
+    token: &str,
+    known_plan: Option<String>,
+) -> ProviderUsage {
     let client = match shared_client() {
         Ok(client) => client,
         Err(error) => return unavailable(PROVIDER, error),
@@ -92,20 +121,42 @@ fn fetch_oauth_usage(usage_url: &str, token: &str, plan: Option<String>) -> Prov
             )
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
-            Ok(parsed) => ProviderUsage {
-                provider: PROVIDER.to_string(),
-                logged_in: true,
-                windows: parsed.windows,
-                balance: None,
-                plan,
-                meters: parsed.meters,
-                detail: None,
-                error: None,
-            },
+            Ok(parsed) => {
+                let plan = known_plan
+                    .or(parsed.plan)
+                    .or_else(|| fetch_oauth_plan(&client, profile_url, token));
+                ProviderUsage {
+                    provider: PROVIDER.to_string(),
+                    logged_in: true,
+                    windows: parsed.windows,
+                    balance: None,
+                    plan,
+                    meters: parsed.meters,
+                    detail: None,
+                    error: None,
+                }
+            }
             Err(error) => unavailable(PROVIDER, format!("Failed to parse response: {error}")),
         },
         Err(error) => unavailable(PROVIDER, format!("Request failed: {error}")),
     }
+}
+
+fn fetch_oauth_plan(
+    client: &reqwest::blocking::Client,
+    profile_url: &str,
+    token: &str,
+) -> Option<String> {
+    let response = client
+        .get(profile_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    parse_oauth_profile_plan(&response.text().ok()?)
 }
 
 #[cfg(test)]
@@ -128,8 +179,10 @@ mod tests {
             "enabled": true
         }
     }"#;
-    const OAUTH_JSON: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-secret","subscriptionType":"pro"}}"#;
-    const ENTERPRISE_JSON: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-ent","subscriptionType":"enterprise"}}"#;
+    const OAUTH_JSON: &str =
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-secret","subscriptionType":"pro"}}"#;
+    const ENTERPRISE_JSON: &str =
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-ent","subscriptionType":"enterprise"}}"#;
 
     fn with_file(json: &str) -> FakeLookup {
         let mut lookup = FakeLookup::default();
@@ -161,8 +214,11 @@ mod tests {
                 tiny_http::Response::from_string(CONSUMER_BODY)
                     .with_status_code(200)
                     .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                            .unwrap(),
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
                     ),
             );
         });
@@ -197,8 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn env_oauth_token_fetch_preserves_enterprise_plan_with_spend() {
-        let port = spawn_loopback(1, move |request| {
+    fn env_oauth_token_fetch_gets_plan_from_profile_not_stale_file() {
+        // Stale local login is Pro; the env token's profile is Enterprise.
+        let port = spawn_loopback(2, move |request| {
             let auth = request
                 .headers()
                 .iter()
@@ -206,16 +263,24 @@ mod tests {
                 .map(|header| header.value.as_str().to_string())
                 .unwrap_or_default();
             assert_eq!(auth, "Bearer sk-ant-oat01-env");
-            let _ = request.respond(
-                tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
-            );
+            let path = request.url().to_string();
+            let body = if path.contains("/profile") {
+                r#"{"organization":{"organization_type":"claude_enterprise"}}"#
+            } else {
+                ENTERPRISE_SPEND_BODY
+            };
+            let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
-        let mut lookup = with_file(ENTERPRISE_JSON);
+        let mut lookup = with_file(OAUTH_JSON);
         lookup
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
+        assert_eq!(
+            usage.plan.as_deref(),
+            Some("Enterprise"),
+            "plan must come from the env token profile, not the stale Pro login file"
+        );
         match &usage.meters[..] {
             [UsageMeter::Metered { amount }] => {
                 assert_eq!(amount.used, 25.0);
@@ -253,7 +318,8 @@ mod tests {
         let hits_thread = Arc::clone(&hits);
         let port = spawn_loopback(1, move |request| {
             hits_thread.fetch_add(1, Ordering::SeqCst);
-            let _ = request.respond(tiny_http::Response::from_string("should not run").with_status_code(200));
+            let _ = request
+                .respond(tiny_http::Response::from_string("should not run").with_status_code(200));
         });
         let mut lookup = with_file(OAUTH_JSON);
         lookup
@@ -293,12 +359,17 @@ mod tests {
     fn authentication_failures_are_logged_out() {
         for status in [401_u16, 403] {
             let port = spawn_loopback(1, move |request| {
-                let _ = request.respond(tiny_http::Response::from_string("denied").with_status_code(status));
+                let _ = request
+                    .respond(tiny_http::Response::from_string("denied").with_status_code(status));
             });
             let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
             assert!(!usage.logged_in, "status {status} should log out");
             assert!(
-                usage.error.as_deref().unwrap_or_default().contains("login expired"),
+                usage
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("login expired"),
                 "{status}: {:?}",
                 usage.error
             );
@@ -308,7 +379,8 @@ mod tests {
     #[test]
     fn rate_limit_and_parse_failures_stay_unavailable() {
         let port_429 = spawn_loopback(1, |request| {
-            let _ = request.respond(tiny_http::Response::from_string("slow down").with_status_code(429));
+            let _ = request
+                .respond(tiny_http::Response::from_string("slow down").with_status_code(429));
         });
         let limited = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_429));
         assert!(limited.logged_in);
@@ -319,7 +391,8 @@ mod tests {
             .contains("Rate limited"));
 
         let port_bad = spawn_loopback(1, |request| {
-            let _ = request.respond(tiny_http::Response::from_string("{nope").with_status_code(200));
+            let _ =
+                request.respond(tiny_http::Response::from_string("{nope").with_status_code(200));
         });
         let bad = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_bad));
         assert!(bad.logged_in);

@@ -62,7 +62,10 @@ impl std::fmt::Debug for ClaudeAuthSource {
                 .field("plan", plan)
                 .field("token", &"<redacted>")
                 .finish(),
-            Self::Missing { error } => f.debug_struct("Missing").field("error", &error.to_string()).finish(),
+            Self::Missing { error } => f
+                .debug_struct("Missing")
+                .field("error", &error.to_string())
+                .finish(),
         }
     }
 }
@@ -123,27 +126,35 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
         return managed(PLATFORM_HELPER, "api_key_helper", b"configured");
     }
     if let Some(token) = var("CLAUDE_CODE_OAUTH_TOKEN") {
-        // Env token wins for the request; plan metadata still comes from the
-        // local OAuth store when present so Enterprise spend keeps its plan.
-        return ClaudeAuthSource::Oauth {
-            token,
-            plan: oauth_plan_from_store(lookup, &config_dir),
-        };
+        // Env tokens (including `claude setup-token`) are not saved locally.
+        // Plan must come from the token's own profile/usage response later —
+        // never from a dormant /login credential for a different account.
+        return ClaudeAuthSource::Oauth { token, plan: None };
     }
 
     let anthropic_cfg = anthropic_config_dir(lookup);
     if let Some(name) = var("ANTHROPIC_PROFILE") {
         return resolve_named_profile(lookup, &anthropic_cfg, &name);
     }
-    if var("ANTHROPIC_FEDERATION_RULE_ID").is_some() && var("ANTHROPIC_ORGANIZATION_ID").is_some()
-    {
+    if var("ANTHROPIC_FEDERATION_RULE_ID").is_some() && var("ANTHROPIC_ORGANIZATION_ID").is_some() {
         return managed(PLATFORM_PROFILE, "federation_env", b"configured");
     }
     if active_profile_is_federation(lookup, &anthropic_cfg) {
         return managed(PLATFORM_PROFILE, "federation_profile", b"configured");
     }
 
-    read_oauth_store(lookup, &config_dir)
+    // Active user_oauth ranks below a working /login credential, then above
+    // a missing login so the valid active profile is not reported as absent.
+    let login = read_oauth_store(lookup, &config_dir);
+    if matches!(login, ClaudeAuthSource::Oauth { .. }) {
+        return login;
+    }
+    if let Some(name) = active_profile_name(lookup, &anthropic_cfg) {
+        if profile_auth_mode(lookup, &anthropic_cfg, &name) == Some(ProfileAuthMode::UserOauth) {
+            return resolve_named_profile(lookup, &anthropic_cfg, &name);
+        }
+    }
+    login
 }
 
 pub(crate) fn cache_identity_from(source: &ClaudeAuthSource) -> UsageIdentityFingerprint {
@@ -200,18 +211,10 @@ fn flag_set(value: Option<&str>) -> bool {
     }
 }
 
+#[derive(Default)]
 struct ClaudeSettings {
     env: HashMap<String, String>,
     api_key_helper: Option<String>,
-}
-
-impl Default for ClaudeSettings {
-    fn default() -> Self {
-        Self {
-            env: HashMap::new(),
-            api_key_helper: None,
-        }
-    }
 }
 
 fn read_settings(lookup: &impl AuthLookup, config_dir: &Path) -> ClaudeSettings {
@@ -258,10 +261,9 @@ struct AnthropicOAuthCred {
 fn read_oauth_store(lookup: &impl AuthLookup, config_dir: &Path) -> ClaudeAuthSource {
     let service = keychain_service_for(config_dir, &default_config_dir(lookup));
     if let Ok(body) = lookup.read_keychain(&service) {
-        match parse_oauth_json(&body) {
-            Ok(source) => return source,
-            // Unusable Keychain data is a miss: fall through to the file store.
-            Err(_) => {}
+        // Unusable Keychain data is a miss: fall through to the file store.
+        if let Ok(source) = parse_oauth_json(&body) {
+            return source;
         }
     }
 
@@ -272,13 +274,6 @@ fn read_oauth_store(lookup: &impl AuthLookup, config_dir: &Path) -> ClaudeAuthSo
             Err(error) => ClaudeAuthSource::Missing { error },
         },
         Err(error) => ClaudeAuthSource::Missing { error },
-    }
-}
-
-fn oauth_plan_from_store(lookup: &impl AuthLookup, config_dir: &Path) -> Option<String> {
-    match read_oauth_store(lookup, config_dir) {
-        ClaudeAuthSource::Oauth { plan, .. } => plan,
-        _ => None,
     }
 }
 
@@ -302,7 +297,10 @@ fn parse_oauth_json(body: &str) -> Result<ClaudeAuthSource, UsageError> {
 }
 
 fn anthropic_config_dir(lookup: &impl AuthLookup) -> PathBuf {
-    if let Some(dir) = lookup.env("ANTHROPIC_CONFIG_DIR").filter(|value| !value.is_empty()) {
+    if let Some(dir) = lookup
+        .env("ANTHROPIC_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+    {
         return PathBuf::from(dir);
     }
     if let Some(appdata) = lookup.env("APPDATA").filter(|value| !value.is_empty()) {
@@ -332,11 +330,12 @@ fn resolve_named_profile(
         Some(ProfileAuthMode::OidcFederation) => {
             managed(PLATFORM_PROFILE, "federation_profile", name.as_bytes())
         }
-        Some(ProfileAuthMode::UserOauth) => match profile_oauth_credentials(lookup, anthropic_cfg, name)
-        {
-            Ok((token, plan)) => ClaudeAuthSource::Oauth { token, plan },
-            Err(error) => ClaudeAuthSource::Missing { error },
-        },
+        Some(ProfileAuthMode::UserOauth) => {
+            match profile_oauth_credentials(lookup, anthropic_cfg, name) {
+                Ok((token, plan)) => ClaudeAuthSource::Oauth { token, plan },
+                Err(error) => ClaudeAuthSource::Missing { error },
+            }
+        }
     }
 }
 
@@ -396,7 +395,9 @@ fn profile_oauth_credentials(
     anthropic_cfg: &Path,
     name: &str,
 ) -> Result<(String, Option<String>), UsageError> {
-    let path = anthropic_cfg.join("credentials").join(format!("{name}.json"));
+    let path = anthropic_cfg
+        .join("credentials")
+        .join(format!("{name}.json"));
     let body = lookup.read_file(&path)?;
     #[derive(Deserialize)]
     struct ProfileCreds {
@@ -507,8 +508,10 @@ impl AuthLookup for FakeLookup {
 mod tests {
     use super::*;
 
-    const OAUTH_JSON: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-secret","subscriptionType":"pro"}}"#;
-    const ENTERPRISE_JSON: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-ent","subscriptionType":"enterprise"}}"#;
+    const OAUTH_JSON: &str =
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-secret","subscriptionType":"pro"}}"#;
+    const ENTERPRISE_JSON: &str =
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-ent","subscriptionType":"enterprise"}}"#;
 
     fn cred_path(lookup: &FakeLookup) -> PathBuf {
         lookup.home.join(".claude").join(".credentials.json")
@@ -612,7 +615,10 @@ mod tests {
         token
             .env
             .insert("ANTHROPIC_AUTH_TOKEN".into(), "sk-gateway".into());
-        assert_eq!(platform(&resolve_claude_auth(&token)), Some(PLATFORM_GATEWAY));
+        assert_eq!(
+            platform(&resolve_claude_auth(&token)),
+            Some(PLATFORM_GATEWAY)
+        );
 
         let mut key = with_oauth_file(OAUTH_JSON);
         key.env
@@ -636,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_env_token_beats_stored_login_and_keeps_plan() {
+    fn oauth_env_token_beats_stored_login_without_borrowing_its_plan() {
         let mut lookup = with_oauth_file(ENTERPRISE_JSON);
         lookup
             .env
@@ -644,9 +650,12 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan } => {
                 assert_eq!(token, "sk-ant-oat01-env");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                assert_eq!(
+                    plan, None,
+                    "env tokens must not inherit plan from a dormant local login"
+                );
             }
-            other => panic!("expected env oauth with plan, got {other:?}"),
+            other => panic!("expected env oauth, got {other:?}"),
         }
     }
 
@@ -661,18 +670,17 @@ mod tests {
             format!(r#"{{"authentication":{{"type":"{auth_type}"}}}}"#),
         );
         if let Some(body) = creds {
-            lookup
-                .files
-                .insert(cfg.join("credentials").join(format!("{name}.json")), body.to_string());
+            lookup.files.insert(
+                cfg.join("credentials").join(format!("{name}.json")),
+                body.to_string(),
+            );
         }
     }
 
     #[test]
     fn named_federation_profile_is_externally_managed() {
         let mut lookup = with_oauth_file(OAUTH_JSON);
-        lookup
-            .env
-            .insert("ANTHROPIC_PROFILE".into(), "work".into());
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
         insert_profile(&mut lookup, "work", "oidc_federation", None);
         assert_eq!(
             platform(&resolve_claude_auth(&lookup)),
@@ -683,16 +691,12 @@ mod tests {
     #[test]
     fn named_user_oauth_profile_uses_profile_credentials() {
         let mut lookup = with_oauth_file(OAUTH_JSON);
-        lookup
-            .env
-            .insert("ANTHROPIC_PROFILE".into(), "work".into());
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
         insert_profile(
             &mut lookup,
             "work",
             "user_oauth",
-            Some(
-                r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#,
-            ),
+            Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#),
         );
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan } => {
@@ -759,6 +763,24 @@ mod tests {
     }
 
     #[test]
+    fn active_user_oauth_profile_is_used_when_login_is_missing() {
+        let mut lookup = FakeLookup::default();
+        insert_profile(
+            &mut lookup,
+            "default",
+            "user_oauth",
+            Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#),
+        );
+        match resolve_claude_auth(&lookup) {
+            ClaudeAuthSource::Oauth { token, plan } => {
+                assert_eq!(token, "sk-ant-oat01-profile");
+                assert_eq!(plan.as_deref(), Some("Enterprise"));
+            }
+            other => panic!("active user_oauth must win when /login is missing, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn file_oauth_includes_enterprise_plan() {
         match resolve_claude_auth(&with_oauth_file(ENTERPRISE_JSON)) {
             ClaudeAuthSource::Oauth { token, plan } => {
@@ -772,10 +794,9 @@ mod tests {
     #[test]
     fn keychain_is_preferred_over_file_via_injected_seam() {
         let mut lookup = with_oauth_file(OAUTH_JSON);
-        lookup.keychain.insert(
-            KEYCHAIN_SERVICE.into(),
-            ENTERPRISE_JSON.into(),
-        );
+        lookup
+            .keychain
+            .insert(KEYCHAIN_SERVICE.into(), ENTERPRISE_JSON.into());
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { plan, .. } => {
                 assert_eq!(plan.as_deref(), Some("Enterprise"))
@@ -821,10 +842,7 @@ mod tests {
         let suffixed = keychain_service_for(Path::new("/tmp/other-claude"), &default);
         assert!(suffixed.starts_with("Claude Code-credentials-"));
         assert_ne!(suffixed, KEYCHAIN_SERVICE);
-        assert_eq!(
-            keychain_service_for(&default, &default),
-            KEYCHAIN_SERVICE
-        );
+        assert_eq!(keychain_service_for(&default, &default), KEYCHAIN_SERVICE);
     }
 
     #[test]
@@ -842,9 +860,7 @@ mod tests {
     #[test]
     fn malformed_credentials_are_shape_errors() {
         let mut lookup = FakeLookup::default();
-        lookup
-            .files
-            .insert(cred_path(&lookup), "{not json".into());
+        lookup.files.insert(cred_path(&lookup), "{not json".into());
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Missing {
                 error: UsageError::Shape(_),

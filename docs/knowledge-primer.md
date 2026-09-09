@@ -65,16 +65,18 @@ environment or the user `settings.json` `env` block report
 `managed_externally` for AWS Bedrock, Google Vertex AI, or Microsoft Foundry
 and must not present a dormant OAuth login as active. Environment API keys,
 bearer tokens, and `apiKeyHelper` outrank stored OAuth. `CLAUDE_CODE_OAUTH_TOKEN`
-uses that token for the request and still reads plan metadata from the local
-OAuth store when present. Named Anthropic profiles are mode-aware:
+uses that token for the request and derives plan from the token's own
+`/api/oauth/profile` (or usage-body plan fields), never from a dormant local
+login for a different account. Named Anthropic profiles are mode-aware:
 `user_oauth` uses the profile credential for usage, while `oidc_federation`
-(named, active, or env-configured) reports `managed_externally` so a dormant
-`/login` credential cannot win. Native OAuth reads the platform store (macOS
-Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
-with `.credentials.json` as fallback when Keychain is missing or unusable)
-and queries `GET /api/oauth/usage` directly — never by spawning the Claude
-CLI. Consumer plans keep five-hour and seven-day windows; Enterprise prefers
-the `spend` object and falls back to `extra_usage`.
+(named, active, or env-configured) reports `managed_externally`. An active
+`user_oauth` profile ranks below a working `/login` credential and above a
+missing login. Native OAuth reads the platform store (macOS Keychain service
+`Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`, with
+`.credentials.json` as fallback when Keychain is missing or unusable) and
+queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.
+Consumer plans keep five-hour and seven-day windows; Enterprise prefers the
+`spend` object and falls back to `extra_usage`.
 
 **The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
 shows one Spawn Option per **stored** `(harness, provider)` pairing as the
