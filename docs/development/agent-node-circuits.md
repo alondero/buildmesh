@@ -15,9 +15,9 @@ the blocker or request a fresh review. When the source's completion cannot be
 read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
-The reviewer uses the source agent's provider plus the Mesh's configured model
-and effort tier, and receives its working directory, Mesh base ref, name, and
-latest completion report. It is instructed
+The reviewer uses the configured Reviewer provider when one is set, otherwise
+the source agent's provider, plus the Mesh's configured model and effort tier.
+It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
@@ -41,11 +41,25 @@ a fix round. A blocked or exhausted run preserves the reviewer checkpoint,
 including its association and worktree, for recovery; cleanup stops its live
 process and is retryable rather than deleting the review evidence.
 
-By default, reviewers inherit the reviewed agent's harness. Explicit reviewer
-settings in an authored Circuit take precedence; model and effort use the
-existing Mesh/harness cascade. PR reviews inspect the published PR and post
+By default, reviewers inherit the reviewed agent's harness. The app-wide
+**Reviewer provider** setting in Settings can override that fallback for
+adversarial review; it is snapshotted into each run, so changing Settings does
+not alter a queued review. The built-in review preset is shared per Mesh, so
+it never stores a provider-specific default from the first agent that used it.
+Explicit reviewer settings in an authored Circuit take precedence; configure
+those in the reviewer `SpawnAgentNode` inspector's Provider field. Model and
+effort use the existing Mesh/harness cascade. PR reviews inspect the published PR and post
 their findings there as well as returning the terminal report. Local reviews
 include uncommitted work and do not publish comments.
+
+Automated first-turn prompt delivery has one shared policy in the agent launch
+module. It uses a harness startup prefill only when the adapter says that the
+prompt is safe for the command line; otherwise it starts the process cleanly
+and pastes the prompt through the PTY. Codex uses the latter for multiline
+review/diff text, avoiding CLI argument parsing of diff lines such as `+ ...`.
+Ordinary interactive spawn intents retain their user-facing startup-prefill
+behavior because they have different submit/readiness semantics, but both
+paths share prompt construction and harness argument preparation.
 
 On startup, inactive stock review graphs are upgraded to this contract while
 preserving spawn settings and round limits. Customized issue-review prompts

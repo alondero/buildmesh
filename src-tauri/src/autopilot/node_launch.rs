@@ -223,9 +223,18 @@ pub(crate) fn launch_autopilot_node(
         .map(|p| p.into_string())
         .unwrap_or_default();
     let prompt_delivery =
-        crate::autopilot::launch::initial_prompt_delivery(&plan.provider, &prefill);
+        crate::agent::launch::initial_prompt_delivery(&plan.provider, &prefill);
     let app_for_spawn = app.clone();
-    let intent_for_spawn = plan.intent.clone();
+    // When the shared delivery policy selects PTY injection, do not also put
+    // the same prompt on the process command line. This is what keeps
+    // multiline Codex review text out of its startup argument parser.
+    let intent_for_spawn = if prompt_delivery
+        == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn
+    {
+        SpawnIntent::Fresh
+    } else {
+        plan.intent.clone()
+    };
     let fallback_prompt = prefill.clone();
     let node_id_for_spawn = node.id;
     tauri::async_runtime::spawn(async move {
@@ -242,7 +251,7 @@ pub(crate) fn launch_autopilot_node(
             );
             return;
         }
-        if prompt_delivery == crate::autopilot::launch::InitialPromptDelivery::InjectAfterSpawn {
+        if prompt_delivery == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn {
             if let Err(error) = crate::autopilot::pipeline::write_prompt_to_pty(
                 node_id_for_spawn,
                 &fallback_prompt,
@@ -269,7 +278,7 @@ pub(crate) fn launch_autopilot_node(
     // match against the staged prefill instead of timing out. Failures
     // here are rare — the prefill only stages the prompt, the watcher
     // waits for harness readiness and presses Enter.
-    if prompt_delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
+    if prompt_delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
         crate::autopilot::launch::watch_and_submit(
             app.clone(),
             node.id,

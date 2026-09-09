@@ -454,6 +454,7 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            commands::preferences::set_app_reviewer_provider,
             commands::preferences::set_app_naming_provider,
             commands::preferences::set_app_autopilot_pool_size,
             commands::preferences::set_app_confirm_before_quit,

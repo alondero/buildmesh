@@ -261,6 +261,27 @@ pub fn default_provider() -> Option<String> {
     }
 }
 
+/// The optional app-wide reviewer Spawn Option. A blank value means reviews
+/// inherit the source/parent provider, while a configured value lets an
+/// adversarial review use an independent harness.
+pub fn reviewer_provider() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs
+            .reviewer_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::reviewer_provider load failed, falling back: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// The user-configured backend the session-naming helper uses to summarise
 /// PTY output into a slug (issue #824). `None` means "auto-naming is off" —
 /// the session_naming module short-circuits and nodes retain their random

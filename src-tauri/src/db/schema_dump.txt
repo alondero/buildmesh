@@ -225,4 +225,3 @@ CREATE TRIGGER meshes_circuit_run_capacity_range BEFORE INSERT ON meshes FOR EAC
 
 trigger:meshes_circuit_run_capacity_range_update
 CREATE TRIGGER meshes_circuit_run_capacity_range_update BEFORE UPDATE ON meshes FOR EACH ROW WHEN NEW.circuit_run_capacity IS NOT NULL AND NEW.circuit_run_capacity != OLD.circuit_run_capacity AND (NEW.circuit_run_capacity < 1 OR NEW.circuit_run_capacity > 8) BEGIN SELECT RAISE(ABORT, 'meshes.circuit_run_capacity must be in 1..=8'); END
-

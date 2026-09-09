@@ -397,6 +397,7 @@ fn repo_client_for(circuit: &AutopilotCircuit) -> Option<(String, String, GitHub
 fn base_context(circuit: &AutopilotCircuit) -> CircuitContext {
     let mut ctx = CircuitContext::new();
     ctx.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
+    ctx.with_app_reviewer_provider();
     let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
     ctx.with_autopilot_finish_prompt(None, Some(action.as_str()));
     ctx

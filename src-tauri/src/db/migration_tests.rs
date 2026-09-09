@@ -88,7 +88,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let mut legacy = crate::autopilot::circuit::model::CircuitGraph::agent_review("codex", None, None, 3);
+        let mut legacy = crate::autopilot::circuit::model::CircuitGraph::agent_review_with_provider(Some("codex"), None, None, 3);
         let reviewer_prompt = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
         let feedback_prompt = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
         for node in &mut legacy.nodes {

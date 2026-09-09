@@ -111,10 +111,29 @@ pub(super) fn resolve_review_spawn_inputs(
         .and_then(non_empty_trim)
         .map(str::to_string);
 
-    let provider = provider
-        .filter(|value| !value.trim().is_empty())
-        .or(source_provider)
-        .or_else(|| inherited_review_provider(None, parent_provider));
+    let configured_review_provider = view
+        .context
+        .get("review.provider")
+        .and_then(non_empty_trim)
+        .map(str::to_string);
+
+    // The built-in node-review preset is reused across runs. Its graph row is
+    // deliberately shared, so a provider persisted there is historical state
+    // from whichever agent first created the row, not a reviewer preference.
+    // A configured reviewer provider is the independent adversarial default;
+    // the source agent is the fallback. Authored Circuits keep their explicit
+    // reviewer provider as the highest-precedence layer.
+    let provider = if view.context.get("source.review_preset") == Some("1") {
+        configured_review_provider
+            .or(source_provider)
+            .or_else(|| inherited_review_provider(None, parent_provider))
+    } else {
+        provider
+            .filter(|value| !value.trim().is_empty())
+            .or(configured_review_provider)
+            .or(source_provider)
+            .or_else(|| inherited_review_provider(None, parent_provider))
+    };
     explicit.model = explicit.model.or(source_model);
     explicit.effort = explicit.effort.or(source_effort);
     (provider, explicit)
@@ -198,11 +217,11 @@ pub(super) struct ResolvedCircuitSpawn {
 /// to the step, then schedule stage-2 in the background — mirroring the
 /// autopilot launch order minus the GitHub ledger.
 pub(super) fn circuit_spawn_intent(
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
     prompt: &str,
 ) -> crate::agent::spawn::SpawnIntent {
     use crate::agent::spawn::SpawnIntent;
-    use crate::autopilot::launch::InitialPromptDelivery;
+    use crate::agent::launch::InitialPromptDelivery;
 
     match delivery {
         InitialPromptDelivery::Prefill => SpawnIntent::Loop {
@@ -218,9 +237,9 @@ pub(super) fn deliver_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
     prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
-    use crate::autopilot::launch::InitialPromptDelivery;
+    use crate::agent::launch::InitialPromptDelivery;
 
     let result = match delivery {
         InitialPromptDelivery::Prefill => Ok(()),
@@ -247,9 +266,9 @@ pub(super) fn schedule_circuit_initial_prompt(
     app: &AppHandle,
     node_id: i64,
     prompt: &str,
-    delivery: crate::autopilot::launch::InitialPromptDelivery,
+    delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
-    if delivery == crate::autopilot::launch::InitialPromptDelivery::Prefill {
+    if delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
         crate::autopilot::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
     }
 }
@@ -275,7 +294,7 @@ pub(super) struct CircuitBackgroundSpawn {
     pub explicit: ExplicitSpawnOverrides,
     pub worktree_policy: crate::agent::spawn::WorktreePolicy,
     pub prompt: String,
-    pub delivery: crate::autopilot::launch::InitialPromptDelivery,
+    pub delivery: crate::agent::launch::InitialPromptDelivery,
 }
 
 pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitBackgroundSpawn) {
@@ -424,6 +443,11 @@ pub(super) fn spawn_step_agent(
     let parent_provider = if is_review_spawn_step(view, node_id)
         && provider_str.as_deref().and_then(non_empty_trim).is_none()
         && source_provider.is_none()
+        && view
+            .context
+            .get("review.provider")
+            .and_then(non_empty_trim)
+            .is_none()
     {
         parent_agent_node_id.and_then(|parent_id| {
             db::get_agent_node_by_id(parent_id)
@@ -455,7 +479,7 @@ pub(super) fn spawn_step_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
     let prompt_delivery =
-        crate::autopilot::launch::initial_prompt_delivery(&provider, &resolved_prompt);
+        crate::agent::launch::initial_prompt_delivery(&provider, &resolved_prompt);
     let worktree_policy =
         if source_issue.is_some() || view.context.get("source.review_preset") == Some("1") {
             WorktreePolicy::ForceBranched

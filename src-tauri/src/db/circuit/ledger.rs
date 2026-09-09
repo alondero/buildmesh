@@ -64,7 +64,6 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     } else {
         let (review_model, review_effort) = review_config.clone().unwrap_or_default();
         let graph = crate::autopilot::circuit::model::CircuitGraph::agent_review(
-            &node.provider,
             review_model.clone(),
             review_effort.clone(),
             max_rounds,
@@ -93,6 +92,7 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
     };
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit_id, &name, node.mesh_id);
+    context.with_app_reviewer_provider();
     context.set("source.agent_id", node_id.to_string());
     context.set("source.name", &node.name);
     context.set("source.path", crate::env::node_working_path(&node).spawn_path);

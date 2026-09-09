@@ -1009,6 +1009,12 @@ export const getAppPreferences = () =>
 export const setAppDefaultProvider = (provider: string | null) =>
   _invoke('set_app_default_provider', { provider });
 
+/** App-wide reviewer Spawn Option. `null` restores the source-agent fallback;
+ * this is separate from the ordinary default provider so adversarial reviews
+ * can use an independent harness. */
+export const setAppReviewerProvider = (provider: string | null) =>
+  _invoke('set_app_reviewer_provider', { provider });
+
 /** Issue #824: pick the backend that summarises PTY output into a slug.
  *  Pass `null` (or empty) to **disable** auto-naming — nodes keep their
  *  random `adjective-adjective-noun` slugs until the user picks a value

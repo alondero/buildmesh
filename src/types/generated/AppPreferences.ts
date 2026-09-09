@@ -18,6 +18,13 @@ export type AppPreferences = {
  */
 default_provider: string | null, 
 /**
+ * Buildmesh-wide reviewer Spawn Option id. `None` means a review falls
+ * back to the reviewed agent's provider. This is intentionally separate
+ * from `default_provider`: adversarial review commonly uses a different
+ * harness than implementation.
+ */
+reviewer_provider: string | null,
+/**
  * MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
  * (#537) — kept so existing preferences.json files still load and the stored
  * key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.

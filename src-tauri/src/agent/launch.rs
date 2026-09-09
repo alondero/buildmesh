@@ -130,6 +130,36 @@ fn normalize_prefill_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Delivery path for an automated node's first turn. A non-empty prompt uses
+/// the harness's startup prefill when available and otherwise falls back to
+/// the same two-phase PTY injection used for later automated turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialPromptDelivery {
+    Fresh,
+    Prefill,
+    InjectAfterSpawn,
+}
+
+/// Select the transport for an automated first-turn prompt using the same
+/// adapter that will prepare the process launch. The adapter owns the
+/// harness-specific safety rule; the callers only choose how to deliver the
+/// resulting prompt and therefore cannot grow provider-specific branches.
+pub(crate) fn initial_prompt_delivery(
+    spawn_option: &str,
+    prompt: &str,
+) -> InitialPromptDelivery {
+    if prompt.trim().is_empty() {
+        return InitialPromptDelivery::Fresh;
+    }
+
+    let adapter = crate::preferences::resolve_harness_provider(spawn_option).adapter();
+    if adapter.supports_prefill() && !adapter.prefill_requires_pty(prompt) {
+        InitialPromptDelivery::Prefill
+    } else {
+        InitialPromptDelivery::InjectAfterSpawn
+    }
+}
+
 /// Shared default implementation of [`AgentProvider::prepare_launch`] for
 /// the Claude-shaped recipe (every adapter that follows the base-recipe +
 /// flag-arg pattern). Subcommand-style resume (Codex) returns options in
@@ -685,5 +715,37 @@ mod tests {
         assert!(!p.resets_backend_env);
         assert!(p.env_remove.is_empty());
         assert!(p.env_set.is_empty());
+    }
+
+    #[test]
+    fn initial_prompt_delivery_keeps_empty_prompts_fresh() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "  \n\t"),
+            InitialPromptDelivery::Fresh
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_prefills_single_line_supported_prompts() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "Review the PR"),
+            InitialPromptDelivery::Prefill
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_injects_codex_multiline_prompts_after_spawn() {
+        assert_eq!(
+            initial_prompt_delivery("codex", "Review the diff\n+ added line"),
+            InitialPromptDelivery::InjectAfterSpawn
+        );
+    }
+
+    #[test]
+    fn initial_prompt_delivery_injects_for_harnesses_without_prefill() {
+        assert_eq!(
+            initial_prompt_delivery("terminal", "Run the verification command"),
+            InitialPromptDelivery::InjectAfterSpawn
+        );
     }
 }

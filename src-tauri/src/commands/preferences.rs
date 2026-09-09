@@ -29,6 +29,19 @@ pub fn set_app_default_provider(provider: Option<String>) -> Result<(), String> 
     preferences::save(prefs)
 }
 
+/// Set the buildmesh-wide reviewer Spawn Option. Pass `None` (or blank) to
+/// restore the source-agent fallback. This is deliberately independent from
+/// the ordinary default provider so adversarial reviews can use another
+/// harness without changing implementation spawns.
+#[command]
+pub fn set_app_reviewer_provider(provider: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.reviewer_provider = provider
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    preferences::save(prefs)
+}
+
 /// Set the backend that summaries node PTY output into a slug (issue #824).
 /// Distinct from [`set_app_default_provider`]: auto-naming runs on every
 /// rename trigger (often), at low content complexity, so it shouldn't

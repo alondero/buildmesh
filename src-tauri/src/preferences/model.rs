@@ -339,6 +339,12 @@ pub struct AppPreferences {
     /// `None` means "no app-wide override — use the hardcoded fallback".
     #[serde(default)]
     pub default_provider: Option<String>,
+    /// Buildmesh-wide reviewer Spawn Option id. `None` means a review falls
+    /// back to the reviewed agent's provider. This is intentionally separate
+    /// from `default_provider`: adversarial review commonly uses a different
+    /// harness than implementation.
+    #[serde(default)]
+    pub reviewer_provider: Option<String>,
     /// MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
     /// (#537) — kept so existing preferences.json files still load and the stored
     /// key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.

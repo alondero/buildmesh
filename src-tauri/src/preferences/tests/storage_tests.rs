@@ -72,6 +72,28 @@ fn default_provider_helper_strips_empty_strings() {
 }
 
 #[test]
+fn reviewer_provider_helper_strips_blank_strings() {
+    with_temp_dir(|_| {
+        save(AppPreferences {
+            reviewer_provider: Some("  codex  ".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            super::super::storage::reviewer_provider().as_deref(),
+            Some("codex")
+        );
+
+        save(AppPreferences {
+            reviewer_provider: Some(" \t".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(super::super::storage::reviewer_provider(), None);
+    });
+}
+
+#[test]
 fn malformed_json_falls_back_to_default() {
     with_temp_dir(|tmp| {
         std::fs::write(tmp.join("preferences.json"), "{not valid json").unwrap();

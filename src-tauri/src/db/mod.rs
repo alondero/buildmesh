@@ -976,4 +976,3 @@ pub fn write_conn() -> std::sync::MutexGuard<'static, Connection> {
 pub fn is_initialized() -> bool {
     DB.get().is_some()
 }
-
