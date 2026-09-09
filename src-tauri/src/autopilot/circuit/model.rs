@@ -196,15 +196,17 @@ pub enum CircuitNodeKind {
         #[serde(default)]
         extra_args: Option<String>,
         /// Optional per-step timeout in seconds (#1219). `None` = inherit
-        /// the orchestrator default; `Some(0)` collapses to `None` at
+        /// the fixed watchdog default; `Some(0)` collapses to `None` at
         /// the resolver seam (`resolve_circuit_spawn_inputs`) so a
         /// zero-int overflow at save time can't request an instant
         /// expiry. The valid range is `1..=MAX_STEP_TIMEOUT_SECONDS`
         /// (7 days) — `validate()` rejects larger values with a
-        /// field-named error. The orchestrator carries the value via
-        /// `ExplicitSpawnOverrides::timeout_seconds`; enforcement
-        /// (cancellation of stuck spawns) is a follow-up slice — this
-        /// AST addition is plumbing + UI only.
+        /// field-named error. The worker's `observe_waits` emits it as
+        /// the `WaitObserved.timeout_ms` the stepper enforces; the
+        /// orchestrator also carries it via
+        /// `ExplicitSpawnOverrides::timeout_seconds` for launch logging.
+        /// Process-level enforcement (cancelling stuck spawns) is still
+        /// a follow-up.
         #[serde(default)]
         #[ts(as = "Option<i32>")]
         timeout_seconds: Option<u32>,

@@ -289,9 +289,10 @@ pub(crate) async fn spawn_with_intent(
             explicit_effort: explicit.effort,
             // #1219: per-step wall-clock budget from the AST.
             // Threaded into SpawnOptions → LaunchParams so the launch
-            // phase logs it and the (deferred) watchdog slice can
-            // consume it without re-deriving from the AST. `Some(0)`
-            // is collapsed to `None` at the carrier seam
+            // phase logs it (and a future process-level watchdog can
+            // consume it without re-deriving from the AST). Circuit-level
+            // enforcement reads the graph node in `observe_waits`.
+            // `Some(0)` is collapsed to `None` at the carrier seam
             // (`resolve_circuit_spawn_inputs` for circuit authors,
             // `ExplicitSpawnOverrides` for direct spawn requests) so
             // we never wire an instant-expiry timeout through.

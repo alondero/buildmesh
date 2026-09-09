@@ -24,12 +24,13 @@ pub(super) struct LaunchParams {
     pub explicit_model: Option<String>,
     pub explicit_effort: Option<String>,
     pub explicit_extra_args: Option<String>,
-    /// Optional per-step wall-clock budget in seconds (#1219). Read by
-    /// the (deferred) step-level watchdog from the resolved spawn
-    /// config. Today the launch phase logs it at warn-level when set
-    /// so a circuit author with a non-default budget has a recognisable
-    /// trace entry — the carrier is testable end-to-end without
-    /// requiring the watchdog slice to ship first.
+    /// Optional per-step wall-clock budget in seconds (#1219). The
+    /// circuit-level watchdog reads the graph node directly in
+    /// `services::circuit_worker::observe_waits`; this carrier lets the
+    /// launch phase log the budget at info-level when set so a circuit
+    /// author with a non-default budget has a recognisable trace entry
+    /// (and a future process-level watchdog can consume it without
+    /// re-deriving from the AST).
     pub explicit_timeout_seconds: Option<u32>,
     /// Composite spawn-option id (`node.provider`), used as the harness
     /// map key for application defaults and per-mesh overrides.
@@ -88,17 +89,18 @@ pub(super) async fn launch_process(
         sandbox,
     } = launch;
 
-    // #1219 (round-2 review): a non-None `explicit_timeout_seconds`
-    // signals the circuit author pinned a per-step wall-clock budget.
-    // The watchdog enforcement slice is a follow-up; today we log the
-    // value at info-level so the carrier is visible in the trace and
-    // the integration test (services::circuit_worker::tests::
-    // circuit_spawn_carries_timeout_through_to_launch) can pin the
-    // seam. `Some(0)` is filtered at the orchestrator (collapse rule
-    // on `ExplicitSpawnOverrides`) so we never see it here.
+    // #1219: a non-None `explicit_timeout_seconds` signals the circuit
+    // author pinned a per-step wall-clock budget. Circuit-level
+    // enforcement reads the graph node in
+    // `services::circuit_worker::observe_waits` (which emits the
+    // `WaitObserved.timeout_ms` the stepper enforces); here we log the
+    // value at info-level so the carrier is visible in the trace.
+    // `Some(0)` is filtered at the carrier seams (collapse rule on
+    // `ExplicitSpawnOverrides` / `resolve_circuit_spawn_inputs`) so we
+    // never see it here.
     if let Some(timeout) = explicit_timeout_seconds {
         tracing::info!(
-            "launch_process: session {} explicit timeout = {}s (watchdog enforcement deferred to follow-up slice)",
+            "launch_process: session {} explicit timeout = {}s (enforced at circuit level via WaitObserved)",
             session_id,
             timeout,
         );

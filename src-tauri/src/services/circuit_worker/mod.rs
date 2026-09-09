@@ -1271,6 +1271,23 @@ const YIELDED_WAIT_MS: i64 = 15 * 60_000;
 const ACTIVE_WAIT_MS: i64 = 2 * 60 * 60_000;
 const APPROVAL_WAIT_MS: i64 = 60 * 60_000;
 
+/// Per-step wall-clock budget authored on `SpawnAgentNode.timeout_seconds`
+/// (#1219), in the milliseconds the watchdog seam speaks. Returns `None`
+/// when the graph node carries no explicit budget so the caller keeps its
+/// fixed default (`YIELDED_WAIT_MS` / `ACTIVE_WAIT_MS` / `APPROVAL_WAIT_MS`).
+/// `Some(0)` collapses to absent — the same rule as the spawn-input resolver
+/// (`resolve_circuit_spawn_inputs`) — so a zero-int overflow at save time
+/// can't request an instant expiry.
+fn spawn_step_timeout_ms(kind: Option<&CircuitNodeKind>) -> Option<i64> {
+    match kind {
+        Some(CircuitNodeKind::SpawnAgentNode {
+            timeout_seconds: Some(t),
+            ..
+        }) if *t > 0 => Some(*t as i64 * 1000),
+        _ => None,
+    }
+}
+
 fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
     if view.state != RunState::Running { return; }
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1298,6 +1315,12 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         } else {
             ("Waiting for step prerequisites; no agent is attached.".into(), YIELDED_WAIT_MS)
         };
+        // #1219: an explicit per-step budget on the graph node overrides the
+        // fixed defaults above. The stepper enforces whatever `timeout_ms`
+        // this event carries, so this override is what makes the
+        // user-visible timeout setting take effect on circuit execution.
+        let timeout_ms = spawn_step_timeout_ms(view.graph.node(&step.node_id).map(|n| &n.kind))
+            .unwrap_or(timeout_ms);
         events.push(CircuitEvent::WaitObserved { node_id: step.node_id.clone(), attempt: step.attempt,
             now_ms, progress, reason, timeout_ms });
     }
@@ -2304,7 +2327,7 @@ mod tests {
     use super::github::*;
     use super::spawn::*;
     use crate::agent::spawn::ExplicitSpawnOverrides;
-    use crate::autopilot::circuit::model::{CircuitNode, StepOutcome};
+    use crate::autopilot::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
     use rusqlite::Connection;
 
     #[test]
@@ -4207,11 +4230,12 @@ mod tests {
     }
 
     /// #1219 review: a user-authored `timeout_seconds: Some(1800)` must
-    /// ride the explicit-override seam so the (separate) watchdog slice
-    /// can consume it. The inspector's contract is "0 or blank = inherit
-    /// default"; this test pins the carrier behaviour so the next slice
-    /// can wire the watchdog against `explicit.timeout_seconds` and trust
-    /// the seam.
+    /// ride the explicit-override seam so the launch phase can log it (and
+    /// a future process-level watchdog can consume it without re-deriving
+    /// from the AST). The circuit-level watchdog reads the graph node
+    /// directly in `observe_waits`; this test pins the carrier behaviour
+    /// so the launch seam can trust `explicit.timeout_seconds`. The
+    /// inspector's contract is "0 or blank = inherit default".
     #[test]
     fn circuit_spawn_passes_timeout_seconds_through_explicit_override() {
         let kind = spawn_kind(Some("anthropic"), None, None, None, Some(1800));
@@ -4248,13 +4272,14 @@ mod tests {
     /// end-to-end. `ResolvedCircuitSpawn` carries `explicit.timeout_seconds`
     /// and is later flattened into `SpawnOptions::explicit_timeout_seconds`
     /// by the orchestrator — this test asserts the carrier shape stays
-    /// populated so the (deferred) watchdog slice can read
-    /// `SpawnOptions::explicit_timeout_seconds` without re-deriving from
-    /// the AST. A future refactor that flattens the carrier without
-    /// copying the timeout would drop the wiring silently; the field
-    /// pin in `prepare_tests::spawn_options_carries_explicit_slots`
-    /// catches that at compile time, this test catches the runtime
-    /// regression.
+    /// populated so the launch phase can log the budget without
+    /// re-deriving from the AST. (The circuit watchdog itself reads the
+    /// graph node in `observe_waits`; see
+    /// `observe_waits_uses_spawn_step_timeout_seconds_for_wait_observed`.)
+    /// A future refactor that flattens the carrier without copying the
+    /// timeout would drop the wiring silently; the field pin in
+    /// `prepare_tests::spawn_options_carries_explicit_slots` catches that
+    /// at compile time, this test catches the runtime regression.
     #[test]
     fn circuit_spawn_carries_timeout_through_to_resolved_carrier() {
         let kind = spawn_kind(Some("anthropic"), None, None, None, Some(1800));
@@ -4264,6 +4289,72 @@ mod tests {
             Some(1800),
             "carrier must thread timeout end-to-end so the orchestrator can \
              pass it into SpawnOptions"
+        );
+    }
+
+    /// #1219 (PR #1666 review): the author's per-step `timeout_seconds` must
+    /// reach the watchdog seam, not just the launch carrier. `observe_waits`
+    /// builds the `WaitObserved` event the stepper enforces (`since_ms` +
+    /// `timeout_ms`), so pin the event's `timeout_ms` here: an explicit
+    /// 1800s budget must surface as 1_800_000ms, while `None` and `Some(0)`
+    /// keep the fixed default. The steps carry no attached agent, so this
+    /// exercises the DB-free prerequisites branch — the override applies
+    /// after the branch computation, identically for attached agents.
+    #[test]
+    fn observe_waits_uses_spawn_step_timeout_seconds_for_wait_observed() {
+        fn wait_timeout_ms(timeout_seconds: Option<u32>) -> i64 {
+            let view = RunView {
+                run_id: 1,
+                graph: CircuitGraph {
+                    version: CIRCUIT_GRAPH_VERSION,
+                    blueprint: None,
+                    nodes: vec![CircuitNode {
+                        id: "worker".into(),
+                        kind: CircuitNodeKind::SpawnAgentNode {
+                            prompt: "p".into(),
+                            name: None,
+                            provider: None,
+                            model: None,
+                            effort: None,
+                            extra_args: None,
+                            timeout_seconds,
+                        },
+                    }],
+                    edges: vec![],
+                },
+                state: RunState::Running,
+                context: CircuitContext::new(),
+                steps: vec![StepView {
+                    node_id: "worker".into(),
+                    status: StepStatus::Running,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 1,
+                }],
+            };
+            let mut events = Vec::new();
+            observe_waits(&view, &mut events);
+            assert_eq!(events.len(), 1, "one Running step must yield one WaitObserved");
+            match &events[0] {
+                CircuitEvent::WaitObserved { node_id, timeout_ms, .. } => {
+                    assert_eq!(node_id, "worker");
+                    *timeout_ms
+                }
+                other => panic!("expected WaitObserved, got {other:?}"),
+            }
+        }
+
+        assert_eq!(wait_timeout_ms(Some(1800)), 1_800_000);
+        assert_eq!(
+            wait_timeout_ms(None),
+            YIELDED_WAIT_MS,
+            "no budget keeps the fixed default for unattached steps"
+        );
+        assert_eq!(
+            wait_timeout_ms(Some(0)),
+            YIELDED_WAIT_MS,
+            "Some(0) collapses to absent so it can't request instant expiry"
         );
     }
 }
