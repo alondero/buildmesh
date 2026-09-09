@@ -88,24 +88,20 @@ impl TranscriptAdapter for GrokAdapter {
         let nt = payload
             .get("notification_type")
             .or_else(|| payload.get("notificationType"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        match nt.as_deref() {
+            .and_then(|v| v.as_str());
+        match nt {
             Some("permission_prompt") => Some(HookClassification {
                 decision: HookDecision::MarkInput,
                 kind: None,
-                notification_type: nt,
             }),
             Some("task_complete") => Some(HookClassification {
                 decision: HookDecision::Ready,
                 kind: None,
-                notification_type: nt,
             }),
             Some("question") | Some("question_prompt") | Some("ask_user") => {
                 Some(HookClassification {
                     decision: HookDecision::MarkInput,
                     kind: Some(LifecycleKind::QuestionRequested),
-                    notification_type: nt,
                 })
             }
             _ => None,
@@ -124,11 +120,12 @@ impl TranscriptAdapter for GrokAdapter {
         let Some(minted) = minted else {
             return false;
         };
-        // Share the route's query parser so the semantics (malformed
-        // pairs without `=` are silently dropped) match every other
-        // attention route token check.
+        // Share the parser from `transcript_reader::types` (not the
+        // routes layer) so the services layer doesn't import from
+        // http::routes — the seam is meant to decouple, not to bind
+        // services back into the routes graph.
         let presented = query_string
-            .and_then(|q| crate::http::routes::attention::extract_query_value(q, "token"));
+            .and_then(|q| crate::services::transcript_reader::types::extract_query_value(q, "token"));
         presented == Some(minted)
     }
 }

@@ -11,12 +11,12 @@
 //!
 //! Issue #1661 step 7: OpenCode is the **fifth harness migrated end-to-end**.
 //! The entire OpenCode reader surface — constants + DB read paths +
-//! message-shape parser + helper functions — moves here. The
-//! `opencode_resolve` function still calls
-//! `services::opencode_session::is_opencode_session_id` and
-//! `opencode_db_path` today; the plan's dependency inversion (making
-//! this adapter the sole owner of those) lands with step 10's discovery
-//! import sweep.
+//! message-shape parser + helper functions + the session-id gate +
+//! the env-aware DB-path resolver — moves here. The capture poller
+//! (`services::opencode_session`) imports both helpers from this
+//! adapter so the two readers (transcript + session-id capture poller)
+//! cannot drift on what an OpenCode session id looks like or where its
+//! DB lives.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,46 @@ pub(crate) const OPENCODE_DIGEST_WINDOW: usize = 50;
 /// Factor > 1 ensures the caller can always extract `tail` turns once the
 /// parser has coalesced/dropped, even on dense conversations.
 pub(crate) const OPENCODE_TURN_TO_MESSAGE_FACTOR: usize = 3;
+
+/// OpenCode session IDs start with `ses_` (schema `SessionID`).
+/// `pub(crate)` so the capture poller (`services::opencode_session`)
+/// can share the same gate without duplicating the prefix check — the
+/// two readers (transcript + session-id capture poller) must agree on
+/// what an OpenCode session id looks like.
+pub(crate) fn is_opencode_session_id(id: &str) -> bool {
+    id.starts_with("ses_") && id.len() > 4
+}
+
+/// Resolve the on-disk SQLite path OpenCode uses for its session +
+/// message store. Mirrors the env handling in `services::usage`
+/// (which opens the same DB for the billing rollup); on WSL the
+/// Linux-side path is converted to the Windows-side UNC form so a
+/// Rust reader can `Connection::open` it directly. `pub(crate)` so
+/// the capture poller resolves the same DB without duplicating the
+/// env↔host mapping.
+pub(crate) fn opencode_db_path(env_type: EnvType) -> Option<PathBuf> {
+    match env_type {
+        EnvType::Wsl => {
+            let user = std::env::var("USERNAME")
+                .ok()
+                .or_else(|| std::env::var("USER").ok())?;
+            let linux = format!("/home/{user}/.local/share/opencode/opencode.db");
+            Some(PathBuf::from(crate::env::to_host_path(&linux)))
+        }
+        EnvType::Windows => {
+            let home = std::env::var("USERPROFILE")
+                .ok()
+                .or_else(|| std::env::var("HOME").ok())?;
+            Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("opencode")
+                    .join("opencode.db"),
+            )
+        }
+    }
+}
 
 /// SQLite busy_timeout the OpenCode reader applies on every open: lets a
 /// concurrent writer (the live OpenCode CLI) hold the lock briefly
@@ -129,12 +169,10 @@ impl TranscriptAdapter for OpenCodeAdapter {
             Some("session.idle") => Some(HookClassification {
                 decision: HookDecision::MarkInput,
                 kind: Some(LifecycleKind::InputRequired),
-                notification_type: None,
             }),
             Some("session.created") => Some(HookClassification {
                 decision: HookDecision::Ignore,
                 kind: None,
-                notification_type: None,
             }),
             _ => None,
         }
@@ -310,18 +348,17 @@ pub(crate) fn opencode_resolve<'a>(
     let session_id = session_id
         .filter(|s| !s.is_empty())
         .ok_or(UnavailableReason::NoSession)?;
-    if !crate::services::opencode_session::is_opencode_session_id(session_id) {
+    if !is_opencode_session_id(session_id) {
         // A non-`ses_` id cannot match any OpenCode row; degrade
         // quietly rather than opening the DB to find nothing. The
-        // gate is shared with
-        // `services::opencode_session::is_opencode_session_id` so the
+        // gate is shared with `services::opencode_session` so the
         // two readers (transcript + capture poller) cannot drift on
-        // what an OpenCode session id looks like.
+        // what an OpenCode session id looks like — both import the
+        // same `is_opencode_session_id` from this adapter.
         return Err(UnavailableReason::NoTranscript);
     }
     let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
-    let db_path = crate::services::opencode_session::opencode_db_path(env_type)
-        .ok_or(UnavailableReason::NoTranscript)?;
+    let db_path = opencode_db_path(env_type).ok_or(UnavailableReason::NoTranscript)?;
     if !db_path.exists() {
         return Err(UnavailableReason::NoTranscript);
     }

@@ -246,3 +246,20 @@ pub(crate) struct AssistantReport {
     pub text: String,
     pub revision: String,
 }
+
+/// Pull a single key=value pair out of an `&`-delimited URL query
+/// string. Lives in `transcript_reader::types` (not in
+/// `http::routes::attention`) so the services layer (Grok's adapter,
+/// issue #1661) can share the parser without the routes layer
+/// reaching back into the services graph. The routes layer's local
+/// copy stays for `routes/attention.rs` test isolation.
+pub(crate) fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|part| {
+        let (k, v) = part.split_once('=')?;
+        if k == key {
+            Some(v)
+        } else {
+            None
+        }
+    })
+}

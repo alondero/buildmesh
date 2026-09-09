@@ -28,30 +28,36 @@
 //! than someone else's lossy summary. Truncation only bounds payload size.
 //!
 //! [`Unavailable`]: UnavailableReason
-use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::env;
-use crate::models::EnvType;
-
-// Format-agnostic envelope + helpers (issue #1661). Re-exported so existing
-// `crate::services::transcript_reader::*` call sites (e.g. `Turn`,
-// `TranscriptTail`, `MAX_TAIL`) continue to resolve without churn.
-//
-// `DEFAULT_TAIL` / `MAX_TAIL` / `MAX_TURN_TOOL_CALLS` are referenced only
-// inside the `mod tests` block via `use super::*;` — silence the unused-
-// import lint on the re-export rather than carry them as locals.
 pub(crate) mod types;
+// `TranscriptTail` and `UnavailableReason` are used by the reader's
+// own entry points below (return types of the public fns); re-exported
+// at `pub` so the public surface `crate::services::transcript_reader::TranscriptTail`
+// resolves for downstream IPC consumers (tauri commands, generated
+// TS bindings).
+// `ToolCall` / `Turn` are used externally by `coordinator::enrichment`
+// (test fixtures + `scrub_tail_masks_secrets_in_all_content_surfaces`);
+// `TranscriptTail` / `UnavailableReason` are the public return types of
+// the reader's `pub fn`s. Suppress the local unused-import warning —
+// Rust's lint doesn't track cross-module use of a `pub use` re-export.
 #[allow(unused_imports)]
-pub use types::{
-    ToolCall, TranscriptTail, Turn, UnavailableReason, DEFAULT_TAIL, MAX_TAIL, MAX_TURN_TEXT,
-    MAX_TURN_TOOL_CALLS, MAX_TOOL_STRING,
-};
-pub(crate) use types::{
-    AssistantReport, Parsed, build_tail, cap_tool_calls, effective_tail, empty_or_shape_changed,
-    merge_into, push_bounded, truncate, truncate_json_strings,
+pub use types::{ToolCall, TranscriptTail, Turn, UnavailableReason};
+// `AssistantReport` is `pub(crate)` in `types` (it's a circuit-side
+// wire type, not part of the public IPC surface) — re-export at the
+// same `pub(crate)` visibility so `coordinator::enrichment::assistant_report`
+// can return it via `crate::services::transcript_reader::AssistantReport`.
+pub(crate) use types::AssistantReport;
+// Internal helpers used by the reader's own entry points below (NOT
+// re-exported — external callers reach the seam directly via the
+// adapter modules, issue #1661 step 10).
+use types::{Parsed, build_tail, effective_tail, empty_or_shape_changed};
+use adapters::claude_code::parse_turns;
+use adapters::opencode::{
+    opencode_resolve, parse_opencode_messages, read_opencode_digest,
+    read_opencode_message_rows, read_opencode_tail, OPENCODE_DIGEST_WINDOW,
 };
 
 // Per-harness adapters + the registry seam. Issue #1661 step 1: Claude Code
@@ -127,24 +133,11 @@ impl TranscriptFormat {
 /// non-alphanumeric character with `-`. On Windows this collapses the drive
 /// colon and `\` separators (and `.` in `.claude`); on Unix it covers `/`.
 /// So `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
-// `encode_path` moved to `services::transcript_paths` (issue #1661 step
-// 5) — shared with `agent_node_discovery` for resumable-session
-// scanning. `commandcode_project_slug` lives in
-// `adapters::commandcode` (step 3). `is_synthetic_message`,
-// `concat_text_blocks`, `first_text_block` also live in
-// `transcript_paths`; re-exported here for the test module + Cursor
-// adapter (which delegates to `ClaudeCodeAdapter::line_has_assistant_text`
-// using the same predicate).
-pub(crate) use crate::services::transcript_paths::encode_path;
-pub(crate) use crate::services::transcript_reader::adapters::commandcode::commandcode_project_slug;
-pub(crate) use crate::services::transcript_paths::{
-    concat_text_blocks, first_text_block, is_synthetic_message,
-};
-// `truncate` and `truncate_json_strings` live in `types` (format-agnostic).
-// Format-agnostic helpers (`truncate`, `truncate_json_strings`,
-// `effective_tail`, `empty_or_shape_changed`, `build_tail`, `push_bounded`,
-// `cap_tool_calls`, `merge_into`, `Parsed`) live in `types` and are
-// re-exported at the top of this file.
+// `encode_path` / `is_synthetic_message` / `concat_text_blocks` /
+// `first_text_block` live in `services::transcript_paths` (issue #1661
+// step 5); `commandcode_project_slug` lives in
+// `adapters::commandcode`. All external callers have been updated
+// to import from those locations directly.
 
 // --- Wire types ---
 // Wire types (`ToolCall`, `Turn`, `UnavailableReason`, `TranscriptTail`,
@@ -201,34 +194,12 @@ fn locate_transcript(
     })
 }
 
-// `agy_locator_in`, `find_agy_transcript` moved to `adapters::agy`
-// (issue #1661 step 5). Re-exported for `services::agy_session` until
-// that caller is routed through the seam.
-pub(crate) use crate::services::transcript_reader::adapters::agy::agy_locator_in;
-
-// `commandcode_sessions_dir`, `commandcode_transcript_path_in`, and
-// `find_commandcode_transcript` moved to `adapters::commandcode` (issue
-// #1661 step 3). Re-exported here for `commandcode_session` and
-// `commandcode_watcher` until those callers are routed through the
-// adapter seam in step 10.
-pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
-    commandcode_sessions_dir, commandcode_transcript_path_in,
-};
-/// `transcript_path`, `parse_turns`, `extract_tool_calls`,
-/// `count_pending_background_tasks`, `pending_background_task_ids`,
-/// and the `LAUNCH_ID` / `NOTIFIED_ID` regex statics moved to
-/// `adapters::claude_code` (issue #1661 step 8). Re-exported so the
-/// existing test module's references keep resolving.
-pub(crate) use crate::services::transcript_reader::adapters::claude_code::{
-    count_pending_background_tasks, parse_turns, pending_background_task_ids, transcript_path,
-};
-
-// `cursor_transcript_path`, `cursor_transcript_path_in`, and
-// `cursor_workspace_slug` moved to `adapters::cursor` (issue #1661
-// step 4). Re-exported for `agent_node_discovery` until step 10.
-pub(crate) use crate::services::transcript_reader::adapters::cursor::{
-    cursor_transcript_path_in, cursor_workspace_slug,
-};
+// `agy_locator_in` lives in `adapters::agy`; `commandcode_*` in
+// `adapters::commandcode`; `cursor_*` in `adapters::cursor`;
+// `claude_code::*` in `adapters::claude_code`; `codex::*` in
+// `adapters::codex`; `opencode::*` in `adapters::opencode`. All
+// external callers have been updated to import directly from the
+// adapter modules (issue #1661 step 10).
 
 // --- OpenCode transcript reader (issue #1296) ---
 //
@@ -273,26 +244,14 @@ pub(crate) use crate::services::transcript_reader::adapters::cursor::{
 // second query and the contract test
 // (`opencode_locator_reads_messages_from_file_backed_db`) is the pin.
 
-// `read_opencode_messages`, `read_opencode_message_rows`,
-// `read_opencode_tail_from_messages`, `read_opencode_digest_from_messages`,
-// `read_opencode_tail`, `read_opencode_digest`, `opencode_resolve`,
-// `parse_opencode_messages`, `parse_opencode_export`,
-// `concat_opencode_text_parts`, `extract_opencode_tool_calls`, plus the
-// three OpenCode constants, moved to `adapters::opencode` (issue #1661
-// step 7). Re-exported for the reader's OpenCode short-circuits in
-// `read_tail` / `read_last_assistant_message` / `read_assistant_report`
-// until step 10 collapses those callers onto the seam.
-pub(crate) use crate::services::transcript_reader::adapters::opencode::{
-    opencode_resolve, parse_opencode_export, parse_opencode_messages,
-    read_opencode_digest, read_opencode_digest_from_messages, read_opencode_messages,
-    read_opencode_message_rows, read_opencode_tail,
-    read_opencode_tail_from_messages, OPENCODE_DIGEST_WINDOW,
-    OPENCODE_TURN_TO_MESSAGE_FACTOR,
-};
 // `find_codex_rollout`, `find_codex_rollout_in`, `subdirs_sorted_desc`
-// moved to `adapters::codex` (issue #1661 step 6). Re-exported for tests
-// in this module.
-pub(crate) use crate::services::transcript_reader::adapters::codex::find_codex_rollout_in;
+// moved to `adapters::codex` (issue #1661 step 6). Test-module
+// references below import directly from the adapter.
+// `read_opencode_*` / `parse_opencode_*` / OpenCode constants moved to
+// `adapters::opencode` (issue #1661 step 7). The reader's OpenCode
+// short-circuits in `read_tail` / `read_last_assistant_message` /
+// `read_assistant_report` import directly from the adapter.
+
 /// Parse the tail directly from a JSONL file. Split out from [`read_tail`] so
 /// the contract test can point it at a checked-in fixture without touching
 /// `~/.claude`. Opens the file, parses turns, and returns the last `tail` of
@@ -567,9 +526,6 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
 
 // `is_codex_synthetic`, `codex_concat_text`, `codex_tool_input`,
 // `parse_codex_turns` moved to `adapters::codex` (issue #1661 step 6).
-// Re-exported so tests in this module (and `codex_session` for
-// `find_codex_rollout_in`) keep working until step 10.
-pub(crate) use crate::services::transcript_reader::adapters::codex::{codex_concat_text, parse_codex_turns};
 
 // --- Command Code transcript parser (issue #1407) ---
 //
@@ -591,12 +547,7 @@ pub(crate) use crate::services::transcript_reader::adapters::codex::{codex_conca
 /// are deliberately absent.
 // `CommandCodeMessageActivity`, `commandcode_message_activity`,
 // `contains_tool_result`, `parse_commandcode_turns` moved to
-// `adapters::commandcode` (issue #1661 step 3). Re-exported for
-// `commandcode_watcher` (and tests in this module) until those callers
-// are routed through the seam in step 10.
-pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
-    commandcode_message_activity, parse_commandcode_turns, CommandCodeMessageActivity,
-};
+// `adapters::commandcode` (issue #1661 step 3).
 
 // --- Antigravity transcript parser (issue #1283) ---
 //
@@ -623,10 +574,7 @@ pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
 // nothing.
 
 // `parse_agy_turns`, `is_agy_synthetic`, `extract_agy_tool_calls` moved
-// to `adapters::agy` (issue #1661 step 5). Re-exported for tests in this
-// module until they're routed through the seam.
-pub(crate) use crate::services::transcript_reader::adapters::agy::parse_agy_turns;
-
+// to `adapters::agy` (issue #1661 step 5).
 
 // --- Grok Code parser (issue #1281) ---
 //
@@ -658,6 +606,38 @@ pub(crate) use crate::services::transcript_reader::adapters::agy::parse_agy_turn
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The reader module no longer re-exports per-harness helpers from
+    // the adapter modules (issue #1661 step 10) — every external
+    // caller now imports from the adapter directly. The test module
+    // pulls each parser through its own path so the contract tests
+    // exercise the seam, not a legacy facade.
+    use crate::services::transcript_paths::{
+        concat_text_blocks, encode_path, first_text_block, is_synthetic_message,
+    };
+    use crate::services::transcript_reader::types::{
+        MAX_TOOL_STRING, MAX_TURN_TOOL_CALLS, truncate_json_strings,
+    };
+    use crate::services::transcript_reader::adapters::agy::{agy_locator_in, parse_agy_turns};
+    use crate::services::transcript_reader::adapters::claude_code::{
+        count_pending_background_tasks, parse_turns, pending_background_task_ids,
+    };
+    use crate::services::transcript_reader::adapters::codex::{find_codex_rollout_in, parse_codex_turns};
+    use crate::services::transcript_reader::adapters::commandcode::{
+        commandcode_project_slug, commandcode_sessions_dir, commandcode_transcript_path_in,
+        parse_commandcode_turns,
+    };
+    use crate::services::transcript_reader::adapters::cursor::{
+        cursor_transcript_path_in, cursor_workspace_slug,
+    };
+    use crate::services::transcript_reader::adapters::opencode::{
+        parse_opencode_export, parse_opencode_messages, read_opencode_digest_from_messages,
+        read_opencode_messages, read_opencode_tail_from_messages,
+    };
+    // Reader-internal EnvType (used by the commandcode_sessions_dir test
+    // and the cursor_workspace_slug test). The reader's own entry
+    // points no longer need it after the migrations, but the tests
+    // do.
+    use crate::models::EnvType;
     use std::path::Path;
 
     #[test]

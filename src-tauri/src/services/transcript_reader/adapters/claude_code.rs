@@ -25,7 +25,7 @@ use crate::services::transcript_reader::adapter::{
     HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
 };
 use crate::services::transcript_reader::types::{
-    build_tail, cap_tool_calls, effective_tail, merge_into, push_bounded, truncate,
+    cap_tool_calls, merge_into, push_bounded, truncate,
     truncate_json_strings, Parsed, ToolCall, Turn,
     MAX_TOOL_STRING, MAX_TURN_TEXT,
 };
@@ -95,7 +95,6 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
             .then_some(HookClassification {
                 decision: HookDecision::MarkInput,
                 kind: None,
-                notification_type: None,
             })
     }
 }

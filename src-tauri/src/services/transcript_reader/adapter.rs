@@ -114,7 +114,6 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
 pub(crate) struct HookClassification {
     pub decision: HookDecision,
     pub kind: Option<crate::agent::session_lifecycle::LifecycleKind>,
-    pub notification_type: Option<String>,
 }
 
 /// Decision an adapter's hook classifier returns.

@@ -168,25 +168,15 @@ fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
 }
 
 /// Pull a single key=value pair out of an `&`-delimited URL query
-/// string. Used by the runtime-scoped `?token=` gate (issue #1366)
-/// to defend against non-Buildmesh hook callbacks. Percent-decoding
-/// of the value is left to the caller — the token is hex so no
-/// escaping is needed in practice.
-///
-/// `pub(crate)` so the Grok adapter (issue #1661) can reuse this
-/// for its `verify_attention_token` token-parse step — Grok is the
-/// only adapter that implements the strict minted-token comparison,
-/// but the query parser is shared infrastructure, not Grok-specific
-/// lore.
-pub(crate) fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|part| {
-        let (k, v) = part.split_once('=')?;
-        if k == key {
-            Some(v)
-        } else {
-            None
-        }
-    })
+/// string. Lives in `crate::services::transcript_reader::types` so the
+/// `services` layer (Grok's adapter, issue #1661) can share the parser
+/// without the `http::routes::attention` module reaching back into
+/// the services graph. The route uses it via this alias for tests
+/// (the production code path is `GrokAdapter::verify_attention_token`,
+/// not this one).
+#[cfg(test)]
+fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    crate::services::transcript_reader::types::extract_query_value(query, key)
 }
 
 /// Normalize known hook shapes without guessing from arbitrary terminal text.
@@ -656,7 +646,7 @@ pub async fn handle_post(
     let classified = classify(
         &body,
         provider,
-        crate::services::transcript_reader::count_pending_background_tasks,
+        crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks,
     );
     let mut detail = classified.detail;
     // The semantic turn always wins over the raw message for the
