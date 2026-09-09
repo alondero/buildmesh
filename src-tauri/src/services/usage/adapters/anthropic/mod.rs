@@ -197,6 +197,35 @@ mod tests {
     }
 
     #[test]
+    fn env_oauth_token_fetch_preserves_enterprise_plan_with_spend() {
+        let port = spawn_loopback(1, move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            assert_eq!(auth, "Bearer sk-ant-oat01-env");
+            let _ = request.respond(
+                tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
+            );
+        });
+        let mut lookup = with_file(ENTERPRISE_JSON);
+        lookup
+            .env
+            .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
+        match &usage.meters[..] {
+            [UsageMeter::Metered { amount }] => {
+                assert_eq!(amount.used, 25.0);
+                assert_eq!(amount.limit, Some(100.0));
+            }
+            other => panic!("expected enterprise spend for env token, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn extra_usage_fallback_is_fetched_when_spend_absent() {
         let body = r#"{
             "extra_usage": {
