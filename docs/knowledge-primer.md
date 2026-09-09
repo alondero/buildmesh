@@ -57,6 +57,21 @@ sources. Fingerprints keep tokens, keys, account identifiers, and credential
 paths out of cache keys and logs. A repeated identity keeps the existing TTL
 hit; changing account or auth source starts a distinct entry.
 
+**Claude Code authentication source.** The Anthropic meter follows Claude's
+documented credential precedence rather than always reading
+`~/.claude/.credentials.json`. Cloud flags (`CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) from the process
+environment or the user `settings.json` `env` block report
+`managed_externally` for AWS Bedrock, Google Vertex AI, or Microsoft Foundry
+and must not present a dormant OAuth login as active. Environment API keys,
+bearer tokens, `apiKeyHelper`, and Anthropic profiles likewise outrank stored
+OAuth. Native OAuth reads the platform store (macOS Keychain service
+`Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`, with the
+`.credentials.json` file as fallback) and queries `GET /api/oauth/usage`
+directly — never by spawning the Claude CLI. Consumer plans keep five-hour
+and seven-day windows; Enterprise prefers the `spend` object and falls back
+to `extra_usage`.
+
 **The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
 shows one Spawn Option per **stored** `(harness, provider)` pairing as the
 composite id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not*
