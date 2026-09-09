@@ -1766,169 +1766,6 @@ fn extract_agy_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
 // silently skipped — issue #1281 acceptance criterion: "graceful failure on
 // unknown event types". They are never flagged as malformed.
 
-/// Resolve a Grok session directory to its primary transcript file.
-///
-/// `sessions_root` is the `~/.grok/sessions` directory (split from the env
-/// lookup so the layout can be tested with a temp dir). The result prefers
-/// `chat_history.jsonl` (the per-message log, which carries the assistant
-/// text the Coordinator reasons over) and falls back to `updates.jsonl`
-/// (event-level telemetry is still better than nothing). Neither file
-/// present yields `None` (→ `NoTranscript` degrade).
-pub(crate) fn grok_locator_in(
-    sessions_root: &Path,
-    session_id: &str,
-    node_path: &str,
-) -> Option<PathBuf> {
-    let session = sessions_root
-        .join(grok_urlencode_cwd(node_path))
-        .join(session_id);
-    let chat = session.join("chat_history.jsonl");
-    if chat.exists() {
-        return Some(chat);
-    }
-    let updates = session.join("updates.jsonl");
-    if updates.exists() {
-        return Some(updates);
-    }
-    None
-}
-
-/// Wrapper that mixes the env lookup back in. Env-keyed so a process-global
-/// `GROK_HOME` override reaches the reader without a signature change.
-fn find_grok_transcript(session_id: &str, node_path: &str) -> Option<PathBuf> {
-    grok_locator_in(&env::grok_dir().join("sessions"), session_id, node_path)
-}
-
-/// Percent-encode the harness-cwd path Grok uses as its session-directory
-/// segment. Distinct from Claude Code's `encode_path` (which replaces
-/// non-alphanumeric with `-`): Grok carries the Windows drive colon and
-/// backslashes through as `%3A`/`%5C` etc. so a `C:\Users\…` cwd round-trips
-/// deterministically. Reserved characters `-_.~` stay literal (RFC 3986);
-/// space becomes `%20`. `pub(crate)` so tests can pin the encoding scheme.
-pub(crate) fn grok_urlencode_cwd(node_path: &str) -> String {
-    let mut out = String::with_capacity(node_path.len());
-    for byte in node_path.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(*byte as char);
-        } else {
-            out.push_str(&format!("%{:02X}", byte));
-        }
-    }
-    out
-}
-
-/// Pull tool calls out of a Grok assistant line's `tool_calls` array. Grok
-/// names the input field `args` (not `input` like Claude), and the parser
-/// honours the same shared `MAX_TOOL_STRING` truncation so a `Write` carrying
-/// a multi-MB body doesn't blow up the payload.
-fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
-    let Some(serde_json::Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let name = obj
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
-            Some(ToolCall {
-                name,
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            })
-        })
-        .collect()
-}
-
-/// Parse Grok Code JSONL lines into logical turns, honouring the same
-/// [`Parsed`] contract as the other parsers: rolling `keep`-bounded turn
-/// window, whole-stream last-assistant-message tracking, malformed flag so a
-/// renamed-shape line degrades loudly as `ShapeChanged`. Unknown event
-/// types (tool echoes, telemetry, status, …) are silently skipped — never
-/// flagged.
-fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        // Grok lines are not gated on an outer `type` discriminator (no
-        // Codex-style envelope), so dispatch on the inner `role` field.
-        let role = match val.get("role").and_then(|r| r.as_str()) {
-            Some("user") => "user",
-            Some("assistant") => "assistant",
-            // `tool` (tool-result echoes), `system`, plus every unknown event
-            // type — silently dropped, never flagged as malformed. This is
-            // the "graceful failure on unknown event types" clause of #1281.
-            _ => continue,
-        };
-        let Some(content) = val.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        let text = match content {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Null => String::new(),
-            // Defensive: if Grok ever switches to a block-array `content`
-            // shape, fall back to joining all `text` blocks — same convention
-            // as the Claude/Codex parsers.
-            serde_json::Value::Array(blocks) => blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => {
-                saw_malformed = true;
-                continue;
-            }
-        };
-        let mut tool_calls = extract_grok_tool_calls(val.get("tool_calls"));
-        // An assistant line with neither text nor tool calls is a no-op
-        // (e.g. a heartbeat variant that picked up `role: "assistant"`
-        // somehow) — silently skip without flagging malformed.
-        if role == "assistant" && text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-        if role == "assistant" {
-            cap_tool_calls(&mut tool_calls);
-            let turn = Turn {
-                role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
-                tool_calls,
-            };
-            if !turn.text.is_empty() {
-                last_assistant_message = Some(turn.text.clone());
-            }
-            push_bounded(&mut turns, turn, keep);
-        } else {
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
-
 // --- Pending background tasks (issue #878) ---
 //
 // Claude Code ends its turn when it launches background work (a
@@ -3364,7 +3201,7 @@ mod tests {
             r#"{"role":"assistant","content":"real reply"}"#.to_string(),
             r#"{"role":"heartbeat","seq":7}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert_eq!(parsed.turns.len(), 2);
         assert!(!parsed.saw_malformed, "unknown event types must not flag malformed");
         assert_eq!(parsed.last_assistant_message.as_deref(), Some("real reply"));
@@ -3384,7 +3221,7 @@ mod tests {
             r#"{"role":"assistant","content":{"unexpected":"object"}}"#.to_string(),
             r#"{"role":"assistant","content":42}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty());
         assert!(parsed.saw_malformed, "recognized role with wrong content type is malformed");
         assert_eq!(
@@ -3403,7 +3240,7 @@ mod tests {
             r#"{"type":"command_status","status":"running"}"#.to_string(),
             r#"{"latency_ms":42,"transport":"stream"}"#.to_string(),
         ];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert!(parsed.turns.is_empty(), "no recognized-role lines yields no turns");
         assert!(
             !parsed.saw_malformed,
@@ -3441,7 +3278,7 @@ mod tests {
             lines.push(format!(r#"{{"role":"user","content":"prompt {i}"}}"#));
             lines.push(format!(r#"{{"role":"assistant","content":"reply {i}"}}"#));
         }
-        let parsed = parse_grok_turns(lines.into_iter(), 3);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 3);
         assert_eq!(parsed.turns.len(), 3, "buffer never exceeds keep");
         assert_eq!(parsed.turns[2].text, "reply 49");
         assert_eq!(
@@ -3459,7 +3296,7 @@ mod tests {
         let lines = vec![format!(
             r#"{{"role":"assistant","content":"with a big tool call","tool_calls":[{{"name":"Read","args":{{"file_path":"a","content":"{big}"}}}}]}}"#
         )];
-        let parsed = parse_grok_turns(lines.into_iter(), 10);
+        let parsed = super::adapters::grok::parse_grok_turns(lines.into_iter(), 10);
         assert_eq!(parsed.turns.len(), 1);
         let call = &parsed.turns[0].tool_calls[0];
         assert_eq!(call.name, "Read");
@@ -3482,7 +3319,7 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("chat_history.jsonl"), "{}").unwrap();
         std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
-        let found = grok_locator_in(&temp, "session-abc", "");
+        let found = super::adapters::grok::grok_locator_in(&temp, "session-abc", "");
         assert_eq!(
             found.as_deref(),
             Some(session.join("chat_history.jsonl").as_path()),
@@ -3502,7 +3339,7 @@ mod tests {
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("updates.jsonl"), "{}").unwrap();
-        let found = grok_locator_in(&temp, "session-abc", "");
+        let found = super::adapters::grok::grok_locator_in(&temp, "session-abc", "");
         assert_eq!(
             found.as_deref(),
             Some(session.join("updates.jsonl").as_path()),
@@ -3520,7 +3357,7 @@ mod tests {
             .join(format!("buildmesh_test_grok_locator_none_{suffix}"));
         let session = temp.join("session-abc");
         std::fs::create_dir_all(&session).unwrap();
-        assert!(grok_locator_in(&temp, "session-abc", "").is_none());
+        assert!(super::adapters::grok::grok_locator_in(&temp, "session-abc", "").is_none());
         std::fs::remove_dir_all(&temp).ok();
     }
 
@@ -3536,30 +3373,30 @@ mod tests {
     /// silently drops (say) the colon encoding produces a compile-time test
     /// failure rather than silently misrouting sessions on Windows drives.
     #[test]
-    fn grok_urlencode_cwd_matches_rfc3986_unreserved_only() {
+    fn grok_urlencode_cwd_test_pin() {
         // RFC 3986 unreserved set: ALPHA / DIGIT / "-" / "." / "_" / "~".
         // Everything else becomes %XX, uppercase hex (the form Grok emits).
         assert_eq!(
-            grok_urlencode_cwd(r"C:\Users\adam\src\buildmesh"),
+            super::adapters::grok::grok_urlencode_cwd(r"C:\Users\adam\src\buildmesh"),
             "C%3A%5CUsers%5Cadam%5Csrc%5Cbuildmesh",
             "Windows drive colon and backslashes must be percent-encoded so the \
              session-directory segment is filesystem-safe"
         );
         assert_eq!(
-            grok_urlencode_cwd("/home/adam/src/buildmesh"),
+            super::adapters::grok::grok_urlencode_cwd("/home/adam/src/buildmesh"),
             "%2Fhome%2Fadam%2Fsrc%2Fbuildmesh",
             "POSIX slashes also percent-encoded"
         );
         // Unreserved per RFC 3986 stays literal; the locator only encodes
         // non-unreserved bytes.
         assert_eq!(
-            grok_urlencode_cwd("project-with_under.dots~tildas"),
+            super::adapters::grok::grok_urlencode_cwd("project-with_under.dots~tildas"),
             "project-with_under.dots~tildas",
             "RFC 3986 unreserved chars pass through unchanged"
         );
-        assert_eq!(grok_urlencode_cwd(""), "");
+        assert_eq!(super::adapters::grok::grok_urlencode_cwd(""), "");
         assert_eq!(
-            grok_urlencode_cwd("with space"),
+            super::adapters::grok::grok_urlencode_cwd("with space"),
             "with%20space",
             "space encodes to %20, not '+' (RFC 3986, not form-style)"
         );
