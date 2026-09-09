@@ -211,7 +211,7 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let sessions_dir =
-        crate::services::transcript_reader::commandcode_sessions_dir(env_type, spawn_directory)?;
+        crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_directory)?;
     find_historic_id_for_directory_in(
         &sessions_dir,
         spawn_directory,
@@ -250,7 +250,7 @@ pub fn start_capture_poller(
     tauri::async_runtime::spawn(async move {
         let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
         let Some(sessions_dir) =
-            crate::services::transcript_reader::commandcode_sessions_dir(env_type, &spawn_directory)
+            crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, &spawn_directory)
         else {
             tracing::warn!("commandcode session capture: no sessions dir for env {env_type:?}");
             return;

@@ -43,7 +43,7 @@ use crate::models::EnvType;
 // `DEFAULT_TAIL` / `MAX_TAIL` / `MAX_TURN_TOOL_CALLS` are referenced only
 // inside the `mod tests` block via `use super::*;` — silence the unused-
 // import lint on the re-export rather than carry them as locals.
-mod types;
+pub(crate) mod types;
 #[allow(unused_imports)]
 pub use types::{
     ToolCall, TranscriptTail, Turn, UnavailableReason, DEFAULT_TAIL, MAX_TAIL, MAX_TURN_TEXT,
@@ -59,7 +59,7 @@ pub(crate) use types::{
 // existing free functions in this module. Each harness migrates end-to-end
 // in its own commit (steps 2-8 of #1661).
 mod adapter;
-mod adapters;
+pub(crate) mod adapters;
 
 /// Which harness's on-disk JSONL shape a transcript uses. Selected once at the
 /// enrichment boundary (from the node's resolved harness adapter id) and passed
