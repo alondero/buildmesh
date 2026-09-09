@@ -253,6 +253,8 @@ mod tests {
             logged_in: true,
             windows: Vec::new(),
             balance: None,
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         }
@@ -413,6 +415,8 @@ mod tests {
             logged_in: false,
             windows: Vec::new(),
             balance: None,
+            plan: None,
+            meters: vec![],
             detail: None,
             error: Some(format!("No API key configured for {provider}")),
         }

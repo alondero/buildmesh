@@ -27,7 +27,39 @@
 use super::types::{ProviderUsage, UsageError, UsageWindow};
 use crate::preferences::ProviderAccount;
 use reqwest::blocking::{Client, RequestBuilder};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
+
+static CACHE_FINGERPRINT_SALT: once_cell::sync::Lazy<[u8; 32]> =
+    once_cell::sync::Lazy::new(rand::random);
+
+/// Opaque cache identity for one provider account and authentication source.
+/// The digest is deliberately private and this type does not implement
+/// `Debug` or `Display`, preventing credentials or account identifiers from
+/// leaking when a cache key is logged accidentally.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) struct UsageIdentityFingerprint {
+    auth_source: &'static str,
+    digest: [u8; 32],
+}
+
+impl UsageIdentityFingerprint {
+    /// Hash both the authentication source and account identity. `identity`
+    /// may be a token when the provider exposes no non-secret account id; only
+    /// the digest is retained in memory as part of the cache key.
+    pub(crate) fn new(auth_source: &'static str, identity: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"buildmesh-usage-cache-v1\0");
+        hasher.update(*CACHE_FINGERPRINT_SALT);
+        hasher.update(auth_source.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(identity);
+        Self {
+            auth_source,
+            digest: hasher.finalize().into(),
+        }
+    }
+}
 
 /// One first-class Usage Meter behind the seam.
 ///
@@ -42,6 +74,19 @@ pub(crate) trait UsageAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn native_harness(&self) -> Option<&'static str> {
         None
+    }
+    /// Identify the account and authentication source used by `fetch`.
+    /// Keyed adapters get account-aware caching automatically. Native adapters
+    /// may override this when they can select between OAuth, cloud, workspace,
+    /// or other provider-owned credential sources.
+    fn cache_identity(&self, accounts: &[ProviderAccount]) -> UsageIdentityFingerprint {
+        if let Some(api_key) = api_key_for(accounts, self.id()) {
+            return UsageIdentityFingerprint::new("api_key", api_key.as_bytes());
+        }
+        UsageIdentityFingerprint::new(
+            self.native_harness().unwrap_or("unconfigured_api_key"),
+            self.id().as_bytes(),
+        )
     }
     fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage;
 }
@@ -202,6 +247,8 @@ where
                 logged_in: true,
                 windows,
                 balance: None,
+                plan: None,
+                meters: vec![],
                 detail,
                 error: None,
             },

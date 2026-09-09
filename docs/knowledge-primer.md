@@ -34,6 +34,26 @@ wallet — different billing relationships, same brand). What is forbidden is
 *duplicate rows for the same credential/billing identity* — that produces
 two cards on the Providers page, two fetcher paths, and confusing UI.
 
+**Usage Meter contract.** Rust owns the additive wire model in
+`services/usage/types.rs`; `cargo test` generates its TypeScript consumers.
+`ProviderUsage.windows` and `.balance` remain the compatibility path for
+rolling percentage quotas and wallets. New adapters may additionally provide
+a verbatim `plan` label and explicit `meters`: `metered` carries a
+`UsageAmount` (used, optional limit/remaining, unit, optional percentage and
+reset), `no_individual_limit` carries the same amount without inventing a
+limit, and `unlimited`, `managed_externally`, and `unavailable` distinguish
+valid non-percentage states. The UI renders zero as zero; only an absent legacy
+percentage or an explicit unavailable state is labelled "Unavailable".
+
+**Usage cache identity.** The five-minute cache is keyed by provider plus an
+opaque account/authentication-source fingerprint selected through the
+`UsageAdapter` seam. Keyed adapters receive a process-salted SHA-256
+credential fingerprint automatically; native adapters override the identity
+when their provider can select OAuth, cloud, workspace, or other credential
+sources. Fingerprints keep tokens, keys, account identifiers, and credential
+paths out of cache keys and logs. A repeated identity keeps the existing TTL
+hit; changing account or auth source starts a distinct entry.
+
 **The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
 shows one Spawn Option per **stored** `(harness, provider)` pairing as the
 composite id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not*

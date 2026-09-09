@@ -1,7 +1,7 @@
 //! Shared wire types for the Usage Meter seam (issue #1657).
 //!
 //! This module owns the data shapes every adapter speaks: [`ProviderUsage`],
-//! [`UsageWindow`], [`BillingBalance`], [`ProviderMeters`], plus the
+//! [`UsageWindow`], [`BillingBalance`], [`UsageMeter`], [`ProviderMeters`], plus the
 //! [`UsageError`] failure type and the two envelope constructors
 //! ([`logged_out`] / [`unavailable`]) that let adapters report
 //! "no credential" vs "credential present but fetch failed" precisely.
@@ -47,6 +47,45 @@ pub struct BillingBalance {
     pub currency: String,
 }
 
+/// Amounts reported for a capped budget or uncapped spend meter. `unit` is
+/// deliberately broader than a currency code because providers may report
+/// credits, tokens, requests, or money. Optional fields stay optional rather
+/// than being derived: a missing limit is not zero and a missing percentage is
+/// not an unavailable reading when the provider supplied an amount used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export, export_to = "UsageAmount.ts")]
+pub struct UsageAmount {
+    pub used: f64,
+    pub limit: Option<f64>,
+    pub remaining: Option<f64>,
+    pub unit: String,
+    #[serde(rename = "usedPercent")]
+    #[ts(rename = "usedPercent")]
+    pub used_percent: Option<f64>,
+    #[serde(rename = "resetsAt")]
+    #[ts(rename = "resetsAt")]
+    pub resets_at: Option<String>,
+}
+
+/// An explicit provider-reported Usage Meter state. This supplements the
+/// legacy percentage windows and wallet balance so providers can migrate one
+/// at a time without treating a valid non-percentage response as missing data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[ts(export, export_to = "UsageMeter.ts")]
+pub enum UsageMeter {
+    /// Usage with a provider-enforced limit (for example a monthly budget).
+    Metered { amount: UsageAmount },
+    /// Spend is reported, but this account has no individual limit.
+    NoIndividualLimit { amount: UsageAmount },
+    /// The provider explicitly reports unlimited usage.
+    Unlimited,
+    /// Another platform owns usage and billing for this authentication source.
+    ManagedExternally { platform: String },
+    /// The provider genuinely supplied no usable usage information.
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "ProviderUsage.ts")]
 /// Generated to src/types/generated/ProviderUsage.ts (issue #404). `loggedIn`
@@ -61,6 +100,14 @@ pub struct ProviderUsage {
     /// report utilization via `windows` instead (issue #537).
     #[serde(default)]
     pub balance: Option<BillingBalance>,
+    /// Provider-reported plan or billing-source label. Buildmesh displays this
+    /// verbatim and does not infer equivalence between provider plan names.
+    #[serde(default)]
+    pub plan: Option<String>,
+    /// New explicit meters. Kept alongside `windows` and `balance` so existing
+    /// adapters remain source-compatible while provider migrations land.
+    #[serde(default)]
+    pub meters: Vec<UsageMeter>,
     pub detail: Option<String>,
     pub error: Option<String>,
 }
@@ -120,6 +167,8 @@ pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
         logged_in: false,
         windows: vec![],
         balance: None,
+        plan: None,
+        meters: vec![],
         detail: None,
         error: Some(error),
     }
@@ -135,6 +184,8 @@ pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
         logged_in: true,
         windows: vec![],
         balance: None,
+        plan: None,
+        meters: vec![],
         detail: None,
         error: Some(error),
     }
@@ -147,4 +198,53 @@ pub(crate) fn home_dir() -> PathBuf {
         .or_else(|_| env::var("HOME"))
         .map(PathBuf::from)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_provider_usage_deserializes_without_new_fields() {
+        let usage: ProviderUsage = serde_json::from_str(
+            r#"{"provider":"anthropic","loggedIn":true,"windows":[],"balance":null,"detail":null,"error":null}"#,
+        )
+        .expect("legacy ProviderUsage should remain compatible");
+
+        assert!(usage.plan.is_none());
+        assert!(usage.meters.is_empty());
+    }
+
+    #[test]
+    fn explicit_usage_states_have_stable_tagged_wire_shapes() {
+        let amount = UsageAmount {
+            used: 25.0,
+            limit: Some(100.0),
+            remaining: Some(75.0),
+            unit: "USD".to_string(),
+            used_percent: Some(25.0),
+            resets_at: Some("2026-10-01T00:00:00Z".to_string()),
+        };
+        let states = vec![
+            UsageMeter::Metered {
+                amount: amount.clone(),
+            },
+            UsageMeter::NoIndividualLimit { amount },
+            UsageMeter::Unlimited,
+            UsageMeter::ManagedExternally {
+                platform: "AWS Bedrock".to_string(),
+            },
+            UsageMeter::Unavailable,
+        ];
+
+        let value = serde_json::to_value(states).expect("serialize explicit usage states");
+        assert_eq!(value[0]["state"], "metered");
+        assert_eq!(value[0]["amount"]["used"], 25.0);
+        assert_eq!(value[0]["amount"]["usedPercent"], 25.0);
+        assert_eq!(value[1]["state"], "no_individual_limit");
+        assert_eq!(value[2]["state"], "unlimited");
+        assert_eq!(value[3]["state"], "managed_externally");
+        assert_eq!(value[3]["platform"], "AWS Bedrock");
+        assert_eq!(value[4]["state"], "unavailable");
+    }
 }

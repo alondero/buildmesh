@@ -12,6 +12,7 @@
  * What lives here:
  *   - `UsageBar`     — single `UsageWindow` → labeled fill bar (#537)
  *   - `BalanceCard`  — single `BillingBalance` → two-row wallet readout
+ *   - `ExplicitUsageMeter` — capped, uncapped, unlimited, external, unavailable
  *   - `UsagePanel`   — one provider's row on the glanceable surface
  *                      (icon + name + optional Refresh + meter body)
  *
@@ -22,7 +23,7 @@
  */
 
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
-import type { UsageWindow, BillingBalance } from '../../lib/tauri';
+import type { UsageWindow, BillingBalance, UsageAmount, UsageMeter } from '../../lib/tauri';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 
 /** A single subscription-quota window as a labeled fill bar. The "0%
@@ -34,7 +35,7 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
   const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
-  const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'N/A';
+  const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'Unavailable';
   return (
     <div className="mt-2 first:mt-0">
       <div className="flex justify-between items-baseline gap-2 text-xs mb-1">
@@ -52,6 +53,94 @@ export function UsageBar({ window }: { window: UsageWindow }) {
       )}
     </div>
   );
+}
+
+function formatUsageAmount(value: number, unit: string) {
+  const formatted = value.toFixed(2);
+  return /^[A-Z]{3}$/.test(unit) ? `${unit} ${formatted}` : `${formatted} ${unit}`;
+}
+
+function AmountRow({ label, value, unit }: { label: string; value: number; unit: string }) {
+  return (
+    <div className="flex flex-wrap justify-between gap-x-2 gap-y-0.5 text-xs">
+      <span className="text-text-muted">{label}</span>
+      <span className="font-mono text-text-primary break-words">
+        {formatUsageAmount(value, unit)}
+      </span>
+    </div>
+  );
+}
+
+function AmountMeter({ amount, uncapped }: { amount: UsageAmount; uncapped: boolean }) {
+  return (
+    <div
+      className="space-y-1"
+      data-usage-state={uncapped ? 'no_individual_limit' : 'metered'}
+      data-testid={uncapped ? 'usage-state-no-individual-limit' : 'usage-state-metered'}
+    >
+      <AmountRow label="Amount used" value={amount.used} unit={amount.unit} />
+      {!uncapped && amount.limit != null && (
+        <AmountRow label="Limit" value={amount.limit} unit={amount.unit} />
+      )}
+      {!uncapped && amount.remaining != null && (
+        <AmountRow label="Remaining" value={amount.remaining} unit={amount.unit} />
+      )}
+      {uncapped && <p className="text-xs text-text-secondary">No individual limit</p>}
+      {amount.usedPercent != null && (
+        <div className="pt-1">
+          <div className="flex justify-between gap-2 text-xs mb-1">
+            <span className="text-text-muted">Usage</span>
+            <span className="font-mono text-text-primary shrink-0">
+              {amount.usedPercent.toFixed(1)}%
+            </span>
+          </div>
+          <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+            <div
+              className="h-full bg-accent-cyan rounded-full transition-[width] duration-300"
+              style={{ width: `${Math.min(Math.max(amount.usedPercent, 0), 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+      {amount.resetsAt && (
+        <p className="text-2xs text-text-muted pt-1 tabular-nums break-words">
+          Resets: {new Date(amount.resetsAt).toLocaleString()}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Explicit capped, uncapped, unlimited, externally managed, or unavailable meter. */
+export function ExplicitUsageMeter({ meter }: { meter: UsageMeter }) {
+  switch (meter.state) {
+    case 'metered':
+      return <AmountMeter amount={meter.amount} uncapped={false} />;
+    case 'no_individual_limit':
+      return <AmountMeter amount={meter.amount} uncapped />;
+    case 'unlimited':
+      return (
+        <p className="text-xs text-text-secondary" data-usage-state="unlimited" data-testid="usage-state-unlimited">
+          Unlimited
+        </p>
+      );
+    case 'managed_externally':
+      return (
+        <p
+          className="text-xs text-text-secondary break-words"
+          data-usage-state="managed_externally"
+          data-testid="usage-state-managed-externally"
+        >
+          Managed by {meter.platform}
+        </p>
+      );
+    case 'unavailable':
+      return (
+        <p className="text-xs text-text-muted" data-usage-state="unavailable" data-testid="usage-state-unavailable">
+          Unavailable
+        </p>
+      );
+  }
 }
 
 /** Cash-balance view for a pay-as-you-go account (issue #537). */
@@ -131,14 +220,27 @@ export function UsagePanel({
     // a cash balance can both be present, so show all rather than
     // choosing one by billing mode (#574 AC3). Also unhides MiniMax's
     // quota bars that the old billing-mode XOR suppressed.
-    const hasMeters = meter.usage.windows.length > 0 || meter.usage.balance != null;
+    const explicitMeters = meter.usage.meters ?? [];
+    const hasMeters = meter.usage.windows.length > 0
+      || meter.usage.balance != null
+      || explicitMeters.length > 0;
     return (
       <div>
+        {meter.usage.plan && (
+          <p className="text-xs text-text-secondary mb-2 break-words" data-testid="usage-plan-label">
+            Plan: {meter.usage.plan}
+          </p>
+        )}
         {meter.usage.windows.map(w => (
           <UsageBar key={w.label} window={w} />
         ))}
         {meter.usage.balance && <BalanceCard balance={meter.usage.balance} />}
-        {!hasMeters && <p className="text-2xs text-text-muted">No usage data</p>}
+        {explicitMeters.map((usageMeter, index) => (
+          <div key={index} className="mt-2 first:mt-0">
+            <ExplicitUsageMeter meter={usageMeter} />
+          </div>
+        ))}
+        {!hasMeters && <p className="text-2xs text-text-muted">Unavailable</p>}
         {meter.usage.detail && <p className="text-2xs text-text-secondary mt-2">{meter.usage.detail}</p>}
       </div>
     );

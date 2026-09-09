@@ -16,8 +16,8 @@ describe('UsageBar', () => {
     expect(screen.getByText('20.0%')).toBeTruthy();
   });
 
-  it('shows N/A only when usedPercent is genuinely unknown (null)', () => {
+  it('shows Unavailable only when usedPercent is genuinely unknown (null)', () => {
     render(<UsageBar window={{ label: 'Unknown', usedPercent: null, resetsAt: null }} />);
-    expect(screen.getByText('N/A')).toBeTruthy();
+    expect(screen.getByText('Unavailable')).toBeTruthy();
   });
 });

@@ -27,7 +27,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { UsagePanel, UsageBar, BalanceCard } from '../../src/components/AppSettings/UsageRender';
+import { UsagePanel, UsageBar, BalanceCard, ExplicitUsageMeter } from '../../src/components/AppSettings/UsageRender';
 import type { ProviderAccount, ProviderMeters, ProviderUsage } from '../../src/lib/tauri';
 import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 
@@ -49,7 +49,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
 }
 
 function usage(over: Partial<ProviderUsage> = {}): ProviderUsage {
-  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, detail: null, error: null, ...over };
+  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, plan: null, meters: [], detail: null, error: null, ...over };
 }
 
 function meter(over: Partial<ProviderMeters> = {}): ProviderMeters {
@@ -68,9 +68,9 @@ describe('UsageBar (extracted, was on AccountCard)', () => {
     expect(screen.getByText('20.0%')).toBeTruthy();
   });
 
-  it('shows N/A only when usedPercent is genuinely unknown (null)', () => {
+  it('shows Unavailable only when usedPercent is genuinely unknown (null)', () => {
     render(<UsageBar window={{ label: 'Unknown', usedPercent: null, resetsAt: null }} />);
-    expect(screen.getByText('N/A')).toBeTruthy();
+    expect(screen.getByText('Unavailable')).toBeTruthy();
   });
 });
 
@@ -116,7 +116,7 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
     expect(screen.queryByText(/%$/)).toBeNull();
   });
 
-  it('shows "No usage data" when a logged-in account has no meters yet', () => {
+  it('shows "Unavailable" when a logged-in account has no meters yet', () => {
     // Meters render by what's present, not by billing mode (#574): no
     // windows and no balance → a neutral placeholder.
     render(
@@ -125,7 +125,7 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
         meter={meter({ provider: 'minimax', usage: usage({ provider: 'minimax', balance: null }) })}
       />,
     );
-    expect(screen.getByText('No usage data')).toBeTruthy();
+    expect(screen.getByText('Unavailable')).toBeTruthy();
   });
 
   it('renders both quota windows and a cash balance together (#574 AC3)', () => {
@@ -236,5 +236,61 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
     );
     await user.click(screen.getByRole('button', { name: /refresh usage for/i }));
     expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ExplicitUsageMeter (issue #1671 states)', () => {
+  const amount = {
+    used: 25,
+    limit: 100,
+    remaining: 75,
+    unit: 'USD',
+    usedPercent: 25,
+    resetsAt: '2026-10-01T00:00:00Z',
+  };
+
+  it('renders every available capped-budget field, including valid zero values', () => {
+    render(<ExplicitUsageMeter meter={{ state: 'metered', amount: { ...amount, used: 0, usedPercent: 0 } }} />);
+    expect(screen.getByText('USD 0.00')).toBeTruthy();
+    expect(screen.getByText('USD 100.00')).toBeTruthy();
+    expect(screen.getByText('USD 75.00')).toBeTruthy();
+    expect(screen.getByText('0.0%')).toBeTruthy();
+    expect(screen.getByText(/Resets:/)).toBeTruthy();
+  });
+
+  it('renders uncapped spend without inventing a limit', () => {
+    render(<ExplicitUsageMeter meter={{ state: 'no_individual_limit', amount: { ...amount, limit: null, remaining: null, usedPercent: null } }} />);
+    expect(screen.getByText('USD 25.00')).toBeTruthy();
+    expect(screen.getByText('No individual limit')).toBeTruthy();
+    expect(screen.queryByText('Limit')).toBeNull();
+  });
+
+  it.each([
+    [{ state: 'unlimited' } as const, 'Unlimited'],
+    [{ state: 'managed_externally', platform: 'AWS Bedrock' } as const, 'Managed by AWS Bedrock'],
+    [{ state: 'unavailable' } as const, 'Unavailable'],
+  ])('renders %s as explicit copy', (meterState, label) => {
+    render(<ExplicitUsageMeter meter={meterState} />);
+    expect(screen.getByText(label)).toBeTruthy();
+  });
+
+  it('renders the provider plan label and keeps long billing-source text wrappable at 240px', () => {
+    const { container } = render(
+      <div style={{ width: 240 }}>
+        <UsagePanel
+          account={account({ name: 'Claude' })}
+          meter={meter({
+            usage: usage({
+              plan: 'Enterprise negotiated monthly billing plan',
+              meters: [{ state: 'managed_externally', platform: 'A very long external cloud billing platform name' }],
+            }),
+          })}
+        />
+      </div>,
+    );
+    expect(screen.getByText(/Plan: Enterprise negotiated/)).toBeTruthy();
+    const managed = screen.getByTestId('usage-state-managed-externally');
+    expect(managed.classList.contains('break-words')).toBe(true);
+    expect(container.querySelector('.truncate [data-testid="usage-state-managed-externally"]')).toBeNull();
   });
 });

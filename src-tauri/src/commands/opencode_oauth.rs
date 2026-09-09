@@ -29,8 +29,8 @@ use crate::services::opencode_oauth::{
 /// side's Usage tab re-fetches with `force=true`. The cache bust
 /// handles the rare case where another Rust caller (not React) is
 /// the source of the change. Both are no-ops when nothing changed;
-/// `set_cached_usage` is keyed by provider name so the cache entry
-/// only exists if a previous `opencode_usage()` call populated it.
+/// Usage cache entries include the provider name, so invalidating `opencode`
+/// removes every identity populated by a previous `opencode_usage()` call.
 fn emit_opencode_console_changed(app: &AppHandle) {
     // `invalidate_provider_cache` is the Rust-side mirror of the React
     // re-fetch. Even if no listeners exist, the next
