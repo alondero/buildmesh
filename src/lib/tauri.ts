@@ -52,6 +52,8 @@ import type { RealizedBind } from '../types/generated/RealizedBind';
 import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { SpawnAgentRequest } from '../types/generated/SpawnAgentRequest';
 import type { UsageWindow } from '../types/generated/UsageWindow';
+import type { UsageAmount } from '../types/generated/UsageAmount';
+import type { UsageMeter } from '../types/generated/UsageMeter';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
 import {
@@ -1273,7 +1275,7 @@ export const removeProviderPairing = async (
 // `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
 // mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
 // the wire, the rest are snake_case.
-export type { UsageWindow, ProviderUsage, BillingBalance, ProviderMeters };
+export type { UsageWindow, UsageAmount, UsageMeter, ProviderUsage, BillingBalance, ProviderMeters };
 
 /** The detection-gated Providers page rows: one entry per provider relevant to
  *  this host, each carrying its Usage Meters (or a "usage not tracked" marker).

@@ -13,7 +13,7 @@ pub(crate) mod catalog;
 // paths keep working while adapters import from `usage::types` directly.
 pub use types::{BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow};
 // Cache stays behind the same `usage::` paths callers already use.
-pub use cache::{get_cached_usage, invalidate_cache, invalidate_provider_cache, set_cached_usage};
+pub use cache::{invalidate_cache, invalidate_provider_cache};
 // `fetch_usage` is a fetcher-only driver: internal call sites in this
 // module import it directly via `crate::services::usage::adapter::fetch_usage`
 // so the `usage::` namespace stops advertising it (issue #1657 step 1:
@@ -519,6 +519,8 @@ fn codex_usage_with_paths(candidates: &[PathBuf], live_url: &str) -> ProviderUsa
             logged_in: true,
             windows,
             balance: None,
+            plan: None,
+            meters: vec![],
             detail,
             error: None,
         },
@@ -751,6 +753,8 @@ pub fn kimi_usage(api_key: &str) -> ProviderUsage {
             logged_in: true,
             windows: Vec::new(),
             balance: Some(balance),
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -939,6 +943,8 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
                 logged_in: true,
                 windows: Vec::new(),
                 balance: None,
+                plan: None,
+                meters: vec![],
                 detail: Some(
                     "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
                         .to_string(),
@@ -973,6 +979,8 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
             logged_in: true,
             windows: Vec::new(),
             balance: Some(balance),
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -1091,6 +1099,8 @@ pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
             logged_in: true,
             windows: Vec::new(),
             balance: Some(balance),
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -1423,6 +1433,8 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
             logged_in: true,
             windows,
             balance: Some(balance),
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -1481,6 +1493,8 @@ fn deepseek_usage_with_url(api_key: &str, live_url: &str) -> ProviderUsage {
             logged_in: true,
             windows: Vec::new(),
             balance: Some(balance),
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -1638,6 +1652,8 @@ fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
         logged_in: true,
         windows,
         balance,
+        plan: None,
+        meters: vec![],
         detail: None,
         error: None,
     })
@@ -1995,6 +2011,8 @@ fn opencode_usage_impl_with_hosts(
             logged_in: true,
             windows,
             balance: None,
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         },
@@ -2537,6 +2555,8 @@ pub fn agy_usage() -> ProviderUsage {
                 logged_in: true,
                 windows,
                 balance: None,
+                plan: None,
+                meters: vec![],
                 detail,
                 error: None,
             };
@@ -2908,6 +2928,8 @@ pub fn cursor_usage_with_sources(
             logged_in: true,
             windows,
             balance: None,
+            plan: None,
+            meters: vec![],
             detail,
             error: None,
         },
@@ -4498,6 +4520,8 @@ pub(crate) mod tests {
                 resets_at: None,
             }],
             balance: None,
+            plan: None,
+            meters: vec![],
             detail: None,
             error: None,
         }
@@ -4509,6 +4533,8 @@ pub(crate) mod tests {
             logged_in: true,
             windows: Vec::new(),
             balance: None,
+            plan: None,
+            meters: vec![],
             detail: None,
             error: Some(msg.to_string()),
         }

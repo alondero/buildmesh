@@ -8,12 +8,13 @@
 //! seam only (issue #1657): the table holds drop-in adapters, never raw
 //! fn pointers into the legacy fetcher module.
 
+use super::adapter::{api_key_for, UsageAdapter};
 use super::adapters::{
     AgyAdapter, AnthropicAdapter, CodexAdapter, CommandcodeAdapter, CursorAdapter, DeepseekAdapter,
-    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, OpencodeAdapter, OpenaiAdapter,
+    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, OpenaiAdapter, OpencodeAdapter,
     OpenrouterAdapter,
 };
-use super::adapter::{api_key_for, UsageAdapter};
+use super::cache::UsageCache;
 use super::types::ProviderUsage;
 use crate::preferences::ProviderAccount;
 use std::collections::HashSet;
@@ -89,20 +90,38 @@ pub(crate) fn cached_or_fetch(
     accounts: &[ProviderAccount],
 ) -> Option<ProviderUsage> {
     let adapter = dispatch(provider_id)?;
+    Some(cached_or_fetch_with(
+        &super::cache::USAGE_CACHE,
+        adapter,
+        force_refresh,
+        accounts,
+    ))
+}
+
+fn cached_or_fetch_with(
+    cache: &UsageCache,
+    adapter: &dyn UsageAdapter,
+    force_refresh: bool,
+    accounts: &[ProviderAccount],
+) -> ProviderUsage {
+    let provider_id = adapter.id();
+    let identity = adapter.cache_identity(accounts);
     if !force_refresh {
-        if let Some(cached) = super::get_cached_usage(provider_id) {
-            return Some(cached);
+        if let Some(cached) = cache.get(provider_id, &identity) {
+            return cached;
         }
     }
 
     let result = adapter.fetch(accounts);
-    super::set_cached_usage(provider_id, result.clone());
-    Some(result)
+    cache.set(provider_id, identity, result.clone());
+    result
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::preferences::BillingMode;
+    use crate::services::usage::adapter::UsageIdentityFingerprint;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn account(id: &str, api_key: Option<&str>) -> ProviderAccount {
         ProviderAccount {
@@ -132,6 +151,76 @@ mod tests {
                 logged_in: true,
                 windows: Vec::new(),
                 balance: None,
+                plan: None,
+                meters: vec![],
+                detail: None,
+                error: None,
+            }
+        }
+    }
+
+    struct CountingAdapter {
+        calls: AtomicUsize,
+    }
+
+    impl CountingAdapter {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl UsageAdapter for CountingAdapter {
+        fn id(&self) -> &'static str {
+            "keyed-test"
+        }
+
+        fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            ProviderUsage {
+                provider: format!("fetch-{call}"),
+                logged_in: true,
+                windows: Vec::new(),
+                balance: None,
+                plan: None,
+                meters: vec![],
+                detail: None,
+                error: None,
+            }
+        }
+    }
+
+    struct AuthSourceAdapter {
+        calls: AtomicUsize,
+    }
+
+    impl UsageAdapter for AuthSourceAdapter {
+        fn id(&self) -> &'static str {
+            "native-test"
+        }
+
+        fn native_harness(&self) -> Option<&'static str> {
+            Some("native-test")
+        }
+
+        fn cache_identity(&self, accounts: &[ProviderAccount]) -> UsageIdentityFingerprint {
+            let source = match accounts.first().map(|account| account.name.as_str()) {
+                Some("cloud") => "cloud",
+                _ => "oauth",
+            };
+            UsageIdentityFingerprint::new(source, b"account-1")
+        }
+
+        fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            ProviderUsage {
+                provider: format!("fetch-{call}"),
+                logged_in: true,
+                windows: Vec::new(),
+                balance: None,
+                plan: None,
+                meters: vec![],
                 detail: None,
                 error: None,
             }
@@ -184,6 +273,52 @@ mod tests {
         let accounts = [account("keyed-test", Some("snapshot-key"))];
 
         assert_eq!(adapter.fetch(&accounts).provider, "snapshot-key");
+    }
+
+    #[test]
+    fn same_identity_reuses_cache_but_changed_account_bypasses_it() {
+        let cache = UsageCache::new();
+        let adapter = CountingAdapter::new();
+        let first_account = [account("keyed-test", Some("first-secret-key"))];
+        let second_account = [account("keyed-test", Some("second-secret-key"))];
+
+        assert_eq!(
+            cached_or_fetch_with(&cache, &adapter, false, &first_account).provider,
+            "fetch-1"
+        );
+        assert_eq!(
+            cached_or_fetch_with(&cache, &adapter, false, &first_account).provider,
+            "fetch-1",
+            "the same identity should retain the five-minute cache behavior"
+        );
+        assert_eq!(
+            cached_or_fetch_with(&cache, &adapter, false, &second_account).provider,
+            "fetch-2",
+            "a different credential must not receive the previous account's usage"
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn changing_authentication_source_bypasses_the_previous_cache_entry() {
+        let cache = UsageCache::new();
+        let adapter = AuthSourceAdapter {
+            calls: AtomicUsize::new(0),
+        };
+        let mut oauth = account("native-test", None);
+        oauth.name = "oauth".to_string();
+        let mut cloud = oauth.clone();
+        cloud.name = "cloud".to_string();
+
+        assert_eq!(
+            cached_or_fetch_with(&cache, &adapter, false, &[oauth]).provider,
+            "fetch-1"
+        );
+        assert_eq!(
+            cached_or_fetch_with(&cache, &adapter, false, &[cloud]).provider,
+            "fetch-2"
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

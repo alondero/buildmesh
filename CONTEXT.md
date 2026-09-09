@@ -36,8 +36,12 @@ A user-defined **Model Provider** — a display name and an API key, with no reg
 _Avoid_: Custom provider (acceptable synonym), unsupported provider.
 
 **Usage Meter**:
-One distinct usage reading of a **Model Provider** — either a subscription plan's rolling window (quota %) or a pay-as-you-go wallet (credit balance). A provider may have **more than one** (e.g. an Anthropic Claude subscription *and* an Anthropic API wallet). The wire shape is `ProviderUsage` (`UsageWindow` for a plan, `BillingBalance` for a wallet). Shown on the Providers page only when its harness is detected or its key is configured.
+One distinct usage reading of a **Model Provider** billing identity: a rolling quota, wallet, capped budget, uncapped spend, unlimited entitlement, externally managed account, or genuinely unavailable reading. A provider may have more than one, and any plan or billing-source label is provider-reported rather than inferred by Buildmesh.
 _Avoid_: Balance (wallet-only sense), billing identity, quota (plan-only sense).
+
+**Usage Identity**:
+The account and authentication source a harness-native **Usage Meter** represents — the credential the harness will actually use, not an inactive credential that happens to exist. Changing either denotes a different cached reading even when the **Model Provider** is unchanged.
+_Avoid_: Provider identity (too broad), cache key (implementation detail).
 
 **Spawn Option**:
 A single launchable entry in the **Spawn Menu** — either an **Agent Harness** on its own (launched natively) or an Agent Harness paired with a **Proxied Provider**. The unit a user picks to start an **Agent Node**, and the identity recorded on the node.
