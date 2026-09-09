@@ -95,7 +95,7 @@ pub(crate) fn cached_or_fetch(
         }
     }
 
-    let result = adapter.fetch(accounts);
+    let result = crate::services::usage::adapter::dispatch_fetch(adapter, accounts);
     super::set_cached_usage(provider_id, result.clone());
     Some(result)
 }
@@ -104,6 +104,17 @@ mod tests {
     use super::*;
     use crate::preferences::BillingMode;
     use crate::services::usage::UsageWindow;
+
+    /// Serialises the dispatch.fetch contract tests so they cannot race
+    /// each other through `FETCH_OVERRIDE` or the global `USAGE_CACHE`.
+    /// `cargo test` runs tests in parallel by default; without this lock,
+    /// `cached_or_fetch("anthropic", force_refresh=true)` could observe
+    /// an empty override (another test restored `previous`) and fall
+    /// through to the production `AnthropicAdapter::fetch`, which issues
+    /// a real HTTP request and returns a 0-window envelope on success —
+    /// false-failing the assertion. The lock is test-only and scoped to
+    /// this module.
+    static OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn account(id: &str, api_key: Option<&str>) -> ProviderAccount {
         ProviderAccount {
@@ -249,32 +260,22 @@ mod tests {
         }
     }
 
-    /// Test-only adapter that proves the seam's `fetch` contract end-to-end
-    /// without touching the network, host credentials, or vendor endpoints.
-    /// Exercised via [`UsageAdapter::fetch`] directly (the production call
-    /// path), not via direct fn calls, so a future trait-extent change (extra
-    /// arg, panic-on-missing-key) fails the contract.
-    struct StubAdapter {
-        id: &'static str,
-        envelope: ProviderUsage,
-    }
-
-    impl UsageAdapter for StubAdapter {
-        fn id(&self) -> &'static str {
-            self.id
-        }
-
-        fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-            self.envelope.clone()
-        }
+    /// Drop the production `USAGE_CACHE` entry for `id` so `cached_or_fetch`
+    /// in the contract tests does not short-circuit on a cached envelope
+    /// from a prior test run. The tests run in a single process and the
+    /// cache is process-wide.
+    fn uncache(id: &str) {
+        crate::services::usage::invalidate_provider_cache(id);
     }
 
     #[test]
     fn dispatch_fetch_returns_representative_success_envelope() {
-        // Production-boundary contract: a successful fetch through the seam
-        // must propagate the adapter envelope unchanged. Pin representative
-        // windows + balance shape so a future "shape pass-through" regression
-        // (e.g. accidentally dropping `balance`) fails here.
+        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Production-boundary contract through `dispatch(id)` →
+        // `cached_or_fetch(id, force_refresh=true)` → `dispatch_fetch` →
+        // override. The contract is the catalog's dispatch path; a future
+        // change to caching, dispatch, or the override hook fails here.
+        uncache("anthropic");
         let success = ProviderUsage {
             provider: "anthropic".to_string(),
             logged_in: true,
@@ -287,11 +288,11 @@ mod tests {
             detail: None,
             error: None,
         };
-        let adapter = StubAdapter {
-            id: "anthropic",
-            envelope: success.clone(),
-        };
-        let observed: ProviderUsage = UsageAdapter::fetch(&adapter, &[]);
+        let observed = crate::services::usage::adapter::with_fetch_override(
+            "anthropic",
+            success.clone(),
+            || cached_or_fetch("anthropic", true, &[]).expect("dispatch anthropic"),
+        );
         assert_eq!(observed.provider, "anthropic");
         assert!(observed.logged_in);
         assert_eq!(observed.windows.len(), 1);
@@ -300,9 +301,11 @@ mod tests {
 
     #[test]
     fn dispatch_fetch_returns_malformed_response_unavailable_envelope() {
+        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Adapter envelopes a parse failure as `unavailable` (logged_in=true,
         // error carries the failure). The seam must propagate it untouched
         // so the UI's "Invalid response" branch fires.
+        uncache("minimax");
         let malformed = ProviderUsage {
             provider: "minimax".to_string(),
             logged_in: true,
@@ -314,12 +317,18 @@ mod tests {
                     .to_string(),
             ),
         };
-        let adapter = StubAdapter {
-            id: "minimax",
-            envelope: malformed.clone(),
-        };
-        let observed: ProviderUsage =
-            UsageAdapter::fetch(&adapter, &[account("minimax", Some("k"))]);
+        let observed = crate::services::usage::adapter::with_fetch_override(
+            "minimax",
+            malformed.clone(),
+            || {
+                cached_or_fetch(
+                    "minimax",
+                    true,
+                    &[account("minimax", Some("k"))],
+                )
+                .expect("dispatch minimax")
+            },
+        );
         assert_eq!(observed.provider, "minimax");
         assert!(observed.logged_in, "parse failure stays logged_in");
         assert!(
@@ -335,11 +344,13 @@ mod tests {
 
     #[test]
     fn dispatch_fetch_returns_auth_failure_logged_out_envelope() {
+        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Rejected credentials surface as `logged_out` (logged_in=false,
         // error carries the re-entry prompt). The seam must propagate it
         // so `assemble_meters`'s no-credential gate can distinguish
         // "no key" from "key rejected" once #1657 step 5 lifts that
         // distinction out of the command layer.
+        uncache("kimi");
         let rejected = ProviderUsage {
             provider: "kimi".to_string(),
             logged_in: false,
@@ -348,12 +359,18 @@ mod tests {
             detail: None,
             error: Some("Invalid API key".to_string()),
         };
-        let adapter = StubAdapter {
-            id: "kimi",
-            envelope: rejected.clone(),
-        };
-        let observed: ProviderUsage =
-            UsageAdapter::fetch(&adapter, &[account("kimi", Some("k"))]);
+        let observed = crate::services::usage::adapter::with_fetch_override(
+            "kimi",
+            rejected.clone(),
+            || {
+                cached_or_fetch(
+                    "kimi",
+                    true,
+                    &[account("kimi", Some("k"))],
+                )
+                .expect("dispatch kimi")
+            },
+        );
         assert_eq!(observed.provider, "kimi");
         assert!(!observed.logged_in, "rejected key must be logged out");
         assert_eq!(observed.error.as_deref(), Some("Invalid API key"));

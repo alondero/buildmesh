@@ -12,17 +12,24 @@ pub(crate) mod catalog;
 // Re-export the wire types so existing `crate::services::usage::{...}`
 // paths keep working while adapters import from `usage::types` directly.
 pub use types::{BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow};
-// `logged_out` / `unavailable` / `home_dir` are shared envelope helpers —
-// adapters import them from `types`, never from the fetcher module.
-pub(crate) use types::{home_dir, logged_out, unavailable};
 // Cache stays behind the same `usage::` paths callers already use.
 pub use cache::{get_cached_usage, invalidate_cache, invalidate_provider_cache, set_cached_usage};
-pub(crate) use cache::cached_age;
-// Shared fetch driver lives on the seam now (issue #1657 step 6).
+// `fetch_usage` lives behind the same path so existing fetcher call sites
+// stay one-line: `crate::services::usage::fetch_usage(...)`. Adapters go
+// through `catalog::dispatch(id).fetch` instead.
 pub(crate) use adapter::fetch_usage;
+// Internal fetcher helpers are NOT re-exported: `usage::home_dir`,
+// `usage::logged_out`, `usage::unavailable`, `usage::cached_age` were
+// fetcher-only and the issue (#1657) requires this module to stop
+// exporting helpers only fetchers use. Internal callers go through
+// `super::types::...` or `super::cache::...` directly.
 
 use reqwest::blocking::Client;
 use serde::Deserialize;
+// Internal fetcher-only helpers: imported by their defining module so the
+// `usage::` namespace stays clean for the seam surface (issue #1657).
+use crate::services::usage::cache::cached_age;
+use crate::services::usage::types::{home_dir, logged_out, unavailable};
 // `Datelike` powers the month-start computation in
 // [`current_month_start_epoch`] (spec §3.1). `Timelike` is only used by the
 // test mod for `current_month_start_epoch_is_first_of_utc_month` and is
