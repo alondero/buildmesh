@@ -68,10 +68,6 @@ use crate::services::opencode_oauth::device_flow;
 // Wire types + envelope helpers moved to `usage::types` (issue #1657).
 // Re-exported at the top of this file so existing paths keep working.
 
-fn anthropic_cred_path() -> PathBuf {
-    home_dir().join(".claude").join(".credentials.json")
-}
-
 /// Build the ordered list of candidate Codex auth.json paths (issue #1108,
 /// spec §2.2). Priority:
 ///
@@ -211,28 +207,6 @@ fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthC
 }
 
 #[derive(Deserialize)]
-struct ClaudeAiOauth {
-    #[serde(rename = "accessToken")]
-    access_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AnthropicOAuthCred {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<ClaudeAiOauth>,
-}
-
-/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
-fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: AnthropicOAuthCred =
-        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.claude_ai_oauth
-        .and_then(|o| o.access_token)
-        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
-}
-
-#[derive(Deserialize)]
 struct OpenCodeAuthEntry {
     key: Option<String>,
 }
@@ -253,77 +227,7 @@ fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
 
 // `logged_out` / `unavailable` / `fetch_usage` moved to the seam
 // (`usage::types` + `usage::adapter`, issue #1657) — imported at the top.
-// Anthropic fetcher lives in `usage::anthropic_usage` for now (issue #1657
-// step 4 migrates it to `services/usage/adapters/anthropic.rs` as a
-// follow-up; the current thin adapter wraps the legacy fetcher so the
-// catalog dispatch path exercises it without duplicating the request
-// shape, credential discovery, or parse logic).
-
-fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
-    #[derive(Deserialize, Debug)]
-    struct UsageBucket {
-        utilization: Option<f64>,
-        #[serde(rename = "resets_at")]
-        resets_at: Option<String>,
-    }
-    #[derive(Deserialize, Debug)]
-    struct Resp {
-        #[serde(default)]
-        five_hour: Option<UsageBucket>,
-        #[serde(default)]
-        seven_day: Option<UsageBucket>,
-        #[serde(default)]
-        seven_day_sonnet: Option<UsageBucket>,
-    }
-
-    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
-
-    let mut windows = Vec::new();
-    if let Some(bucket) = resp.five_hour {
-        if let Some(util) = bucket.utilization {
-            windows.push(UsageWindow {
-                label: "5-hour".to_string(),
-                used_percent: Some(util),
-                resets_at: bucket.resets_at,
-            });
-        }
-    }
-    if let Some(bucket) = resp.seven_day {
-        if let Some(util) = bucket.utilization {
-            windows.push(UsageWindow {
-                label: "7-day".to_string(),
-                used_percent: Some(util),
-                resets_at: bucket.resets_at,
-            });
-        }
-    }
-    if let Some(bucket) = resp.seven_day_sonnet {
-        if let Some(util) = bucket.utilization {
-            windows.push(UsageWindow {
-                label: "7-day Sonnet".to_string(),
-                used_percent: Some(util),
-                resets_at: bucket.resets_at,
-            });
-        }
-    }
-    Ok(windows)
-}
-
-pub fn anthropic_usage() -> ProviderUsage {
-    let token = match read_anthropic_token(anthropic_cred_path()) {
-        Ok(t) => t,
-        Err(e) => return logged_out("anthropic", e.to_string()),
-    };
-    fetch_usage(
-        "anthropic",
-        |c| {
-            c.get("https://api.anthropic.com/api/oauth/usage")
-                .header("Authorization", format!("Bearer {}", token))
-                .header("anthropic-beta", "oauth-2025-04-20")
-        },
-        |body| Ok((parse_anthropic_response(body)?, None)),
-    )
-}
+// Anthropic lives in `services/usage/adapters/anthropic` (issue #1673).
 
 // ─── Codex CLI (`codex`) subscription quotas ───────────────────────────
 //
@@ -2959,24 +2863,6 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn parse_anthropic_response_valid() {
-        let json = r#"{"five_hour":{"utilization":41.0,"resets_at":"2026-05-30T21:30:00.379395+00:00"},"seven_day":{"utilization":33.0,"resets_at":"2026-06-05T04:00:00.379418+00:00"}}"#;
-        let windows = parse_anthropic_response(json).unwrap();
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].label, "5-hour");
-        assert_eq!(windows[0].used_percent, Some(41.0));
-        assert_eq!(windows[1].label, "7-day");
-        assert_eq!(windows[1].used_percent, Some(33.0));
-    }
-
-    #[test]
-    fn parse_anthropic_response_malformed() {
-        let json = r#"{"not_usage": []}"#;
-        let windows = parse_anthropic_response(json).unwrap();
-        assert!(windows.is_empty());
-    }
-
-    #[test]
     fn parse_codex_response_valid() {
         // Pinned fixture per spec §2.4: `rate_limit.primaryWindow` +
         // `secondaryWindow` with `usedPercent`, `limitWindowSeconds` (dynamic
@@ -3901,19 +3787,6 @@ pub(crate) mod tests {
         let usage = minimax_usage("");
         assert!(!usage.logged_in);
         assert!(usage.error.is_some());
-    }
-
-    #[test]
-    fn test_read_anthropic_token_valid() {
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_anthropic_cred.json");
-        let content = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-testtoken123","refreshToken":"sk-ant-ort01-ref123","expiresAt":123456789,"scopes":[],"subscriptionType":"pro","rateLimitTier":"default"}}"#;
-        std::fs::write(&file_path, content).unwrap();
-
-        let token = read_anthropic_token(file_path.clone()).unwrap();
-        assert_eq!(token, "sk-ant-oat01-testtoken123");
-
-        std::fs::remove_file(file_path).unwrap();
     }
 
     #[test]
