@@ -22,10 +22,12 @@ use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, merge_into, push_bounded, truncate, Parsed, Turn, MAX_TURN_TEXT,
 };
-// Claude-Code primitives still live in `mod.rs` (will move to
-// `transcript_paths` in step 5 of #1661). Reach through `super::super`
-// until then.
-use super::super::{concat_text_blocks, is_synthetic_message};
+// Command Code's wire shape reuses Claude Code's content
+// primitives (same `tool_use` blocks, same `local-command-caveat`
+// synthetic wrappers). Reach the shared primitives from
+// `transcript_paths` — the legacy indirection through mod.rs ended
+// with step 5 of #1661.
+use crate::services::transcript_paths::{concat_text_blocks, is_synthetic_message};
 use super::claude_code::extract_tool_calls as extract_claude_tool_calls;
 
 /// Drop-in [`TranscriptAdapter`] for Command Code.

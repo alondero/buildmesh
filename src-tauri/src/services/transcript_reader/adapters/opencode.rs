@@ -97,7 +97,22 @@ impl TranscriptAdapter for OpenCodeAdapter {
         false
     }
 
-    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+    fn classify_hook(
+        &self,
+        body: &[u8],
+        provider: &str,
+    ) -> Option<HookClassification> {
+        // OpenCode's plugin events are harness-specific — the
+        // `session.idle` / `session.created` names aren't shared with
+        // Claude Code, Codex, or AGY. Gate on `provider == "opencode"`
+        // (or empty, matching the legacy hook POSTs from
+        // `~/.opencode/plugins/buildmesh-attention.js` that don't set
+        // a `provider` field) so a sibling harness that ever borrowed
+        // the same event names cannot false-positive this adapter's
+        // classification.
+        if provider != "opencode" && !provider.is_empty() {
+            return None;
+        }
         // OpenCode's plugin fires `session.idle` when the agent finishes
         // a turn and waits for input (issue #1295) — mark for attention
         // with `InputRequired`. `session.created` fires once at TUI boot

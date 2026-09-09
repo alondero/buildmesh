@@ -66,7 +66,11 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
                 .is_empty()
     }
 
-    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+    fn classify_hook(
+        &self,
+        body: &[u8],
+        _provider: &str,
+    ) -> Option<HookClassification> {
         // Claude Code's documented Notification envelope is "… needs
         // your permission to use X" — anchored to the verb phrase, not
         // a bare "permission" substring, so prose like "Permission was

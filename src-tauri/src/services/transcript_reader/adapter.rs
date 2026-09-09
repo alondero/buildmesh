@@ -78,7 +78,19 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// `None` for every payload; OpenCode (session.idle / session.created),
     /// Grok (notification_type), and Claude Code (the "needs your
     /// permission" prose substring) carry their own logic here.
-    fn classify_hook(&self, _body: &[u8]) -> Option<HookClassification> {
+    ///
+    /// `provider` is the harness id from the hook payload (often empty
+    /// for legacy Claude Code hooks). Adapters whose classifier keys
+    /// on body content alone (Grok, Claude Code) ignore it; OpenCode's
+    /// `session.idle` / `session.created` event names are
+    /// OpenCode-specific, so OpenCodeAdapter gates on `provider` to
+    /// avoid false-positives if a sibling harness ever borrowed the
+    /// same event names.
+    fn classify_hook(
+        &self,
+        _body: &[u8],
+        _provider: &str,
+    ) -> Option<HookClassification> {
         None
     }
 
@@ -160,11 +172,11 @@ pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapte
 /// per-harness classifiers inspect the body itself (OpenCode's
 /// `session.idle`, Grok's `notificationType`, Claude Code's
 /// "needs your permission" prose substring).
-pub(crate) fn classify_hook(body: &[u8]) -> Option<HookClassification> {
+pub(crate) fn classify_hook(body: &[u8], provider: &str) -> Option<HookClassification> {
     ADAPTERS
         .iter()
         .copied()
-        .find_map(|adapter| adapter.classify_hook(body))
+        .find_map(|adapter| adapter.classify_hook(body, provider))
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an

@@ -62,7 +62,11 @@ impl TranscriptAdapter for GrokAdapter {
             })
     }
 
-    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+    fn classify_hook(
+        &self,
+        body: &[u8],
+        _provider: &str,
+    ) -> Option<HookClassification> {
         // Grok posts `hookEventName: "notification"` with a structured
         // `notificationType` (issue #1282): permission_prompt marks
         // input, task_complete marks ready, question-shaped types
@@ -120,15 +124,12 @@ impl TranscriptAdapter for GrokAdapter {
         let Some(minted) = minted else {
             return false;
         };
-        let presented = query_string.and_then(|q| {
-            // Tiny query-string parser: extract `token=<value>` from the
-            // hook runner's URL. The hook URL is the route's own format
-            // so this stays here (the attention route uses the same
-            // `extract_query_value` helper for other harnesses).
-            q.split('&')
-                .find_map(|kv| kv.strip_prefix("token=").map(|v| v.to_string()))
-        });
-        presented.as_deref() == Some(minted)
+        // Share the route's query parser so the semantics (malformed
+        // pairs without `=` are silently dropped) match every other
+        // attention route token check.
+        let presented = query_string
+            .and_then(|q| crate::http::routes::attention::extract_query_value(q, "token"));
+        presented == Some(minted)
     }
 }
 

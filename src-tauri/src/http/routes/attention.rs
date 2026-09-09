@@ -172,7 +172,13 @@ fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
 /// to defend against non-Buildmesh hook callbacks. Percent-decoding
 /// of the value is left to the caller — the token is hex so no
 /// escaping is needed in practice.
-fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+///
+/// `pub(crate)` so the Grok adapter (issue #1661) can reuse this
+/// for its `verify_attention_token` token-parse step — Grok is the
+/// only adapter that implements the strict minted-token comparison,
+/// but the query parser is shared infrastructure, not Grok-specific
+/// lore.
+pub(crate) fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|part| {
         let (k, v) = part.split_once('=')?;
         if k == key {
@@ -431,13 +437,13 @@ fn classify(
     // phrase). Other harnesses' adapters return `None` and the request
     // falls through to the shared post-processing below.
     //
-    // Iterate every registered adapter because legacy hook POSTs send
-    // empty `provider` strings — the per-harness classifiers inspect
-    // the body itself (event name + notificationType), not the
-    // provider field. Most adapters' `classify_hook` is the default
-    // no-op, so this is one method call per harness.
+    // Pass `provider` so OpenCode's plugin-event classifier can gate
+    // on the harness id (its `session.idle` / `session.created` event
+    // names are OpenCode-specific — a sibling harness borrowing the
+    // same names must not false-positive). Grok + Claude Code ignore
+    // `provider` (their classifiers key on body content alone).
     if let Some(classified) =
-        crate::services::transcript_reader::adapter::classify_hook(body)
+        crate::services::transcript_reader::adapter::classify_hook(body, provider)
     {
         return match classified.decision {
             HookDecision::MarkInput => {
@@ -482,31 +488,13 @@ fn classify(
     {
         return Classified::suppress(detail);
     }
-    // OpenCode plugin (issue #1294) — rule 3b above. Fires once at TUI
-    // boot carrying the freshly minted `ses_…` id; `set_cli_session_id_if_missing`
-    // (called outside this function) persists it as the primary
-    // capture path. The classifier still treats the event as lifecycle-neutral
-    // AGY `Stop` with `fullyIdle: false` is a direct false-yield signal
-    // from the harness — short-circuit before the transcript scan so an
-    // AGY node gets correct suppression.
+    // OpenCode plugin (issue #1294) — `session.created` is captured by
+    // `OpenCodeAdapter::classify_hook` above (returns Ignore — capture-
+    // only, prevents a fresh spawn from flipping to AwaitingInput).
     //
-    // AGY-specific: in AGY Stop payloads, `hook_event_name` is either
-    // explicitly "Stop" or omitted from stdin JSON. When `fullyIdle: false`
-    // arrives on a Stop event or an AGY payload (with session_id / conversationId
-    // or terminationReason), suppress attention without scanning transcripts.
-    // This is the only AGY-specific shared gate that stays in attention.rs
-    // (per #1661 plan step 9): AGY's `event` is *shape*-keyed (absent or
-    // `Stop`), not id-keyed, so it doesn't dispatch cleanly through the
-    // registry.
-    if (event == Some("stop")
-        || (event.is_none()
-            && (payload.termination_reason.is_some() || payload.session_id.is_some())))
-        && payload.fully_idle == Some(false)
-    {
-        return Classified::suppress(detail);
-    }
-    // A Stop with fullyIdle: true or absent falls through to the transcript-scan
-    // path so any future transcript reader hooks in normally.
+    // A Stop with fullyIdle: true or absent falls through to the
+    // transcript-scan path so any future transcript reader hooks in
+    // normally.
     let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
         return Classified::ready(detail);
     };
