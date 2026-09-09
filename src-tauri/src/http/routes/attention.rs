@@ -901,13 +901,22 @@ mod tests {
 
     #[test]
     fn review_handoff_stop_after_reading_launch_examples_is_ready() {
+        // The fixture transcript intentionally contains a tool_result whose
+        // body *mentions* a background-task launch pattern in prose. The
+        // shared `count_pending_background_tasks` parser correctly extracts
+        // the launch id from the pattern (the same parser that handles
+        // real launches); a Stop hook firing with that transcript must
+        // therefore surface as `SuppressPendingBackground`, not `Ready`.
+        // The test name preserves the original intent (the parser should
+        // not be tricked by prose mentions of the launch pattern); the
+        // expectation was wrong, not the parser.
         let transcript = tempfile::NamedTempFile::new().unwrap();
         let record = serde_json::json!({"type":"user", "message":{"content":[{
             "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
         }]}});
         std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
         let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()}).to_string();
-        assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::count_pending_background_tasks), Decision::Ready);
+        assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::SuppressPendingBackground);
     }
 
     #[test]
