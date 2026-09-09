@@ -54,6 +54,13 @@ pub(crate) use types::{
     merge_into, push_bounded, truncate, truncate_json_strings,
 };
 
+// Per-harness adapters + the registry seam. Issue #1661 step 1: Claude Code
+// is the first real adapter; the other six are thin wrappers around the
+// existing free functions in this module. Each harness migrates end-to-end
+// in its own commit (steps 2-8 of #1661).
+mod adapter;
+mod adapters;
+
 /// Which harness's on-disk JSONL shape a transcript uses. Selected once at the
 /// enrichment boundary (from the node's resolved harness adapter id) and passed
 /// down, so the reader itself never consults provider state.
@@ -244,26 +251,17 @@ fn locate_transcript(
     session_id: &str,
     node_path: &str,
 ) -> Option<PathBuf> {
-    // File-based formats only. OpenCode's per-session data lives in a
-    // shared SQLite DB rather than a transcript file (issue #1296), so
-    // `read_tail` / `read_last_assistant_message` short-circuit before
-    // this dispatch runs. The wildcard keeps the match exhaustive when
-    // new file-based formats are added later.
-    match format {
-        TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
-        TranscriptFormat::Cursor => Some(cursor_transcript_path(session_id, node_path)),
-        TranscriptFormat::Codex => find_codex_rollout(session_id),
-        TranscriptFormat::Agy => find_agy_transcript(session_id),
-        TranscriptFormat::Grok => find_grok_transcript(session_id, node_path),
-        TranscriptFormat::CommandCode => find_commandcode_transcript(session_id, node_path),
-        // OpenCode's per-session data lives in a shared SQLite DB
-        // rather than a transcript file (issue #1296), so `read_tail` /
-        // `read_last_assistant_message` short-circuit before this
-        // dispatch runs. Explicit arm so a future file-based variant
-        // added to `TranscriptFormat` triggers a compile error here
-        // and forces the map to be updated.
-        TranscriptFormat::OpenCode => None,
-    }
+    // Issue #1661: per-harness dispatch via the registry seam. Each
+    // adapter owns its own locator; the reader never holds per-format
+    // path knowledge. OpenCode's adapter returns `None` because its
+    // data lives in a shared SQLite DB (issue #1296); the reader's
+    // OpenCode path short-circuits before this is called.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.locate(adapter::LocateCtx {
+        session_id,
+        node_path,
+    })
 }
 
 /// Find the on-disk JSONL for an AGY conversation. AGY keeps the
@@ -891,26 +889,31 @@ fn parse_transcript(
     keep: usize,
 ) -> Parsed {
     // JSONL pipeline only. OpenCode never reaches this dispatch — see
-    // the comment on `locate_transcript`. The wildcard arm returns an
-    // empty `Parsed` (no turns, no digest message) so a future file-based
-    // harness that ends up routed here in error degrades as `Empty`,
-    // not a panic.
+    // Issue #1661: parse dispatch goes through the registry seam. Every
+    // registered adapter (claude_code, agy, codex, cursor, commandcode,
+    // grok) handles its own parser; OpenCode short-circuits before this
+    // is reached so its adapter's `parse` is unreachable in practice.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.parse(Box::new(lines), keep)
+}
+
+/// Map a [`TranscriptFormat`] to its adapter's harness id (issue #1661).
+/// Will collapse to a direct `&'static str` once the enum is replaced in
+/// a later step; for now this is the bridge from the public `TranscriptFormat`
+/// API to the registry's `&str` keys.
+fn adapter_id_for_format(format: TranscriptFormat) -> &'static str {
     match format {
-        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => parse_turns(lines, keep),
-        TranscriptFormat::Codex => parse_codex_turns(lines, keep),
-        TranscriptFormat::Agy => parse_agy_turns(lines, keep),
-        TranscriptFormat::Grok => parse_grok_turns(lines, keep),
-        TranscriptFormat::CommandCode => parse_commandcode_turns(lines, keep),
-        // OpenCode short-circuits before `read_tail_from_file` is
-        // reached (issue #1296) — every other adapter is JSONL-backed
-        // and parses line-shaped input. Explicit arm keeps the match
-        // exhaustive; a future file-based harness added to the enum
-        // will trigger a compile error here.
-        TranscriptFormat::OpenCode => Parsed {
-            turns: Vec::new(),
-            last_assistant_message: None,
-            saw_malformed: false,
-        },
+        TranscriptFormat::ClaudeCode => "claude_code",
+        TranscriptFormat::Agy => "agy",
+        TranscriptFormat::Codex => "codex",
+        TranscriptFormat::Cursor => "cursor",
+        TranscriptFormat::CommandCode => "commandcode",
+        TranscriptFormat::Grok => "grok",
+        // OpenCode's adapter's `parse` is unreachable (the reader
+        // short-circuits to `read_opencode_*` before `parse_transcript`
+        // runs); routing through the registry still resolves correctly.
+        TranscriptFormat::OpenCode => "opencode",
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -1023,68 +1026,11 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
 /// over the collected window below, avoiding the old O(lines × full-parser)
 /// loop on large transcript tails.
 fn line_has_assistant_text(format: TranscriptFormat, line: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
-    };
-    match format {
-        TranscriptFormat::ClaudeCode | TranscriptFormat::Cursor => {
-            value.get("type").and_then(|kind| kind.as_str()) == Some("assistant")
-                && value
-                    .get("message")
-                    .and_then(|message| message.get("role"))
-                    .and_then(|role| role.as_str())
-                    == Some("assistant")
-                && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
-                    .trim()
-                    .is_empty()
-        }
-        TranscriptFormat::Codex => {
-            matches!(
-                value.get("type").and_then(|kind| kind.as_str()),
-                Some("response_item") | Some("event_msg")
-            ) && value
-                .get("payload")
-                .is_some_and(|payload| {
-                    payload.get("type").and_then(|kind| kind.as_str()) == Some("message")
-                        && payload.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !payload
-                            .get("content")
-                            .map(codex_concat_text)
-                            .unwrap_or_default()
-                            .trim()
-                            .is_empty()
-                })
-        }
-        TranscriptFormat::CommandCode => {
-            value.get("type").and_then(|kind| kind.as_str()) == Some("message")
-                && value.get("message").is_some_and(|message| {
-                    message.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                        && !concat_text_blocks(message.get("content"))
-                            .trim()
-                            .is_empty()
-                })
-        }
-        TranscriptFormat::Agy => {
-            value.get("source").and_then(|source| source.as_str()) == Some("MODEL")
-                && value
-                    .get("content")
-                    .and_then(|content| content.as_str())
-                    .is_some_and(|text| !text.trim().is_empty())
-        }
-        TranscriptFormat::Grok => {
-            value.get("role").and_then(|role| role.as_str()) == Some("assistant")
-                && value.get("content").is_some_and(|content| match content {
-                    serde_json::Value::String(text) => !text.trim().is_empty(),
-                    serde_json::Value::Array(blocks) => blocks
-                        .iter()
-                        .filter(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("text"))
-                        .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
-                        .any(|text| !text.trim().is_empty()),
-                    _ => false,
-                })
-        }
-        TranscriptFormat::OpenCode => false,
-    }
+    // Issue #1661: per-harness dispatch via the registry seam. Each adapter
+    // owns its own line predicate; the reader never holds per-format logic.
+    let adapter = adapter::dispatch(adapter_id_for_format(format))
+        .unwrap_or_else(adapter::default_adapter);
+    adapter.line_has_assistant_text(line)
 }
 
 /// Cheap file-level reader. See [`read_last_assistant_message`].
