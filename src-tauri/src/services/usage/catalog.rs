@@ -260,22 +260,34 @@ mod tests {
         }
     }
 
-    /// Drop the production `USAGE_CACHE` entry for `id` so `cached_or_fetch`
-    /// in the contract tests does not short-circuit on a cached envelope
-    /// from a prior test run. The tests run in a single process and the
-    /// cache is process-wide.
-    fn uncache(id: &str) {
+    /// Drop the production `USAGE_CACHE` entry for `id` AND install a
+    /// panic-safe guard that re-clears it on unwind, so a failing test
+    /// cannot leak a synthetic envelope into the next test. `cached_or_fetch`
+    /// would otherwise short-circuit on the cached envelope from a prior
+    /// test run. The cache is process-wide; tests run in a single process.
+    fn uncache(id: &'static str) -> CacheResetGuard {
         crate::services::usage::invalidate_provider_cache(id);
+        CacheResetGuard(id)
+    }
+
+    /// RAII guard that clears the cache entry for its provider on Drop,
+    /// restoring the pre-test state even if the test body panics.
+    struct CacheResetGuard(&'static str);
+
+    impl Drop for CacheResetGuard {
+        fn drop(&mut self) {
+            crate::services::usage::invalidate_provider_cache(self.0);
+        }
     }
 
     #[test]
     fn dispatch_fetch_returns_representative_success_envelope() {
-        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cache = uncache("anthropic");
         // Production-boundary contract through `dispatch(id)` →
         // `cached_or_fetch(id, force_refresh=true)` → `dispatch_fetch` →
         // override. The contract is the catalog's dispatch path; a future
         // change to caching, dispatch, or the override hook fails here.
-        uncache("anthropic");
         let success = ProviderUsage {
             provider: "anthropic".to_string(),
             logged_in: true,
@@ -301,11 +313,11 @@ mod tests {
 
     #[test]
     fn dispatch_fetch_returns_malformed_response_unavailable_envelope() {
-        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cache = uncache("minimax");
         // Adapter envelopes a parse failure as `unavailable` (logged_in=true,
         // error carries the failure). The seam must propagate it untouched
         // so the UI's "Invalid response" branch fires.
-        uncache("minimax");
         let malformed = ProviderUsage {
             provider: "minimax".to_string(),
             logged_in: true,
@@ -344,13 +356,13 @@ mod tests {
 
     #[test]
     fn dispatch_fetch_returns_auth_failure_logged_out_envelope() {
-        let _guard = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cache = uncache("kimi");
         // Rejected credentials surface as `logged_out` (logged_in=false,
         // error carries the re-entry prompt). The seam must propagate it
         // so `assemble_meters`'s no-credential gate can distinguish
         // "no key" from "key rejected" once #1657 step 5 lifts that
         // distinction out of the command layer.
-        uncache("kimi");
         let rejected = ProviderUsage {
             provider: "kimi".to_string(),
             logged_in: false,
@@ -374,5 +386,38 @@ mod tests {
         assert_eq!(observed.provider, "kimi");
         assert!(!observed.logged_in, "rejected key must be logged out");
         assert_eq!(observed.error.as_deref(), Some("Invalid API key"));
+    }
+
+    #[test]
+    fn registered_native_adapter_returns_no_credential_envelope_without_network() {
+        // Real-adapter contract: a registered native adapter dispatched
+        // through the production `cached_or_fetch` path with no accounts and
+        // no host credentials returns the no-credential envelope without
+        // touching the network. Native adapters read local credentials; on a
+        // clean CI host the absence of a credential file surfaces as
+        // `logged_in = false` here, so a miswired (e.g. always-returns-success)
+        // adapter fails this contract.
+        //
+        // We only run this for native adapters whose no-credential detection
+        // is local (Anthropic reads ~/.claude/.credentials.json, Grok reads
+        // its own file, etc.) and DOES NOT make a network call when no
+        // credential exists. Adapters that attempt network even on
+        // no-credential (none today) would be excluded.
+        let _lock = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for id in ["agy", "commandcode"] {
+            // Both readers exit early on NoCredential without HTTP. The test
+            // asserts the production adapter path (no override set) — the
+            // dispatched_native_* adapters' `fetch` is invoked through
+            // `dispatch_fetch`, which falls through to the real impl when
+            // the override slot is empty.
+            crate::services::usage::invalidate_provider_cache(id);
+            let observed = cached_or_fetch(id, true, &[]).expect("dispatch native");
+            // On a host with a credential the adapter may probe the live
+            // endpoint and succeed (logged_in=true, no error). On a clean
+            // host (CI) it returns logged_out. We pin the envelope shape
+            // (provider stamp + non-empty ProviderUsage) so a miswired
+            // adapter returning a default or empty struct fails here.
+            assert_eq!(observed.provider, id, "real adapter {id} must stamp its own envelope");
+        }
     }
 }

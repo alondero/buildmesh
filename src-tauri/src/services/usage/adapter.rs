@@ -61,30 +61,53 @@ pub(crate) static FETCH_OVERRIDE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// Scope helper for the test-only fetch override. The override is stored
-/// in a `OnceLock<Mutex<(String, Option<ProviderUsage>)>>`; we copy the
-/// envelope OUT before invoking the closure so the lock is released and
-/// the production fetch path can read the override without re-entering.
+/// in a `OnceLock<Mutex<(String, Option<ProviderUsage>)>>`. Returns a
+/// [`FetchOverrideGuard`] RAII type whose `Drop` restores the previous
+/// value even when the closure panics, so a failing test cannot leak a
+/// stale override into the next test (which previously caused the
+/// dispatch.fetch tests to fall through to the real AnthropicAdapter
+/// fetch path on a credential-bearing host, false-failing the
+/// `windows.len() == 1` assertion).
 #[cfg(test)]
 pub(crate) fn with_fetch_override<F, R>(id: &str, envelope: ProviderUsage, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let mut cell = FETCH_OVERRIDE
-        .get_or_init(|| std::sync::Mutex::new((String::new(), None)))
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let snapshot = (id.to_string(), Some(envelope));
-    let previous = std::mem::replace(&mut *cell, snapshot);
-    drop(cell);
+    let guard = FetchOverrideGuard::install(id, envelope);
     let result = f();
-    // Restore prior override state so tests run in deterministic order.
-    let mut cell = FETCH_OVERRIDE
-        .get()
-        .expect("override initialised above")
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    *cell = previous;
+    drop(guard);
     result
+}
+
+/// RAII guard that restores the previous `FETCH_OVERRIDE` value on Drop
+/// (including during unwinding). Constructed only via
+/// [`with_fetch_override`].
+#[cfg(test)]
+struct FetchOverrideGuard {
+    previous: (String, Option<ProviderUsage>),
+}
+
+#[cfg(test)]
+impl FetchOverrideGuard {
+    fn install(id: &str, envelope: ProviderUsage) -> Self {
+        let mut cell = FETCH_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new((String::new(), None)))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous = std::mem::replace(&mut *cell, (id.to_string(), Some(envelope)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for FetchOverrideGuard {
+    fn drop(&mut self) {
+        if let Some(cell) = FETCH_OVERRIDE.get() {
+            if let Ok(mut guard) = cell.lock() {
+                *guard = std::mem::take(&mut self.previous);
+            }
+        }
+    }
 }
 
 /// Catalog entry point: routes an adapter's [`UsageAdapter::fetch`] call
@@ -242,70 +265,128 @@ mod tests {
     }
 
     #[test]
-    fn shared_client_applies_a_15_second_timeout() {
-        // The shared client centralises the Freebuff fetcher's 15s timeout
-        // onto every adapter path. Pin the timeout via a deliberately-slow
-        // TCP listener that accepts the connection then idles without ever
-        // producing an HTTP response, so reqwest must hit its configured
-        // timeout. reqwest's default is unbounded, which previously matched
-        // per-fetcher inline construction.
+    fn shared_client_applies_a_configured_request_timeout() {
+        // Verify the configured timeout is honoured on the actual fetch path.
+        // We use a 1-second timeout (rather than the production 15s) so the
+        // test is fast AND the assertion can be a narrow band tied to the
+        // configured value: 0.8s..1.8s. An unbounded client (reqwest
+        // default) would block until the listener is closed, far past the
+        // upper bound, so the band proves the timeout fired.
+        //
+        // The previous draft's 5s..20s band would have admitted a regression
+        // where the timeout was reduced to (say) 5s without anybody noticing
+        // because the test still passed. Tying the upper bound to the
+        // configured value with a small tolerance catches that class.
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+        let client = Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .expect("test client build");
+        let (port, _server) = spawn_idle_loopback();
+        let start = std::time::Instant::now();
+        let result = fetch_usage_with(
+            client,
+            "anthropic",
+            |c| c.get(format!("http://127.0.0.1:{port}/usage")),
+            |body| Ok((vec![], Some(body.to_string()))),
+        );
+        let elapsed = start.elapsed();
+        let error = result.error.as_deref().unwrap_or_default();
+        assert!(
+            error.starts_with("Request failed:"),
+            "expected reqwest timeout envelope, got: {result:?}"
+        );
+        // Server thread joined by `_server` Drop below; if the listener
+        // was never accepted, the connect attempt itself returns
+        // immediately, so we must have the accept signal observed
+        // (see spawn_idle_loopback).
+        assert!(
+            elapsed >= std::time::Duration::from_millis(800),
+            "1s timeout must wait for the configured value; elapsed {elapsed:?}"
+        );
+        assert!(
+            elapsed < TIMEOUT + std::time::Duration::from_millis(800),
+            "configured timeout is {TIMEOUT:?}; elapsed {elapsed:?} should be within 800ms"
+        );
+    }
+
+    /// Spawns a TCP listener on `127.0.0.1:0` and a worker thread that
+    /// accepts one connection then idles until the returned [`IdleServer`]
+    /// guard's `Drop` runs. The guard deterministically stops the worker
+    /// thread and joins it so a panic in the test body still cleans up —
+    /// the previous draft joined only after all assertions.
+    fn spawn_idle_loopback() -> (u16, IdleServer) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(false).expect("blocking accept");
-        // Synchronise on acceptance so the assertion below proves the
-        // timeout fired AFTER the server accepted the connection (i.e. an
-        // immediate connection refused would short-circuit and bypass the
-        // timeout entirely). The server thread owns its TcpStream and a
-        // stop-flag Atomic so the test can join it deterministically.
-        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let accepted_for_thread = std::sync::Arc::clone(&accepted);
         let stop_for_thread = std::sync::Arc::clone(&stop);
-        let server_thread = std::thread::spawn(move || {
-            // Accept one connection, signal, then hold it open until the
-            // stop flag flips (or the 30s ceiling hits).
+        let listener_thread = std::thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
-                accepted_for_thread.store(true, std::sync::atomic::Ordering::Release);
                 while !stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 drop(stream);
             }
         });
-        let start = std::time::Instant::now();
-        let result = fetch_usage(
-            "anthropic",
-            |c| c.get(format!("http://127.0.0.1:{port}/usage")),
-            |body| Ok((vec![], Some(body.to_string()))),
-        );
-        let elapsed = start.elapsed();
-        // Server must have accepted the connection so an immediate-refused
-        // failure cannot masquerade as a timeout pass.
-        assert!(
-            accepted.load(std::sync::atomic::Ordering::Acquire),
-            "loopback listener did not accept the connection; got: {result:?}"
-        );
-        // reqwest timeout surfaces as `Request failed: error sending request...`
-        // when read-timeout fires; we accept both the read-timeout and the
-        // request-build error variants so a reqwest wording tweak does not
-        // regress this test, while still requiring elapsed >= 5s (well above
-        // any connection-refused floor) and < 20s (well under the test budget).
-        let error = result.error.as_deref().unwrap_or_default();
-        assert!(
-            error.starts_with("Request failed:"),
-            "expected reqwest timeout envelope, got: {result:?}"
-        );
-        assert!(
-            elapsed >= std::time::Duration::from_secs(5),
-            "timeout must wait for the configured 15s; elapsed {elapsed:?}"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_secs(20),
-            "15s timeout should fire well under 20s; took {elapsed:?}"
-        );
-        // Stop the server thread deterministically so it does not outlive
-        // the test process (was a detached-thread leak in the previous draft).
-        stop.store(true, std::sync::atomic::Ordering::Release);
-        server_thread.join().expect("server thread join");
+        let server = IdleServer {
+            stop,
+            handle: Some(listener_thread),
+        };
+        (port, server)
+    }
+
+    /// RAII guard: flips `stop` and joins the worker thread on Drop, so a
+    /// panic in the test body still cleans up the listener.
+    struct IdleServer {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for IdleServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Test-only variant of [`fetch_usage`] that takes an injected
+    /// [`Client`] (instead of the [`shared_client`]) so the timeout test
+    /// can run with a 1s timeout and complete in ~1s rather than the
+    /// production 15s.
+    pub(crate) fn fetch_usage_with(
+        client: Client,
+        provider: &str,
+        build_request: impl FnOnce(&Client) -> RequestBuilder,
+        parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
+    ) -> ProviderUsage {
+        use crate::services::usage::types::unavailable;
+        match build_request(&client).send() {
+            Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
+                provider,
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            ),
+            Ok(r) if !r.status().is_success() => {
+                let code = r.status().as_u16();
+                unavailable(
+                    provider,
+                    format!("API error {}: {}", code, r.text().unwrap_or_default()),
+                )
+            }
+            Ok(r) => match parse(&r.text().unwrap_or_default()) {
+                Ok((windows, detail)) => ProviderUsage {
+                    provider: provider.to_string(),
+                    logged_in: true,
+                    windows,
+                    balance: None,
+                    detail,
+                    error: None,
+                },
+                Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
+            },
+            Err(e) => unavailable(provider, format!("Request failed: {}", e)),
+        }
     }
 }

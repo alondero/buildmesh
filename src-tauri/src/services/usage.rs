@@ -14,10 +14,11 @@ pub(crate) mod catalog;
 pub use types::{BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow};
 // Cache stays behind the same `usage::` paths callers already use.
 pub use cache::{get_cached_usage, invalidate_cache, invalidate_provider_cache, set_cached_usage};
-// `fetch_usage` lives behind the same path so existing fetcher call sites
-// stay one-line: `crate::services::usage::fetch_usage(...)`. Adapters go
-// through `catalog::dispatch(id).fetch` instead.
-pub(crate) use adapter::fetch_usage;
+// `fetch_usage` is a fetcher-only driver: internal call sites in this
+// module import it directly via `crate::services::usage::adapter::fetch_usage`
+// so the `usage::` namespace stops advertising it (issue #1657 step 1:
+// stop exporting helpers used only by fetchers). Adapters go through
+// `catalog::dispatch(id).fetch` instead.
 // Internal fetcher helpers are NOT re-exported: `usage::home_dir`,
 // `usage::logged_out`, `usage::unavailable`, `usage::cached_age` were
 // fetcher-only and the issue (#1657) requires this module to stop
@@ -28,6 +29,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 // Internal fetcher-only helpers: imported by their defining module so the
 // `usage::` namespace stays clean for the seam surface (issue #1657).
+use crate::services::usage::adapter::fetch_usage;
 use crate::services::usage::cache::cached_age;
 use crate::services::usage::types::{home_dir, logged_out, unavailable};
 // `Datelike` powers the month-start computation in
