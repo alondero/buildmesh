@@ -81,7 +81,9 @@ fn schema_dump(conn: &Connection) -> String {
         out.push_str(sql.trim());
         out.push_str("\n\n");
     }
-    out
+    // Keep the committed snapshot canonical: blank lines separate entries,
+    // while the file has one final newline rather than an accidental extra.
+    out.trim_end_matches('\n').to_owned() + "\n"
 }
 
 #[test]

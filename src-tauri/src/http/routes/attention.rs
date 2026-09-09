@@ -940,6 +940,17 @@ mod tests {
     }
 
     #[test]
+    fn review_handoff_stop_after_reading_launch_examples_is_ready() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let record = serde_json::json!({"type":"user", "message":{"content":[{
+            "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+        }]}});
+        std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
+        let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()}).to_string();
+        assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::count_pending_background_tasks), Decision::Ready);
+    }
+
+    #[test]
     fn fieldless_json_body_marks_input_with_degraded_health() {
         // A parseable `{}` with no recognized fields is an unknown signal —
         // not "turn completed". Mark with degraded health (issue #1364).

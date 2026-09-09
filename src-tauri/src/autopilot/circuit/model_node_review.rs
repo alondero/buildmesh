@@ -42,7 +42,7 @@ impl CircuitGraph {
                 target_node_id: target(),
             }),
             ("close_reviewer", K::CloseAgentNode { target_node_id: reviewer() }),
-            ("await_fixes", K::LlmTurnClassifier { target_node_id: target() }),
+            ("await_fixes", K::AwaitAgentTurn { target_node_id: target() }),
             ("retry", K::RetryLimit { max_retries: max_rounds }),
             ("close_approved", K::CloseAgentNode { target_node_id: reviewer() }),
             ("approved", K::Notify { message: "Review approved for {{source.name}} (agent {{source.agent_id}}).".into() }),
