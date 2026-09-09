@@ -127,59 +127,19 @@ impl TranscriptFormat {
 /// non-alphanumeric character with `-`. On Windows this collapses the drive
 /// colon and `\` separators (and `.` in `.claude`); on Unix it covers `/`.
 /// So `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
-/// `X--src-buildmesh--claude-worktrees-foo`.
-pub(crate) fn encode_path(path: &str) -> String {
-    path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-// `commandcode_project_slug` moved to `adapters::commandcode` (issue #1661
-// step 3). Re-exported for `commandcode_session`, `commandcode_watcher`, and
-// `agent_node_discovery` until step 10 collapses those callers onto the
-// adapter.
+// `encode_path` moved to `services::transcript_paths` (issue #1661 step
+// 5) — shared with `agent_node_discovery` for resumable-session
+// scanning. `commandcode_project_slug` lives in
+// `adapters::commandcode` (step 3). `is_synthetic_message`,
+// `concat_text_blocks`, `first_text_block` also live in
+// `transcript_paths`; re-exported here for the test module + Cursor
+// adapter (which delegates to `ClaudeCodeAdapter::line_has_assistant_text`
+// using the same predicate).
+pub(crate) use crate::services::transcript_paths::encode_path;
 pub(crate) use crate::services::transcript_reader::adapters::commandcode::commandcode_project_slug;
-/// True when raw message text is a synthetic Claude Code injection rather than
-/// genuine user input (e.g. the `local-command-caveat` wrapper). Such lines are
-/// not real turns and must be skipped.
-pub(crate) fn is_synthetic_message(text: &str) -> bool {
-    text.trim_start().starts_with("<local-command-caveat>")
-}
-/// Pull the text out of a message `content` field, which Claude Code writes
-/// either as a bare string (user prompts) or as an array of typed blocks
-/// (assistant output, tool results). Only `text` blocks contribute; `thinking`,
-/// `tool_use`, `tool_result`, `image`, etc. are not text. Multiple text blocks
-/// are joined with newlines.
-pub(crate) fn concat_text_blocks(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-/// Pull the text of only the **first** `text` block out of a message `content`
-/// field (or the whole string for a bare-string content). Unlike
-/// [`concat_text_blocks`] this never joins multiple blocks: `session_discovery`
-/// wants a single-line session *title* from the opening prompt, and joining all
-/// blocks with `\n` (which its `strip_tags` doesn't collapse) would corrupt the
-/// title for a multi-text-block user message (issue #335). For the common
-/// single-block message the two functions are identical.
-pub(crate) fn first_text_block(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .find_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .unwrap_or("")
-            .to_string(),
-        _ => String::new(),
-    }
-}
+pub(crate) use crate::services::transcript_paths::{
+    concat_text_blocks, first_text_block, is_synthetic_message,
+};
 // `truncate` and `truncate_json_strings` live in `types` (format-agnostic).
 // Format-agnostic helpers (`truncate`, `truncate_json_strings`,
 // `effective_tail`, `empty_or_shape_changed`, `build_tail`, `push_bounded`,
@@ -254,14 +214,14 @@ pub(crate) use crate::services::transcript_reader::adapters::agy::agy_locator_in
 pub(crate) use crate::services::transcript_reader::adapters::commandcode::{
     commandcode_sessions_dir, commandcode_transcript_path_in,
 };
-/// Build the expected on-disk path of a Claude Code session transcript:
-/// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
-fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
-    env::claude_dir()
-        .join("projects")
-        .join(encode_path(node_path))
-        .join(format!("{session_id}.jsonl"))
-}
+/// `transcript_path`, `parse_turns`, `extract_tool_calls`,
+/// `count_pending_background_tasks`, `pending_background_task_ids`,
+/// and the `LAUNCH_ID` / `NOTIFIED_ID` regex statics moved to
+/// `adapters::claude_code` (issue #1661 step 8). Re-exported so the
+/// existing test module's references keep resolving.
+pub(crate) use crate::services::transcript_reader::adapters::claude_code::{
+    count_pending_background_tasks, parse_turns, pending_background_task_ids, transcript_path,
+};
 
 // `cursor_transcript_path`, `cursor_transcript_path_in`, and
 // `cursor_workspace_slug` moved to `adapters::cursor` (issue #1661
@@ -577,149 +537,17 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
 /// size). Skips every non-message line type (`mode`, `queue-operation`,
 /// `file-history-snapshot`, `system`, summaries, …), synthetic injections, and
 /// pure tool-result echoes. Consecutive assistant lines sharing a `message.id`
-/// are coalesced into one turn (Claude Code splits one assistant message "—
-/// thinking / text / tool_use "— across several lines).
-fn parse_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
-    // Always retain at least the open turn so a split assistant message can
-    // still coalesce its continuation lines (the open turn is never evicted —
-    // eviction only drops the front).
-    let keep = keep.max(1);
-    let mut turns: VecDeque<Turn> = VecDeque::new();
-    let mut last_assistant_message: Option<String> = None;
-    let mut saw_malformed = false;
-    // Tracks the message.id of the in-progress assistant turn so the next line
-    // of the same message merges instead of starting a new turn.
-    let mut open_assistant_id: Option<String> = None;
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let entry_type = val.get("type").and_then(|t| t.as_str());
-        if entry_type != Some("user") && entry_type != Some("assistant") {
-            continue;
-        }
-        // From here the line claims to be a user/assistant message. A missing or
-        // renamed `message`/`role`/`content` is a structural break in the Claude
-        // Code shape (issue #335) — flag it so an all-broken file degrades loudly
-        // as `ShapeChanged`, while a file whose only non-turn lines were
-        // *deliberately* skipped (synthetic/echo/thinking) degrades as `Empty`.
-        let Some(message) = val.get("message") else {
-            saw_malformed = true;
-            continue;
-        };
-        let role = message.get("role").and_then(|r| r.as_str());
-        if role != Some("user") && role != Some("assistant") {
-            saw_malformed = true;
-            continue;
-        }
-        let role = role.unwrap();
-        let Some(content) = message.get("content") else {
-            saw_malformed = true;
-            continue;
-        };
-        let content = Some(content);
-        let text = concat_text_blocks(content);
-        let mut tool_calls = extract_tool_calls(content);
-        // Skip synthetic user injections (local-command-caveat) and pure
-        // tool-result echoes (a user line carrying only tool output). These are
-        // well-formed lines we choose not to surface — never `ShapeChanged`.
-        if role == "user" {
-            if is_synthetic_message(&text) {
-                open_assistant_id = None;
-                continue;
-            }
-            if text.trim().is_empty() {
-                // No real text and (user lines never carry tool_use) …"™ echo.
-                open_assistant_id = None;
-                continue;
-            }
-        }
-        // An assistant line with neither text nor tool calls (e.g. a lone
-        // `thinking` block) carries nothing the Coordinator can use.
-        if role == "assistant" && text.trim().is_empty() && tool_calls.is_empty() {
-            continue;
-        }
-        if role == "assistant" {
-            let id = message
-                .get("id")
-                .and_then(|i| i.as_str())
-                .map(|s| s.to_string());
-            // Coalesce with the open assistant turn iff the ids match and are
-            // non-empty; otherwise this starts a fresh turn.
-            if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
-                if id == open {
-                    if let Some(last) = turns.back_mut() {
-                        merge_into(last, &text, tool_calls);
-                        if !last.text.is_empty() {
-                            last_assistant_message = Some(last.text.clone());
-                        }
-                        continue;
-                    }
-                }
-            }
-            open_assistant_id = id;
-            cap_tool_calls(&mut tool_calls);
-            let turn = Turn {
-                role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
-                tool_calls,
-            };
-            if !turn.text.is_empty() {
-                last_assistant_message = Some(turn.text.clone());
-            }
-            push_bounded(&mut turns, turn, keep);
-        } else {
-            open_assistant_id = None;
-            push_bounded(
-                &mut turns,
-                Turn {
-                    role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
-                    tool_calls: Vec::new(),
-                },
-                keep,
-            );
-        }
-    }
-    Parsed {
-        turns: turns.into(),
-        last_assistant_message,
-        saw_malformed,
-    }
-}
+/// `parse_turns` + `extract_tool_calls` moved to
+/// `adapters::claude_code` (issue #1661 step 8). The Claude Code
+/// adapter is the sole owner of its message-id-coalescing parser; the
+/// re-export above keeps the reader's test module calling the same
+/// function names.
+
 // `push_bounded` moved to `super::types` (format-agnostic rolling-buffer
 // helper).
-/// Bound a turn's tool-call count to [`MAX_TURN_TOOL_CALLS`] (issue #335), so no
-/// single turn dominates the payload even if a message carries a pathological
-/// number of parallel tool calls.
 // `push_bounded`, `cap_tool_calls`, `merge_into` moved to `super::types`
 // (format-agnostic rolling-buffer helpers).
-/// Pull `tool_use` blocks out of a message `content` array into [`ToolCall`]s,
-/// truncating string leaves in each raw `input`.
-fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<ToolCall> {
-    let Some(serde_json::Value::Array(blocks)) = content else {
-        return Vec::new();
-    };
-    blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-        .map(|b| {
-            let name = b
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
-            ToolCall {
-                name,
-                input: truncate_json_strings(input, MAX_TOOL_STRING),
-            }
-        })
-        .collect()
-}
+
 // --- Codex rollout parser (issue #885 / #887) ---
 //
 // Codex writes `rollout-<timestamp>-<session-id>.jsonl` files whose lines are
@@ -821,97 +649,11 @@ pub(crate) use crate::services::transcript_reader::adapters::agy::parse_agy_turn
 
 // --- Pending background tasks (issue #878) ---
 //
-// Claude Code ends its turn when it launches background work (a
-// `run_in_background` Bash call, or a foreground command that outlives its
-// timeout and is moved to the background) and auto-resumes itself when the
-// task's `<task-notification>` arrives. A Stop hook that fires with such work
-// still pending is NOT "the user is needed". The transcript records both ends
-// deterministically:
-//
-//   launch  — a `tool_result` whose text says "…background… (ID: xyz) …
-//             You will be notified when it completes."
-//   finish  — a line (queue-operation, or the queued_command attachment that
-//             re-invokes the agent) carrying `<task-id>xyz</task-id>`.
-//
-// Pending = launched minus notified.
-
-/// Matches the task id in either launch phrasing:
-/// `Command running in background with ID: xyz.` and
-/// `…was moved to the background (ID: xyz).`
-static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    // Match the harness's result envelope, not examples printed by Read,
-    // grep, or a test command that happens to include our launch marker.
-    regex::Regex::new(
-        r"\ACommand (?:running in background with ID: |did not complete within its [^\r\n]+ timeout and was moved to the background \(ID: )([A-Za-z0-9_-]+)\)?\. Output is being written to: "
-    ).unwrap()
-});
-/// A task-notification's id paired with its status, non-greedy so several
-/// notifications on one line pair correctly. Real transcripts carry
-/// `<status>running</status>` notifications too (e.g. a foreground command
-/// moved to the background) — only a terminal status means the wait is over.
-static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>").unwrap()
-});
-/// Both known launch envelopes carry this promise. It must accompany the
-/// anchored launch header; either fragment alone can occur in printed code.
-const LAUNCH_MARKER: &str = "You will be notified when it completes";
-
-/// Count background tasks launched but not yet notified in a Claude Code
-/// transcript. `None` = the file could not be read — the caller must treat
-/// that as "unknown" and fall back to its pre-#878 behaviour, never as "no
-/// pending work".
-pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    Some(pending_background_task_ids(reader.lines().map_while(Result::ok)).len())
-}
-
-/// Pure scan over JSONL lines: launched-task ids with no matching
-/// `<task-id>` notification, in launch order. Split from the I/O wrapper so
-/// tests drive it with inline fixtures.
-fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<String> {
-    let mut launched: Vec<String> = Vec::new();
-    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for line in lines {
-        // The notification marker is matched on the raw line: it appears in
-        // `queue-operation` lines and in the queued_command attachment that
-        // re-invokes the agent, and caring which one carries it would couple
-        // us to more of the shape than we need.
-        for cap in NOTIFIED_ID.captures_iter(&line) {
-            if &cap[2] != "running" {
-                notified.insert(cap[1].to_string());
-            }
-        }
-        // Launches only count inside a tool_result block — free text merely
-        // *mentioning* the promise (e.g. an agent quoting these docs) must not
-        // register a phantom task.
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let Some(serde_json::Value::Array(blocks)) =
-            val.get("message").and_then(|m| m.get("content"))
-        else {
-            continue;
-        };
-        for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
-                continue;
-            }
-            let text = match block.get("content") {
-                Some(serde_json::Value::String(s)) => s.clone(),
-                other => concat_text_blocks(other),
-            };
-            if !text.contains(LAUNCH_MARKER) {
-                continue;
-            }
-            if let Some(cap) = LAUNCH_ID.captures(&text) {
-                launched.push(cap[1].to_string());
-            }
-        }
-    }
-    launched.retain(|id| !notified.contains(id));
-    launched
-}
+// `count_pending_background_tasks`, `pending_background_task_ids`,
+// `LAUNCH_ID` / `NOTIFIED_ID` regex statics, and `LAUNCH_MARKER`
+// moved to `adapters::claude_code` (issue #1661 step 8). Re-exported
+// from this module so the reader's test module's references keep
+// resolving.
 
 #[cfg(test)]
 mod tests {

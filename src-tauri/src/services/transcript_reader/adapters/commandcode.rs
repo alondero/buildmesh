@@ -25,7 +25,8 @@ use crate::services::transcript_reader::types::{
 // Claude-Code primitives still live in `mod.rs` (will move to
 // `transcript_paths` in step 5 of #1661). Reach through `super::super`
 // until then.
-use super::super::{concat_text_blocks, extract_tool_calls as extract_claude_tool_calls, is_synthetic_message};
+use super::super::{concat_text_blocks, is_synthetic_message};
+use super::claude_code::extract_tool_calls as extract_claude_tool_calls;
 
 /// Drop-in [`TranscriptAdapter`] for Command Code.
 pub(crate) struct CommandCodeAdapter;
