@@ -34,7 +34,7 @@ impl CircuitGraph {
             ("reviewer", K::SpawnAgentNode {
                 prompt: CircuitGraph::local_review_prompt(),
                 name: Some("Code reviewer".into()), provider: provider.map(str::to_owned),
-                model, effort, extra_args: None,
+                model, effort, extra_args: None, timeout_seconds: None,
             }),
             ("verdict", K::ReviewVerdict { target_node_id: reviewer() }),
             ("feedback", K::InjectPty {

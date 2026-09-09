@@ -35,11 +35,20 @@ fn spawn_options_carries_explicit_slots() {
         // through mesh / app defaults and `default_prepare` only
         // forwards the string when `supports_extra_args = true`.
         explicit_extra_args: None,
+        // #1219: per-step wall-clock budget. Forwarded from the AST's
+        // `SpawnAgentNode.timeout_seconds` through `resolve_circuit_spawn_inputs`
+        // → `ExplicitSpawnOverrides::timeout_seconds` →
+        // `SpawnOptions::explicit_timeout_seconds` → `LaunchParams` so
+        // the launch phase can log it and the (deferred) watchdog can
+        // consume it. Pin the field here so a future refactor that
+        // drops it fails compilation.
+        explicit_timeout_seconds: Some(1800),
         worktree_policy: WorktreePolicy::RespectMesh,
     };
     assert_eq!(opts.explicit_model.as_deref(), Some("sonnet-4"));
     assert_eq!(opts.explicit_effort.as_deref(), Some("low"));
     assert!(opts.explicit_extra_args.is_none());
+    assert_eq!(opts.explicit_timeout_seconds, Some(1800));
 }
 
 // -----------------------------------------------------------------------

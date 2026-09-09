@@ -95,6 +95,13 @@ pub(crate) struct SpawnOptions {
     /// the only one) silently drops the value at the resolver rather
     /// than splicing a synthetic flag into its argv.
     pub explicit_extra_args: Option<String>,
+    /// Optional per-step wall-clock budget in seconds (#1219). Threaded
+    /// into the launch phase so the (deferred) step-level watchdog can
+    /// read it from the resolved spawn config — today the orchestrator
+    /// just logs it at the seam so the carrier is testable end-to-end.
+    /// `Some(0)` is filtered to `None` at the carrier so a zero-int
+    /// overflow at save time can't request an instant expiry.
+    pub explicit_timeout_seconds: Option<u32>,
     /// Caller-owned worktree policy. `ForceBranched` is used by issue-driven
     /// circuit runs; `RespectMesh` preserves the normal spawn behaviour.
     pub worktree_policy: WorktreePolicy,
@@ -196,6 +203,7 @@ pub(super) async fn prepare_context(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        explicit_timeout_seconds,
         worktree_policy,
     } = opts;
 
@@ -457,6 +465,7 @@ pub(super) async fn prepare_context(
             explicit_model,
             explicit_effort,
             explicit_extra_args,
+            explicit_timeout_seconds,
             harness_id,
             node_mesh_id,
             registry_mesh_id: mesh_id,

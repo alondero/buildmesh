@@ -45,6 +45,7 @@ import {
   categoryAccent,
   categoryOf,
   configSummary,
+  defaultKind,
   getReachableContext,
   groupForPath,
   isReachablePath,
@@ -161,40 +162,111 @@ const inputClass =
   'w-full px-2 py-1 bg-bg-input border border-border-subtle rounded-md text-xs text-text-primary focus:outline-none focus:border-border-active';
 
 /**
+ * Mirrors `MAX_STEP_TIMEOUT_SECONDS` in
+ * `src-tauri/src/autopilot/circuit/model.rs` (#1219). One week gives
+ * every realistic circuit room to wait (a flaky CI run, a long-running
+ * PR review) while bounding the user-typable range so a typo like
+ * `999999999` doesn't ship a value the orchestrator's eventual
+ * watchdog (#1219 follow-up) can't reason about. The validator
+ * enforces the same upper bound and rejects overshoots with a
+ * field-named error.
+ */
+const MAX_STEP_TIMEOUT_SECONDS = 604_800; // 7 days
+
+/**
  * Number field that tolerates transient states (cleared input, "0",
  * partial typing): keeps a local draft while focused, commits any
- * finite number upward, and falls back to the committed value on blur.
+ * finite integer upward, and falls back to the committed value on
+ * blur.
+ *
+ * `nullable` lets the input represent "no override" — value=null →
+ * display is empty while not focused, and clearing the input commits
+ * null upward (mirrors how `model`/`effort` use the input type=null
+ * for "inherit default"). When omitted, value is treated as a finite
+ * number (legacy behaviour): the field rejects `null` at runtime and
+ * callers receive a `number`.
+ *
+ * `max` lets callers enforce an upper bound. The Rust validator
+ * (`CircuitGraph::validate`) mirrors the same upper bound and rejects
+ * overshoots with a field-named error, so the contract is enforced
+ * in one place per language.
+ *
+ * Fractions and non-numeric input are silently rejected at the
+ * `Number.isFinite` check; the field never commits a value the
+ * serializer would later drop.
  */
 function NumberField({
   value,
   min,
+  max,
   ariaLabel,
   testId,
+  nullable = false,
   onCommit,
 }: {
-  value: number;
+  value: number | null;
   min?: number;
+  max?: number;
   ariaLabel: string;
   testId: string;
-  onCommit: (n: number) => void;
+  nullable?: boolean;
+  onCommit: (n: number | null) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
-  const display = draft ?? String(value);
+  // When `nullable` is true, an absent (null) value shows an empty input
+  // so the user has a clear "no override" affordance and can re-enter a
+  // number; the comment in the field caption explains the override's
+  // effect.
+  const display =
+    draft ?? (nullable ? (value === null ? '' : String(value)) : String(value ?? 0));
+  // Non-nullable callers get a pure `number` callback by ignoring null
+  // (the input never emits null when `nullable=false`).
+  const commit = nullable
+    ? onCommit
+    : (n: number | null) => {
+        if (n !== null) onCommit(n);
+      };
   return (
     <input
       type="number"
       min={min}
+      max={max}
       value={display}
       aria-label={ariaLabel}
       data-testid={testId}
       onChange={(e) => {
-        setDraft(e.target.value);
-        if (e.target.value !== '') {
-          const n = Number(e.target.value);
-          if (Number.isFinite(n)) onCommit(n);
+        const raw = e.target.value;
+        setDraft(raw);
+        if (nullable && raw === '') {
+          commit(null);
+          return;
+        }
+        if (raw !== '') {
+          const n = Number(raw);
+          if (!Number.isFinite(n)) return;
+          // Nullable + `0` is the inspector's affordance for "inherit
+          // default" (the resolver collapses `Some(0)` to `None` at the
+          // seam, mirroring the spec). Commit `null` immediately so the
+          // AST and the displayed value stay consistent without waiting
+          // for blur — and so the `min={1}` clamp doesn't coerce a
+          // typed `0` to `1` behind the user's back.
+          if (nullable && n === 0) {
+            commit(null);
+            return;
+          }
+          // Fractions (3.14) silently coerce down — typing a decimal
+          // while typing an integer happens often enough that
+          // round-tripping the floor is friendlier than rejecting
+          // the keystroke. Negative / oversize values are clamped to
+          // bounds so the AST never carries a value the Rust
+          // validator would reject at save time.
+          let clamped = n;
+          if (min !== undefined && clamped < min) clamped = min;
+          if (max !== undefined && clamped > max) clamped = max;
+          commit(Math.trunc(clamped));
         }
       }}
-      onFocus={() => setDraft(String(value))}
+      onFocus={() => setDraft(value === null ? '' : String(value))}
       onBlur={() => setDraft(null)}
       className={inputClass}
     />
@@ -599,7 +671,15 @@ export function InspectorPanel(props: InspectorPanelProps) {
             min={60}
             ariaLabel="Interval seconds"
             testId="inspector-interval"
-            onCommit={(interval_seconds) => onChange({ ...kind, interval_seconds })}
+            // Non-nullable field — the NumberField runtime never emits null
+            // for `nullable: false` callers, but TypeScript widens the
+            // callback to `number | null` for the nullable-overload
+            // variant; unwrap defensively here.
+            onCommit={(n) => {
+              if (n !== null) {
+                onChange({ ...kind, interval_seconds: n });
+              }
+            }}
           />
         </Field>
       )}
@@ -614,6 +694,35 @@ export function InspectorPanel(props: InspectorPanelProps) {
             placeholder="buildmesh:run"
             className={inputClass}
           />
+        </Field>
+      )}
+
+      {/* #1219 review feedback: the trigger-type select for root nodes
+          is the missing piece that lets a Manual author rewire to
+          Interval / GitHub-Issue / GitHub-PR without deleting the
+          node. Switching the discriminator re-defaults the kind
+          through `defaultKind` so the new shape satisfies the
+          generated AST union — the previous slot-specific fields
+          (interval_seconds / label) are reset, which matches the
+          author's expectation of "I'm authoring a fresh trigger of
+          this kind now". */}
+      {categoryOf(kind) === 'trigger' && (
+        <Field label="Trigger type">
+          <select
+            value={kind.type}
+            aria-label="Trigger type"
+            data-testid="inspector-trigger-type-select"
+            onChange={(e) => {
+              const next = defaultKind(e.target.value);
+              onChange(next);
+            }}
+            className={inputClass}
+          >
+            <option value="manual">Manual</option>
+            <option value="interval">Interval</option>
+            <option value="github_issue_label">GitHub issue label</option>
+            <option value="github_pull_request_label">GitHub PR label</option>
+          </select>
         </Field>
       )}
 
@@ -650,13 +759,21 @@ export function InspectorPanel(props: InspectorPanelProps) {
             min={0}
             ariaLabel="Max retries"
             testId="inspector-max-retries"
-            onCommit={(max_retries) => onChange({ ...kind, max_retries })}
+            onCommit={(n) => {
+              if (n !== null) {
+                onChange({ ...kind, max_retries: n });
+              }
+            }}
           />
         </Field>
       )}
 
-      {/* Kinds with no configurable payload still get a readable line. */}
-      {['manual', 'all_completed', 'any_completed'].includes(kind.type) && (
+      {/* Kinds with no configurable payload still get a readable line.
+          `manual` is intentionally excluded: it now exposes the
+          Trigger type select (#1219 review), so the summary line is
+          noise — the dropdown already communicates "this is a manual
+          trigger". Joins remain here because they have no payload. */}
+      {['all_completed', 'any_completed'].includes(kind.type) && (
         <p className="text-xs text-text-secondary">{configSummary(kind)}</p>
       )}
 
@@ -731,6 +848,14 @@ function SpawnAgentNodeFields({
             // resolver would silently drop at spawn time — the next
             // edit re-populates them. The `provider` itself is the
             // one field that legitimately persists across switches.
+            //
+            // `timeout_seconds` is NOT cleared here: it's orchestrator
+            // policy (the future step-level watchdog is builtmesh-wide,
+            // not harness-specific), so it persists across harness
+            // switches. No harness has yet advertised it does NOT
+            // support timeout, and the field is hidden behind a
+            // `Provider: Some(_)` selector only by historical accident
+            // (#1219 review).
             const next: Partial<typeof kind> =
               v === ''
                 ? { provider: null }
@@ -806,6 +931,37 @@ function SpawnAgentNodeFields({
           />
         </Field>
       )}
+
+      {/* Per-step timeout (#1219). Always rendered: the field is
+          orchestrator-level policy (the future step-level watchdog is
+          buildmesh-wide, not harness-specific), so hiding it behind
+          a provider selector was the wrong gate. The clamp mirrors
+          `MAX_STEP_TIMEOUT_SECONDS` (7 days) so the inspector never
+          commits a value the Rust `validate()` would reject at save
+          time. Enforcement (cancellation of stuck spawns) is a
+          follow-up slice; today the value rides the
+          `ExplicitSpawnOverrides::timeout_seconds` carrier seam
+          (`tests/unit/circuits-probe-tab.test.tsx` pins the wire shape)
+          so the watchdog slice can wire against it without re-deriving
+          it from the AST. */}
+      <Field label="Step timeout (seconds, blank = inherit default)">
+        <NumberField
+          value={kind.timeout_seconds ?? null}
+          min={1}
+          max={MAX_STEP_TIMEOUT_SECONDS}
+          ariaLabel="Step timeout"
+          testId="inspector-timeout"
+          nullable
+          onCommit={(timeout_seconds) =>
+            onChange({ ...kind, timeout_seconds })
+          }
+        />
+        <p className="text-2xs text-text-muted mt-0.5">
+          Per-step wall-clock budget for the orchestrator. Leave blank (or
+          enter 0) to inherit the default. Range: 1–{MAX_STEP_TIMEOUT_SECONDS.toLocaleString()}
+          s (7 days).
+        </p>
+      </Field>
 
       {!caps && harnessId == null && (
         <p className="text-2xs text-text-muted">

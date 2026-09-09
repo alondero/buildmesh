@@ -20,6 +20,7 @@ pub(super) fn resolve_circuit_spawn_inputs(
         model,
         effort,
         extra_args,
+        timeout_seconds,
     } = kind
     else {
         return Err(format!(
@@ -34,6 +35,9 @@ pub(super) fn resolve_circuit_spawn_inputs(
     let provider_str = provider.clone();
     let prompt = prompt.clone();
     let name = name.clone();
+    // `timeout_seconds = 0` collapses to absent so a zero-int overflow
+    // at save time can't accidentally request an instant expiry.
+    let timeout_seconds = timeout_seconds.filter(|&t| t > 0);
     let explicit = ExplicitSpawnOverrides {
         model: model
             .as_deref()
@@ -47,6 +51,7 @@ pub(super) fn resolve_circuit_spawn_inputs(
             .as_deref()
             .and_then(non_empty_trim)
             .map(str::to_string),
+        timeout_seconds,
     };
     Ok(ResolvedCircuitSpawn {
         prompt,

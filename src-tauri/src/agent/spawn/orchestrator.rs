@@ -287,6 +287,15 @@ pub(crate) async fn spawn_with_intent(
             // (issue #1148 AC #32 + #1155 AC #3).
             explicit_model: explicit.model,
             explicit_effort: explicit.effort,
+            // #1219: per-step wall-clock budget from the AST.
+            // Threaded into SpawnOptions → LaunchParams so the launch
+            // phase logs it and the (deferred) watchdog slice can
+            // consume it without re-deriving from the AST. `Some(0)`
+            // is collapsed to `None` at the carrier seam
+            // (`resolve_circuit_spawn_inputs` for circuit authors,
+            // `ExplicitSpawnOverrides` for direct spawn requests) so
+            // we never wire an instant-expiry timeout through.
+            explicit_timeout_seconds: explicit.timeout_seconds,
             worktree_policy,
         },
     )

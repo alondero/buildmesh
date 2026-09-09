@@ -29,8 +29,17 @@ export { isTerminalRunState } from './circuitVocabulary';
 export type NodeCategory = 'trigger' | 'action' | 'gate' | 'join';
 export type KindDiscriminator = CircuitNodeKind['type'];
 
-/** Mirrors Rust `CIRCUIT_GRAPH_VERSION`. Writers emit this; parse upgrades v1. */
-export const CIRCUIT_GRAPH_VERSION = 2;
+/**
+ * Mirrors Rust `CIRCUIT_GRAPH_VERSION`. Bump together with the Rust
+ * constant — version drift between the two breaks the cross-boundary
+ * `version` stamp and silently downgrades new saves to a stale schema.
+ * See `tests/unit/circuit-graph-model.test.ts::ts_version_constant_matches_rust`
+ * for the cross-boundary pin.
+ *
+ * v1 → v2 (issue #1356): `graph_json` round-trips with version stamping.
+ * v2 → v3 (issue #1219): added `timeout_seconds` to `SpawnAgentNode`.
+ */
+export const CIRCUIT_GRAPH_VERSION = 3;
 
 /** One palette entry: a node kind plus its presentation grouping. */
 export interface NodeKindSpec {
@@ -116,6 +125,7 @@ export function defaultKind(discriminator: string): CircuitNodeKind {
         model: null,
         effort: null,
         extra_args: null,
+        timeout_seconds: null,
       };
     case 'inject_pty':
       return { type: 'inject_pty', prompt: '', target_node_id: null };
@@ -241,9 +251,11 @@ export function parseGraph(json: string): CircuitGraph {
   const graph = parsed as CircuitGraph;
   // The Rust boundary defaults a missing edge condition to `always`
   // (`#[serde(default)]`); hand-edited JSON gets the same grace here.
-  // v1 blueprints upgrade in-memory to v2 (version stamp + optional
-  // field defaults) so a canvas save persists the current AST without
-  // looking dirty on open (issue #1356).
+  // Older blueprints upgrade in-memory to the current schema (version
+  // stamp + optional field defaults) so a canvas save persists the
+  // current AST without looking dirty on open.
+  // v1 → v2: edge condition + version stamp (issue #1356).
+  // v2 → v3: `timeout_seconds` field default (issue #1219).
   const version =
     typeof graph.version === 'number' && graph.version >= CIRCUIT_GRAPH_VERSION
       ? graph.version
@@ -272,6 +284,7 @@ function normalizeKind(kind: CircuitNodeKind): CircuitNodeKind {
         model: kind.model ?? null,
         effort: kind.effort ?? null,
         extra_args: kind.extra_args ?? null,
+        timeout_seconds: kind.timeout_seconds ?? null,
       };
     case 'inject_pty':
       return {

@@ -187,6 +187,13 @@ pub(crate) struct ExplicitSpawnOverrides {
     /// silently drops the value at the resolver rather than forwarding
     /// it as a synthetic flag.
     pub(crate) extra_args: Option<String>,
+    /// Optional per-step wall-clock budget in seconds (#1219). `None`
+    /// = the orchestrator uses its own default. Enforcement (cancelling
+    /// stuck spawns) is a follow-up slice — this field is the data
+    /// shape only. `Some(0)` is treated as "absent" by the resolver
+    /// rather than "expire immediately", mirroring the whitespace-only
+    /// collapse rule above.
+    pub(crate) timeout_seconds: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
