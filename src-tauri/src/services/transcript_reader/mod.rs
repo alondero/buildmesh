@@ -291,55 +291,12 @@ fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
-/// Build the expected on-disk path of a Cursor CLI session transcript:
-/// `<cursor_dir>/projects/<workspace-slug>/agent-transcripts/<session>/<session>.jsonl`.
-fn cursor_transcript_path(session_id: &str, node_path: &str) -> PathBuf {
-    cursor_transcript_path_in(&env::cursor_dir(), session_id, node_path)
-}
-
-/// Pure path builder for Cursor transcripts, split from the environment lookup
-/// so the workspace layout can be tested without process-global state.
-pub(crate) fn cursor_transcript_path_in(
-    cursor_home: &Path,
-    session_id: &str,
-    node_path: &str,
-) -> PathBuf {
-    cursor_home
-        .join("projects")
-        .join(cursor_workspace_slug(node_path))
-        .join("agent-transcripts")
-        .join(session_id)
-        .join(format!("{session_id}.jsonl"))
-}
-
-/// Convert a workspace path into Cursor's lossy project directory slug.
-/// Cursor drops a leading separator, removes a Windows drive colon, and uses
-/// dashes for path separators and other non-alphanumeric characters.
-pub(crate) fn cursor_workspace_slug(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    let mut parts = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if let Some(first) = parts.first_mut() {
-        if first.len() == 2 && first.as_bytes()[1] == b':' {
-            first.truncate(1);
-            first.make_ascii_lowercase();
-        }
-    }
-
-    parts
-        .into_iter()
-        .map(|part| {
-            part.chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("-")
-}
+// `cursor_transcript_path`, `cursor_transcript_path_in`, and
+// `cursor_workspace_slug` moved to `adapters::cursor` (issue #1661
+// step 4). Re-exported for `agent_node_discovery` until step 10.
+pub(crate) use crate::services::transcript_reader::adapters::cursor::{
+    cursor_transcript_path_in, cursor_workspace_slug,
+};
 
 // --- OpenCode transcript reader (issue #1296) ---
 //
