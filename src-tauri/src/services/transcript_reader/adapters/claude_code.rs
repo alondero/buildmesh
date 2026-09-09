@@ -21,7 +21,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::env;
-use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
+use crate::services::transcript_reader::adapter::{
+    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+};
 use crate::services::transcript_reader::types::{
     build_tail, cap_tool_calls, effective_tail, merge_into, push_bounded, truncate,
     truncate_json_strings, Parsed, ToolCall, Turn,
@@ -62,6 +64,35 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
             && !concat_text_blocks(value.get("message").and_then(|message| message.get("content")))
                 .trim()
                 .is_empty()
+    }
+
+    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+        // Claude Code's documented Notification envelope is "… needs
+        // your permission to use X" — anchored to the verb phrase, not
+        // a bare "permission" substring, so prose like "Permission was
+        // already granted for Bash" cannot false-positive. Cursor's
+        // envelope shape matches Claude Code's, so Cursor delegates
+        // here.
+        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
+        // The HookPayload struct in routes/attention.rs applies the
+        // `hookEventName` alias; we read raw `serde_json::Value` here.
+        let event = payload
+            .get("hook_event_name")
+            .or_else(|| payload.get("hookEventName"))
+            .and_then(|n| n.as_str())
+            .map(str::to_ascii_lowercase);
+        if event.as_deref() != Some("notification") {
+            return None;
+        }
+        payload
+            .get("message")
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.to_ascii_lowercase().contains("needs your permission"))
+            .then_some(HookClassification {
+                decision: HookDecision::MarkInput,
+                kind: None,
+                notification_type: None,
+            })
     }
 }
 

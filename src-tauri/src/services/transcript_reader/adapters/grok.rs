@@ -15,7 +15,10 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::env;
-use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
+use crate::agent::session_lifecycle::LifecycleKind;
+use crate::services::transcript_reader::adapter::{
+    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
     MAX_TOOL_STRING, MAX_TURN_TEXT,
@@ -57,6 +60,75 @@ impl TranscriptAdapter for GrokAdapter {
                     .any(|text| !text.trim().is_empty()),
                 _ => false,
             })
+    }
+
+    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+        // Grok posts `hookEventName: "notification"` with a structured
+        // `notificationType` (issue #1282): permission_prompt marks
+        // input, task_complete marks ready, question-shaped types
+        // mark input with QuestionRequested. Other notification types
+        // and unrelated events fall through to the shared
+        // post-processing.
+        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
+        // The HookPayload struct in routes/attention.rs applies serde
+        // aliases (`hookEventName`, `notificationType`); we read raw
+        // `serde_json::Value` here, so handle both casings explicitly.
+        let event = payload
+            .get("hook_event_name")
+            .or_else(|| payload.get("hookEventName"))
+            .and_then(|n| n.as_str())
+            .map(str::to_ascii_lowercase);
+        if event.as_deref() != Some("notification") {
+            return None;
+        }
+        let nt = payload
+            .get("notification_type")
+            .or_else(|| payload.get("notificationType"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        match nt.as_deref() {
+            Some("permission_prompt") => Some(HookClassification {
+                decision: HookDecision::MarkInput,
+                kind: None,
+                notification_type: nt,
+            }),
+            Some("task_complete") => Some(HookClassification {
+                decision: HookDecision::Ready,
+                kind: None,
+                notification_type: nt,
+            }),
+            Some("question") | Some("question_prompt") | Some("ask_user") => {
+                Some(HookClassification {
+                    decision: HookDecision::MarkInput,
+                    kind: Some(LifecycleKind::QuestionRequested),
+                    notification_type: nt,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn verify_attention_token(
+        &self,
+        query_string: Option<&str>,
+        minted: Option<&str>,
+    ) -> bool {
+        // Issue #1366 round-2 + round-3: Grok's runner cannot bind
+        // loopback peer, so the route relies on a minted token
+        // attached to the hook command. Default adapters (Claude,
+        // Codex, …) accept every callback.
+        let Some(minted) = minted else {
+            return false;
+        };
+        let presented = query_string.and_then(|q| {
+            // Tiny query-string parser: extract `token=<value>` from the
+            // hook runner's URL. The hook URL is the route's own format
+            // so this stays here (the attention route uses the same
+            // `extract_query_value` helper for other harnesses).
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("token=").map(|v| v.to_string()))
+        });
+        presented.as_deref() == Some(minted)
     }
 }
 

@@ -58,7 +58,7 @@ pub(crate) use types::{
 // is the first real adapter; the other six are thin wrappers around the
 // existing free functions in this module. Each harness migrates end-to-end
 // in its own commit (steps 2-8 of #1661).
-mod adapter;
+pub(crate) mod adapter;
 pub(crate) mod adapters;
 
 /// Which harness's on-disk JSONL shape a transcript uses. Selected once at the

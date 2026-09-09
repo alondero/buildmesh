@@ -70,6 +70,53 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// #341). OpenCode returns `false` because its per-line JSON doesn't
     /// match the file-based shape.
     fn line_has_assistant_text(&self, line: &str) -> bool;
+
+    /// Per-harness hook classification. The attention route calls this
+    /// first; `Some(classified)` short-circuits to that decision, `None`
+    /// falls through to the shared post-processing gates (transcript
+    /// scan, AGY's `fullyIdle == false` shape gate). Most adapters return
+    /// `None` for every payload; OpenCode (session.idle / session.created),
+    /// Grok (notification_type), and Claude Code (the "needs your
+    /// permission" prose substring) carry their own logic here.
+    fn classify_hook(&self, _body: &[u8]) -> Option<HookClassification> {
+        None
+    }
+
+    /// Verify the attention-route token gate (issue #1366 round-2 +
+    /// round-3). The default accepts every callback; Grok's adapter
+    /// implements the strict minted-token check.
+    fn verify_attention_token(
+        &self,
+        _query_string: Option<&str>,
+        _minted: Option<&str>,
+    ) -> bool {
+        true
+    }
+}
+
+/// What an adapter's [`TranscriptAdapter::classify_hook`] returns. `Some(_)`
+/// short-circuits the attention route's shared post-processing; `None`
+/// falls through to the transcript-scan fallback and the AGY `fullyIdle`
+/// shape gate.
+#[derive(Debug, Clone)]
+pub(crate) struct HookClassification {
+    pub decision: HookDecision,
+    pub kind: Option<crate::agent::session_lifecycle::LifecycleKind>,
+    pub notification_type: Option<String>,
+}
+
+/// Decision an adapter's hook classifier returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookDecision {
+    /// User input needed — land the node in `AwaitingInput`.
+    MarkInput,
+    /// Turn finished cleanly — land in `Ready` (never the autopilot-only
+    /// `Completed`).
+    Ready,
+    /// Capture-only event (e.g. OpenCode's `session.created` carrying
+    /// the freshly minted `ses_…` id) — publish the Node Turn
+    /// without attention marking.
+    Ignore,
 }
 
 static CLAUDE_CODE_ADAPTER: ClaudeCodeAdapter = ClaudeCodeAdapter;
@@ -102,6 +149,22 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 7] = [
 /// default adapter).
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
+}
+
+/// Iterate every registered adapter's [`TranscriptAdapter::classify_hook`]
+/// in registration order, returning the first non-`None` decision. The
+/// attention route calls this once per hook POST; most adapters return
+/// `None` (default impl) for every payload, so the cost is one
+/// function call per harness id. Used because the route cannot rely on
+/// the `provider` field alone (the legacy hooks send empty strings) and
+/// per-harness classifiers inspect the body itself (OpenCode's
+/// `session.idle`, Grok's `notificationType`, Claude Code's
+/// "needs your permission" prose substring).
+pub(crate) fn classify_hook(body: &[u8]) -> Option<HookClassification> {
+    ADAPTERS
+        .iter()
+        .copied()
+        .find_map(|adapter| adapter.classify_hook(body))
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an

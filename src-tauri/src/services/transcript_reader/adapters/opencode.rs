@@ -24,9 +24,12 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 
+use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env;
 use crate::models::EnvType;
-use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
+use crate::services::transcript_reader::adapter::{
+    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+};
 use crate::services::transcript_reader::types::{
     build_tail, cap_tool_calls, effective_tail, empty_or_shape_changed, push_bounded, truncate,
     Parsed, ToolCall, TranscriptTail, Turn, UnavailableReason, MAX_TURN_TEXT,
@@ -92,6 +95,34 @@ impl TranscriptAdapter for OpenCodeAdapter {
         // `read_opencode_digest` instead, so this is unreachable in
         // practice.
         false
+    }
+
+    fn classify_hook(&self, body: &[u8]) -> Option<HookClassification> {
+        // OpenCode's plugin fires `session.idle` when the agent finishes
+        // a turn and waits for input (issue #1295) — mark for attention
+        // with `InputRequired`. `session.created` fires once at TUI boot
+        // carrying the freshly minted `ses_…` id; it's lifecycle-neutral
+        // (the id-capture path persists the session id, the attention
+        // route must not flip a fresh spawn into `AwaitingInput`).
+        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let event = payload
+            .get("hook_event_name")
+            .or_else(|| payload.get("hookEventName"))
+            .and_then(|n| n.as_str())
+            .map(str::to_ascii_lowercase);
+        match event.as_deref() {
+            Some("session.idle") => Some(HookClassification {
+                decision: HookDecision::MarkInput,
+                kind: Some(LifecycleKind::InputRequired),
+                notification_type: None,
+            }),
+            Some("session.created") => Some(HookClassification {
+                decision: HookDecision::Ignore,
+                kind: None,
+                notification_type: None,
+            }),
+            _ => None,
+        }
     }
 }
 
