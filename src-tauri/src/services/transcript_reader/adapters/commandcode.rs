@@ -5,13 +5,14 @@
 //! `{type: "message", message: {role, content}}` event per line.
 //!
 //! Issue #1661 step 3: Command Code is the **second harness migrated
-//! end-to-end**. The reader's `commandcode_sessions_dir` path composition +
-//! `commandcode_transcript_path_in` + `find_commandcode_transcript` wrapper
-//! + `commandcode_message_activity` (used by `commandcode_watcher.rs`)
-//! + `parse_commandcode_turns` all live in this file. The capture poller
-//! in `services::commandcode_session` already delegates to
-//! `commandcode_sessions_dir`, so the seam-inversion is one import rewrite
-//! in step 10.
+//! end-to-end**. The reader's `commandcode_sessions_dir` path
+//! composition + `commandcode_transcript_path_in` +
+//! `find_commandcode_transcript` wrapper + `commandcode_message_activity`
+//! (used by `commandcode_watcher.rs`) + `parse_commandcode_turns` all
+//! live in this file. The capture poller in
+//! `services::commandcode_session` already delegates to
+//! `commandcode_sessions_dir`, so the seam-inversion is one import
+//! rewrite in step 10.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};

@@ -128,11 +128,6 @@ impl TranscriptFormat {
     }
 }
 // --- Shared Claude-Code JSONL primitives (also used by session_discovery) ---
-/// Encode a filesystem path the same way Claude Code does for its
-/// `~/.claude/projects/<encoded>` directory names: replace every
-/// non-alphanumeric character with `-`. On Windows this collapses the drive
-/// colon and `\` separators (and `.` in `.claude`); on Unix it covers `/`.
-/// So `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
 // `encode_path` / `is_synthetic_message` / `concat_text_blocks` /
 // `first_text_block` live in `services::transcript_paths` (issue #1661
 // step 5); `commandcode_project_slug` lives in
@@ -491,19 +486,11 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
 }
 // `effective_tail`, `Parsed`, `build_tail`, `empty_or_shape_changed` moved to
 // `super::types` (format-agnostic, shared by every TranscriptAdapter).
-/// Parse JSONL lines into logical turns, retaining only the last `keep` of them
-/// in a rolling buffer (issue #335: bounds held memory regardless of transcript
-/// size). Skips every non-message line type (`mode`, `queue-operation`,
-/// `file-history-snapshot`, `system`, summaries, …), synthetic injections, and
-/// pure tool-result echoes. Consecutive assistant lines sharing a `message.id`
-/// `parse_turns` + `extract_tool_calls` moved to
-/// `adapters::claude_code` (issue #1661 step 8). The Claude Code
-/// adapter is the sole owner of its message-id-coalescing parser; the
-/// re-export above keeps the reader's test module calling the same
-/// function names.
+// `parse_turns` + `extract_tool_calls` moved to
+// `adapters::claude_code` (issue #1661 step 8). The Claude Code
+// adapter is the sole owner of its message-id-coalescing parser; the
+// test module imports each parser directly.
 
-// `push_bounded` moved to `super::types` (format-agnostic rolling-buffer
-// helper).
 // `push_bounded`, `cap_tool_calls`, `merge_into` moved to `super::types`
 // (format-agnostic rolling-buffer helpers).
 
