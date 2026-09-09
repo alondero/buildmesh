@@ -24,6 +24,14 @@ pub(super) struct LaunchParams {
     pub explicit_model: Option<String>,
     pub explicit_effort: Option<String>,
     pub explicit_extra_args: Option<String>,
+    /// Optional per-step wall-clock budget in seconds (#1219). The
+    /// circuit-level watchdog reads the graph node directly in
+    /// `services::circuit_worker::observe_waits`; this carrier lets the
+    /// launch phase log the budget at info-level when set so a circuit
+    /// author with a non-default budget has a recognisable trace entry
+    /// (and a future process-level watchdog can consume it without
+    /// re-deriving from the AST).
+    pub explicit_timeout_seconds: Option<u32>,
     /// Composite spawn-option id (`node.provider`), used as the harness
     /// map key for application defaults and per-mesh overrides.
     pub harness_id: String,
@@ -73,12 +81,30 @@ pub(super) async fn launch_process(
         explicit_model,
         explicit_effort,
         explicit_extra_args,
+        explicit_timeout_seconds,
         harness_id,
         node_mesh_id,
         registry_mesh_id,
         session_id_mode,
         sandbox,
     } = launch;
+
+    // #1219: a non-None `explicit_timeout_seconds` signals the circuit
+    // author pinned a per-step wall-clock budget. Circuit-level
+    // enforcement reads the graph node in
+    // `services::circuit_worker::observe_waits` (which emits the
+    // `WaitObserved.timeout_ms` the stepper enforces); here we log the
+    // value at info-level so the carrier is visible in the trace.
+    // `Some(0)` is filtered at the carrier seams (collapse rule on
+    // `ExplicitSpawnOverrides` / `resolve_circuit_spawn_inputs`) so we
+    // never see it here.
+    if let Some(timeout) = explicit_timeout_seconds {
+        tracing::info!(
+            "launch_process: session {} explicit timeout = {}s (enforced at circuit level via WaitObserved)",
+            session_id,
+            timeout,
+        );
+    }
     let adapter = provider.adapter();
 
     // Resolve configuration values through the per-field cascade (issue

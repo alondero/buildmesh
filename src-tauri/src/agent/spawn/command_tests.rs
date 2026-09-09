@@ -554,6 +554,7 @@ fn spawn_request_explicit_wins_at_resolver() {
             // was collected by the Inspector but dropped at the
             // `spawn_with_intent` seam.
             extra_args: Some("--dangerously-skip-permissions --verbose".into()),
+            timeout_seconds: None,
         },
     );
     let app_default = HarnessConfigValue {
@@ -601,6 +602,7 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
             model: Some("   ".into()),
             effort: Some("\t\n".into()),
             extra_args: None,
+            timeout_seconds: None,
         },
     );
     let mesh_override = HarnessConfigValue {
@@ -642,6 +644,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
             model: None,
             effort: None,
             extra_args: Some("--dangerously-skip-permissions".into()),
+            timeout_seconds: None,
         });
     let resolved_anthropic = resolve_spawn_config(
         Provider::Anthropic,
@@ -663,6 +666,7 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
             model: None,
             effort: None,
             extra_args: Some("--dangerously-skip-permissions --verbose".into()),
+            timeout_seconds: None,
         });
     let resolved_terminal = resolve_spawn_config(
         Provider::Terminal,
