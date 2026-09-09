@@ -46,102 +46,6 @@ pub(crate) trait UsageAdapter: Send + Sync {
     fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage;
 }
 
-/// Test-only seam hook: when set, [`fetch`] overrides adapter dispatch and
-/// returns the supplied envelope directly. Used to keep the
-/// `dispatch(id).fetch(accounts)` contract testable end-to-end without
-/// running host credential discovery or live HTTP. `None` in production;
-/// set inside `#[cfg(test)]` blocks only.
-///
-/// Implemented as a process-wide `OnceLock` so tests can swap it once per
-/// scope and the catalog dispatch path can read it without changing the
-/// adapter trait. Mirrors the `SHARED_CLIENT` pattern in this module.
-#[cfg(test)]
-pub(crate) static FETCH_OVERRIDE: std::sync::OnceLock<
-    std::sync::Mutex<(String, Option<ProviderUsage>)>,
-> = std::sync::OnceLock::new();
-
-/// Scope helper for the test-only fetch override. The override is stored
-/// in a `OnceLock<Mutex<(String, Option<ProviderUsage>)>>`. Returns a
-/// [`FetchOverrideGuard`] RAII type whose `Drop` restores the previous
-/// value even when the closure panics, so a failing test cannot leak a
-/// stale override into the next test (which previously caused the
-/// dispatch.fetch tests to fall through to the real AnthropicAdapter
-/// fetch path on a credential-bearing host, false-failing the
-/// `windows.len() == 1` assertion).
-#[cfg(test)]
-pub(crate) fn with_fetch_override<F, R>(id: &str, envelope: ProviderUsage, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let guard = FetchOverrideGuard::install(id, envelope);
-    let result = f();
-    drop(guard);
-    result
-}
-
-/// RAII guard that restores the previous `FETCH_OVERRIDE` value on Drop
-/// (including during unwinding). Constructed only via
-/// [`with_fetch_override`].
-#[cfg(test)]
-struct FetchOverrideGuard {
-    previous: (String, Option<ProviderUsage>),
-}
-
-#[cfg(test)]
-impl FetchOverrideGuard {
-    fn install(id: &str, envelope: ProviderUsage) -> Self {
-        let mut cell = FETCH_OVERRIDE
-            .get_or_init(|| std::sync::Mutex::new((String::new(), None)))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let previous = std::mem::replace(&mut *cell, (id.to_string(), Some(envelope)));
-        Self { previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for FetchOverrideGuard {
-    fn drop(&mut self) {
-        if let Some(cell) = FETCH_OVERRIDE.get() {
-            if let Ok(mut guard) = cell.lock() {
-                *guard = std::mem::take(&mut self.previous);
-            }
-        }
-    }
-}
-
-/// Catalog entry point: routes an adapter's [`UsageAdapter::fetch`] call
-/// through the (cfg(test)) override hook when one is set for the adapter's
-/// id, otherwise calls the adapter's production [`fetch`](UsageAdapter::fetch).
-/// Production callers go through this so the dispatch contract tests
-/// (`catalog::cached_or_fetch` → [`dispatch_fetch`] → override) exercise the
-/// real dispatch path with a controllable transport instead of bypassing the
-/// catalog.
-pub(crate) fn dispatch_fetch(
-    adapter: &dyn UsageAdapter,
-    accounts: &[ProviderAccount],
-) -> ProviderUsage {
-    #[cfg(test)]
-    if let Some(envelope) = peek_override(adapter.id()) {
-        return envelope;
-    }
-    adapter.fetch(accounts)
-}
-
-/// Snapshot the override for `adapter_id` without holding the lock during
-/// the caller's dispatch path. Returning `Option<ProviderUsage>` is the
-/// only contract; `dispatch_fetch` reads it and propagates.
-#[cfg(test)]
-fn peek_override(adapter_id: &str) -> Option<ProviderUsage> {
-    let guard = FETCH_OVERRIDE.get()?.lock().unwrap_or_else(|p| p.into_inner());
-    let (id, env) = &*guard;
-    if id == adapter_id {
-        env.clone()
-    } else {
-        None
-    }
-}
-
 /// Resolve the non-empty API key for a keyed provider from the effective
 /// account snapshot. `None` means "no credential configured" — keyed adapters
 /// pass `""` through to their legacy fetcher, which returns the `logged_out`
@@ -192,22 +96,23 @@ pub(crate) fn shared_client() -> Result<Client, String> {
         .clone()
 }
 
-/// Test-only thread-safe client override: when set, [`shared_client`]
-/// returns it instead of the production 15s client. Scoped via
-/// [`with_client_override`] (panic-safe RAII). The catalog/timeout tests
-/// use this to inject a 1s client so the timeout assertion is a narrow
-/// band tied to the configured value.
+// Test-only client override: when set on the current thread,
+// `shared_client` returns it instead of the production 15s client.
+// Thread-local (not process-wide) so parallel `cargo test` workers stay
+// isolated: one worker installing a 1s timeout client cannot poison
+// another worker's production fetch path. Scoped via
+// `with_client_override` (panic-safe RAII). The timeout test uses this
+// to inject a 1s client so the timeout assertion is a narrow band tied
+// to the configured value.
 #[cfg(test)]
-static CLIENT_OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<Client>>> =
-    std::sync::OnceLock::new();
+thread_local! {
+    static CLIENT_OVERRIDE: std::cell::RefCell<Option<Client>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn current_client_override() -> Option<Client> {
-    CLIENT_OVERRIDE
-        .get()?
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
+    CLIENT_OVERRIDE.with(|cell| cell.borrow().clone())
 }
 
 /// RAII guard that restores the previous `CLIENT_OVERRIDE` value on Drop
@@ -221,11 +126,9 @@ struct ClientOverrideGuard {
 #[cfg(test)]
 impl Drop for ClientOverrideGuard {
     fn drop(&mut self) {
-        if let Some(cell) = CLIENT_OVERRIDE.get() {
-            if let Ok(mut guard) = cell.lock() {
-                *guard = self.previous.take();
-            }
-        }
+        CLIENT_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = self.previous.take();
+        });
     }
 }
 
@@ -247,16 +150,10 @@ where
 #[cfg(test)]
 impl ClientOverrideGuard {
     fn install(client: Client) -> Self {
-        let mut cell = CLIENT_OVERRIDE
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let previous = std::mem::replace(&mut *cell, Some(client));
+        let previous = CLIENT_OVERRIDE.with(|cell| cell.borrow_mut().replace(client));
         Self { previous }
     }
 }
-
-
 
 /// Drives the shared request → status-check → parse flow. Callers reach this
 /// only once a credential is confirmed present, so any failure here is reported

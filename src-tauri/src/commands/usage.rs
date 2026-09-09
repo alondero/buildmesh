@@ -77,20 +77,21 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
 /// provider I shouldn't see the usage meter for that provider at all."
 ///
 /// Why condition on the configured-key set rather than just
-/// `usage.logged_in`? Because keyed adapters (Kimi, OpenRouter — see
-/// `services::usage::adapters::{kimi,openrouter}`) both return
+/// `usage.logged_in`? Because keyed fetchers (Kimi, OpenRouter — see
+/// `services::usage::{kimi_usage,openrouter_usage}`) still return
 /// `logged_in = false` on HTTP 401/403 — i.e. when the user's stored key
-/// has been revoked, expired, or mistyped. The 401-vs-no-key distinction
-/// lives in the seam: adapters report `logged_out` (no credential) vs
-/// `unavailable` (credential present but fetch failed) precisely, and the
-/// catalog exposes `configured_keyed_provider_ids` from the same account
-/// snapshot. Conflating "no credential" with "credential is bad" would
-/// silently drop the row for those users with no in-tab signal to re-enter
-/// their key. By gating on the *account-level* key presence (the
-/// `configured_keys` parameter), the row stays visible when the key exists
-/// but the API rejected it — `<UsagePanel>` renders the existing
-/// "Invalid API key" copy (UsageRender.tsx:115) and the user has a path
-/// back to Settings. `assemble_meters` itself has no per-provider branches.
+/// has been revoked, expired, or mistyped. That 401-vs-no-key distinction
+/// has NOT yet moved into the seam (issue #1657 step 5 is an explicit
+/// follow-up): until adapters report `logged_out` (no credential) vs
+/// `unavailable` (credential present but fetch failed) precisely, the
+/// account-level key-presence gate here stays necessary. Conflating "no
+/// credential" with "credential is bad" would silently drop the row for
+/// those users with no in-tab signal to re-enter their key. By gating on
+/// the *account-level* key presence (the `configured_keys` parameter),
+/// the row stays visible when the key exists but the API rejected it —
+/// `<UsagePanel>` renders the existing "Invalid API key" copy
+/// (UsageRender.tsx:115) and the user has a path back to Settings.
+/// `assemble_meters` itself has no per-provider branches.
 ///
 /// Two cases intentionally bypass this gate:
 ///

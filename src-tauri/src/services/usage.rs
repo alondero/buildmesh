@@ -70,7 +70,9 @@ use crate::services::opencode_oauth::device_flow;
 
 fn anthropic_cred_path() -> PathBuf {
     home_dir().join(".claude").join(".credentials.json")
-}/// Build the ordered list of candidate Codex auth.json paths (issue #1108,
+}
+
+/// Build the ordered list of candidate Codex auth.json paths (issue #1108,
 /// spec §2.2). Priority:
 ///
 /// 1. `$CODEX_HOME/auth.json` if set and non-empty.
