@@ -261,6 +261,8 @@ pub enum CircuitNodeKind {
     },
     /// Classify task completion, including a transcript turn already finished
     /// before this run was attached. `$source` binds to the triggering agent.
+    /// The built-in local review preset accepts clean source turns here;
+    /// its independent reviewer assesses completeness and correctness.
     AwaitAgentTurn { target_node_id: Option<String> },
     /// Distinguish reviewer approval from a completed review with findings.
     ReviewVerdict { target_node_id: Option<String> },

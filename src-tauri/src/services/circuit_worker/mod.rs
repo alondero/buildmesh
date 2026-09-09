@@ -1490,7 +1490,6 @@ fn classify_step_turn(
             Err(error) => tracing::warn!("circuits: session recovery for agent {agent_node_id}: {error}"),
         }
     }
-    let initial_source = matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::AwaitAgentTurn { .. }));
     let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
     if stamp != observed_stamp { return None; }
     let transcript = crate::coordinator::enrichment::assistant_report(&agent_node);
@@ -1510,26 +1509,22 @@ fn classify_step_turn(
         evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
         return None;
     }
-    if !should_classify_report(view, node_id, &output, since_evaluation_ms) {
+    if !should_classify_report(view, node_id, agent_node.status, &output, since_evaluation_ms) {
         evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
         return None;
     }
-    // Evaluator backend env: the mesh's Autopilot provider side-channel
-    // (never the node's own model — the #824 lesson).
-    let backend_provider = db::get_mesh_by_id(active.run.mesh_id)
-        .ok()
-        .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
-        .unwrap_or_else(|| "claude".to_string());
-    let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
     evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
     evaluator::note_evaluation(agent_node_id);
-    let classification = if initial_source {
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::circuit_classify_prompt(&output))
-    } else if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::review_prompt(&output))
-    } else {
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, &evaluator::circuit_classify_prompt(&output))
-    };
+    let classification = classify_gate_report(view, node_id, agent_node.status, &output, |prompt| {
+        // Clean review turns need neither a classifier nor its credentials.
+        // Other gates use the mesh Autopilot side-channel, not the node model.
+        let backend_provider = db::get_mesh_by_id(active.run.mesh_id)
+            .ok()
+            .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
+            .unwrap_or_else(|| "claude".to_string());
+        let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
+        evaluator::classify_with_prompt(agent_node_id, &backend_env, prompt)
+    });
     if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten() { return None; }
     if input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
     let mut classification = classification.filter(|c|
@@ -1550,6 +1545,54 @@ fn classify_step_turn(
         classification
     );
     Some(ClassifiedTurn { agent_node_id, classification, output, continuation })
+}
+
+fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
+    if view.context.get("source.review_preset") != Some("1") {
+        return false;
+    }
+    match view.graph.node(node_id).map(|n| &n.kind) {
+        // Older saved presets used a task classifier after feedback. Apply
+        // the turn handoff policy without rewriting an active graph. Custom
+        // task-completion gates and owned-agent gates retain their contract.
+        Some(CircuitNodeKind::AwaitAgentTurn { target_node_id }
+            | CircuitNodeKind::LlmTurnClassifier { target_node_id }) =>
+                target_node_id.as_deref() == Some("$source"),
+        _ => false,
+    }
+}
+
+fn review_turn_is_complete(view: &RunView, node_id: &str, status: SessionStatus) -> bool {
+    awaits_review_turn(view, node_id)
+        && matches!(status, SessionStatus::Ready | SessionStatus::Completed)
+}
+
+fn classify_gate_report(
+    view: &RunView,
+    node_id: &str,
+    status: SessionStatus,
+    output: &str,
+    classify: impl FnOnce(&str) -> Option<crate::autopilot::evaluator::Classification>,
+) -> Option<crate::autopilot::evaluator::Classification> {
+    use crate::autopilot::evaluator;
+    if output.trim().is_empty()
+        || !matches!(status, SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput)
+    {
+        return None;
+    }
+    // Ready is a clean lifecycle turn completion, not an LLM judgement of
+    // task quality. Review must work even when the classifier is unavailable.
+    if review_turn_is_complete(view, node_id, status) {
+        return Some(evaluator::Classification::Completed);
+    }
+    let prompt = if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
+        evaluator::review_prompt(output)
+    } else if awaits_review_turn(view, node_id) {
+        evaluator::review_turn_prompt(output)
+    } else {
+        evaluator::circuit_classify_prompt(output)
+    };
+    classify(&prompt)
 }
 
 fn select_turn_report(
@@ -1622,10 +1665,16 @@ pub(super) fn prepare_turn_boundaries(
     Ok(changed)
 }
 
-fn should_classify_report(view: &RunView, node_id: &str, output: &str, since_evaluation_ms: Option<u128>) -> bool {
+fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, output: &str, since_evaluation_ms: Option<u128>) -> bool {
     let Some(step) = view.step(node_id) else { return false; };
     if view.state != RunState::Running || step.status != StepStatus::Running {
         return false;
+    }
+    // The same report may first be observed on a watchdog/permission yield,
+    // then on the real completion hook. That new lifecycle fact must win
+    // over a previously parked WORKING verdict, including after restart.
+    if review_turn_is_complete(view, node_id, status) {
+        return true;
     }
     let prefix = format!("node.{node_id}");
     let same_attempt = view.context.get(&format!("{prefix}.evaluated_attempt"))
@@ -2501,6 +2550,156 @@ mod tests {
     }
 
     #[test]
+    fn review_handoff_clean_turn_does_not_require_task_completion_or_classifier() {
+        use crate::autopilot::evaluator::Classification;
+        use crate::autopilot::circuit::stepper::{Capacity, Effect};
+        let mut view = RunView {
+            run_id: 85,
+            graph: CircuitGraph::agent_review(None, None, 3),
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        view.context.set("source.agent_id", "3759");
+        view.context.set("source.review_preset", "1");
+        advance(&mut view, &CircuitEvent::Triggered);
+        let capacity = Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
+        advance(&mut view, &CircuitEvent::Tick(capacity));
+        let report = "Final Summary: 11 commits landed. Remaining work: per-adapter snapshot tests.";
+        let classification = classify_gate_report(&view, "await_source", SessionStatus::Ready, report, |_| None);
+        assert_eq!(classification, Some(Classification::Completed));
+        advance(&mut view, &CircuitEvent::TurnClassified {
+            node_id: "await_source".into(), classification, output: Some(report.into()),
+        });
+        let transition = advance(&mut view, &CircuitEvent::Tick(capacity));
+        assert!(transition.effects.iter().any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+        assert_eq!(view.context.get("source.output"), Some(report));
+        // Persisted presets used LlmTurnClassifier for fixes. They must gain
+        // the same behavior without rewriting an active graph's ledger.
+        view.graph.nodes.iter_mut().find(|n| n.id == "await_fixes").unwrap().kind =
+            CircuitNodeKind::LlmTurnClassifier { target_node_id: Some("$source".into()) };
+        assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::Ready, report, |_| None), Some(Classification::Completed));
+    }
+
+    #[test]
+    fn review_handoff_keeps_permission_background_and_verdict_checks() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        view.context.set("source.review_preset", "1");
+        for status in [SessionStatus::Running, SessionStatus::Spawning, SessionStatus::Error] {
+            assert_eq!(classify_gate_report(&view, "await_source", status, "Earlier report", |_| panic!("active or lost agent cannot be classified")), None);
+        }
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::Ready, "", |_| panic!("empty report")), None);
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::AwaitingInput, "Allow tests?", |prompt| {
+            assert!(prompt.contains("ready for an independent code review"));
+            Some(Classification::Blocked)
+        }), Some(Classification::Blocked));
+        assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::AwaitingInput, "Tests running", |_| Some(Classification::Working)), Some(Classification::Working));
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::AwaitingInput, "Report", |_| None), None);
+        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::Ready, "Changes requested", |prompt| {
+            assert!(prompt.contains("explicitly approves"));
+            Some(Classification::Working)
+        }), Some(Classification::Working));
+        view.context.set("source.review_preset", "0");
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::Ready, "Remaining work", |prompt| {
+            assert!(prompt.contains("the assigned work is finished"));
+            Some(Classification::Working)
+        }), Some(Classification::Working));
+        // A custom task-completion gate retains its original contract.
+        view.graph = CircuitGraph::issue_driven_autopilot_review("run");
+        assert_eq!(classify_gate_report(&view, "finish_classifier", SessionStatus::Ready, "Remaining work", |prompt| {
+            assert!(prompt.contains("the assigned work is finished"));
+            Some(Classification::Working)
+        }), Some(Classification::Working));
+    }
+
+    #[test]
+    fn review_handoff_clean_completion_reconsiders_a_parked_report_after_restart() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        view.context.set("source.review_preset", "1");
+        view.steps[0].node_id = "await_source".into();
+        let report = "Final report with remaining tests";
+        advance(&mut view, &CircuitEvent::TurnClassified {
+            node_id: "await_source".into(), classification: Some(Classification::Working), output: Some(report.into()),
+        });
+        view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
+        assert!(!should_classify_report(&view, "await_source", SessionStatus::AwaitingInput, report, None));
+        assert!(should_classify_report(&view, "await_source", SessionStatus::Ready, report, None));
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::Ready, report, |_| panic!("clean turn does not need a classifier")), Some(Classification::Completed));
+        view.state = RunState::Cancelled;
+        assert!(!should_classify_report(&view, "await_source", SessionStatus::Ready, report, None));
+        view.state = RunState::Running;
+        view.steps[0].status = StepStatus::Completed;
+        assert!(!should_classify_report(&view, "await_source", SessionStatus::Ready, report, None));
+    }
+
+    #[test]
+    fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_presets() {
+        use crate::autopilot::circuit::stepper::{Capacity, Effect};
+        use crate::autopilot::evaluator::Classification;
+        for legacy in [false, true] {
+            let mut view = RunView {
+                run_id: 85,
+                graph: CircuitGraph::agent_review(None, None, 3),
+                state: RunState::Pending,
+                context: CircuitContext::new(),
+                steps: vec![],
+            };
+            view.context.set("source.agent_id", "3759");
+            view.context.set("source.review_preset", "1");
+            if legacy {
+                view.graph.nodes.iter_mut().find(|n| n.id == "await_fixes").unwrap().kind =
+                    CircuitNodeKind::LlmTurnClassifier { target_node_id: Some("$source".into()) };
+            }
+            let capacity = Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
+            advance(&mut view, &CircuitEvent::Triggered);
+            advance(&mut view, &CircuitEvent::Tick(capacity));
+            let classification = classify_gate_report(&view, "await_source", SessionStatus::Ready, "Implementation report", |_| None);
+            advance(&mut view, &CircuitEvent::TurnClassified {
+                node_id: "await_source".into(), classification, output: Some("Implementation report".into()),
+            });
+            let mut scheduled = advance(&mut view, &CircuitEvent::Tick(capacity));
+            for round in 1..=3 {
+                assert_eq!(scheduled.effects.iter().filter(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")).count(), 1);
+                assert_eq!(view.step("reviewer").unwrap().attempt, round);
+                let reviewer_id = 4000 + i64::from(round);
+                view.attach_agent_node("reviewer", reviewer_id);
+                let report = format!("Round {round}: {}", if round == 3 { "Approved" } else { "Changes requested: add regression tests" });
+                advance(&mut view, &CircuitEvent::AgentFinished { agent_node_id: reviewer_id, success: true, output: Some(report.clone()) });
+                advance(&mut view, &CircuitEvent::Tick(capacity));
+                let classification = classify_gate_report(&view, "verdict", SessionStatus::Ready, &report, |_| {
+                    Some(if round == 3 { Classification::Completed } else { Classification::Working })
+                });
+                let mut verdict = advance(&mut view, &CircuitEvent::TurnClassified { node_id: "verdict".into(), classification, output: Some(report.clone()) });
+                if round == 3 {
+                    verdict.effects.extend(advance(&mut view, &CircuitEvent::Tick(capacity)).effects);
+                    assert_eq!(view.state, RunState::Completed);
+                    assert!(verdict.effects.iter().all(|e| !matches!(e, Effect::InjectPty { .. } | Effect::SpawnAgentNode { .. })));
+                    break;
+                }
+                assert_eq!(view.state, RunState::Running);
+                let feedback = advance(&mut view, &CircuitEvent::AgentReady { node_id: "feedback".into() });
+                assert_eq!(view.resolve_target_agent("feedback"), Some(3759));
+                assert!(feedback.effects.iter().any(|e| matches!(e, Effect::InjectPty { prompt, .. } if prompt.contains(&report))));
+                assert!(feedback.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { .. })));
+                // Model acknowledged reviewer cleanup and restart of the
+                // durable context between delivery and the next report.
+                view.step_mut("reviewer").unwrap().agent_node_id = None;
+                view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
+                advance(&mut view, &CircuitEvent::Tick(capacity));
+                let fixes = "Fixes made; some optional tests remain.";
+                let classification = classify_gate_report(&view, "await_fixes", SessionStatus::Ready, fixes, |_| None);
+                scheduled = advance(&mut view, &CircuitEvent::TurnClassified { node_id: "await_fixes".into(), classification, output: Some(fixes.into()) });
+                scheduled.effects.extend(advance(&mut view, &CircuitEvent::Tick(capacity)).effects);
+                assert!(view.steps.iter().all(|s| s.agent_node_id != Some(3759)));
+            }
+        }
+    }
+
+    #[test]
     fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
         let mut view = report_gate_view();
         view.steps.push(StepView { node_id: "implementer".into(), agent_node_id: Some(900),
@@ -2523,18 +2722,18 @@ mod tests {
         let report = "Still working; waiting for the requested credentials.";
         // The implementation gate consumed the same agent's output. That
         // global clock must not suppress this finish gate's first evaluation.
-        assert!(should_classify_report(&view, "finish_classifier", report, Some(0)));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, Some(0)));
         advance(&mut view, &CircuitEvent::TurnClassified {
             node_id: "finish_classifier".into(), classification: Some(Classification::Working),
             output: Some(report.into()),
         });
         view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
-        assert!(!should_classify_report(&view, "finish_classifier", report, None), "restart must not reclassify a consumed report");
-        assert!(should_classify_report(&view, "finish_classifier", "Wrap-up complete", None), "recover a new transcript without PTY clocks");
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None), "restart must not reclassify a consumed report");
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, "Wrap-up complete", None), "recover a new transcript without PTY clocks");
         view.steps[0].attempt += 1;
-        assert!(should_classify_report(&view, "finish_classifier", report, Some(0)), "a new round may produce an identical report");
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, Some(0)), "a new round may produce an identical report");
         view.state = RunState::Paused;
-        assert!(!should_classify_report(&view, "finish_classifier", report, None));
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None));
     }
 
     #[test]
@@ -2549,9 +2748,9 @@ mod tests {
             .as_ref()
             .and_then(|error| error.as_ref())
             .is_some_and(|error| error.contains("retrying")));
-        assert!(!should_classify_report(&view, "finish_classifier", report, Some(59_999)));
-        assert!(should_classify_report(&view, "finish_classifier", report, Some(60_000)));
-        assert!(should_classify_report(&view, "finish_classifier", report, None), "restart permits recovery");
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, Some(59_999)));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, Some(60_000)));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None), "restart permits recovery");
         advance(&mut view, &CircuitEvent::TurnClassified {
             node_id: "finish_classifier".into(), classification: Some(crate::autopilot::evaluator::Classification::Completed),
             output: Some(report.into()),
@@ -2559,7 +2758,7 @@ mod tests {
         assert_eq!(view.step("finish_classifier").unwrap().status, StepStatus::Completed);
         assert!(view.step("finish_classifier").unwrap().error.is_none());
         assert_eq!(view.step("open_pr").unwrap().status, StepStatus::Running);
-        assert!(!should_classify_report(&view, "finish_classifier", report, None));
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None));
     }
 
     #[test]
@@ -2596,7 +2795,7 @@ mod tests {
         // A concise new response made while capture was offline is recoverable.
         let report = select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: "Done. PR updated.".into(), revision: "turn-2".into() }), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)).unwrap();
         assert_eq!(report, "Done. PR updated.");
-        assert!(should_classify_report(&report_gate_view(), "finish_classifier", &report, None));
+        assert!(should_classify_report(&report_gate_view(), "finish_classifier", SessionStatus::AwaitingInput, &report, None));
         assert!(crate::autopilot::evaluator::classify_prompt(&report).contains(&report));
         assert_eq!(select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: old.into(), revision: "turn-2".into() }), Some("turn-1"), false, String::new), Some(old.into()), "identical text in a new assistant response is fresh");
         evaluator::unregister(id);

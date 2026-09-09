@@ -2178,8 +2178,13 @@ fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed 
 /// Matches the task id in either launch phrasing:
 /// `Command running in background with ID: xyz.` and
 /// `…was moved to the background (ID: xyz).`
-static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =
-    once_cell::sync::Lazy::new(|| regex::Regex::new(r"\bID: ([A-Za-z0-9_-]+)").unwrap());
+static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    // Match the harness's result envelope, not examples printed by Read,
+    // grep, or a test command that happens to include our launch marker.
+    regex::Regex::new(
+        r"\ACommand (?:running in background with ID: |did not complete within its [^\r\n]+ timeout and was moved to the background \(ID: )([A-Za-z0-9_-]+)\)?\. Output is being written to: "
+    ).unwrap()
+});
 /// A task-notification's id paired with its status, non-greedy so several
 /// notifications on one line pair correctly. Real transcripts carry
 /// `<status>running</status>` notifications too (e.g. a foreground command
@@ -2187,9 +2192,8 @@ static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =
 static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
     regex::Regex::new(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>").unwrap()
 });
-/// The phrase that makes a `tool_result` a background-task launch. Both known
-/// launch phrasings carry it; matching the promise (rather than the two exact
-/// sentences) keeps the scan stable across minor wording changes.
+/// Both known launch envelopes carry this promise. It must accompany the
+/// anchored launch header; either fragment alone can occur in printed code.
 const LAUNCH_MARKER: &str = "You will be notified when it completes";
 
 /// Count background tasks launched but not yet notified in a Claude Code
@@ -4354,6 +4358,19 @@ mod tests {
                 "session-id filter leaked a row from the other session id"
             );
         }
+    }
+
+    #[test]
+    fn review_handoff_source_code_in_tool_results_does_not_launch_background_tasks() {
+        // Run 85 read and grepped this module. The old scan registered the
+        // example id in a source comment as a live task.
+        let read = serde_json::json!({"type":"user", "message":{"content":[{
+            "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n669\tstatic LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+        }]}}).to_string();
+        let grep = serde_json::json!({"type":"user", "message":{"content":[{
+            "type":"tool_result", "content":"6 matches in 1 files:\nmod.rs:669:static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =\nmod.rs:681:const LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
+        }]}}).to_string();
+        assert_eq!(pending_background_task_ids(vec![read, grep, launch_line("real_task")].into_iter()), vec!["real_task"]);
     }
 
     #[test]
