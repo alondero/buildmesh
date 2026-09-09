@@ -1,5 +1,9 @@
-//! Anthropic (Claude Code) native adapter — self-authenticates via
-//! `~/.claude/.credentials.json`, detection-gated on the `anthropic` harness.
+//! Anthropic (Claude Code) native adapter — thin wrapper.
+//!
+//! Self-authenticates via `~/.claude/.credentials.json`, detection-gated on
+//! the `anthropic` harness. The credential parsing + HTTP request live in
+//! `usage::anthropic_usage` for now (issue #1657 step 4 migrates them
+//! here as a follow-up).
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::UsageAdapter;

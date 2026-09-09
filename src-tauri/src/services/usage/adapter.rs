@@ -158,19 +158,30 @@ pub(crate) fn api_key_for<'a>(
         .filter(|key| !key.is_empty())
 }
 
-/// One shared HTTP client for all adapters (issue #1657 step 6, first half).
+/// One shared HTTP client for all adapters (issue #1657 step 6).
 ///
 /// Previously every fetcher built its own `reqwest::blocking::Client` inline,
 /// so tests could only intercept at the loopback-HTTP layer. Construction is
-/// centralised here behind a process-wide `OnceLock`; per-adapter transport
-/// injection is an explicit follow-up and is not claimed here. Timeout is 15s,
-/// matching the Freebuff fetcher; `fetch_usage` callers previously built an
-/// unbounded client, so this adds a timeout there (behaviour change, covered
-/// by the existing status/parse loopback tests, no timeout-specific test).
+/// centralised here behind a process-wide `OnceLock`; the test-only
+/// [`with_client_override`] seam lets the timeout test drive the production
+/// [`fetch_usage`] path with a 1-second client so the assertion is a
+/// narrow band tied to the configured value (1s) instead of a 5..20s band
+/// that admits a regression. Timeout is 15s, matching the Freebuff fetcher;
+/// `fetch_usage` callers previously built an unbounded client, so this adds
+/// a timeout there (behaviour change covered by
+/// [`shared_client_applies_a_configured_request_timeout`]).
 static SHARED_CLIENT: std::sync::OnceLock<Result<Client, String>> =
     std::sync::OnceLock::new();
 
 pub(crate) fn shared_client() -> Result<Client, String> {
+    // Test-only override (set by `with_client_override`); when present,
+    // use it INSTEAD of the production 15s client so the timeout test
+    // can assert the configured timeout deterministically without
+    // duplicating fetch_usage's request/status/parse algorithm.
+    #[cfg(test)]
+    if let Some(client) = crate::services::usage::adapter::current_client_override() {
+        return Ok(client);
+    }
     SHARED_CLIENT
         .get_or_init(|| {
             Client::builder()
@@ -181,6 +192,72 @@ pub(crate) fn shared_client() -> Result<Client, String> {
         .clone()
 }
 
+/// Test-only thread-safe client override: when set, [`shared_client`]
+/// returns it instead of the production 15s client. Scoped via
+/// [`with_client_override`] (panic-safe RAII). The catalog/timeout tests
+/// use this to inject a 1s client so the timeout assertion is a narrow
+/// band tied to the configured value.
+#[cfg(test)]
+static CLIENT_OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<Client>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn current_client_override() -> Option<Client> {
+    CLIENT_OVERRIDE
+        .get()?
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// RAII guard that restores the previous `CLIENT_OVERRIDE` value on Drop
+/// (including during unwinding). Constructed only via
+/// [`with_client_override`].
+#[cfg(test)]
+struct ClientOverrideGuard {
+    previous: Option<Client>,
+}
+
+#[cfg(test)]
+impl Drop for ClientOverrideGuard {
+    fn drop(&mut self) {
+        if let Some(cell) = CLIENT_OVERRIDE.get() {
+            if let Ok(mut guard) = cell.lock() {
+                *guard = self.previous.take();
+            }
+        }
+    }
+}
+
+/// Scope helper: install `client` as the [`shared_client`] override for
+/// the duration of `f`. Used by the timeout test so it can drive the
+/// production [`fetch_usage`] path with an HTTP client that has a 1s
+/// timeout (rather than the production 15s). Returns `f()`'s result.
+#[cfg(test)]
+pub(crate) fn with_client_override<F, R>(client: Client, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let guard = ClientOverrideGuard::install(client);
+    let result = f();
+    drop(guard);
+    result
+}
+
+#[cfg(test)]
+impl ClientOverrideGuard {
+    fn install(client: Client) -> Self {
+        let mut cell = CLIENT_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous = std::mem::replace(&mut *cell, Some(client));
+        Self { previous }
+    }
+}
+
+
+
 /// Drives the shared request → status-check → parse flow. Callers reach this
 /// only once a credential is confirmed present, so any failure here is reported
 /// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
@@ -190,11 +267,15 @@ pub(crate) fn shared_client() -> Result<Client, String> {
 /// loopback tests must pass unmodified after each provider move (tests move
 /// files, not assertions); the only intended behaviour delta is the 15s
 /// timeout noted on [`shared_client`].
-pub(crate) fn fetch_usage(
+pub(crate) fn fetch_usage<F1, F2>(
     provider: &str,
-    build_request: impl FnOnce(&Client) -> RequestBuilder,
-    parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
-) -> ProviderUsage {
+    build_request: F1,
+    parse: F2,
+) -> ProviderUsage
+where
+    F1: FnOnce(&Client) -> RequestBuilder,
+    F2: FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
+{
     use super::types::unavailable;
 
     let client = match shared_client() {
@@ -202,7 +283,11 @@ pub(crate) fn fetch_usage(
         Err(e) => return unavailable(provider, e),
     };
 
-    match build_request(&client).send() {
+    // Production request → response → parse. `shared_client` (above) may
+    // be a test override installed by [`with_client_override`], letting
+    // the timeout test drive the production path with a 1s client.
+    let request = build_request(&client);
+    match request.send() {
         Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
             provider,
             "Rate limited — usage data temporarily unavailable".to_string(),
@@ -266,17 +351,19 @@ mod tests {
 
     #[test]
     fn shared_client_applies_a_configured_request_timeout() {
-        // Verify the configured timeout is honoured on the actual fetch path.
-        // We use a 1-second timeout (rather than the production 15s) so the
-        // test is fast AND the assertion can be a narrow band tied to the
-        // configured value: 0.8s..1.8s. An unbounded client (reqwest
-        // default) would block until the listener is closed, far past the
-        // upper bound, so the band proves the timeout fired.
+        // Verify the configured timeout on the actual production fetch
+        // path: install a 1s client via `with_client_override` (the
+        // shared_client seam), drive the production `fetch_usage`
+        // against an idle loopback listener, and assert the timeout
+        // envelope AND a narrow band tied to the configured value
+        // (0.8s..1.8s). The previous draft reproduced the
+        // request/status/parse algorithm in `fetch_usage_with`; this
+        // test exercises the production code itself.
         //
-        // The previous draft's 5s..20s band would have admitted a regression
-        // where the timeout was reduced to (say) 5s without anybody noticing
-        // because the test still passed. Tying the upper bound to the
-        // configured value with a small tolerance catches that class.
+        // Tying the upper bound to the configured value with a small
+        // tolerance catches the regression class where the timeout
+        // is reduced (say) to 5s without anybody noticing because the
+        // test still passes.
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
         let client = Client::builder()
             .timeout(TIMEOUT)
@@ -284,22 +371,23 @@ mod tests {
             .expect("test client build");
         let (port, _server) = spawn_idle_loopback();
         let start = std::time::Instant::now();
-        let result = fetch_usage_with(
-            client,
-            "anthropic",
-            |c| c.get(format!("http://127.0.0.1:{port}/usage")),
-            |body| Ok((vec![], Some(body.to_string()))),
-        );
+        let result = with_client_override(client, || {
+            fetch_usage(
+                "anthropic",
+                |c| c.get(format!("http://127.0.0.1:{port}/usage")),
+                |body| Ok((vec![], Some(body.to_string()))),
+            )
+        });
         let elapsed = start.elapsed();
         let error = result.error.as_deref().unwrap_or_default();
         assert!(
             error.starts_with("Request failed:"),
             "expected reqwest timeout envelope, got: {result:?}"
         );
-        // Server thread joined by `_server` Drop below; if the listener
-        // was never accepted, the connect attempt itself returns
-        // immediately, so we must have the accept signal observed
-        // (see spawn_idle_loopback).
+        // IdleServer Drop joins the worker thread on every exit path
+        // (success or panic); the assertion below proves the timeout
+        // fired AFTER the connection was accepted, not because the
+        // listener was closed prematurely.
         assert!(
             elapsed >= std::time::Duration::from_millis(800),
             "1s timeout must wait for the configured value; elapsed {elapsed:?}"
@@ -313,8 +401,7 @@ mod tests {
     /// Spawns a TCP listener on `127.0.0.1:0` and a worker thread that
     /// accepts one connection then idles until the returned [`IdleServer`]
     /// guard's `Drop` runs. The guard deterministically stops the worker
-    /// thread and joins it so a panic in the test body still cleans up —
-    /// the previous draft joined only after all assertions.
+    /// thread and joins it so a panic in the test body still cleans up.
     fn spawn_idle_loopback() -> (u16, IdleServer) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().unwrap().port();
@@ -349,44 +436,6 @@ mod tests {
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }
-        }
-    }
-
-    /// Test-only variant of [`fetch_usage`] that takes an injected
-    /// [`Client`] (instead of the [`shared_client`]) so the timeout test
-    /// can run with a 1s timeout and complete in ~1s rather than the
-    /// production 15s.
-    pub(crate) fn fetch_usage_with(
-        client: Client,
-        provider: &str,
-        build_request: impl FnOnce(&Client) -> RequestBuilder,
-        parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
-    ) -> ProviderUsage {
-        use crate::services::usage::types::unavailable;
-        match build_request(&client).send() {
-            Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
-                provider,
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            ),
-            Ok(r) if !r.status().is_success() => {
-                let code = r.status().as_u16();
-                unavailable(
-                    provider,
-                    format!("API error {}: {}", code, r.text().unwrap_or_default()),
-                )
-            }
-            Ok(r) => match parse(&r.text().unwrap_or_default()) {
-                Ok((windows, detail)) => ProviderUsage {
-                    provider: provider.to_string(),
-                    logged_in: true,
-                    windows,
-                    balance: None,
-                    detail,
-                    error: None,
-                },
-                Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
-            },
-            Err(e) => unavailable(provider, format!("Request failed: {}", e)),
         }
     }
 }

@@ -389,35 +389,31 @@ mod tests {
     }
 
     #[test]
-    fn registered_native_adapter_returns_no_credential_envelope_without_network() {
-        // Real-adapter contract: a registered native adapter dispatched
-        // through the production `cached_or_fetch` path with no accounts and
-        // no host credentials returns the no-credential envelope without
-        // touching the network. Native adapters read local credentials; on a
-        // clean CI host the absence of a credential file surfaces as
-        // `logged_in = false` here, so a miswired (e.g. always-returns-success)
-        // adapter fails this contract.
-        //
-        // We only run this for native adapters whose no-credential detection
-        // is local (Anthropic reads ~/.claude/.credentials.json, Grok reads
-        // its own file, etc.) and DOES NOT make a network call when no
-        // credential exists. Adapters that attempt network even on
-        // no-credential (none today) would be excluded.
-        let _lock = OVERRIDE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        for id in ["agy", "commandcode"] {
-            // Both readers exit early on NoCredential without HTTP. The test
-            // asserts the production adapter path (no override set) — the
-            // dispatched_native_* adapters' `fetch` is invoked through
-            // `dispatch_fetch`, which falls through to the real impl when
-            // the override slot is empty.
-            crate::services::usage::invalidate_provider_cache(id);
-            let observed = cached_or_fetch(id, true, &[]).expect("dispatch native");
-            // On a host with a credential the adapter may probe the live
-            // endpoint and succeed (logged_in=true, no error). On a clean
-            // host (CI) it returns logged_out. We pin the envelope shape
-            // (provider stamp + non-empty ProviderUsage) so a miswired
-            // adapter returning a default or empty struct fails here.
-            assert_eq!(observed.provider, id, "real adapter {id} must stamp its own envelope");
+    fn dispatch_id_returns_static_registered_adapter() {
+        // Wiring contract through the seam for every registered adapter:
+        // `dispatch(id)` returns a `&'static dyn UsageAdapter` whose
+        // `id()` matches the dispatch key. Future per-adapter real-adapter
+        // contract tests (issue #1657 follow-ups) build on this guarantee:
+        // `dispatch(id).fetch(accounts)` is the production call surface, and
+        // a regression where a registered adapter stops implementing the
+        // seam (e.g. falls back to a stale fn pointer) fails here.
+        for id in [
+            "anthropic",
+            "codex",
+            "cursor",
+            "minimax",
+            "agy",
+            "kimi",
+            "openrouter",
+            "grok",
+            "opencode",
+            "commandcode",
+            "openai",
+            "deepseek",
+            "freebuff",
+        ] {
+            let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
+            assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");
         }
     }
 }

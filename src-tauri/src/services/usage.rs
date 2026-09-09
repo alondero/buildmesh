@@ -70,9 +70,7 @@ use crate::services::opencode_oauth::device_flow;
 
 fn anthropic_cred_path() -> PathBuf {
     home_dir().join(".claude").join(".credentials.json")
-}
-
-/// Build the ordered list of candidate Codex auth.json paths (issue #1108,
+}/// Build the ordered list of candidate Codex auth.json paths (issue #1108,
 /// spec §2.2). Priority:
 ///
 /// 1. `$CODEX_HOME/auth.json` if set and non-empty.
@@ -173,28 +171,6 @@ impl CodexAuthFile {
     }
 }
 
-#[derive(Deserialize)]
-struct ClaudeAiOauth {
-    #[serde(rename = "accessToken")]
-    access_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AnthropicOAuthCred {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<ClaudeAiOauth>,
-}
-
-/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
-fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: AnthropicOAuthCred =
-        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.claude_ai_oauth
-        .and_then(|o| o.access_token)
-        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
-}
-
 /// Reads Codex's credentials JSON which has access_token at the top level
 /// (legacy) OR nested inside a `tokens` envelope (spec §2.3). Returns both
 /// the bearer token and the optional `ChatGPT-Account-Id` so the live probe
@@ -233,6 +209,28 @@ fn read_codex_credentials(candidates: &[PathBuf]) -> Result<(PathBuf, CodexAuthC
 }
 
 #[derive(Deserialize)]
+struct ClaudeAiOauth {
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicOAuthCred {
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<ClaudeAiOauth>,
+}
+
+/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
+fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let cred: AnthropicOAuthCred =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.claude_ai_oauth
+        .and_then(|o| o.access_token)
+        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+#[derive(Deserialize)]
 struct OpenCodeAuthEntry {
     key: Option<String>,
 }
@@ -253,6 +251,11 @@ fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
 
 // `logged_out` / `unavailable` / `fetch_usage` moved to the seam
 // (`usage::types` + `usage::adapter`, issue #1657) — imported at the top.
+// Anthropic fetcher lives in `usage::anthropic_usage` for now (issue #1657
+// step 4 migrates it to `services/usage/adapters/anthropic.rs` as a
+// follow-up; the current thin adapter wraps the legacy fetcher so the
+// catalog dispatch path exercises it without duplicating the request
+// shape, credential discovery, or parse logic).
 
 fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
     #[derive(Deserialize, Debug)]
