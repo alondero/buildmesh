@@ -1,9 +1,12 @@
 import { spawn } from 'child_process';
+import { createRequire } from 'module';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const viteEntrypoint = resolve(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+const require = createRequire(import.meta.url);
+const vitePackageJson = require.resolve('vite/package.json');
+const viteEntrypoint = resolve(dirname(vitePackageJson), 'bin', 'vite.js');
 const defaultTimeoutMs = 60000;
 
 function isReady(url) {

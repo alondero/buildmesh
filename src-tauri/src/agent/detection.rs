@@ -257,7 +257,7 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         path_dirs.retain(|dir| !DETECTABLE.iter().any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
         if let Ok(path) = std::env::join_paths(&path_dirs) { let _ = NATIVE_WSL_PATH.set(path); }
     }
-    let mut profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.is_file());
+    let mut profiles = detect_profiles(&path_dirs, &ext_refs, home.as_deref(), &|p| p.exists());
     if cfg!(windows) {
         // Explicit Windows entries also work in WSL-backed meshes. Keep the
         // legacy entries so existing node identities retain their semantics.
