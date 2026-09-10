@@ -20,9 +20,20 @@ use parse::{parse_anthropic_usage, parse_oauth_profile_plan};
 const PROVIDER: &str = "anthropic";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
-/// Shown when usage/spend is available but plan cannot be read because the
-/// token lacks `user:profile` (typical of `claude setup-token`).
-const PLAN_SCOPE_DETAIL: &str = "Plan unavailable — token lacks user:profile scope (`claude setup-token` is model-request-only; run /login for full OAuth)";
+/// Env / setup-token path: inference-only tokens lack `user:profile`.
+const PLAN_SCOPE_DETAIL_ENV: &str = "Plan unavailable — token lacks user:profile scope (`claude setup-token` is model-request-only; run /login for full OAuth)";
+/// Stored /login or profile tokens that predate the scope — re-auth refreshes it.
+const PLAN_SCOPE_DETAIL_RELOGIN: &str =
+    "Plan unavailable — OAuth token lacks user:profile scope; run /login to refresh credentials";
+
+fn scope_limitation_detail(origin: OauthOrigin) -> &'static str {
+    match origin {
+        OauthOrigin::Env => PLAN_SCOPE_DETAIL_ENV,
+        OauthOrigin::Login | OauthOrigin::NamedProfile | OauthOrigin::ActiveProfile => {
+            PLAN_SCOPE_DETAIL_RELOGIN
+        }
+    }
+}
 
 pub(crate) struct AnthropicAdapter;
 
@@ -72,12 +83,12 @@ fn anthropic_usage_with_urls(
             plan,
             origin,
         } => {
-            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan);
+            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan, origin);
             if !usage.logged_in && origin == OauthOrigin::Login {
                 if let Some(ClaudeAuthSource::Oauth {
                     token: fallback_token,
                     plan: fallback_plan,
-                    ..
+                    origin: fallback_origin,
                 }) = active_user_oauth(lookup, &anthropic_config_dir_for(lookup))
                 {
                     if fallback_token != token {
@@ -86,6 +97,7 @@ fn anthropic_usage_with_urls(
                             profile_url,
                             &fallback_token,
                             fallback_plan,
+                            fallback_origin,
                         );
                     }
                 }
@@ -113,6 +125,7 @@ fn fetch_oauth_usage(
     profile_url: &str,
     token: &str,
     known_plan: Option<String>,
+    origin: OauthOrigin,
 ) -> ProviderUsage {
     let client = match shared_client() {
         Ok(client) => client,
@@ -128,7 +141,7 @@ fn fetch_oauth_usage(
         Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
             let status = response.status().as_u16();
             let body = response.text().unwrap_or_default();
-            classify_oauth_auth_failure(status, &body)
+            classify_oauth_auth_failure(status, &body, origin)
         }
         Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
             PROVIDER,
@@ -153,9 +166,7 @@ fn fetch_oauth_usage(
                     match fetch_oauth_plan(&client, profile_url, token) {
                         ProfilePlan::Found(label) => plan = Some(label),
                         ProfilePlan::Forbidden => {
-                            // setup-token / inference-only tokens can sometimes
-                            // still return usage spend but never authorize plan.
-                            detail = Some(PLAN_SCOPE_DETAIL.to_string());
+                            detail = Some(scope_limitation_detail(origin).to_string());
                         }
                         ProfilePlan::Unavailable => {}
                     }
@@ -186,10 +197,11 @@ enum ProfilePlan {
 /// Distinguish expired/revoked credentials from missing `user:profile` scope.
 /// Scope failures keep the account logged in with an explicit limitation;
 /// expired credentials remain `logged_out` so active-profile retry can run.
-fn classify_oauth_auth_failure(_status: u16, body: &str) -> ProviderUsage {
+fn classify_oauth_auth_failure(_status: u16, body: &str, origin: OauthOrigin) -> ProviderUsage {
     if is_oauth_scope_failure(body) {
-        let mut usage = unavailable(PROVIDER, PLAN_SCOPE_DETAIL.to_string());
-        usage.detail = Some(PLAN_SCOPE_DETAIL.to_string());
+        let detail = scope_limitation_detail(origin).to_string();
+        let mut usage = unavailable(PROVIDER, detail.clone());
+        usage.detail = Some(detail);
         return usage;
     }
     logged_out(
@@ -571,26 +583,37 @@ mod tests {
             "scope failure must not look like a logged-out/expired credential"
         );
         assert!(usage.plan.is_none());
+        let detail = usage.detail.as_deref().unwrap_or_default();
+        let error = usage.error.as_deref().unwrap_or_default();
         assert!(
-            usage
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("user:profile")
-                || usage
-                    .detail
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("user:profile"),
-            "error={:?} detail={:?}",
-            usage.error,
-            usage.detail
+            detail.contains("setup-token") || error.contains("setup-token"),
+            "env-token scope failure should mention setup-token; detail={detail:?} error={error:?}"
         );
-        assert!(!usage
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("login expired"));
+        assert!(!error.contains("login expired"));
+    }
+
+    #[test]
+    fn stored_login_scope_failure_guides_relogin_not_setup_token() {
+        let port = spawn_loopback(1, move |request| {
+            let _ = request.respond(
+                tiny_http::Response::from_string(
+                    r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                )
+                .with_status_code(403),
+            );
+        });
+        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        assert!(usage.logged_in);
+        let detail = usage.detail.as_deref().unwrap_or_default();
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("run /login") || error.contains("run /login"),
+            "stored login scope failure should recommend /login; detail={detail:?} error={error:?}"
+        );
+        assert!(
+            !detail.contains("setup-token") && !error.contains("setup-token"),
+            "stored login must not claim the setup-token limitation"
+        );
     }
 
     #[test]

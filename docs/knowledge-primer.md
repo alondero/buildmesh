@@ -78,9 +78,14 @@ Enterprise plan + spend together. This is an intentional exception to the
 inference-only env tokens. Named Anthropic profiles
 are mode-aware: `user_oauth` uses the profile credential for usage, while
 `oidc_federation` (named, active, or env-configured) reports
-`managed_externally`. An active `user_oauth` profile ranks below a *working*
-`/login` credential (expired tokens and fetch 401/403 fall through / retry)
-and above a missing login. Native OAuth reads the platform store (macOS
+`managed_externally`. Env federation requires the full WIF set (rule, org,
+service account, and identity token/`_FILE`); a partial pair does not suppress
+stored OAuth. A set-but-empty `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`
+still occupies that credential slot. An active `user_oauth` profile ranks
+below a *working* `/login` credential (expired tokens and fetch 401/403 fall
+through / retry) and above a missing login. `user:profile` scope failures
+guide `/login` for stored credentials and mention `setup-token` only for env
+tokens. Native OAuth reads the platform store (macOS
 Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
 with `.credentials.json` as fallback when Keychain is missing or unusable) and
 queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.

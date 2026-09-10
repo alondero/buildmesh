@@ -96,7 +96,10 @@ pub(crate) struct ProductionLookup;
 
 impl AuthLookup for ProductionLookup {
     fn env(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok().filter(|value| !value.is_empty())
+        // Preserve empty strings: Claude treats a set-but-empty
+        // ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN as an active higher-priority
+        // slot that must not fall through to stored OAuth.
+        std::env::var(key).ok()
     }
 
     fn read_file(&self, path: &Path) -> Result<String, UsageError> {
@@ -127,6 +130,8 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
     if flag_set(var("CLAUDE_CODE_USE_FOUNDRY").as_deref()) {
         return managed(PLATFORM_FOUNDRY, "foundry", b"azure");
     }
+    // Presence wins even when the value is empty — an empty API key/token still
+    // occupies the slot and must not fall through to dormant OAuth usage.
     if let Some(token) = var("ANTHROPIC_AUTH_TOKEN") {
         return managed(PLATFORM_GATEWAY, "auth_token", token.as_bytes());
     }
@@ -140,7 +145,7 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
     {
         return managed(PLATFORM_HELPER, "api_key_helper", b"configured");
     }
-    if let Some(token) = var("CLAUDE_CODE_OAUTH_TOKEN") {
+    if let Some(token) = var("CLAUDE_CODE_OAUTH_TOKEN").filter(|value| !value.is_empty()) {
         // Env tokens (including `claude setup-token`) are not saved locally.
         // Plan must come from the token's own profile/usage response later —
         // never from a dormant /login credential for a different account.
@@ -152,10 +157,10 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
     }
 
     let anthropic_cfg = anthropic_config_dir(lookup);
-    if let Some(name) = var("ANTHROPIC_PROFILE") {
+    if let Some(name) = var("ANTHROPIC_PROFILE").filter(|value| !value.trim().is_empty()) {
         return resolve_named_profile(lookup, &anthropic_cfg, &name, OauthOrigin::NamedProfile);
     }
-    if var("ANTHROPIC_FEDERATION_RULE_ID").is_some() && var("ANTHROPIC_ORGANIZATION_ID").is_some() {
+    if federation_env_active(var) {
         return managed(PLATFORM_PROFILE, "federation_env", b"configured");
     }
     if active_profile_is_federation(lookup, &anthropic_cfg) {
@@ -192,6 +197,16 @@ pub(crate) fn active_user_oauth(
 
 pub(crate) fn anthropic_config_dir_for(lookup: &impl AuthLookup) -> PathBuf {
     anthropic_config_dir(lookup)
+}
+
+/// WIF env federation is active only when the full required set is present
+/// (rule, org, service account, and an identity token source).
+fn federation_env_active(var: impl Fn(&str) -> Option<String>) -> bool {
+    let set = |key: &str| var(key).is_some_and(|value| !value.trim().is_empty());
+    set("ANTHROPIC_FEDERATION_RULE_ID")
+        && set("ANTHROPIC_ORGANIZATION_ID")
+        && set("ANTHROPIC_SERVICE_ACCOUNT_ID")
+        && (set("ANTHROPIC_IDENTITY_TOKEN_FILE") || set("ANTHROPIC_IDENTITY_TOKEN"))
 }
 
 pub(crate) fn cache_identity_from(source: &ClaudeAuthSource) -> UsageIdentityFingerprint {
@@ -693,6 +708,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_api_key_still_occupies_the_credential_slot() {
+        let mut lookup = with_oauth_file(OAUTH_JSON);
+        lookup.env.insert("ANTHROPIC_API_KEY".into(), String::new());
+        assert_eq!(
+            platform(&resolve_claude_auth(&lookup)),
+            Some(PLATFORM_CONSOLE),
+            "empty ANTHROPIC_API_KEY must not fall through to dormant OAuth"
+        );
+    }
+
+    #[test]
     fn api_key_helper_beats_oauth_without_running_the_script() {
         let mut lookup = with_oauth_file(OAUTH_JSON);
         lookup.files.insert(
@@ -792,10 +818,34 @@ mod tests {
         lookup
             .env
             .insert("ANTHROPIC_ORGANIZATION_ID".into(), "org-uuid".into());
+        lookup
+            .env
+            .insert("ANTHROPIC_SERVICE_ACCOUNT_ID".into(), "svac_test".into());
+        lookup
+            .env
+            .insert("ANTHROPIC_IDENTITY_TOKEN_FILE".into(), "/tmp/id.jwt".into());
         assert_eq!(
             platform(&resolve_claude_auth(&lookup)),
             Some(PLATFORM_PROFILE)
         );
+    }
+
+    #[test]
+    fn partial_federation_env_does_not_suppress_oauth() {
+        let mut lookup = with_oauth_file(ENTERPRISE_JSON);
+        lookup
+            .env
+            .insert("ANTHROPIC_FEDERATION_RULE_ID".into(), "fdrl_test".into());
+        lookup
+            .env
+            .insert("ANTHROPIC_ORGANIZATION_ID".into(), "org-uuid".into());
+        // Missing SERVICE_ACCOUNT_ID and identity token — incomplete WIF config.
+        match resolve_claude_auth(&lookup) {
+            ClaudeAuthSource::Oauth { token, .. } => {
+                assert_eq!(token, "sk-ant-oat01-ent");
+            }
+            other => panic!("partial federation must not hide stored OAuth, got {other:?}"),
+        }
     }
 
     #[test]
