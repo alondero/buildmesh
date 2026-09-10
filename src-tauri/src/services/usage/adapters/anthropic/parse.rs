@@ -4,6 +4,11 @@
 //! reports monthly spend: prefer the current `spend` object, fall back to the
 //! older `extra_usage` credits shape. Partial bodies are valid — a missing
 //! window is omitted, not treated as an error.
+//!
+//! Note: the `subscription_type` / `rate_limit_tier` plan fields on the
+//! response body are no longer surfaced after #1689 cut
+//! `ProviderUsage.plan`; serde ignores unknown fields so a stale
+//! response shape still parses cleanly.
 
 use crate::services::usage::types::{UsageAmount, UsageError, UsageMeter, UsageWindow};
 use serde::Deserialize;
@@ -52,21 +57,6 @@ struct Resp {
     spend: Option<Spend>,
     #[serde(default)]
     extra_usage: Option<ExtraUsage>,
-    // Plan fields on the usage body are no longer read after #1689 cut
-    // ProviderUsage.plan; tracked in #1694 for a follow-up that migrates
-    // the Anthropic auth chain off `plan` entirely.
-    #[serde(default, rename = "subscription_type")]
-    #[allow(dead_code)]
-    subscription_type: Option<String>,
-    #[serde(default, rename = "subscriptionType")]
-    #[allow(dead_code)]
-    subscription_type_camel: Option<String>,
-    #[serde(default, rename = "rate_limit_tier")]
-    #[allow(dead_code)]
-    rate_limit_tier: Option<String>,
-    #[serde(default, rename = "rateLimitTier")]
-    #[allow(dead_code)]
-    rate_limit_tier_camel: Option<String>,
 }
 
 pub(crate) fn parse_anthropic_usage(body: &str) -> Result<ParsedAnthropicUsage, UsageError> {
@@ -88,47 +78,7 @@ pub(crate) fn parse_anthropic_usage(body: &str) -> Result<ParsedAnthropicUsage, 
         meters.push(UsageMeter::Unavailable);
     }
 
-    Ok(ParsedAnthropicUsage {
-        windows,
-        meters,
-    })
-}
-
-/// Parse `GET /api/oauth/profile` for the account plan belonging to the token.
-pub(crate) fn parse_oauth_profile_plan(body: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Org {
-        #[serde(default)]
-        organization_type: Option<String>,
-        #[serde(default)]
-        rate_limit_tier: Option<String>,
-        #[serde(default, rename = "subscriptionType")]
-        subscription_type: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Profile {
-        #[serde(default)]
-        organization: Option<Org>,
-        #[serde(default)]
-        subscription_type: Option<String>,
-        #[serde(default, rename = "subscriptionType")]
-        subscription_type_camel: Option<String>,
-        #[serde(default)]
-        rate_limit_tier: Option<String>,
-        #[serde(default, rename = "rateLimitTier")]
-        rate_limit_tier_camel: Option<String>,
-    }
-    let profile: Profile = serde_json::from_str(body).ok()?;
-    let org = profile.organization.as_ref();
-    plan_label(
-        org.and_then(|org| org.organization_type.as_deref())
-            .or(org.and_then(|org| org.subscription_type.as_deref()))
-            .or(profile.subscription_type.as_deref())
-            .or(profile.subscription_type_camel.as_deref()),
-        org.and_then(|org| org.rate_limit_tier.as_deref())
-            .or(profile.rate_limit_tier.as_deref())
-            .or(profile.rate_limit_tier_camel.as_deref()),
-    )
+    Ok(ParsedAnthropicUsage { windows, meters })
 }
 
 fn push_window(windows: &mut Vec<UsageWindow>, label: &str, bucket: Option<UsageBucket>) {
@@ -226,33 +176,6 @@ fn parse_money(value: &Value) -> Option<(f64, String)> {
     }
 }
 
-/// Provider-reported plan label. Unknown names pass through unchanged so we
-/// never collapse distinct plans into one another.
-pub(crate) fn plan_label(
-    subscription_type: Option<&str>,
-    rate_limit_tier: Option<&str>,
-) -> Option<String> {
-    let raw = subscription_type
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            rate_limit_tier
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })?;
-    let normalized = raw
-        .strip_prefix("claude_")
-        .or_else(|| raw.strip_prefix("Claude_"))
-        .unwrap_or(raw);
-    Some(match normalized.to_ascii_lowercase().as_str() {
-        "pro" => "Pro".to_string(),
-        "max" => "Max".to_string(),
-        "team" => "Team".to_string(),
-        "enterprise" => "Enterprise".to_string(),
-        _ => raw.to_string(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,15 +193,6 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "7-day");
         assert_eq!(parsed.windows[1].used_percent, Some(33.0));
         assert!(parsed.meters.is_empty());
-    }
-
-    #[test]
-    fn oauth_profile_plan_uses_organization_type() {
-        let json = r#"{"organization":{"organization_type":"claude_enterprise","rate_limit_tier":"default"}}"#;
-        assert_eq!(
-            parse_oauth_profile_plan(json).as_deref(),
-            Some("Enterprise")
-        );
     }
 
     #[test]
@@ -453,21 +367,20 @@ mod tests {
     }
 
     #[test]
-    fn unknown_plan_names_pass_through() {
-        assert_eq!(
-            plan_label(Some("enterprise"), None).as_deref(),
-            Some("Enterprise")
-        );
-        assert_eq!(plan_label(Some("pro"), None).as_deref(), Some("Pro"));
-        assert_eq!(plan_label(Some("claude_max"), None).as_deref(), Some("Max"));
-        assert_eq!(
-            plan_label(Some("Business Plus"), None).as_deref(),
-            Some("Business Plus")
-        );
-        assert_eq!(
-            plan_label(None, Some("default_claude_max_20x")).as_deref(),
-            Some("default_claude_max_20x")
-        );
-        assert_eq!(plan_label(Some(""), Some("")).as_deref(), None);
+    fn stale_plan_fields_are_ignored() {
+        // subscription_type / rate_limit_tier / their camelCase variants
+        // are no longer in the parsed shape after #1689. Serde defaults
+        // make them silently dropped, but a regression that re-introduces
+        // a strict parser would fail this test. Lock the lenient behavior.
+        let json = r#"{
+            "five_hour":{"utilization":1.0},
+            "subscription_type":"enterprise",
+            "subscriptionType":"pro",
+            "rate_limit_tier":"default",
+            "rateLimitTier":"max"
+        }"#;
+        let parsed = parse_anthropic_usage(json).unwrap();
+        assert_eq!(parsed.windows.len(), 1);
+        assert!(parsed.meters.is_empty());
     }
 }

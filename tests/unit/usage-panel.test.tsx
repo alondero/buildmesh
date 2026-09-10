@@ -128,6 +128,26 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
     expect(screen.getByText('Unavailable')).toBeTruthy();
   });
 
+  it('shows "Unavailable" when balance is zero and there is no spend (would render empty box otherwise)', () => {
+    // A fresh Codex-Business wallet whose /wham/usage returns
+    // `{ credits: { balance: 0 } }` arrives as balance != null with
+    // remaining === 0 and monthlySpend === null. The BalanceCard returns
+    // null in that case, but the panel still needs to render the
+    // "Unavailable" fallback rather than an empty box. Pin the
+    // interaction between the two predicates.
+    render(
+      <UsagePanel
+        account={account({ id: 'codex' })}
+        meter={meter({
+          provider: 'codex',
+          usage: usage({ provider: 'codex', balance: { remaining: 0, monthlySpend: null, currency: 'credits' } }),
+        })}
+      />,
+    );
+    expect(screen.getByText('Unavailable')).toBeTruthy();
+    expect(screen.queryByText(/0\.00 credits/)).toBeNull();
+  });
+
   it('renders both quota windows and a cash balance together (#574 AC3)', () => {
     render(
       <UsagePanel

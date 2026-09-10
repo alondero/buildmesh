@@ -317,11 +317,10 @@ enum CodexAdditionalLimit {
 
 #[derive(Deserialize, Debug)]
 struct CodexUsageResp {
-    // `plan_type` is no longer read after #1689 cut ProviderUsage.plan;
-    // tracked in #1694 for a follow-up that drops the field entirely.
-    #[serde(default)]
-    #[allow(dead_code)]
-    plan_type: Option<String>,
+    // `plan_type` was dropped after #1689 / #1686 — ProviderUsage no
+    // longer carries plan, so the parsed value has nowhere to land.
+    // Serde's default silently ignores the field, which keeps cached
+    // / replayed payloads that still include it parsing cleanly.
     #[serde(default)]
     rate_limit: Option<CodexRateLimits>,
     #[serde(default)]
@@ -480,15 +479,16 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
         }
     }
 
+    // The bar's fill width is the inverse of "% remaining", so emitting
+    // the string on top of the bar would duplicate the same number.
+    // The "No active" fallback below stays because it explains a
+    // different case (why nothing is rendered), not a redundant
+    // percentage.
     let detail = if windows.is_empty() && meters.is_empty() && balance.is_none() {
         Some("No active Codex rate-limit windows".to_string())
     } else {
         None
     };
-    // The bar's fill width is the inverse of "% remaining", so emitting
-    // the string on top of the bar would duplicate the same number. The
-    // "No active" fallback above stays because it explains a different
-    // case (why nothing is rendered), not a redundant percentage.
 
     Ok(CodexParsed {
         windows,
@@ -784,6 +784,24 @@ mod tests {
             "detail must not duplicate bar percentages; got: {:?}",
             parsed.detail
         );
+    }
+
+    // After #1689 dropped `plan_type` from CodexUsageResp (provider
+    // payload), a cached /wham/usage response from before the cut
+    // must still parse cleanly. Serde's default drops the unknown
+    // field; pin the lenient behavior here so a future regression
+    // that adds `#[serde(deny_unknown_fields)]` is caught.
+    #[test]
+    fn parse_codex_response_does_not_emit_plan_type_round_trip() {
+        let json = r#"{
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {"used_percent": 18.5, "limit_window_seconds": 18000}
+            }
+        }"#;
+        let parsed = parse_codex_response(json).unwrap();
+        assert_eq!(parsed.windows.len(), 1);
+        assert!(parsed.windows[0].used_percent.is_some());
     }
 
     #[test]

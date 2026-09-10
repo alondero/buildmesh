@@ -159,7 +159,7 @@ A mixed reply may include both rolling windows and spend/credit fields. `plan_ty
 
 ### 2.5 Mapping to Buildmesh Wire Contract (`ProviderUsage`)
 
-- **Plan:** `plan_type` maps to `ProviderUsage.plan` verbatim when non-empty.
+- **Plan (superseded by #1689):** `plan_type` was historically mapped to `ProviderUsage.plan` verbatim when non-empty. After #1689 / #1686 the wire field `ProviderUsage.plan` is gone; the adapter ignores `plan_type` on incoming payloads and does not emit it on outgoing ones. Serde's default silently drops the field when parsing — see `parse_codex_response_does_not_emit_plan_type_round_trip` for the cache-payload compat pin.
 - **Window Mapping:**
   - `rate_limit.primary_window` / `secondary_window`: Mapped to `UsageWindow`. Dynamic label derived from `limit_window_seconds`:
     - `18000` seconds (5 hours) → Label `"5-hour"`.
@@ -172,7 +172,7 @@ A mixed reply may include both rolling windows and spend/credit fields. `plan_ty
   - `rate_limit: null` (or a missing object) is valid. It is not a shape error.
 - **Credits:** `credits.unlimited` maps to `UsageMeter::Unlimited`. A numeric `credits.balance` is retained as `BillingBalance.remaining` with currency `"credits"`.
 - **Spend control:** `spend_control.individual_limit` maps to `UsageMeter::Metered` (or `NoIndividualLimit` when a used amount is present without a limit), carrying used, optional limit/remaining, percentage, unit `"credits"`, and reset.
-- **Detail:** When quota windows exist, populated with remaining-percentage phrasing from the highest-used window. Spend-only replies do not invent a "no rate-limit windows" error when credits or spend meters are present.
+- **Detail (revised by #1689):** The earlier "X% remaining" string is intentionally NOT emitted when quota windows are present — the glanceable panel renders a labelled fill bar per window whose width IS the inverse of "% remaining", so emitting the string on top of the bar would duplicate the same number. The `No active Codex rate-limit windows` fallback for the no-data case stays because it explains why nothing is rendered, a different semantic from a redundant percentage. Spend-only replies do not invent a "no rate-limit windows" error when credits or spend meters are present.
 
 ---
 

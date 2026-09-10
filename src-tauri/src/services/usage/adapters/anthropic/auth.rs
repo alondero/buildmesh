@@ -10,7 +10,6 @@
 //! `settings.json` `env` block. Cloud configuration must not fall through
 //! to a dormant OAuth credential.
 
-use super::parse::plan_label;
 use crate::services::usage::adapter::UsageIdentityFingerprint;
 use crate::services::usage::types::{home_dir, UsageError};
 use serde::Deserialize;
@@ -50,6 +49,10 @@ pub(crate) enum ClaudeAuthSource {
     },
     Oauth {
         token: String,
+        // `plan` is no longer read after #1689 cut ProviderUsage.plan;
+        // tracked in #1694 for a follow-up that drops the field plus the
+        // four `plan_label(...)` calls in this module that populate it.
+        #[allow(dead_code)]
         plan: Option<String>,
         origin: OauthOrigin,
     },
@@ -308,9 +311,14 @@ fn parse_settings(body: &str) -> ClaudeSettings {
 struct ClaudeAiOauth {
     #[serde(rename = "accessToken")]
     access_token: Option<String>,
+    // Plan fields no longer read after #1689 cut ProviderUsage.plan;
+    // tracked in #1694 for a follow-up that drops these plus the
+    // corresponding parse-time normalisation.
     #[serde(rename = "subscriptionType")]
+    #[allow(dead_code)]
     subscription_type: Option<String>,
     #[serde(rename = "rateLimitTier")]
+    #[allow(dead_code)]
     rate_limit_tier: Option<String>,
     /// Milliseconds since Unix epoch; absent means "treat as usable".
     #[serde(rename = "expiresAt")]
@@ -360,10 +368,7 @@ fn parse_oauth_json(body: &str, origin: OauthOrigin) -> Result<ClaudeAuthSource,
         return Err(UsageError::NoCredential("expired accessToken".to_string()));
     }
     Ok(ClaudeAuthSource::Oauth {
-        plan: plan_label(
-            oauth.subscription_type.as_deref(),
-            oauth.rate_limit_tier.as_deref(),
-        ),
+        plan: None,
         token,
         origin,
     })
@@ -491,13 +496,21 @@ fn profile_oauth_credentials(
     #[derive(Deserialize)]
     struct ProfileCreds {
         access_token: Option<String>,
+        // Plan fields are no longer read after #1689 cut
+        // ProviderUsage.plan; tracked in #1694 for a follow-up that
+        // drops these and the parallel fields in the named-profile
+        // credential deserializer below.
         #[serde(default)]
+        #[allow(dead_code)]
         subscription_type: Option<String>,
         #[serde(default, rename = "subscriptionType")]
+        #[allow(dead_code)]
         subscription_type_camel: Option<String>,
         #[serde(default)]
+        #[allow(dead_code)]
         rate_limit_tier: Option<String>,
         #[serde(default, rename = "rateLimitTier")]
+        #[allow(dead_code)]
         rate_limit_tier_camel: Option<String>,
     }
     let creds: ProfileCreds =
@@ -506,17 +519,11 @@ fn profile_oauth_credentials(
         .access_token
         .filter(|token| !token.is_empty())
         .ok_or_else(|| UsageError::NoCredential(path.to_string_lossy().to_string()))?;
-    let plan = plan_label(
-        creds
-            .subscription_type
-            .as_deref()
-            .or(creds.subscription_type_camel.as_deref()),
-        creds
-            .rate_limit_tier
-            .as_deref()
-            .or(creds.rate_limit_tier_camel.as_deref()),
-    );
-    Ok((token, plan))
+    // `plan` is no longer read after #1689 cut ProviderUsage.plan;
+    // a follow-up in #1694 will drop the credential-file fields and
+    // the deserialize struct entirely. Until then, always pass None so
+    // the struct compiles.
+    Ok((token, None))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -801,7 +808,7 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan, .. } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected profile oauth, got {other:?}"),
         }
@@ -880,7 +887,7 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("stored /login must outrank active user_oauth profile, got {other:?}"),
         }
@@ -898,7 +905,7 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan, .. } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("active user_oauth must win when /login is missing, got {other:?}"),
         }
@@ -921,7 +928,7 @@ mod tests {
                 origin,
             } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
                 assert_eq!(
                     origin,
                     OauthOrigin::ActiveProfile {
@@ -938,7 +945,7 @@ mod tests {
         match resolve_claude_auth(&with_oauth_file(ENTERPRISE_JSON)) {
             ClaudeAuthSource::Oauth { token, plan, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected oauth, got {other:?}"),
         }
@@ -952,7 +959,7 @@ mod tests {
             .insert(KEYCHAIN_SERVICE.into(), ENTERPRISE_JSON.into());
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { plan, .. } => {
-                assert_eq!(plan.as_deref(), Some("Enterprise"))
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected keychain oauth, got {other:?}"),
         }
@@ -967,7 +974,7 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { token, plan, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                assert_eq!(plan.as_deref(), Some("Enterprise"));
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("malformed Keychain must fall through to file, got {other:?}"),
         }
@@ -986,7 +993,7 @@ mod tests {
         lookup.files.insert(cred_path(&lookup), OAUTH_JSON.into());
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth { plan, .. } => {
-                assert_eq!(plan.as_deref(), Some("Enterprise"))
+                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected config-dir oauth, got {other:?}"),
         }

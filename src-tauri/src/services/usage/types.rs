@@ -208,6 +208,25 @@ mod tests {
         assert!(usage.meters.is_empty());
     }
 
+    // After #1689 dropped `plan: Option<String>` from ProviderUsage, a
+    // cached payload from before that cut must still parse: the IPC
+    // route and the mobile HTTP route both replay cached
+    // `get_provider_meters` responses on reconnect. Serde's default
+    // ignores unknown fields, but a regression that re-introduces
+    // `#[serde(deny_unknown_fields)]` would break this — pin the lenient
+    // behavior here so the regression is caught at the type layer.
+    #[test]
+    fn legacy_payload_with_plan_field_still_deserializes() {
+        let usage: ProviderUsage = serde_json::from_str(
+            r#"{"provider":"anthropic","loggedIn":true,"windows":[],"balance":null,"plan":"pro","meters":[],"detail":null,"error":null}"#,
+        )
+        .expect("pre-#1689 payload with plan field must still parse");
+
+        assert_eq!(usage.provider, "anthropic");
+        assert!(usage.logged_in);
+        assert!(usage.meters.is_empty());
+    }
+
     #[test]
     fn explicit_usage_states_have_stable_tagged_wire_shapes() {
         let amount = UsageAmount {
