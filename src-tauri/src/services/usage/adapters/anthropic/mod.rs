@@ -199,10 +199,11 @@ fn classify_oauth_auth_failure(_status: u16, body: &str) -> ProviderUsage {
 }
 
 fn is_oauth_scope_failure(body: &str) -> bool {
+    // Anthropic's documented scope error names `user:profile` explicitly.
+    // A bare `permission_error` type is a generic denial and must not be
+    // treated as the setup-token / missing-scope limitation.
     let lower = body.to_ascii_lowercase();
-    lower.contains("scope requirement")
-        || lower.contains("user:profile")
-        || lower.contains("permission_error")
+    lower.contains("scope requirement") && lower.contains("user:profile")
 }
 
 fn fetch_oauth_plan(
@@ -219,18 +220,18 @@ fn fetch_oauth_plan(
         return ProfilePlan::Unavailable;
     };
     let status = response.status().as_u16();
+    let body = response.text().unwrap_or_default();
     if status == 401 || status == 403 {
-        return ProfilePlan::Forbidden;
+        return if is_oauth_scope_failure(&body) {
+            ProfilePlan::Forbidden
+        } else {
+            ProfilePlan::Unavailable
+        };
     }
-    if !response.status().is_success() {
+    if !(200..300).contains(&status) {
         return ProfilePlan::Unavailable;
     }
-    match response
-        .text()
-        .ok()
-        .as_deref()
-        .and_then(parse_oauth_profile_plan)
-    {
+    match parse_oauth_profile_plan(&body) {
         Some(label) => ProfilePlan::Found(label),
         None => ProfilePlan::Unavailable,
     }
@@ -590,6 +591,62 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("login expired"));
+    }
+
+    #[test]
+    fn generic_permission_error_is_not_a_scope_failure() {
+        // A bare permission_error without the user:profile scope message must
+        // stay logged_out so active-profile retry can still run.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_thread = Arc::clone(&hits);
+        let port = spawn_loopback(2, move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            let n = hits_thread.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                assert_eq!(auth, "Bearer sk-ant-oat01-secret");
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        r#"{"type":"error","error":{"type":"permission_error","message":"Request not allowed"}}"#,
+                    )
+                    .with_status_code(403),
+                );
+            } else {
+                assert_eq!(auth, "Bearer sk-ant-oat01-profile");
+                let _ = request.respond(
+                    tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
+                );
+            }
+        });
+
+        let mut lookup = with_file(OAUTH_JSON);
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup.files.insert(
+            cfg.join("configs").join("default.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("default.json"),
+            r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
+        );
+
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(!usage
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("setup-token"));
+        assert!(matches!(
+            usage.meters.first(),
+            Some(UsageMeter::Metered { .. })
+        ));
     }
 
     #[test]
