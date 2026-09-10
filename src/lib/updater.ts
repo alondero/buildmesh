@@ -135,8 +135,17 @@ const AUTH_RES = /\bauthorization\s*[:=]\s*[^\s,)]+/gi;
 // modal). Stop at `,`, `)`, and `\n` (real error-message delimiters)
 // but allow spaces inside the match; require a non-space, non-comma,
 // non-backslash terminator so we don't capture trailing punctuation
-// the error message appended. The reviewer flagged this as a privacy
-// leak (issue #1526 follow-up).
+// the error message appended.
+//
+// Trade-off (round-2 minor 3): the match is greedy across
+// non-`,\n` characters, so trailing reason words like `failed`,
+// `error`, or `access denied` are also consumed into the `<path>`
+// replacement. A real error like "Read C:\Users\Jane Doe\…\foo.bin
+// failed" becomes "Read <path>" with no diagnostic verb. We prefer
+// the over-redaction to a leak — the modal surfaces a
+// "Retry" / "Open GitHub releases" pair that gives the user a way
+// out regardless — and the round-1 finding (path leakage) was the
+// higher-severity bug. The reviewer accepted this trade-off.
 const ABS_PATH_RES = /(?:[A-Za-z]:[\\/]|\\\\|\/(?:home|Users|var|tmp|etc)\/)(?:[^,\n]*[^\s,\n\\])/gi;
 
 export function sanitizeUpdaterError(raw: unknown): string {

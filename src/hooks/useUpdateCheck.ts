@@ -37,7 +37,11 @@ export function useUpdateCheck(): UpdateCheckApi {
 
   return {
     state,
-    enabled: enabled ?? false,
+    // Tri-state: `null` while the boot probe is in flight, `true` /
+    // `false` once resolved. The Settings > About surface renders a
+    // neutral "checking…" while null instead of briefly flashing the
+    // disabled notice (round-2 minor 1).
+    enabled,
     check: api.check,
     install: api.install,
     retry: api.retry,

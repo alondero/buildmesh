@@ -12,10 +12,11 @@ import { useUpdateCheck, type UpdatePhase } from '../../hooks/useUpdateCheck';
 //
 // State lives in `useUpdaterStore` — both this prompt and Settings >
 // About subscribe to the same store, so dismissing one surface leaves
-// the other with the same view. `restarting` is the brief "click
-// registered, awaiting the modal decision" window: we render nothing
-// here so the ExitConfirmationModal can stack on top without competing
-// for input (finding 4 follow-up).
+// the other with the same view. The ExitConfirmationModal stacks on
+// top of the ReadyPrompt via z-50 during the restart flow (round-2
+// blocking fix — we don't transition to a separate `restarting`
+// phase; "Keep Working" returns the user here with the staged
+// binary intact).
 //
 // aria-live regions name the phase so a screen reader user hears
 // progress ("Checking for updates…", "Downloading v0.3.0…", "Restart
@@ -56,8 +57,7 @@ export function UpdatePrompt() {
     state.kind === 'idle' ||
     state.kind === 'checking' ||
     state.kind === 'current' ||
-    state.kind === 'unreachable' ||
-    state.kind === 'restarting'
+    state.kind === 'unreachable'
   ) {
     return null;
   }
@@ -191,6 +191,11 @@ function ProgressPrompt({
           {isDownloading ? 'Cancel download' : 'Installing (cannot cancel)'}
         </button>
       </div>
+      {/* Round-2 minor 6 — restored the pre-review footer note. The
+          disabled "Installing (cannot cancel)" label only half-covers
+          the reassurance; the explicit "keep this window open" line
+          is what a user skimming the modal looks for. */}
+      <p className="mt-3 text-xs text-text-muted">Keep this window open until the update finishes.</p>
     </Modal>
   );
 }

@@ -1,4 +1,4 @@
-// Updater state machine — shared Zustand store (issue #1526 + #1654 review).
+// Updater state machine — shared Zustand store (issue #1526 + #1654 review rounds 1 + 2).
 //
 // The pre-review design lifted the state machine into a plain custom hook
 // (`useUpdateCheck`) and both `UpdatePrompt` (App.tsx) and
@@ -7,16 +7,20 @@
 // machine that the Settings button had been writing to; closing Settings
 // while a download was in flight dropped the progress callbacks into a
 // dead instance. The reviewer flagged this as a cross-instance desync
-// (finding 1): state must live in a singleton the two surfaces
+// (round-1 finding 1): state must live in a singleton the two surfaces
 // subscribe to.
 //
-// Other review fixes layered on top of the store:
+// Round-2 review fixes layered on top of the store:
 //   - finding 2 — `downloading` and `installing` now map to real
 //     operations (`downloadUpdate` / `installUpdate`); no settle sleep.
 //   - finding 3 — `failedAt` is narrowed to `'download' | 'install'`
 //     (the only two phases that produce a `failed` state) and a new
 //     `'enabled' | 'disabled' | null` reflects `updaterEnabled()` so
-//     the Settings button stops lying to dev-build users.
+//     the Settings button stops lying to dev-build users. `null`
+//     represents "the boot probe hasn't resolved yet" — the hook
+//     surfaces this tri-state so the Settings UI can render a
+//     neutral "checking…" surface instead of flickering to disabled
+//     (round-2 minor 1).
 //   - finding 4 — restart delegates to `useExitPromptStore.requestExit`
 //     so the policy lives in one place.
 //   - finding 5 — `cancelInstall()` increments the seq guard and
@@ -24,7 +28,18 @@
 //     gets a real escape hatch (with the seq guard making the in-flight
 //     download's progress callbacks inert).
 //   - finding 7 — the Settings button's `disabled` set includes
-//     `'downloading'` and `'installing'` (consumer side).
+//     `'downloading'` and `'installing'` (consumer side). Round-2
+//     minor 4 adds `ready_to_restart` so a mid-restart Check click
+//     can't orphan the staged binary.
+//   - round-2 blocking — the previous `restart()` flow transitioned
+//     to a `restarting` phase before awaiting `requestExit`. If the
+//     user then clicked "Keep Working" on the modal, both surfaces
+//     stranded in `restarting` with no Restart affordance anywhere.
+//     The fix: stay in `ready_to_restart` throughout the modal flow
+//     and let the modal's z-50 stack on top of the ReadyPrompt. A
+//     Keep Working click lands the user back on the prompt surface
+//     with the staged binary intact. Idempotency guard against
+//     re-entry while the modal is already up.
 
 import { create } from 'zustand';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -49,20 +64,15 @@ export type UpdatePhase =
   | { kind: 'downloading'; update: Update; summary: UpdateSummary; progress: DownloadProgress }
   | { kind: 'installing'; update: Update; summary: UpdateSummary }
   | { kind: 'ready_to_restart'; update: Update; summary: UpdateSummary }
-  // `restarting` is the brief "click registered, awaiting the modal
-  // decision" window. The UpdatePrompt renders nothing here so the
-  // ExitConfirmationModal can stack on top without competing for input
-  // (finding 4 follow-up).
-  | { kind: 'restarting'; update: Update; summary: UpdateSummary }
   | { kind: 'failed'; failedAt: 'download' | 'install'; update: Update | null; summary: UpdateSummary | null; error: string };
 
 export interface UpdateCheckApi {
   state: UpdatePhase;
-  /** Whether the updater is enabled in this build (false in dev profile,
-   *  non-Tauri page loads, and non-production builds). Computed once on
-   *  mount; the Settings > About button uses this to decide whether to
-   *  render at all (issue #1654 finding 3). */
-  enabled: boolean;
+  /** Tri-state updater-enabled flag. `null` until the boot probe
+   *  resolves — the Settings > About surface renders a neutral
+   *  "checking…" while null instead of briefly flashing the disabled
+   *  notice (round-2 minor 1). */
+  enabled: boolean | null;
   check: () => Promise<void>;
   install: () => Promise<void>;
   retry: () => Promise<void>;
@@ -110,9 +120,10 @@ function applyManualCheck(_prev: UpdatePhase, result: CheckResult): UpdatePhase 
 interface UpdaterState {
   phase: UpdatePhase;
   /** `null` until the boot-time `updaterEnabled()` probe resolves. The
-   *  Settings > About button waits for this so it can either render the
-   *  check button (true) or the disabled notice (false), instead of
-   *  briefly showing the button and then flickering to "disabled". */
+   *  Settings > About button waits for this so it can either render
+   *  the check button (true), the disabled notice (false), or a
+   *  neutral "checking…" surface (null) — never a false-disabled
+   *  flicker before the probe resolves (round-2 minor 1). */
   enabled: boolean | null;
   /** Monotonic version sequence. Stale callbacks (download progress,
    *  check results) compare against this and bail if their captured
@@ -134,6 +145,14 @@ interface UpdaterState {
   restart: () => Promise<void>;
   cancelInstall: () => void;
   dismiss: () => void;
+}
+
+/** Setter-side guard for `check()`: phase transitions a manual check
+ *  is allowed FROM (round-2 minor 5 — setter-side invariants per the
+ *  project's hard rules). Blocks from any in-flight or staged phase
+ *  so a stray Check click can't orphan work. */
+function checkAllowedFrom(kind: UpdatePhase['kind']): boolean {
+  return kind === 'idle' || kind === 'current' || kind === 'unreachable' || kind === 'available' || kind === 'failed';
 }
 
 export const useUpdaterStore = create<UpdaterState>((set, get) => {
@@ -202,8 +221,15 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => {
     },
 
     check: async () => {
-      // Bump seq so any in-flight quiet check's result bails instead of
-      // overwriting the manual result with a stale `available` / `idle`.
+      // Setter-side guard (round-2 minor 5). The Settings button also
+      // gates on this, but the guard here makes the class impossible
+      // rather than merely unclickable. Bumping seq on a guarded-out
+      // check would still orphan staged work — bail before the bump.
+      const current = get().phase;
+      if (!checkAllowedFrom(current.kind)) return;
+      // Bump seq so any in-flight quiet check's result bails instead
+      // of overwriting the manual result with a stale `available` /
+      // `idle`.
       const startSeq = get().seq + 1;
       set({ seq: startSeq, phase: { kind: 'checking', manual: true } });
       const result = await runUpdateCheck();
@@ -230,26 +256,31 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => {
     restart: async () => {
       const current = get().phase;
       if (current.kind !== 'ready_to_restart') return;
-      // Gate relaunch on the shared Exit Readiness policy (#1501 / #1526).
-      // The store owns no second policy: it just delegates to the exit
-      // prompt store, which encapsulates the active-nodes / providers /
-      // partition lookup (finding 4). The decision is a single boolean
-      // (`prompted`) — `true` means the modal is up and will dispatch
-      // `relaunch` on confirm; `false` means the policy says relaunch
-      // directly. Either way the update phase advances out of
-      // `ready_to_restart` so the UpdatePrompt can yield input focus
-      // to the modal.
-      set({ phase: { kind: 'restarting', update: current.update, summary: current.summary } });
+      // Idempotency guard: a Restart click while the modal is already
+      // up for this restart is a no-op (the prior click is being
+      // handled — the modal's confirm will dispatch relaunch).
+      if (useExitPromptStore.getState().pending?.mode === 'update-restart') return;
+      // Round-2 blocking fix — STAY in `ready_to_restart` throughout
+      // the modal flow. The pre-review design transitioned to a
+      // `restarting` phase before awaiting `requestExit`, which
+      // stranded the user with no Restart affordance after a
+      // "Keep Working" click. Now the modal's z-50 stacking puts
+      // it on top of the ReadyPrompt, and a Keep Working click
+      // cleanly returns the user to the prompt surface with the
+      // staged binary intact.
       const prompted = await useExitPromptStore.getState().requestExit('update-restart');
+      // The user may have dismissed or otherwise transitioned out of
+      // `ready_to_restart` during the await (e.g. clicked "Later"
+      // underneath the modal). Bail rather than re-firing relaunch
+      // — the dismiss already cleared the staged binary from view.
+      if (get().phase.kind !== 'ready_to_restart') return;
       if (!prompted) {
         try {
           await relaunch();
         } catch (e) {
-          // Relaunch failed — fall back to `ready_to_restart` so the
-          // user can retry from the prompt surface rather than being
-          // stuck in `restarting`.
+          // Relaunch failed — stay in `ready_to_restart` so the user
+          // can retry from the prompt surface rather than being stuck.
           console.error('[updater] direct relaunch failed:', e);
-          set({ phase: { kind: 'ready_to_restart', update: current.update, summary: current.summary } });
         }
       }
     },

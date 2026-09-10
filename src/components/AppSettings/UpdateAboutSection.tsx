@@ -49,7 +49,20 @@ export function UpdateAboutSection() {
         <span data-testid="settings-about-version">{appVersion ?? '…'}</span>
       </div>
       <div className="flex items-center gap-3">
-        {enabled ? (
+        {/* Round-2 minor 1 — render a neutral "checking…" while the
+            boot probe is in flight so the user doesn't briefly see
+            "Update checks are disabled in this build" on every
+            Settings open (the pre-fix behavior was to collapse the
+            tri-state to false at the hook boundary, then surface a
+            false-disabled flicker). */}
+        {enabled === null ? (
+          <p
+            className="text-sm text-text-muted"
+            data-testid="settings-about-loading"
+          >
+            Checking update support…
+          </p>
+        ) : enabled ? (
           <CheckButton state={state} onCheck={() => void check()} />
         ) : (
           <p
@@ -72,15 +85,20 @@ export function UpdateAboutSection() {
   );
 }
 
-// Disabled while checking / downloading / installing — a click during
-// any of those phases would bump the seq guard and orphan the
-// in-flight progress callbacks (finding 7).
+// Disabled while checking / downloading / installing / ready_to_restart
+// — a click during any of those phases would bump the seq guard and
+// orphan in-flight or staged work (finding 7, round-2 minor 4).
 function CheckButton({ state, onCheck }: { state: UpdatePhase; onCheck: () => void }) {
-  const busy = state.kind === 'checking' || state.kind === 'downloading' || state.kind === 'installing';
+  const busy =
+    state.kind === 'checking' ||
+    state.kind === 'downloading' ||
+    state.kind === 'installing' ||
+    state.kind === 'ready_to_restart';
   const label: string =
     state.kind === 'checking' ? 'Checking…'
     : state.kind === 'downloading' ? 'Downloading…'
     : state.kind === 'installing' ? 'Installing…'
+    : state.kind === 'ready_to_restart' ? 'Restart ready'
     : 'Check for updates';
   return (
     <button
@@ -131,10 +149,6 @@ function UpdateStatusLine({ state }: { state: UpdatePhase }) {
       break;
     case 'ready_to_restart':
       label = `Buildmesh ${state.summary.version} is ready to install.`;
-      break;
-    case 'restarting':
-      label = `Restarting to apply v${state.summary.version}…`;
-      ariaLive = 'polite';
       break;
     case 'failed':
       label = `Update failed (${state.failedAt}): ${state.error}`;

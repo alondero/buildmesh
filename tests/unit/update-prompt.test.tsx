@@ -4,11 +4,12 @@
  * Phase-aware rendering — the modal only appears for `available` /
  * `downloading` / `installing` / `ready_to_restart` / `failed` and
  * exposes different actions for each. Quiet check phases (`idle`,
- * `checking`, `current`, `unreachable`, `restarting`) render nothing —
- * those are the Settings > About section's concern, except
- * `restarting` which is the brief "click registered, awaiting the
- * modal decision" window so the ExitConfirmationModal can stack
- * cleanly (review finding 4 follow-up).
+ * `checking`, `current`, `unreachable`) render nothing — those are
+ * the Settings > About section's concern. The ExitConfirmationModal
+ * stacks on top of the ReadyPrompt via z-50 during the restart flow
+ * (round-2 blocking fix — no separate `restarting` phase; a "Keep
+ * Working" returns the user to the prompt with the staged binary
+ * intact).
  *
  * The hook's pure state machine is covered by `updater.test.ts` (lib)
  * and `useUpdateCheck.test.tsx` (store); this file exercises the
