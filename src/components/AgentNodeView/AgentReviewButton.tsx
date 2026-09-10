@@ -7,6 +7,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { cancelCircuitRun, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
+import { groupByHarness } from '../../lib/groups';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { Modal } from '../shared/Modal';
@@ -20,10 +21,18 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   const [circuits, setCircuits] = useState<AutopilotCircuit[]>([]);
   const [circuitId, setCircuitId] = useState<number | null>(null);
   const [reviewerProvider, setReviewerProvider] = useState('');
-  const reviewerProviders = useMemo(
-    () => providerList.filter(provider => provider.harness_id !== 'terminal'),
+  // Same bucketing the Spawn Menu renders (ADR-0016): harness headers with
+  // their Proxied children nested, which keeps composite `harness:provider`
+  // rows unambiguous. Terminal is not an agent, so it is filtered out before
+  // bucketing — the backend enforces the same invariant.
+  const reviewerGroups = useMemo(
+    () => groupByHarness(providerList, { filter: provider => provider.harness_id !== 'terminal' }),
     [providerList],
   );
+  // The reviewer inherits the source Mesh's model and effort, so a pick from a
+  // different harness family can be handed a model that harness rejects (#1690).
+  const sourceHarness = node.provider.split(':')[0];
+  const crossHarness = reviewerProvider !== '' && reviewerProvider.split(':')[0] !== sourceHarness;
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[node.id]);
   const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
     ? ownership
@@ -86,7 +95,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
       aria-label="Start review or circuit"
       title="Start review or circuit"
       disabled={!activeOwnership && !eligible}
-      onClick={() => setOpen(true)}
+      onClick={() => { setReviewerProvider(''); setOpen(true); }}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
     ><CircuitsIcon className="h-4 w-4" /></button>
     {open && createPortal(
@@ -114,21 +123,29 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
         </label>
         {circuitId === null ? <>
         <label className="text-xs block mb-4">Reviewer provider
-          <select value={reviewerProvider} aria-label="Reviewer provider"
+          <select value={reviewerProvider}
             onChange={e => setReviewerProvider(e.target.value)}
             className="block w-full mt-1 bg-surface-raised border border-border-subtle rounded-md px-2 py-1">
             <option value="">Default (app Reviewer provider or this agent)</option>
-            {reviewerProviders.map(provider => (
-              <option key={provider.id} value={provider.id}>{provider.label}</option>
+            {reviewerGroups.map(([groupKey, rows]) => (
+              <optgroup key={groupKey} label={rows.find(row => !row.is_proxied)?.label ?? groupKey}>
+                {rows.map(provider => (
+                  <option key={provider.id} value={provider.id}>{provider.label}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </label>
+        {crossHarness && <p role="alert" className="text-xs text-status-warning mb-4">
+          Reviewer model and effort are inherited from this Mesh, so a provider from a different
+          harness may reject them. See issue #1690.
+        </p>}
         <p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
           The reviewer uses the app-wide Reviewer provider when configured, otherwise this
           agent's provider — pick a provider above to override it for this review.
-          Reviewer model and effort still follow the Mesh/harness configuration.
+          Reviewer model and effort follow the Mesh configuration, unchanged by this pick.
           You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">

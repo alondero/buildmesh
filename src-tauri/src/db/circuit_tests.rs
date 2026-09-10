@@ -185,7 +185,11 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
     let run_id = create_node_circuit_run(source.id, None, 3, Some("codex".into())).unwrap();
+    // First writer wins: a retry passing no pick, or a different one, gets the
+    // existing run back untouched — neither the provider nor the round limit
+    // from the later calls is applied.
     assert_eq!(create_node_circuit_run(source.id, None, 3, None).unwrap(), run_id);
+    assert_eq!(create_node_circuit_run(source.id, None, 5, Some("anthropic".into())).unwrap(), run_id);
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
     let preset_count: i64 = write_conn().query_row(
         "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
@@ -197,7 +201,8 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
-    assert_eq!(ctx.get("review.provider"), Some("codex"), "the picked reviewer harness overrides the app-wide default");
+    assert_eq!(ctx.get("review.provider"), Some("codex"), "the first picked reviewer provider survives the dedup re-creates");
+    assert_eq!(ctx.get("retry.max_retries"), Some("3"), "and so does the first round limit");
     assert!(list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
     commit_circuit_advance(run_id, Some("running"), None, &[CircuitStepOp {
         node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
@@ -234,13 +239,53 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     assert_eq!(get_circuit_run(run).unwrap().unwrap().circuit_id, manual.id);
     cancel_circuit_run(run).unwrap();
     // An authored Circuit carries its reviewer provider in its graph, so the
-    // title-bar override must not leak into the run context.
+    // title-bar override must not leak into the run context. Assert the exact
+    // preserved value (not merely "not codex"): with the override the context
+    // must equal the same no-override run's context, so "ignored" is
+    // distinguishable from "clobbered with an empty string".
+    let expected_reviewer = crate::preferences::reviewer_provider().unwrap_or_default();
+    let run_context = crate::autopilot::circuit::context::CircuitContext::from_json(
+        &get_circuit_run(run).unwrap().unwrap().context_json,
+    ).unwrap();
     let rerun = create_node_circuit_run(source.id, Some(manual.id), 3, Some("codex".into())).unwrap();
-    assert_ne!(rerun, run);
     let rerun_context = crate::autopilot::circuit::context::CircuitContext::from_json(
         &get_circuit_run(rerun).unwrap().unwrap().context_json,
     ).unwrap();
-    assert_ne!(rerun_context.get("review.provider"), Some("codex"));
+    assert!(rerun != run, "the cancelled run was replaced");
+    assert_eq!(run_context.get("review.provider"), Some(expected_reviewer.as_str()));
+    assert_eq!(
+        rerun_context.get("review.provider"),
+        Some(expected_reviewer.as_str()),
+        "the authored-Circuit override is ignored, not applied",
+    );
+}
+
+#[test]
+fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
+    init_temp_db("node-review-provider-validation");
+    let mesh = create_mesh("node-review-validation-mesh", "/tmp/node-review-validation").unwrap();
+    let source = create_agent_node(mesh.id, "Validated", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
+    // The picker filters Terminal, but the backend holds its own invariant: the
+    // spawn cascade treats any non-empty string as the preset winner, so an
+    // unchecked invoke would otherwise spawn the "reviewer" on a plain shell.
+    // Bare, padded, and composite (the harness segment decides) all reject.
+    for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
+        let err = create_node_circuit_run(source.id, None, 3, Some(picked.into())).unwrap_err();
+        assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
+    }
+    // A blank pick is not an error — it means "inherit", so the run keeps the
+    // app-wide Reviewer provider snapshot it would have had anyway.
+    let run = create_node_circuit_run(source.id, None, 3, Some("   ".into())).unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+        &get_circuit_run(run).unwrap().unwrap().context_json,
+    ).unwrap();
+    assert_eq!(
+        ctx.get("review.provider"),
+        Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
+        "a blank pick collapses to the app-wide snapshot",
+    );
 }
 
 // ---------------------------------------------------------------------------

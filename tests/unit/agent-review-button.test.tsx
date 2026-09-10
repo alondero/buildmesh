@@ -26,8 +26,20 @@ function spawnOption(id: string, label: string): SpawnOption {
   };
 }
 
+/** A Proxied child of `harness` — composite id, clusters under the harness. */
+function proxiedOption(id: string, label: string, harness: string): SpawnOption {
+  return {
+    ...spawnOption(id, label),
+    harness_id: harness,
+    provider_id: id.split(':')[1],
+    is_proxied: true,
+    group_key: harness,
+  };
+}
+
 const PROVIDERS: SpawnOption[] = [
-  spawnOption('anthropic', 'Anthropic'),
+  spawnOption('claude', 'Claude Code'),
+  proxiedOption('claude:minimax', 'MiniMax', 'claude'),
   spawnOption('codex', 'Codex'),
   spawnOption('terminal', 'Terminal'),
 ];
@@ -58,7 +70,7 @@ describe('agent workflow title-bar control', () => {
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
   });
 
-  it('parameterises the reviewer harness for the review loop', async () => {
+  it('parameterises the reviewer provider for the review loop', async () => {
     renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
@@ -67,6 +79,45 @@ describe('agent workflow title-bar control', () => {
     fireEvent.change(select, { target: { value: 'codex' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
+  });
+
+  it('groups providers by harness and nests proxied rows', async () => {
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
+    // Same bucketing as the Spawn Menu: one group per harness, Terminal gone.
+    expect(Array.from(select.querySelectorAll('optgroup')).map(group => group.getAttribute('label')))
+      .toEqual(['Claude Code', 'Codex']);
+    const claude = select.querySelector('optgroup[label="Claude Code"]')!;
+    expect(Array.from(claude.querySelectorAll('option')).map(option => option.textContent))
+      .toEqual(['Claude Code', 'MiniMax']);
+    // The composite id is what reaches the backend, so it must be selectable.
+    fireEvent.change(select, { target: { value: 'claude:minimax' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'claude:minimax'));
+  });
+
+  it('warns only when the pick crosses harness families', () => {
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const select = screen.getByLabelText('Reviewer provider');
+    expect(screen.queryByText(/#1690/)).toBeNull();
+    // Codex on a claude source agent inherits a claude-shaped model (#1690).
+    fireEvent.change(select, { target: { value: 'codex' } });
+    expect(screen.getByText(/#1690/)).toBeTruthy();
+    // A Proxied child of the same harness keeps the inheritance valid.
+    fireEvent.change(select, { target: { value: 'claude:minimax' } });
+    expect(screen.queryByText(/#1690/)).toBeNull();
+  });
+
+  it('resets the reviewer provider when the dialog is reopened', () => {
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    fireEvent.change(screen.getByLabelText('Reviewer provider'), { target: { value: 'codex' } });
+    expect((screen.getByLabelText('Reviewer provider') as HTMLSelectElement).value).toBe('codex');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    expect((screen.getByLabelText('Reviewer provider') as HTMLSelectElement).value).toBe('');
   });
 
   it('offers saved manual Circuits and passes the selected id', async () => {
@@ -79,6 +130,10 @@ describe('agent workflow title-bar control', () => {
     await screen.findByRole('option', { name: 'My workflow' });
     expect(screen.queryByRole('option', { name: 'Interval only' })).toBeNull();
     fireEvent.change(screen.getByLabelText('Workflow'), { target: { value: '3' } });
+    // An authored Circuit carries its reviewer provider in its graph, so the
+    // picker is not offered — the flag below only proves the value sent is null,
+    // not that the control is hidden.
+    expect(screen.queryByLabelText('Reviewer provider')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null));
   });
