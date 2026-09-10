@@ -17,9 +17,9 @@ before review begins.
 
 The reviewer uses the provider picked in the Start Review dialog when one is
 chosen, otherwise the configured Reviewer provider, otherwise the source
-agent's provider. Model and effort are inherited from the Mesh regardless of
-the pick, so a pick from a different harness family is not reconciled with them
-— the dialog warns, and issue #1690 tracks the fix.
+agent's provider. Model and effort come from the selected reviewer's
+harness-specific Mesh overrides, then application defaults. Legacy source
+snapshots and shared preset graphs do not override that configuration.
 It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
@@ -49,9 +49,7 @@ By default, reviewers inherit the reviewed agent's harness. The app-wide
 adversarial review; it is snapshotted into each run, so changing Settings does
 not alter a queued review. The Start Review dialog's **Reviewer provider**
 picker overrides the app-wide setting for that one run only; it lists the same
-harness-grouped Spawn Options as the Spawn Menu, minus Terminal, and a pick from
-a different harness than the source agent warns about the inherited model and
-effort (#1690). The built-in
+harness-grouped Spawn Options as the Spawn Menu, minus Terminal. The built-in
 review preset is shared per Mesh, so
 it never stores a provider-specific default from the first agent that used it.
 Explicit reviewer settings in an authored Circuit take precedence; configure

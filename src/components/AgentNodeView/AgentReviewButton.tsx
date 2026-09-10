@@ -29,10 +29,6 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
     () => groupByHarness(providerList, { filter: provider => provider.harness_id !== 'terminal' }),
     [providerList],
   );
-  // The reviewer inherits the source Mesh's model and effort, so a pick from a
-  // different harness family can be handed a model that harness rejects (#1690).
-  const sourceHarness = node.provider.split(':')[0];
-  const crossHarness = reviewerProvider !== '' && reviewerProvider.split(':')[0] !== sourceHarness;
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[node.id]);
   const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
     ? ownership
@@ -136,16 +132,12 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
             ))}
           </select>
         </label>
-        {crossHarness && <p role="alert" className="text-xs text-status-warning mb-4">
-          Reviewer model and effort are inherited from this Mesh, so a provider from a different
-          harness may reject them. See issue #1690.
-        </p>}
         <p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
           The reviewer uses the app-wide Reviewer provider when configured, otherwise this
-          agent's provider — pick a provider above to override it for this review.
-          Reviewer model and effort follow the Mesh configuration, unchanged by this pick.
+          agent's provider — pick a provider above to override it for this review. Model and
+          effort come from the picked provider's own harness configuration.
           You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">

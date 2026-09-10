@@ -12,6 +12,7 @@ use tauri::AppHandle;
 use crate::models::EnvType;
 
 struct ActiveWatcher {
+    session_id: String,
     /// Keeps notify's backend and callback alive for this node.
     _watcher: RecommendedWatcher,
     /// Coordinates activation and teardown without polling from the worker.
@@ -34,10 +35,10 @@ struct ActivationGuard {
 }
 
 impl ActivationGuard {
-    fn new(node_id: i64) -> Self {
+    fn new(node_id: i64, resume: bool) -> Self {
         Self {
             node_id,
-            armed: true,
+            armed: resume,
         }
     }
 
@@ -147,13 +148,14 @@ pub struct TurnTracker {
 struct TranscriptTail {
     offset: u64,
     tracker: TurnTracker,
+    pending_transition: Option<TerminalTransition>,
 }
 
 impl TranscriptTail {
     fn from_offset(offset: u64) -> Self {
         Self {
             offset,
-            tracker: TurnTracker::default(),
+            ..Default::default()
         }
     }
     fn read_transitions(&mut self, path: &Path) -> Result<Vec<TerminalTransition>, String> {
@@ -165,13 +167,13 @@ impl TranscriptTail {
         if file_len < self.offset {
             self.offset = 0;
             self.tracker = TurnTracker::default();
+            self.pending_transition = None;
         }
 
         let mut reader = BufReader::new(file);
         reader
             .seek(SeekFrom::Start(self.offset))
             .map_err(|e| format!("seek {}: {e}", path.display()))?;
-        let mut transitions = Vec::new();
         loop {
             let mut line = String::new();
             let bytes = reader
@@ -181,14 +183,25 @@ impl TranscriptTail {
                 break;
             }
             if !line.ends_with('\n') {
-                break;
+                // The suffix could start a new turn. Keep the candidate
+                // pending until we can inspect the complete record.
+                return Ok(vec![]);
             }
             self.offset += bytes as u64;
             if let Some(transition) = self.tracker.observe_transcript_line(&line) {
-                transitions.push(transition);
+                self.pending_transition = Some(transition);
             }
         }
-        Ok(transitions)
+        // A late observer can read several turns at once. Only the current
+        // terminal state may be published; earlier completions must not mark
+        // a newer user/tool turn ready.
+        if self.tracker.pending_tool_calls || self.tracker.deferred_assistant_response
+            || !matches!(self.tracker.state, Some(TranscriptActivity::TurnCompleted
+                | TranscriptActivity::AwaitingInput | TranscriptActivity::AssistantResponse))
+        {
+            self.pending_transition = None;
+        }
+        Ok(self.pending_transition.take().into_iter().collect())
     }
 }
 
@@ -201,6 +214,11 @@ pub fn start_for_session(
     env_type: EnvType,
     app: &AppHandle,
 ) -> Result<(), String> {
+    if WATCHERS.lock().map_err(|_| "Command Code watcher registry lock poisoned".to_string())?
+        .get(&node_id).is_some_and(|watcher| watcher.session_id == session_id)
+    {
+        return Ok(());
+    }
     let sessions_dir =
         crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, spawn_path)
             .ok_or_else(|| format!("no Command Code sessions directory for {env_type:?}"))?;
@@ -254,7 +272,9 @@ fn start(
     app: &AppHandle,
     initial_offset: Option<u64>,
 ) -> Result<(), String> {
-    let mut activation_guard = ActivationGuard::new(node_id);
+    // Fresh discovery runs after spawn activation. A transient file/watch
+    // failure must not erase that milestone and strand the next retry.
+    let mut activation_guard = ActivationGuard::new(node_id, initial_offset.is_some());
     if !transcript_path.is_file() {
         return Err(format!(
             "Command Code transcript does not exist: {}",
@@ -288,30 +308,16 @@ fn start(
         .watch(&transcript_path, RecursiveMode::NonRecursive)
         .map_err(|e| format!("watch {}: {e}", transcript_path.display()))?;
 
-    // Lock ordering matches `activate`/`stop`, so an activation that races
-    // fresh-session discovery is either remembered before we insert or opens
-    // this exact gate afterwards — never lost between the two maps.
-    let activated_nodes = ACTIVATED_NODES
-        .lock()
-        .map_err(|_| "Command Code activation registry lock poisoned".to_string())?;
-    let signal = Arc::new(WorkerSignal::new(activated_nodes.contains(&node_id)));
-    WATCHERS
-        .lock()
-        .map_err(|_| "Command Code watcher registry lock poisoned".to_string())?
-        .insert(
-            node_id,
-            ActiveWatcher {
-                _watcher: watcher,
-                signal: signal.clone(),
-            },
-        );
-    drop(activated_nodes);
+    let Some(signal) = register_watcher(node_id, session_id, watcher, initial_offset.is_some())? else {
+        activation_guard.disarm();
+        return Ok(());
+    };
 
     // Close the registration/reader-exit race: if the reader died between
     // the first liveness check and map insertion, cancel this exact watcher
     // before its worker can replay the terminal transcript.
     if initial_offset.is_none() && !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-        stop_if_current(node_id, &signal);
+        stop_if_current(node_id, &signal, false);
         return Err(format!("Command Code node {node_id} is no longer running"));
     }
 
@@ -362,11 +368,41 @@ fn start(
             }
         })
     {
-        stop_if_current(node_id, &signal);
+        stop_if_current(node_id, &signal, initial_offset.is_none());
         return Err(format!("start Command Code watcher worker: {error}"));
     }
     activation_guard.disarm();
     Ok(())
+}
+
+/// Lock order matches activate/stop: activation before insertion is remembered,
+/// and activation after insertion wakes this exact worker.
+fn register_watcher(
+    node_id: i64,
+    session_id: &str,
+    watcher: RecommendedWatcher,
+    resume: bool,
+) -> Result<Option<Arc<WorkerSignal>>, String> {
+    let activated_nodes = ACTIVATED_NODES.lock()
+        .map_err(|_| "Command Code activation registry lock poisoned".to_string())?;
+    let mut watchers = WATCHERS.lock()
+        .map_err(|_| "Command Code watcher registry lock poisoned".to_string())?;
+    if !resume {
+        if let Some(existing) = watchers.get(&node_id) {
+            return if existing.session_id == session_id {
+                Ok(None)
+            } else {
+                Err(format!("Command Code node {node_id} already observes a different session"))
+            };
+        }
+    }
+    let signal = Arc::new(WorkerSignal::new(activated_nodes.contains(&node_id)));
+    if let Some(previous) = watchers.insert(node_id, ActiveWatcher {
+        session_id: session_id.to_string(), _watcher: watcher, signal: signal.clone(),
+    }) {
+        previous.signal.cancel();
+    }
+    Ok(Some(signal))
 }
 
 /// Stop a node's watcher. Dropping the watcher closes its sender, so the
@@ -402,14 +438,16 @@ pub fn activate(node_id: i64) {
     }
 }
 
-fn stop_if_current(node_id: i64, signal: &Arc<WorkerSignal>) {
+fn stop_if_current(node_id: i64, signal: &Arc<WorkerSignal>, preserve_activation: bool) {
     if let Ok(mut activated_nodes) = ACTIVATED_NODES.lock() {
         if let Ok(mut watchers) = WATCHERS.lock() {
             let is_current = watchers
                 .get(&node_id)
                 .is_some_and(|watcher| Arc::ptr_eq(&watcher.signal, signal));
             if is_current {
-                activated_nodes.remove(&node_id);
+                if !preserve_activation {
+                    activated_nodes.remove(&node_id);
+                }
                 if let Some(watcher) = watchers.remove(&node_id) {
                     watcher.signal.cancel();
                 }
@@ -573,13 +611,18 @@ fn transcript_activity(line: &str) -> Option<TranscriptActivityInfo> {
         }),
         "message" => {
             let message = value.get("message")?;
+            // Native v3 records persist the complete model response at
+            // onCommit, with a stable messageId. The record id is a ledger
+            // entry id, not the streaming message id used by legacy records.
+            let committed = message.pointer("/meta/source").and_then(|v| v.as_str()) == Some("model")
+                && message.pointer("/meta/messageId").and_then(|v| v.as_str()).is_some_and(|id| !id.is_empty());
             Some(TranscriptActivityInfo {
                 activity: message_activity(message)?,
-                message_id: value
+                message_id: (!committed).then(|| value
                     .get("id")
                     .or_else(|| message.get("id"))
                     .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
+                    .map(str::to_string)).flatten(),
             })
         }
         _ => None,
@@ -607,6 +650,79 @@ fn message_activity(message: &serde_json::Value) -> Option<TranscriptActivity> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn watcher_registration_is_idempotent_and_old_teardown_cannot_stop_replacement() {
+        let id = 9_860_002;
+        let watcher = || RecommendedWatcher::new(|_| {}, Config::default()).unwrap();
+        activate(id);
+        let first = register_watcher(id, "session", watcher(), false).unwrap().unwrap();
+        assert!(first.state.lock().unwrap().activated);
+        assert!(register_watcher(id, "session", watcher(), false).unwrap().is_none());
+        assert!(first.is_active());
+        assert!(register_watcher(id, "different", watcher(), false).is_err());
+        assert!(first.is_active());
+        let replacement = register_watcher(id, "session", watcher(), true).unwrap().unwrap();
+        assert!(!first.is_active());
+        stop_if_current(id, &first, false);
+        assert!(replacement.is_active());
+        assert!(Arc::ptr_eq(&WATCHERS.lock().unwrap().get(&id).unwrap().signal, &replacement));
+        stop(id);
+        assert!(!replacement.is_active());
+        assert!(!WATCHERS.lock().unwrap().contains_key(&id));
+        assert!(!ACTIVATED_NODES.lock().unwrap().contains(&id));
+    }
+
+    #[test]
+    fn failed_fresh_watcher_setup_preserves_activation_for_retry() {
+        let id = 9_860_003;
+        activate(id);
+        drop(ActivationGuard::new(id, false));
+        assert!(ACTIVATED_NODES.lock().unwrap().contains(&id));
+        let watcher = RecommendedWatcher::new(|_| {}, Config::default()).unwrap();
+        let signal = register_watcher(id, "session", watcher, false).unwrap().unwrap();
+        assert!(signal.state.lock().unwrap().activated);
+        // Worker-thread creation can fail after registry insertion too.
+        stop_if_current(id, &signal, true);
+        assert!(!signal.is_active());
+        assert!(!WATCHERS.lock().unwrap().contains_key(&id));
+        assert!(ACTIVATED_NODES.lock().unwrap().contains(&id));
+        stop(id);
+        activate(id);
+        drop(ActivationGuard::new(id, true));
+        assert!(!ACTIVATED_NODES.lock().unwrap().contains(&id));
+    }
+
+    #[test]
+    fn commandcode_native_committed_response_completes_without_synthetic_envelope() {
+        let mut tracker = TurnTracker::default();
+        assert_eq!(tracker.observe_transcript_line(r#"{"type":"message","id":"tool-message","message":{"role":"assistant","content":[{"type":"text","text":"Checking."},{"type":"tool_use","id":"call","name":"shell_command"}],"meta":{"source":"model","messageId":"model-tool"}}}"#), None);
+        assert_eq!(tracker.observe_transcript_line(r#"{"type":"message","id":"result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"passed"}],"meta":{"source":"tool","messageId":"tool-result"}}}"#), None);
+        assert_eq!(tracker.observe_transcript_line(r#"{"type":"message","id":"final","message":{"role":"assistant","content":[{"type":"text","text":"Done. Tests passed."}],"meta":{"source":"model","createdAt":1789047857877,"messageId":"model-final"}}}"#), Some(TerminalTransition::TurnCompleted));
+    }
+
+    #[test]
+    fn commandcode_late_watcher_does_not_publish_a_previous_turn_during_new_work() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{\"type\":\"turn_complete\"}\n{\"type\":\"user_turn\"}\n{\"type\":\"tool_use\"}\n").unwrap();
+        let mut tail = TranscriptTail::default();
+        assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn commandcode_partial_suffix_defers_completion_until_current_state_is_known() {
+        for suffix in ["user_turn", "metadata"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), "{\"type\":\"turn_complete\"}\n{\"type\":\"").unwrap();
+            let mut tail = TranscriptTail::default();
+            assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
+            std::fs::OpenOptions::new().append(true).open(file.path()).unwrap()
+                .write_all(format!("{suffix}\"}}\n").as_bytes()).unwrap();
+            let expected = if suffix == "user_turn" { vec![] } else { vec![TerminalTransition::TurnCompleted] };
+            assert_eq!(tail.read_transitions(file.path()).unwrap(), expected);
+            assert_eq!(tail.read_transitions(file.path()).unwrap(), vec![]);
+        }
+    }
 
     #[test]
     fn transcript_tool_turn_completes_only_after_the_final_assistant_message() {

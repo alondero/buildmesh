@@ -97,17 +97,19 @@ describe('agent workflow title-bar control', () => {
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'claude:minimax'));
   });
 
-  it('warns only when the pick crosses harness families', () => {
-    renderButton();
+  it('sends a cross-harness pick without warning about the model', async () => {
+    // #1690: a cross-harness pick resolves model and effort from the picked
+    // harness's own configuration, so it must not be presented as risky, and
+    // the source agent's harness must not gate the choice.
+    renderButton({ ...node, provider: 'claude' });
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const select = screen.getByLabelText('Reviewer provider');
-    expect(screen.queryByText(/#1690/)).toBeNull();
-    // Codex on a claude source agent inherits a claude-shaped model (#1690).
+    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
+    expect(Array.from(select.querySelectorAll('option')).map(option => option.textContent))
+      .toContain('Codex');
     fireEvent.change(select, { target: { value: 'codex' } });
-    expect(screen.getByText(/#1690/)).toBeTruthy();
-    // A Proxied child of the same harness keeps the inheritance valid.
-    fireEvent.change(select, { target: { value: 'claude:minimax' } });
     expect(screen.queryByText(/#1690/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
   it('resets the reviewer provider when the dialog is reopened', () => {
