@@ -57,6 +57,47 @@ sources. Fingerprints keep tokens, keys, account identifiers, and credential
 paths out of cache keys and logs. A repeated identity keeps the existing TTL
 hit; changing account or auth source starts a distinct entry.
 
+**Claude Code authentication source.** The Anthropic meter follows Claude's
+documented credential precedence rather than always reading
+`~/.claude/.credentials.json`. Cloud flags (`CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) from the process
+environment or the user `settings.json` `env` block report
+`managed_externally` for AWS Bedrock, Google Vertex AI, or Microsoft Foundry
+and must not present a dormant OAuth login as active. Environment API keys,
+bearer tokens, and `apiKeyHelper` outrank stored OAuth. `CLAUDE_CODE_OAUTH_TOKEN`
+uses that token for the request and derives plan from usage-body plan fields or
+the token's own `/api/oauth/profile`, never from a dormant local login.
+**Exception — `claude setup-token`:** those tokens are model-request-only
+(`user:inference`) and commonly lack `user:profile`. Anthropic's `/usage` and
+`/profile` endpoints then return a scope/`permission_error` rather than a
+usable plan. Buildmesh keeps the account logged in, surfaces an explicit
+scope limitation (not "login expired"), and does not invent a plan name.
+Full `/login` OAuth (or a token that includes `user:profile`) is required for
+Enterprise plan + spend together. This is an intentional exception to the
+"Enterprise OAuth accounts show plan and spend" acceptance criterion for
+inference-only env tokens. Named Anthropic profiles
+are mode-aware: `user_oauth` uses the profile credential for usage, while
+`oidc_federation` (named, active, or env-configured) reports
+`managed_externally`. Env federation requires the full WIF set (rule, org,
+service account, and identity token/`_FILE`); a partial pair does not suppress
+stored OAuth. A set-but-empty `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`
+still occupies that credential slot. An active `user_oauth` profile ranks
+below a *working* `/login` credential (expired tokens and fetch 401/403 fall
+through / retry) and above a missing login. `user:profile` scope failures are HTTP 403 with the explicit scope message:
+env tokens mention `setup-token`, Claude Code `/login` credentials guide
+`/login`, and named `ANTHROPIC_PROFILE` credentials guide
+`ant auth login --profile <actual-name>` (because `/login` cannot repair that
+higher-priority profile). Non-scope 401/403 auth failures are likewise
+origin-aware: env tokens guide refreshing or unsetting
+`CLAUDE_CODE_OAUTH_TOKEN`, profiles guide `ant auth login --profile
+<actual-name>`, and `/login` store credentials guide `/login`. HTTP 401
+remains an expired/revoked credential even if the body mentions scopes. Native OAuth reads the platform store (macOS
+Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
+with `.credentials.json` as fallback when Keychain is missing or unusable) and
+queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.
+Consumer plans keep five-hour and seven-day windows; Enterprise prefers the
+`spend` object and falls back to `extra_usage`.
+
 **The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
 shows one Spawn Option per **stored** `(harness, provider)` pairing as the
 composite id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not*
