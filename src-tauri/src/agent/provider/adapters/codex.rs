@@ -506,11 +506,13 @@ fn runtime_codex_home(
     let output = command
         .output()
         .map_err(|e| format!("failed to resolve WSL Codex home for trust: {e}"))?;
-    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() || home.is_empty() {
+    let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
+        return Err("WSL Codex home identity is unavailable for trust".to_string());
+    };
+    if !output.status.success() {
         return Err("WSL Codex home identity is unavailable for trust".to_string());
     }
-    Ok((PathBuf::from(home), Some(distro)))
+    Ok((home, Some(distro)))
 }
 
 fn runtime_wsl_distro(

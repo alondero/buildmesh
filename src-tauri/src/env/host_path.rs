@@ -302,6 +302,26 @@ pub fn to_host_path(path: &str) -> String {
     }
 }
 
+/// Convert a path using the selected harness runtime's native syntax into a
+/// path the current Buildmesh process can read. A WSL Codex home may be
+/// relocated outside `/home` or `/root` (for example `/var/lib/codex`), so the
+/// runtime-aware form extends the general conversion with the distro UNC
+/// fallback for arbitrary absolute guest paths.
+pub(crate) fn to_host_path_for_runtime(path: &str, env_type: EnvType) -> String {
+    let host = to_host_path(path);
+    if cfg!(target_os = "windows")
+        && env_type == EnvType::Wsl
+        && path.starts_with('/')
+        && host == path
+    {
+        let distro = super::environment::get_default_wsl_distro()
+            .unwrap_or_else(|| "Ubuntu".to_string());
+        format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
+    } else {
+        host
+    }
+}
+
 /// The host-accessible Codex rollout directory for an agent environment.
 /// CLI-home selection belongs to `environment`; this module owns the WSL path
 /// conversion needed before the host reads that directory.
@@ -310,7 +330,7 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     match env_type {
         EnvType::Windows => Some(home.join("sessions")),
         EnvType::Wsl | EnvType::WindowsInterop => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+            PathBuf::from(to_host_path_for_runtime(&home.to_string_lossy(), env_type)).join("sessions"),
         ),
     }
 }
@@ -1263,6 +1283,17 @@ mod tests {
             to_host_path("/mnt/c/Users/Adam/Proj"),
             "C:\\Users\\Adam\\Proj"
         );
+    }
+
+    #[test]
+    fn runtime_host_path_converts_relocated_wsl_home() {
+        let converted = to_host_path_for_runtime("/var/lib/codex", EnvType::Wsl);
+        if cfg!(target_os = "windows") {
+            assert!(converted.starts_with("\\\\wsl$\\"));
+            assert!(converted.ends_with("\\var\\lib\\codex"));
+        } else {
+            assert_eq!(converted, "/var/lib/codex");
+        }
     }
 
     /// `to_spawn_path`'s WSL arm is a one-line delegate to `windows_to_wsl`
