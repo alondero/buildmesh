@@ -12,13 +12,17 @@ use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentity
 use crate::services::usage::types::{logged_out, unavailable, ProviderUsage, UsageMeter};
 
 use auth::{
-    cache_identity_from, resolve_claude_auth, AuthLookup, ClaudeAuthSource, ProductionLookup,
+    active_user_oauth, anthropic_config_dir_for, cache_identity_from, resolve_claude_auth,
+    AuthLookup, ClaudeAuthSource, OauthOrigin, ProductionLookup,
 };
 use parse::{parse_anthropic_usage, parse_oauth_profile_plan};
 
 const PROVIDER: &str = "anthropic";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+/// Shown when usage/spend is available but plan cannot be read because the
+/// token lacks `user:profile` (typical of `claude setup-token`).
+const PLAN_SCOPE_DETAIL: &str = "Plan unavailable — token lacks user:profile scope (`claude setup-token` is model-request-only; run /login for full OAuth)";
 
 pub(crate) struct AnthropicAdapter;
 
@@ -63,8 +67,30 @@ fn anthropic_usage_with_urls(
             error: None,
         },
         ClaudeAuthSource::Missing { error } => logged_out(PROVIDER, error.to_string()),
-        ClaudeAuthSource::Oauth { token, plan } => {
-            fetch_oauth_usage(usage_url, profile_url, &token, plan)
+        ClaudeAuthSource::Oauth {
+            token,
+            plan,
+            origin,
+        } => {
+            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan);
+            if !usage.logged_in && origin == OauthOrigin::Login {
+                if let Some(ClaudeAuthSource::Oauth {
+                    token: fallback_token,
+                    plan: fallback_plan,
+                    ..
+                }) = active_user_oauth(lookup, &anthropic_config_dir_for(lookup))
+                {
+                    if fallback_token != token {
+                        return fetch_oauth_usage(
+                            usage_url,
+                            profile_url,
+                            &fallback_token,
+                            fallback_plan,
+                        );
+                    }
+                }
+            }
+            usage
         }
     }
 }
@@ -122,9 +148,19 @@ fn fetch_oauth_usage(
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
             Ok(parsed) => {
-                let plan = known_plan
-                    .or(parsed.plan)
-                    .or_else(|| fetch_oauth_plan(&client, profile_url, token));
+                let mut plan = known_plan.or(parsed.plan);
+                let mut detail = None;
+                if plan.is_none() {
+                    match fetch_oauth_plan(&client, profile_url, token) {
+                        ProfilePlan::Found(label) => plan = Some(label),
+                        ProfilePlan::Forbidden => {
+                            // setup-token / inference-only tokens can sometimes
+                            // still return usage spend but never authorize plan.
+                            detail = Some(PLAN_SCOPE_DETAIL.to_string());
+                        }
+                        ProfilePlan::Unavailable => {}
+                    }
+                }
                 ProviderUsage {
                     provider: PROVIDER.to_string(),
                     logged_in: true,
@@ -132,7 +168,7 @@ fn fetch_oauth_usage(
                     balance: None,
                     plan,
                     meters: parsed.meters,
-                    detail: None,
+                    detail,
                     error: None,
                 }
             }
@@ -142,21 +178,41 @@ fn fetch_oauth_usage(
     }
 }
 
+enum ProfilePlan {
+    Found(String),
+    Forbidden,
+    Unavailable,
+}
+
 fn fetch_oauth_plan(
     client: &reqwest::blocking::Client,
     profile_url: &str,
     token: &str,
-) -> Option<String> {
-    let response = client
+) -> ProfilePlan {
+    let Ok(response) = client
         .get(profile_url)
         .header("Authorization", format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+    else {
+        return ProfilePlan::Unavailable;
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return ProfilePlan::Forbidden;
     }
-    parse_oauth_profile_plan(&response.text().ok()?)
+    if !response.status().is_success() {
+        return ProfilePlan::Unavailable;
+    }
+    match response
+        .text()
+        .ok()
+        .as_deref()
+        .and_then(parse_oauth_profile_plan)
+    {
+        Some(label) => ProfilePlan::Found(label),
+        None => ProfilePlan::Unavailable,
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +344,99 @@ mod tests {
             }
             other => panic!("expected enterprise spend for env token, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn env_oauth_token_forbidden_profile_documents_setup_token_limit() {
+        // Realistic setup-token shape: usage/spend may succeed while profile
+        // returns 403 (missing user:profile). Plan stays blank with an explicit
+        // limitation — we do not invent Enterprise or borrow a stale local plan.
+        let port = spawn_loopback(2, move |request| {
+            let path = request.url().to_string();
+            if path.contains("/profile") {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                    )
+                    .with_status_code(403),
+                );
+            } else {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
+                );
+            }
+        });
+        let mut lookup = with_file(OAUTH_JSON);
+        lookup.env.insert(
+            "CLAUDE_CODE_OAUTH_TOKEN".into(),
+            "sk-ant-oat01-setup".into(),
+        );
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        assert!(usage.plan.is_none(), "must not invent or borrow a plan");
+        assert!(
+            usage
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("user:profile"),
+            "detail={:?}",
+            usage.detail
+        );
+        assert!(matches!(
+            usage.meters.first(),
+            Some(UsageMeter::Metered { .. })
+        ));
+    }
+
+    #[test]
+    fn rejected_login_retries_active_user_oauth_profile() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_thread = Arc::clone(&hits);
+        let port = spawn_loopback(2, move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            let n = hits_thread.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                assert_eq!(auth, "Bearer sk-ant-oat01-expired-login");
+                let _ = request
+                    .respond(tiny_http::Response::from_string("denied").with_status_code(401));
+            } else {
+                assert_eq!(auth, "Bearer sk-ant-oat01-profile");
+                let _ = request.respond(
+                    tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
+                );
+            }
+        });
+
+        let mut lookup = FakeLookup::default();
+        lookup.files.insert(
+            lookup.home.join(".claude").join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-expired-login","subscriptionType":"pro"}}"#
+                .into(),
+        );
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup.files.insert(
+            cfg.join("configs").join("default.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("default.json"),
+            r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
+        );
+
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            usage.meters.first(),
+            Some(UsageMeter::Metered { .. })
+        ));
     }
 
     #[test]
