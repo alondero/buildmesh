@@ -139,8 +139,16 @@ pub(super) fn resolve_review_spawn_inputs(
             .or(source_provider)
             .or_else(|| inherited_review_provider(None, parent_provider))
     };
-    explicit.model = explicit.model.or(source_model);
-    explicit.effort = explicit.effort.or(source_effort);
+    if view.context.get("source.review_preset") == Some("1") {
+        // Saved built-in graphs and source.* snapshots copied the legacy
+        // mesh columns. They are not reviewer-specific configuration. Let
+        // launch resolve the selected harness's mesh/application defaults.
+        explicit.model = None;
+        explicit.effort = None;
+    } else {
+        explicit.model = explicit.model.or(source_model);
+        explicit.effort = explicit.effort.or(source_effort);
+    }
     (provider, explicit)
 }
 

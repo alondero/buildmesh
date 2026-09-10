@@ -26,7 +26,6 @@ use serde::Deserialize;
 
 use crate::models::EnvType;
 
-pub const CAPTURE_SKEW_MS: i64 = 2_000;
 const RETRY_DELAYS_MS: &[u64] = &[400, 800, 1_600, 2_500, 4_000, 6_000];
 
 /// Session header JSON record at line 1 of `<session_id>.jsonl`.
@@ -162,43 +161,19 @@ pub fn read_session_file(path: &Path) -> Option<Candidate> {
     })
 }
 
-/// Pick the newest session candidate matching the spawn directory created at or after `created_not_before_ms`.
-///
-/// Every candidate produced by [`read_session_file`] already carries a valid
-/// session ID, so this filters only on directory and spawn window.
-pub fn select_id_for_directory<'a>(
-    candidates: &'a [Candidate],
+/// Select an unambiguous session in the recorded generation's launch window.
+fn select_id_for_directory(
+    candidates: impl IntoIterator<Item = Candidate>,
     spawn_directory: &str,
-    created_not_before_ms: i64,
-) -> Option<&'a str> {
-    candidates
-        .iter()
-        .filter(|c| crate::env::directories_match(&c.directory, spawn_directory))
-        .filter(|c| c.timestamp_ms >= created_not_before_ms)
-        .max_by_key(|c| c.timestamp_ms)
-        .map(|c| c.id.as_str())
-}
-
-/// Scan `sessions_dir` (`<home>/.commandcode/projects/<encoded-cwd>/`) for all
-/// session transcripts and find the newest valid candidate. [`read_session_file`]
-/// is the single authority on what counts as a transcript (stem + header
-/// validation); non-transcripts yield `None` there and are skipped here.
-pub fn find_fresh_id_for_directory_in(
-    sessions_dir: &Path,
-    spawn_directory: &str,
-    created_not_before_ms: i64,
+    anchor_ms: i64,
+    recorded_start: bool,
 ) -> Option<String> {
-    if !sessions_dir.exists() {
-        return None;
-    }
-    let entries = fs::read_dir(sessions_dir).ok()?;
-    let mut candidates = Vec::new();
-    for entry in entries.flatten() {
-        if let Some(candidate) = read_session_file(&entry.path()) {
-            candidates.push(candidate);
-        }
-    }
-    select_id_for_directory(&candidates, spawn_directory, created_not_before_ms).map(str::to_string)
+    crate::services::session_recovery::select_recovery_identity(
+        candidates.into_iter()
+            .filter(|c| crate::env::directories_match(&c.directory, spawn_directory))
+            .map(|c| (c.id, c.timestamp_ms)),
+        anchor_ms, recorded_start,
+    )
 }
 
 /// Historic startup recovery entry point used by the Command Code adapter.
@@ -229,13 +204,8 @@ pub(crate) fn find_historic_id_for_directory_in(
     let entries = fs::read_dir(sessions_dir).ok()?;
     let candidates = entries
         .flatten()
-        .filter_map(|entry| read_session_file(&entry.path()))
-        .filter(|candidate| crate::env::directories_match(&candidate.directory, spawn_directory));
-    crate::services::session_recovery::select_recovery_identity(
-        candidates.map(|candidate| (candidate.id, candidate.timestamp_ms)),
-        anchor_ms,
-        recorded_start,
-    )
+        .filter_map(|entry| read_session_file(&entry.path()));
+    select_id_for_directory(candidates, spawn_directory, anchor_ms, recorded_start)
 }
 
 /// Background poller: read Command Code's session directory until a fresh session
@@ -246,69 +216,55 @@ pub fn start_capture_poller(
     env_type: EnvType,
     app: tauri::AppHandle,
 ) {
-    let spawn_epoch_ms = chrono::Utc::now().timestamp_millis();
+    let generation = crate::db::session_started_at_ms(node_id).ok().flatten();
     tauri::async_runtime::spawn(async move {
-        let not_before = spawn_epoch_ms.saturating_sub(CAPTURE_SKEW_MS);
-        let Some(sessions_dir) =
-            crate::services::transcript_reader::adapters::commandcode::commandcode_sessions_dir(env_type, &spawn_directory)
-        else {
-            tracing::warn!("commandcode session capture: no sessions dir for env {env_type:?}");
-            return;
-        };
-        for (attempt, delay) in RETRY_DELAYS_MS.iter().enumerate() {
-            tokio::time::sleep(Duration::from_millis(*delay)).await;
+        let Some(generation) = generation else { return; };
+        // The session header can be created at launch but only flushed with
+        // the first model commit. Slow first responses outlive the fast polls.
+        for (attempt, delay) in RETRY_DELAYS_MS.iter().copied()
+            .chain(std::iter::repeat_n(10_000, 60)).enumerate()
+        {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
             if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
                 tracing::debug!("commandcode session capture: node {node_id} gone, stop");
+                return;
+            }
+            if crate::db::session_started_at_ms(node_id).ok().flatten() != Some(generation) {
                 return;
             }
             if node_has_cli_session_id(node_id) {
                 return;
             }
-            let path = sessions_dir.clone();
-            let dir = spawn_directory.clone();
             let captured = tauri::async_runtime::spawn_blocking(move || {
-                find_fresh_id_for_directory_in(&path, &dir, not_before)
+                crate::services::session_recovery::recover_live_node(node_id)
             })
             .await
             .ok()
+            .and_then(Result::ok)
             .flatten();
 
             if let Some(id) = captured {
                 if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
                     return;
                 }
-                match crate::db::set_cli_session_id_if_missing(node_id, &id) {
-                    Ok(true) => {
-                        tracing::info!(
-                            "commandcode session capture: stored {id} for node {node_id} (attempt {})",
-                            attempt + 1
-                        );
-                        let watcher_id = id.clone();
-                        let watcher_directory = spawn_directory.clone();
-                        let watcher_app = app.clone();
-                        let watcher_result = crate::blocking::run_blocking(
-                            "commandcode watcher start",
-                            move || {
-                                crate::services::commandcode_watcher::start_for_session(
-                                    node_id,
-                                    &watcher_id,
-                                    &watcher_directory,
-                                    env_type,
-                                    &watcher_app,
-                                )
-                            },
-                        )
-                        .await;
-                        if let Err(error) = watcher_result {
-                            tracing::warn!(
-                                "commandcode watcher: could not start for node {node_id}: {error}"
-                            );
-                        }
+                if crate::db::session_started_at_ms(node_id).ok().flatten() == Some(generation) {
+                    tracing::info!(
+                        "commandcode session capture: stored {id} for node {node_id} (attempt {})",
+                        attempt + 1
+                    );
+                    let watcher_directory = spawn_directory.clone();
+                    let watcher_app = app.clone();
+                    let watcher_result = crate::blocking::run_blocking(
+                        "commandcode watcher start",
+                        move || {
+                            crate::services::commandcode_watcher::start_for_session(
+                                node_id, &id, &watcher_directory, env_type, &watcher_app,
+                            )
+                        },
+                    ).await;
+                    if let Err(error) = watcher_result {
+                        tracing::warn!("commandcode watcher: could not start for node {node_id}: {error}");
                     }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!(
-                        "commandcode session capture: db write failed for node {node_id}: {e}"
-                    ),
                 }
                 return;
             }
@@ -362,27 +318,28 @@ mod tests {
             200,
         )];
         let id = select_id_for_directory(
-            &candidates,
+            candidates,
             "f:/src/buildmesh/.claude/worktrees/commandcode-test",
             100,
+            true,
         );
-        assert_eq!(id, Some("sess_01j6worktree001"));
+        assert_eq!(id.as_deref(), Some("sess_01j6worktree001"));
     }
 
     #[test]
-    fn select_prefers_newest_in_window() {
+    fn select_rejects_ambiguous_sessions_in_window() {
         let candidates = vec![
             cand("sess_01j6older0001", "/tmp/wt", 150),
             cand("sess_01j6newer0002", "/tmp/wt", 250),
         ];
-        let id = select_id_for_directory(&candidates, "/tmp/wt", 100);
-        assert_eq!(id, Some("sess_01j6newer0002"));
+        let id = select_id_for_directory(candidates, "/tmp/wt", 100, true);
+        assert_eq!(id, None);
     }
 
     #[test]
     fn select_rejects_sessions_before_spawn_window() {
         let candidates = vec![cand("sess_01j6old000001", "/tmp/wt", 50)];
-        let id = select_id_for_directory(&candidates, "/tmp/wt", 100);
+        let id = select_id_for_directory(candidates, "/tmp/wt", 3_000, true);
         assert_eq!(id, None);
     }
 
@@ -414,10 +371,11 @@ mod tests {
         });
         fs::write(&file_path, content.to_string()).unwrap();
 
-        let found = find_fresh_id_for_directory_in(
+        let found = find_historic_id_for_directory_in(
             temp.path(),
             "/home/user/src/project",
             1_787_830_400_000,
+            true,
         );
         assert_eq!(found, Some("sess_01j6target".to_string()));
     }
@@ -444,10 +402,11 @@ mod tests {
         );
         assert!(c.timestamp_ms > 0);
 
-        let found = find_fresh_id_for_directory_in(
+        let found = find_historic_id_for_directory_in(
             temp.path(),
             r"F:\src\buildmesh\.claude\worktrees\saucy-thunderous-cove",
             c.timestamp_ms - 1,
+            true,
         );
         assert_eq!(found, Some(id.to_string()));
     }
@@ -475,8 +434,8 @@ mod tests {
         .unwrap();
 
         assert!(read_session_file(&checkpoint_path).is_none());
-        let found =
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", 0);
+        let anchor = read_session_file(&temp.path().join(format!("{session_id}.jsonl"))).unwrap().timestamp_ms;
+        let found = find_historic_id_for_directory_in(temp.path(), "/tmp/wt", anchor, true);
         assert_eq!(found, Some(session_id.to_string()));
     }
 

@@ -16,7 +16,9 @@ read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
 The reviewer uses the configured Reviewer provider when one is set, otherwise
-the source agent's provider, plus the Mesh's configured model and effort tier.
+the source agent's provider. Model and effort come from the selected reviewer's
+harness-specific Mesh overrides, then application defaults. Legacy source
+snapshots and shared preset graphs do not override that configuration.
 It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
 to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
