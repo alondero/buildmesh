@@ -83,9 +83,12 @@ service account, and identity token/`_FILE`); a partial pair does not suppress
 stored OAuth. A set-but-empty `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`
 still occupies that credential slot. An active `user_oauth` profile ranks
 below a *working* `/login` credential (expired tokens and fetch 401/403 fall
-through / retry) and above a missing login. `user:profile` scope failures
-guide `/login` for stored credentials and mention `setup-token` only for env
-tokens. Native OAuth reads the platform store (macOS
+through / retry) and above a missing login. `user:profile` scope failures are HTTP 403 with the explicit scope message:
+env tokens mention `setup-token`, Claude Code `/login` credentials guide
+`/login`, and named `ANTHROPIC_PROFILE` credentials guide
+`ant auth login --profile` (because `/login` cannot repair that higher-priority
+profile). HTTP 401 remains an expired/revoked credential even if the body
+mentions scopes. Native OAuth reads the platform store (macOS
 Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
 with `.credentials.json` as fallback when Keychain is missing or unusable) and
 queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.

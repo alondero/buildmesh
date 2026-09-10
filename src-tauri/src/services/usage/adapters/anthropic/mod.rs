@@ -22,16 +22,20 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 /// Env / setup-token path: inference-only tokens lack `user:profile`.
 const PLAN_SCOPE_DETAIL_ENV: &str = "Plan unavailable — token lacks user:profile scope (`claude setup-token` is model-request-only; run /login for full OAuth)";
-/// Stored /login or profile tokens that predate the scope — re-auth refreshes it.
+/// Claude Code `/login` store tokens that predate the scope.
 const PLAN_SCOPE_DETAIL_RELOGIN: &str =
     "Plan unavailable — OAuth token lacks user:profile scope; run /login to refresh credentials";
+/// Named `ANTHROPIC_PROFILE` stays above `/login`, so re-auth the profile itself.
+const PLAN_SCOPE_DETAIL_NAMED_PROFILE: &str = "Plan unavailable — OAuth token lacks user:profile scope; re-authenticate the Anthropic profile with `ant auth login --profile <name>`";
+/// Active Anthropic profile (not Claude Code `/login` store).
+const PLAN_SCOPE_DETAIL_ACTIVE_PROFILE: &str = "Plan unavailable — OAuth token lacks user:profile scope; re-authenticate the active Anthropic profile (`ant auth login`)";
 
 fn scope_limitation_detail(origin: OauthOrigin) -> &'static str {
     match origin {
         OauthOrigin::Env => PLAN_SCOPE_DETAIL_ENV,
-        OauthOrigin::Login | OauthOrigin::NamedProfile | OauthOrigin::ActiveProfile => {
-            PLAN_SCOPE_DETAIL_RELOGIN
-        }
+        OauthOrigin::Login => PLAN_SCOPE_DETAIL_RELOGIN,
+        OauthOrigin::NamedProfile => PLAN_SCOPE_DETAIL_NAMED_PROFILE,
+        OauthOrigin::ActiveProfile => PLAN_SCOPE_DETAIL_ACTIVE_PROFILE,
     }
 }
 
@@ -195,10 +199,11 @@ enum ProfilePlan {
 }
 
 /// Distinguish expired/revoked credentials from missing `user:profile` scope.
-/// Scope failures keep the account logged in with an explicit limitation;
-/// expired credentials remain `logged_out` so active-profile retry can run.
-fn classify_oauth_auth_failure(_status: u16, body: &str, origin: OauthOrigin) -> ProviderUsage {
-    if is_oauth_scope_failure(body) {
+/// Scope failures are HTTP 403 with the explicit scope message and keep the
+/// account logged in; 401 (even with similar text) remains `logged_out` so
+/// active-profile retry can run.
+fn classify_oauth_auth_failure(status: u16, body: &str, origin: OauthOrigin) -> ProviderUsage {
+    if is_oauth_scope_failure(status, body) {
         let detail = scope_limitation_detail(origin).to_string();
         let mut usage = unavailable(PROVIDER, detail.clone());
         usage.detail = Some(detail);
@@ -210,10 +215,12 @@ fn classify_oauth_auth_failure(_status: u16, body: &str, origin: OauthOrigin) ->
     )
 }
 
-fn is_oauth_scope_failure(body: &str) -> bool {
-    // Anthropic's documented scope error names `user:profile` explicitly.
-    // A bare `permission_error` type is a generic denial and must not be
-    // treated as the setup-token / missing-scope limitation.
+fn is_oauth_scope_failure(status: u16, body: &str) -> bool {
+    // Anthropic documents the missing-scope case as HTTP 403 with an explicit
+    // `user:profile` scope message. 401 is authentication failure / expired.
+    if status != 403 {
+        return false;
+    }
     let lower = body.to_ascii_lowercase();
     lower.contains("scope requirement") && lower.contains("user:profile")
 }
@@ -234,7 +241,7 @@ fn fetch_oauth_plan(
     let status = response.status().as_u16();
     let body = response.text().unwrap_or_default();
     if status == 401 || status == 403 {
-        return if is_oauth_scope_failure(&body) {
+        return if is_oauth_scope_failure(status, &body) {
             ProfilePlan::Forbidden
         } else {
             ProfilePlan::Unavailable
@@ -614,6 +621,93 @@ mod tests {
             !detail.contains("setup-token") && !error.contains("setup-token"),
             "stored login must not claim the setup-token limitation"
         );
+    }
+
+    #[test]
+    fn named_profile_scope_failure_guides_ant_auth_login() {
+        let port = spawn_loopback(1, move |request| {
+            let _ = request.respond(
+                tiny_http::Response::from_string(
+                    r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                )
+                .with_status_code(403),
+            );
+        });
+        let mut lookup = FakeLookup::default();
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup.files.insert(
+            cfg.join("configs").join("work.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("work.json"),
+            r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
+        );
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        let detail = usage.detail.as_deref().unwrap_or_default();
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("ant auth login --profile")
+                || error.contains("ant auth login --profile"),
+            "named profile must recommend ant auth login --profile; detail={detail:?} error={error:?}"
+        );
+        assert!(
+            !detail.contains("run /login") && !error.contains("run /login"),
+            "/login cannot repair ANTHROPIC_PROFILE credentials"
+        );
+    }
+
+    #[test]
+    fn usage_401_with_scope_text_is_expired_not_scope_limitation() {
+        // 401 is authentication failure even if the body mentions user:profile.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_thread = Arc::clone(&hits);
+        let port = spawn_loopback(2, move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            let n = hits_thread.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                assert_eq!(auth, "Bearer sk-ant-oat01-secret");
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                    )
+                    .with_status_code(401),
+                );
+            } else {
+                assert_eq!(auth, "Bearer sk-ant-oat01-profile");
+                let _ = request.respond(
+                    tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
+                );
+            }
+        });
+
+        let mut lookup = with_file(OAUTH_JSON);
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup.files.insert(
+            cfg.join("configs").join("default.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("default.json"),
+            r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
+        );
+
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(!usage
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("user:profile"));
     }
 
     #[test]
