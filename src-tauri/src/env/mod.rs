@@ -164,6 +164,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_wsl_home_marker_after_login_banner() {
+        let output = b"Welcome to Ubuntu\r\nlast login: today\n__BUILDMESH_WSL_HOME__/home/alond\r\n";
+        assert_eq!(
+            environment::parse_wsl_home_output(output).as_deref(),
+            Some(std::path::Path::new("/home/alond"))
+        );
+    }
+
+    #[test]
+    fn rejects_unmarked_wsl_home_output() {
+        assert!(environment::parse_wsl_home_output(b"/home/alond\n").is_none());
+    }
+
+    #[test]
     fn cursor_dir_uses_the_current_environment_home() {
         let expected = match current_env() {
             Environment::Wsl => std::env::var("HOME")

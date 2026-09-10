@@ -354,19 +354,41 @@ fn detect_windows_from_wsl() -> Vec<HarnessProfile> {
     let command = crate::env::powershell_command(&script);
     let Ok(output) = crate::process_util::run_command_with_timeout(command, "Windows harness detection", std::time::Duration::from_secs(15)) else { return Vec::new(); };
     if !output.status.success() { return Vec::new(); }
-    // Probe the actual mount roots once. Host-path readers never spawn tools.
-    let mounts = ('a'..='z').filter_map(|drive| {
-        let mut command = crate::process_util::command_no_window("wslpath");
-        command.args(["-u", &format!("{drive}:\\")]);
-        let output = crate::process_util::run_command_with_timeout(command, "WSL drive mount", std::time::Duration::from_secs(2)).ok()?;
-        output.status.success().then(|| (drive, String::from_utf8_lossy(&output.stdout).trim().into()))
-    }).collect();
+    // DriveFS mount points are already published by WSL in /proc/mounts. Read
+    // that table once instead of spawning one wslpath process per drive.
+    let mounts = wsl_drive_mounts_from_proc();
     crate::env::set_wsl_drive_mounts(mounts);
     let stdout = String::from_utf8_lossy(&output.stdout);
     DETECTABLE.iter().filter(|tool| stdout.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
         .map(|tool| HarnessProfile { id: format!("{}-windows", tool.id), name: format!("{} (Windows)", tool.name),
             harness: tool.harness.into(), runtime: Some(crate::models::EnvType::WindowsInterop), wsl_distro: None })
         .collect()
+}
+
+fn wsl_drive_mounts_from_proc() -> Vec<(char, String)> {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return Vec::new();
+    };
+    mounts.lines().filter_map(parse_wsl_drive_mount).collect()
+}
+
+fn parse_wsl_drive_mount(line: &str) -> Option<(char, String)> {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    let mount = fields.get(1)?.strip_suffix('/').unwrap_or(fields[1]);
+    let fstype = fields.get(2)?;
+    let options = fields.get(3).copied().unwrap_or_default();
+    let drive = mount.strip_prefix("/mnt/")?.chars().next()?;
+    if mount.len() != "/mnt/a".len() || !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    let is_drivefs = fstype.eq_ignore_ascii_case("drvfs")
+        || options.split(',').any(|option| {
+            option
+                .split(';')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("aname=drvfs"))
+        });
+    is_drivefs.then(|| (drive.to_ascii_lowercase(), mount.to_string()))
 }
 
 /// One bounded login-shell probe, with executable checks rather than config
@@ -417,6 +439,18 @@ fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parses_wsl_drivefs_mounts_without_process_probes() {
+        let mounts = [
+            r#"C:\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\;uid=1000 0 0"#,
+            r#"tmpfs /tmp tmpfs rw 0 0"#,
+            r#"D:\134 /mnt/d drvfs rw 0 0"#,
+            r#"E:\134 /mnt/extra 9p rw,noatime,aname=drvfs 0 0"#,
+        ];
+        let parsed: Vec<_> = mounts.iter().filter_map(|line| super::parse_wsl_drive_mount(line)).collect();
+        assert_eq!(parsed, vec![('c', "/mnt/c".into()), ('d', "/mnt/d".into())]);
+    }
 
     #[test]
     fn removed_native_installation_exposes_foreign_fallback() {

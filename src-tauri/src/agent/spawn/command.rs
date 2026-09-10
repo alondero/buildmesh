@@ -144,7 +144,7 @@ pub fn build_spawn_command_prepared(
         command_wsl_env.push(key);
     }
     if resolved.env_type == EnvType::WindowsInterop && provider_enum == Provider::Codex {
-        if let Some(home) = routing.launch_runtime().harness_home.or_else(|| std::env::var("CODEX_HOME").ok()) {
+        if let Some(home) = routing.launch_runtime().harness_home {
             cmd.env("CODEX_HOME", crate::env::windows_path_from_wsl(&home));
             command_wsl_env.push("CODEX_HOME");
         }

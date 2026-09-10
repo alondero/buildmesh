@@ -245,7 +245,9 @@ fn is_known_harness_id_rejects_unknown() {
     assert!(!is_known_harness_id("not-a-harness"));
     assert!(!is_known_harness_id(""));
     assert!(!is_known_harness_id("   "));
-}#[test]
+}
+
+#[test]
 fn runtime_profile_round_trips_and_resolves_composite_and_canonical_ids() {
     with_temp_dir(|_| {
         let mut prefs = AppPreferences::default();

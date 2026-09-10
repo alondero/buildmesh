@@ -503,11 +503,6 @@ fn runtime_codex_home(
         "-c",
         WSL_CODEX_HOME_SCRIPT,
     ]);
-    if std::env::var_os("CODEX_HOME").is_some() {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-        command.env("WSLENV", wslenv);
-    }
     let output = command
         .output()
         .map_err(|e| format!("failed to resolve WSL Codex home for trust: {e}"))?;
@@ -716,11 +711,6 @@ fn codex_output(
             "--exec",
             "codex",
         ]);
-        if std::env::var_os("CODEX_HOME").is_some() {
-            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-            command.env("WSLENV", wslenv);
-        }
         command
     } else if cfg!(target_os = "windows") {
         // npm installs Codex as a `.cmd` shim. `std::process::Command` cannot
@@ -835,11 +825,6 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
             "-c",
             WSL_CODEX_HOME_SCRIPT,
         ]);
-        if std::env::var_os("CODEX_HOME").is_some() {
-            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-            command.env("WSLENV", wslenv);
-        }
         let output = command
             .output()
             .map_err(|e| format!("failed to resolve WSL Codex home: {e}"))?;
@@ -1159,7 +1144,9 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn wsl_passthrough_env(&self) -> &'static [&'static str] {
-        &["CODEX_HOME"]
+        // The guest resolves its own CODEX_HOME. Forwarding the host process
+        // value through WSLENV would make Windows state override guest state.
+        &[]
     }
 
     /// Codex writes rollout transcripts under `~/.codex/sessions/` that
@@ -1310,25 +1297,9 @@ mod tests {
     }
 
     #[test]
-    fn wsl_codex_home_uses_default_and_propagates_explicit_override_once() {
+    fn wsl_codex_home_uses_guest_default_without_host_override() {
         assert!(WSL_CODEX_HOME_SCRIPT.contains("${CODEX_HOME:-$HOME/.codex}"));
-        let mut empty = String::new();
-        crate::agent::spawn_environment::append_to_wslenv(&mut empty, "CODEX_HOME", "/u");
-        assert_eq!(empty, "CODEX_HOME/u");
-        let mut existing = "SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut existing,
-            "CODEX_HOME",
-            "/u",
-        );
-        assert_eq!(existing, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
-        let mut already_present = "CODEX_HOME/u:SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut already_present,
-            "CODEX_HOME",
-            "/u",
-        );
-        assert_eq!(already_present, "CODEX_HOME/u:SSH_AUTH_SOCK/up");
+        assert!(!CODEX.wsl_passthrough_env().contains(&"CODEX_HOME"));
         assert_ne!(
             wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
             wsl_runtime_identity("Debian", "/home/user/.codex")

@@ -215,13 +215,20 @@ pub(crate) fn wsl_home() -> Option<PathBuf> {
     if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
     static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| {
         let mut command = command_no_window("wsl.exe");
-        command.args(["-d", &get_default_wsl_distro()?, "--cd", "~", "--exec", "sh", "-lc", "printf '%s' \"$HOME\""]);
+        command.args(["-d", &get_default_wsl_distro()?, "--cd", "~", "--exec", "sh", "-lc", "printf '__BUILDMESH_WSL_HOME__%s\\n' \"$HOME\""]);
         let output = crate::process_util::run_command_with_timeout(command, "WSL home", std::time::Duration::from_secs(10)).ok()?;
         if !output.status.success() { return None; }
-        let home = String::from_utf8(output.stdout).ok()?;
-        home.starts_with('/').then(|| PathBuf::from(home))
+        parse_wsl_home_output(&output.stdout)
     });
     GUEST_HOME.clone()
+}
+
+pub(super) fn parse_wsl_home_output(output: &[u8]) -> Option<PathBuf> {
+    let output = String::from_utf8(output.to_vec()).ok()?;
+    output.lines().rev().find_map(|line| {
+        let home = line.strip_prefix("__BUILDMESH_WSL_HOME__")?.trim();
+        home.starts_with('/').then(|| PathBuf::from(home))
+    })
 }
 
 /// Runtime paths are already translated for the process. A UNC spawn path
@@ -337,14 +344,12 @@ pub fn codex_dir() -> PathBuf {
 /// login-shell probe because the guest username can differ from Windows.
 pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {
-        EnvType::WindowsInterop => env::var("CODEX_HOME").ok().filter(|home| !home.is_empty()).map(|home| PathBuf::from(super::to_host_path(&home))).or_else(|| super::windows_cli_home(".codex")),
+        // CODEX_HOME belongs to the process that owns the environment. A
+        // Linux Buildmesh must not reinterpret its own value as a Windows
+        // harness setting, and a Windows host value must not leak into WSL.
+        EnvType::WindowsInterop => super::windows_cli_home(".codex"),
         EnvType::Windows => Some(codex_dir()),
         EnvType::Wsl => {
-            if let Ok(home) = env::var("CODEX_HOME") {
-                if home.starts_with('/') {
-                    return Some(PathBuf::from(home));
-                }
-            }
             let _ = spawn_path;
             wsl_home().map(|home| home.join(".codex"))
         }
