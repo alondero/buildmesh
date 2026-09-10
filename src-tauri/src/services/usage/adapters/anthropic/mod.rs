@@ -294,13 +294,10 @@ mod tests {
 
     // After #1689 the Anthropic adapter always issues a second HTTP
     // request to /oauth/profile for scope-failure detection. Most tests
-    // don't care about the profile response; this helper just answers
+    // don't care about the profile response; the test loopback answers
     // it with a 200 + empty body (which `oauth_profile_scope_failure`
     // interprets as "no scope failure, no detail to surface"). Tests
     // that need a 403-from-profile path override the closure.
-    fn respond_with_default_profile(port: u16) -> u16 {
-        port
-    }
 
     #[test]
     fn consumer_oauth_fetch_keeps_windows() {
@@ -332,7 +329,6 @@ mod tests {
         assert!(!format!("{usage:?}").contains("sk-ant-"));
         // /profile returned 200, so detail stays unset.
         assert!(usage.detail.is_none());
-        let _ = respond_with_default_profile(port);
     }
 
     #[test]

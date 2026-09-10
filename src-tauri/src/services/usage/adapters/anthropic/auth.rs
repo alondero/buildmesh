@@ -806,9 +806,8 @@ mod tests {
             Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#),
         );
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, .. } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected profile oauth, got {other:?}"),
         }
@@ -885,9 +884,8 @@ mod tests {
             Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"pro"}"#),
         );
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("stored /login must outrank active user_oauth profile, got {other:?}"),
         }
@@ -903,9 +901,8 @@ mod tests {
             Some(r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#),
         );
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, .. } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("active user_oauth must win when /login is missing, got {other:?}"),
         }
@@ -941,11 +938,10 @@ mod tests {
     }
 
     #[test]
-    fn file_oauth_includes_enterprise_plan() {
+    fn file_oauth_resolves_enterprise_token() {
         match resolve_claude_auth(&with_oauth_file(ENTERPRISE_JSON)) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("expected oauth, got {other:?}"),
         }
@@ -958,9 +954,7 @@ mod tests {
             .keychain
             .insert(KEYCHAIN_SERVICE.into(), ENTERPRISE_JSON.into());
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { plan, .. } => {
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
-            }
+            ClaudeAuthSource::Oauth { .. } => {}
             other => panic!("expected keychain oauth, got {other:?}"),
         }
     }
@@ -972,9 +966,8 @@ mod tests {
             .keychain
             .insert(KEYCHAIN_SERVICE.into(), "{not-json".into());
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { token, plan, .. } => {
+            ClaudeAuthSource::Oauth { token, .. } => {
                 assert_eq!(token, "sk-ant-oat01-ent");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
             }
             other => panic!("malformed Keychain must fall through to file, got {other:?}"),
         }
@@ -992,9 +985,7 @@ mod tests {
         );
         lookup.files.insert(cred_path(&lookup), OAUTH_JSON.into());
         match resolve_claude_auth(&lookup) {
-            ClaudeAuthSource::Oauth { plan, .. } => {
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
-            }
+            ClaudeAuthSource::Oauth { .. } => {}
             other => panic!("expected config-dir oauth, got {other:?}"),
         }
 

@@ -143,21 +143,25 @@ export function ExplicitUsageMeter({ meter }: { meter: UsageMeter }) {
   }
 }
 
+/** Whether `BalanceCard` would render any row for a given balance.
+ *  `BalanceCard` hides "Balance remaining" when exactly zero (a fresh
+ *  wallet has nothing to compare against) and only renders "Spent this
+ *  month" when monthly spend is set. Returns true if either row would
+ *  appear. -0 collapses to 0 in JS so no special-case is needed; a
+ *  negative remaining (overdrawn wallet) is informative and counts. */
+export function isBalanceVisible(balance: BillingBalance): boolean {
+  return balance.remaining !== 0 || balance.monthlySpend != null;
+}
+
 /** Cash-balance view for a pay-as-you-go account (issue #537).
- *  Hides "Balance remaining" when exactly zero — there is nothing to
- *  compare against on a fresh wallet — but keeps it for any non-zero
- *  value, including negative (an overdrawn wallet is exactly when
- *  the user needs to see the number). -0 collapses to 0 in JS so
- *  no special-case is needed. "Spent this month" stays even when
- *  remaining is zero so a user spending against an exhausted balance
- *  still sees live spend. Returns null when nothing is renderable
- *  (e.g. { remaining: 0, monthlySpend: null }) so the parent doesn't
- *  show an empty box. */
+ *  Returns null when nothing is renderable (e.g.
+ *  `{ remaining: 0, monthlySpend: null }`) so the parent doesn't show
+ *  an empty box. */
 export function BalanceCard({ balance }: { balance: BillingBalance }) {
+  if (!isBalanceVisible(balance)) return null;
   const fmt = (n: number) => `${balance.currency} ${n.toFixed(2)}`;
   const showRemaining = balance.remaining !== 0;
   const showSpend = balance.monthlySpend != null;
-  if (!showRemaining && !showSpend) return null;
   return (
     <div className="mt-2 space-y-1">
       {showRemaining && (
@@ -235,13 +239,14 @@ export function UsagePanel({
     // choosing one by billing mode (#574 AC3). Also unhides MiniMax's
     // quota bars that the old billing-mode XOR suppressed.
     const explicitMeters = meter.usage.meters ?? [];
-    // Mirror BalanceCard's render predicate: a balance with no remaining
-    // (exact zero) and no monthly spend contributes nothing to the panel
-    // and would be skipped by the BalanceCard null-return below. Don't
-    // count it as "has meters" — otherwise the panel hides "Unavailable"
-    // and shows a blank box instead.
+    // Mirror BalanceCard's render predicate via the shared helper so the
+    // panel and the card cannot desynchronize. A balance with no
+    // remaining (exact zero) and no monthly spend contributes nothing
+    // and would be skipped by the BalanceCard null-return below; don't
+    // count it as "has meters" or the panel would hide "Unavailable"
+    // and show a blank box.
     const balanceRendersContent = meter.usage.balance != null
-      && (meter.usage.balance.remaining !== 0 || meter.usage.balance.monthlySpend != null);
+      && isBalanceVisible(meter.usage.balance);
     const hasMeters = meter.usage.windows.length > 0
       || balanceRendersContent
       || explicitMeters.length > 0;
