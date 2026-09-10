@@ -49,7 +49,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
 }
 
 function usage(over: Partial<ProviderUsage> = {}): ProviderUsage {
-  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, plan: null, meters: [], detail: null, error: null, ...over };
+  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, meters: [], detail: null, error: null, ...over };
 }
 
 function meter(over: Partial<ProviderMeters> = {}): ProviderMeters {
@@ -275,17 +275,13 @@ describe('ExplicitUsageMeter (issue #1671 states)', () => {
   });
 
   it('does NOT render the provider plan label (glanceable noise — user does not find it actionable)', () => {
-    // Plan type strings like "prolite" carry no decision-making content at
-    // a glance; the bars / balance / metered meter below already carry
-    // the live state.
     render(
       <UsagePanel
         account={account({ name: 'Claude' })}
-        meter={meter({ usage: usage({ plan: 'prolite' }) })}
+        meter={meter({ usage: usage() })}
       />,
     );
     expect(screen.queryByText(/Plan:/)).toBeNull();
-    expect(screen.queryByText(/prolite/)).toBeNull();
   });
 
   it('keeps long billing-source text wrappable at 240px (separate from the removed plan label)', () => {

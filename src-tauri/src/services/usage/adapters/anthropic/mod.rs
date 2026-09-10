@@ -91,7 +91,6 @@ fn anthropic_usage_with_urls(
             logged_in: true,
             windows: vec![],
             balance: None,
-            plan: None,
             meters: vec![UsageMeter::ManagedExternally {
                 platform: platform.to_string(),
             }],
@@ -181,23 +180,21 @@ fn fetch_oauth_usage(
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
             Ok(parsed) => {
-                let mut plan = known_plan.or(parsed.plan);
-                let mut detail = None;
-                if plan.is_none() {
-                    match fetch_oauth_plan(&client, profile_url, token) {
-                        ProfilePlan::Found(label) => plan = Some(label),
-                        ProfilePlan::Forbidden => {
-                            detail = Some(scope_limitation_detail(&origin));
-                        }
-                        ProfilePlan::Unavailable => {}
-                    }
-                }
+                // /oauth/profile is still called for scope-failure detection
+                // (sets `detail` when the user's token is missing `user:profile`).
+                // The plan label it would otherwise return is unused — the
+                // glanceable Usage Meter no longer surfaces it. Tracked in
+                // #1694 for full internal-state cleanup.
+                let _ = known_plan;
+                let detail = match fetch_oauth_plan(&client, profile_url, token) {
+                    ProfilePlan::Forbidden => Some(scope_limitation_detail(&origin)),
+                    ProfilePlan::Found(_) | ProfilePlan::Unavailable => None,
+                };
                 ProviderUsage {
                     provider: PROVIDER.to_string(),
                     logged_in: true,
                     windows: parsed.windows,
                     balance: None,
-                    plan,
                     meters: parsed.meters,
                     detail,
                     error: None,
@@ -210,6 +207,9 @@ fn fetch_oauth_usage(
 }
 
 enum ProfilePlan {
+    // The label is unused after #1689 cut ProviderUsage.plan; tracked for
+    // a follow-up that migrates the Anthropic auth chain off `plan` entirely.
+    #[allow(dead_code)]
     Found(String),
     Forbidden,
     Unavailable,
@@ -336,7 +336,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Pro"));
         assert_eq!(usage.windows.len(), 2);
         assert!(usage.meters.is_empty());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -351,7 +350,6 @@ mod tests {
             );
         });
         let usage = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert!(usage.windows.is_empty());
         match &usage.meters[..] {
             [UsageMeter::Metered { amount }] => {
@@ -387,11 +385,6 @@ mod tests {
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert_eq!(
-            usage.plan.as_deref(),
-            Some("Enterprise"),
-            "plan must come from the env token profile, not the stale Pro login file"
-        );
         match &usage.meters[..] {
             [UsageMeter::Metered { amount }] => {
                 assert_eq!(amount.used, 25.0);
@@ -428,7 +421,6 @@ mod tests {
         );
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert!(usage.plan.is_none(), "must not invent or borrow a plan");
         assert!(
             usage
                 .detail
@@ -486,7 +478,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(matches!(
             usage.meters.first(),
@@ -656,7 +647,6 @@ mod tests {
             usage.logged_in,
             "scope failure must not look like a logged-out/expired credential"
         );
-        assert!(usage.plan.is_none());
         let detail = usage.detail.as_deref().unwrap_or_default();
         let error = usage.error.as_deref().unwrap_or_default();
         assert!(
@@ -806,7 +796,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(!usage
             .detail
@@ -858,7 +847,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(!usage
             .detail

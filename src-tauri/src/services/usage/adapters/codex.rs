@@ -317,7 +317,10 @@ enum CodexAdditionalLimit {
 
 #[derive(Deserialize, Debug)]
 struct CodexUsageResp {
+    // `plan_type` is no longer read after #1689 cut ProviderUsage.plan;
+    // tracked in #1694 for a follow-up that drops the field entirely.
     #[serde(default)]
+    #[allow(dead_code)]
     plan_type: Option<String>,
     #[serde(default)]
     rate_limit: Option<CodexRateLimits>,
@@ -330,7 +333,6 @@ struct CodexUsageResp {
 }
 
 struct CodexParsed {
-    plan: Option<String>,
     windows: Vec<UsageWindow>,
     balance: Option<BillingBalance>,
     meters: Vec<UsageMeter>,
@@ -478,11 +480,6 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
         }
     }
 
-    let plan = resp
-        .plan_type
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty());
-
     let detail = if windows.is_empty() && meters.is_empty() && balance.is_none() {
         Some("No active Codex rate-limit windows".to_string())
     } else {
@@ -494,7 +491,6 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
     // case (why nothing is rendered), not a redundant percentage.
 
     Ok(CodexParsed {
-        plan,
         windows,
         balance,
         meters,
@@ -508,7 +504,6 @@ fn parsed_to_usage(parsed: CodexParsed) -> ProviderUsage {
         logged_in: true,
         windows: parsed.windows,
         balance: parsed.balance,
-        plan: parsed.plan,
         meters: parsed.meters,
         detail: parsed.detail,
         error: None,
@@ -608,7 +603,6 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "Weekly");
         assert_eq!(parsed.windows[1].used_percent, Some(42.0));
         assert!(parsed.detail.is_none());
-        assert!(parsed.plan.is_none());
         assert!(parsed.meters.is_empty());
     }
 
@@ -657,7 +651,6 @@ mod tests {
     fn parse_codex_response_null_rate_limit_is_valid() {
         let parsed = parse_codex_response(SPEND_ONLY_ENTERPRISE).unwrap();
         assert!(parsed.windows.is_empty());
-        assert_eq!(parsed.plan.as_deref(), Some("enterprise"));
         assert!(parsed.detail.is_none());
         let balance = parsed.balance.expect("credit balance retained");
         assert_eq!(balance.remaining, 17000.50);
@@ -682,7 +675,6 @@ mod tests {
     #[test]
     fn parse_codex_response_consumer_plus_fixture_keeps_windows() {
         let parsed = parse_codex_response(CONSUMER_PLUS).unwrap();
-        assert_eq!(parsed.plan.as_deref(), Some("plus"));
         assert_eq!(parsed.windows.len(), 2);
         assert_eq!(parsed.windows[0].label, "5-hour");
         assert_eq!(parsed.windows[0].used_percent, Some(18.5));
@@ -695,7 +687,6 @@ mod tests {
     #[test]
     fn parse_codex_response_mixed_business_has_windows_and_budget() {
         let parsed = parse_codex_response(MIXED_BUSINESS).unwrap();
-        assert_eq!(parsed.plan.as_deref(), Some("business"));
         assert_eq!(parsed.windows.len(), 3);
         assert_eq!(parsed.windows[0].label, "5-hour");
         assert_eq!(parsed.windows[1].label, "Weekly");
@@ -717,7 +708,6 @@ mod tests {
     #[test]
     fn parse_codex_response_unknown_plan_degrades_without_failing() {
         let parsed = parse_codex_response(UNKNOWN_PLAN).unwrap();
-        assert_eq!(parsed.plan.as_deref(), Some("future_workspace_plan"));
         assert!(parsed.windows.is_empty());
         assert!(parsed.balance.is_none());
         assert_eq!(parsed.meters, vec![UsageMeter::Unlimited]);
@@ -738,7 +728,6 @@ mod tests {
             }
         }"#;
         let parsed = parse_codex_response(json).unwrap();
-        assert_eq!(parsed.plan.as_deref(), Some("business"));
         match parsed.meters.as_slice() {
             [UsageMeter::NoIndividualLimit { amount }] => {
                 assert_eq!(amount.used, 12.5);
@@ -997,7 +986,6 @@ mod tests {
 
         assert!(usage.logged_in);
         assert!(usage.error.is_none());
-        assert_eq!(usage.plan.as_deref(), Some("enterprise"));
         assert!(usage.windows.is_empty());
         assert_eq!(usage.balance.as_ref().map(|b| b.remaining), Some(17000.50));
         assert!(matches!(
@@ -1022,7 +1010,6 @@ mod tests {
         let usage = with_adapter_loopback(vec![auth_path], url, || CodexAdapter.fetch(&[]));
 
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("business"));
         assert_eq!(usage.windows.len(), 3);
         assert!(usage.balance.is_some());
         assert_eq!(usage.meters.len(), 1);

@@ -39,8 +39,8 @@ function mockBackend(opts: {
 } = {}) {
   const accounts = opts.accounts ?? builtinAccounts();
   const meters = opts.meters ?? [
-    { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
-    { provider: 'minimax', usageTracked: true, usage: { provider: 'minimax', loggedIn: true, windows: [], balance: { remaining: 12.34, monthlySpend: 1.5, currency: 'USD' }, plan: null, meters: [], detail: null, error: null } },
+    { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
+    { provider: 'minimax', usageTracked: true, usage: { provider: 'minimax', loggedIn: true, windows: [], balance: { remaining: 12.34, monthlySpend: 1.5, currency: 'USD' }, meters: [], detail: null, error: null } },
   ];
   const calls: Record<string, unknown[]> = {};
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
@@ -143,7 +143,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
         // Hold the forced-refresh call; the initial mount-fetch resolves fast.
         if (a?.forceRefresh === true) return refreshPending;
         return Promise.resolve([
-          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
         ]);
       }
       if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
@@ -176,7 +176,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
 
     // Resolve the in-flight refresh — counts must include the forced call.
     resolveRefresh([
-      { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 75, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+      { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 75, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
     ]);
 
     // Post-resolve: button returns to idle, rows region clears.
@@ -562,7 +562,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
             return refresh2;
           }
           return Promise.resolve([
-            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
           ]);
         }
         if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
@@ -585,7 +585,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       // see 90% on screen.
       await act(async () => {
         resolveRefresh2([
-          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
         ]);
       });
       await screen.findByText('90.0%');
@@ -596,7 +596,7 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       // and fail (the previous bug).
       await act(async () => {
         resolveRefresh1([
-          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
         ]);
         // Let microtasks / state commits flush so any erroneous
         // setState from the stale resolve would commit before the
@@ -650,7 +650,7 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
             return refresh2;
           }
           return Promise.resolve([
-            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+            { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
           ]);
         }
         if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
@@ -683,7 +683,7 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
       // while refresh2 was still in flight.
       await act(async () => {
         resolveRefresh1([
-          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 5, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
         ]);
         await vi.advanceTimersByTimeAsync(50);
       });
@@ -707,7 +707,7 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
       // path; that's intentional).
       await act(async () => {
         resolveRefresh2([
-          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, plan: null, meters: [], detail: null, error: null } },
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 90, resetsAt: null }], balance: null, meters: [], detail: null, error: null } },
         ]);
         await vi.advanceTimersByTimeAsync(50);
       });

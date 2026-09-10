@@ -14,11 +14,6 @@ export type ProviderUsage = { provider: string, loggedIn: boolean, windows: Arra
  */
 balance: BillingBalance | null, 
 /**
- * Provider-reported plan or billing-source label. Buildmesh displays this
- * verbatim and does not infer equivalence between provider plan names.
- */
-plan: string | null, 
-/**
  * New explicit meters. Kept alongside `windows` and `balance` so existing
  * adapters remain source-compatible while provider migrations land.
  */

@@ -13,9 +13,6 @@ use serde_json::Value;
 pub(crate) struct ParsedAnthropicUsage {
     pub windows: Vec<UsageWindow>,
     pub meters: Vec<UsageMeter>,
-    /// Plan fields occasionally appear on the usage body; prefer credentials /
-    /// profile when present, then fall back to these.
-    pub plan: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -55,13 +52,20 @@ struct Resp {
     spend: Option<Spend>,
     #[serde(default)]
     extra_usage: Option<ExtraUsage>,
+    // Plan fields on the usage body are no longer read after #1689 cut
+    // ProviderUsage.plan; tracked in #1694 for a follow-up that migrates
+    // the Anthropic auth chain off `plan` entirely.
     #[serde(default, rename = "subscription_type")]
+    #[allow(dead_code)]
     subscription_type: Option<String>,
     #[serde(default, rename = "subscriptionType")]
+    #[allow(dead_code)]
     subscription_type_camel: Option<String>,
     #[serde(default, rename = "rate_limit_tier")]
+    #[allow(dead_code)]
     rate_limit_tier: Option<String>,
     #[serde(default, rename = "rateLimitTier")]
+    #[allow(dead_code)]
     rate_limit_tier_camel: Option<String>,
 }
 
@@ -84,19 +88,9 @@ pub(crate) fn parse_anthropic_usage(body: &str) -> Result<ParsedAnthropicUsage, 
         meters.push(UsageMeter::Unavailable);
     }
 
-    let plan = plan_label(
-        resp.subscription_type
-            .as_deref()
-            .or(resp.subscription_type_camel.as_deref()),
-        resp.rate_limit_tier
-            .as_deref()
-            .or(resp.rate_limit_tier_camel.as_deref()),
-    );
-
     Ok(ParsedAnthropicUsage {
         windows,
         meters,
-        plan,
     })
 }
 
@@ -276,14 +270,6 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "7-day");
         assert_eq!(parsed.windows[1].used_percent, Some(33.0));
         assert!(parsed.meters.is_empty());
-        assert!(parsed.plan.is_none());
-    }
-
-    #[test]
-    fn usage_body_plan_fields_are_recovered() {
-        let json = r#"{"spend":{"used":{"amount_minor":100,"currency":"USD","exponent":2}},"subscription_type":"enterprise"}"#;
-        let parsed = parse_anthropic_usage(json).unwrap();
-        assert_eq!(parsed.plan.as_deref(), Some("Enterprise"));
     }
 
     #[test]

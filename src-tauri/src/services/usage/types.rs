@@ -100,10 +100,6 @@ pub struct ProviderUsage {
     /// report utilization via `windows` instead (issue #537).
     #[serde(default)]
     pub balance: Option<BillingBalance>,
-    /// Provider-reported plan or billing-source label. Buildmesh displays this
-    /// verbatim and does not infer equivalence between provider plan names.
-    #[serde(default)]
-    pub plan: Option<String>,
     /// New explicit meters. Kept alongside `windows` and `balance` so existing
     /// adapters remain source-compatible while provider migrations land.
     #[serde(default)]
@@ -167,7 +163,6 @@ pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
         logged_in: false,
         windows: vec![],
         balance: None,
-        plan: None,
         meters: vec![],
         detail: None,
         error: Some(error),
@@ -184,7 +179,6 @@ pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
         logged_in: true,
         windows: vec![],
         balance: None,
-        plan: None,
         meters: vec![],
         detail: None,
         error: Some(error),
@@ -211,7 +205,6 @@ mod tests {
         )
         .expect("legacy ProviderUsage should remain compatible");
 
-        assert!(usage.plan.is_none());
         assert!(usage.meters.is_empty());
     }
 

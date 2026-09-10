@@ -22,7 +22,6 @@ const USAGE_FIXTURES = {
         loggedIn: true,
         windows: [],
         balance: null,
-        plan: 'Enterprise negotiated monthly billing plan',
         meters: [
           {
             state: 'metered',
