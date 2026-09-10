@@ -4,7 +4,8 @@ import {
   isDevProfile,
   decideUpdateEnabled,
   runUpdateCheck,
-  downloadAndInstallUpdate,
+  downloadUpdate,
+  installUpdate,
   sanitizeUpdaterError,
   __resetIdentifierCacheForTests,
 } from '../../src/lib/updater';
@@ -186,6 +187,41 @@ describe('sanitizeUpdaterError (issue #1526 — no token / URL / path leaks)', (
     ).not.toContain('alice');
   });
 
+  // Finding 6 (issue #1654 review) — the pre-review regex stopped at
+  // the first space, leaking `Doe\AppData\…` from `C:\Users\Jane Doe\…`
+  // into the modal. Both names + the trailing path must be scrubbed.
+  it('strips Windows paths containing spaces in user directories', () => {
+    const msg = 'Write C:\\Users\\Jane Doe\\AppData\\Local\\buildmesh\\config.json failed';
+    const result = sanitizeUpdaterError(new Error(msg));
+    expect(result).not.toContain('Jane');
+    expect(result).not.toContain('Doe');
+    expect(result).not.toContain('config.json');
+    expect(result).toContain('<path>');
+  });
+
+  it('strips Windows paths in Program Files', () => {
+    const msg = 'Read C:\\Program Files\\Buildmesh\\cache\\update.bin failed';
+    const result = sanitizeUpdaterError(new Error(msg));
+    expect(result).not.toContain('Buildmesh');
+    expect(result).not.toContain('cache');
+    expect(result).not.toContain('update.bin');
+  });
+
+  it('strips UNC paths with spaces', () => {
+    const msg = 'Mount \\\\Server Name\\Share\\Buildmesh\\foo failed';
+    const result = sanitizeUpdaterError(new Error(msg));
+    expect(result).not.toContain('Server');
+    expect(result).not.toContain('Share');
+  });
+
+  it('strips POSIX paths with spaces under sensitive roots', () => {
+    const result = sanitizeUpdaterError(
+      new Error('Write to /home/Jane Doe/.config/buildmesh/foo failed'),
+    );
+    expect(result).not.toContain('Jane');
+    expect(result).not.toContain('Doe');
+  });
+
   it('strips absolute POSIX paths under sensitive roots', () => {
     expect(
       sanitizeUpdaterError(new Error('Write to /home/alice/.config/buildmesh/foo failed')),
@@ -205,16 +241,20 @@ describe('sanitizeUpdaterError (issue #1526 — no token / URL / path leaks)', (
   });
 });
 
-// Issue #1526: `downloadAndInstallUpdate` translates the plugin's
-// per-chunk events into a cumulative `DownloadProgress`. The hook
-// surfaces this so the modal can show a real progress bar.
-describe('downloadAndInstallUpdate (issue #1526 — progress + sanitized errors)', () => {
+// Issue #1526: `downloadUpdate` / `installUpdate` translate the
+// plugin's per-chunk events into a cumulative `DownloadProgress`. The
+// store surfaces this so the modal can show a real progress bar.
+// Finding 2 (issue #1654 review) — the previous monolithic
+// `downloadAndInstallUpdate` ran install under the `downloading` phase
+// and surfaced a fake 150ms "Installing…" spinner after the work
+// finished. The split lets the store flip to `installing` BEFORE
+// `installUpdate` actually runs.
+describe('downloadUpdate / installUpdate (issue #1526 + #1654 review — phase split)', () => {
   it('reports cumulative progress across Progress events', async () => {
-    const installMock = vi.fn().mockResolvedValue(undefined);
     const update = {
       version: '1.0.0',
       body: null,
-      install: installMock,
+      install: vi.fn().mockResolvedValue(undefined),
       download: vi.fn(async (cb: (e: unknown) => void) => {
         cb({ event: 'Started', data: { contentLength: 1000 } });
         cb({ event: 'Progress', data: { chunkLength: 200 } });
@@ -224,12 +264,34 @@ describe('downloadAndInstallUpdate (issue #1526 — progress + sanitized errors)
       }),
     };
     const progress: Array<{ downloaded: number; total: number | null }> = [];
-    await downloadAndInstallUpdate(update, (p) => progress.push(p));
+    await downloadUpdate(update, (p) => progress.push(p));
     // Each event should have produced a tick: started with total 1000,
     // then three cumulative steps (200, 500, 1000).
     expect(progress.at(-1)?.downloaded).toBe(1000);
     expect(progress.at(-1)?.total).toBe(1000);
     expect(progress.map((p) => p.downloaded)).toEqual([0, 200, 500, 1000, 1000]);
+  });
+
+  it('downloadUpdate does NOT call install (phase split)', async () => {
+    // Finding 2 — the previous combined function awaited both; the
+    // hook could not flip to `installing` until the entire chain
+    // resolved. Now `downloadUpdate` only does the download half.
+    const installMock = vi.fn().mockResolvedValue(undefined);
+    const update = {
+      version: '1.0.0',
+      body: null,
+      install: installMock,
+      download: vi.fn(async (cb: (e: unknown) => void) => {
+        cb({ event: 'Finished' });
+      }),
+    };
+    await downloadUpdate(update);
+    expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('installUpdate runs the staged binary swap', async () => {
+    const installMock = vi.fn().mockResolvedValue(undefined);
+    await installUpdate({ version: '1.0.0', body: null, install: installMock, download: vi.fn() });
     expect(installMock).toHaveBeenCalledTimes(1);
   });
 
@@ -244,7 +306,7 @@ describe('downloadAndInstallUpdate (issue #1526 — progress + sanitized errors)
       }),
     };
     const progress: Array<{ downloaded: number; total: number | null }> = [];
-    await downloadAndInstallUpdate(update, (p) => progress.push(p));
+    await downloadUpdate(update, (p) => progress.push(p));
     expect(progress.at(-1)?.downloaded).toBe(100);
     expect(progress.at(-1)?.total).toBeNull();
   });
@@ -258,7 +320,7 @@ describe('downloadAndInstallUpdate (issue #1526 — progress + sanitized errors)
         throw new Error('GET https://api.github.com/x failed');
       }),
     };
-    await expect(downloadAndInstallUpdate(update)).rejects.toThrow(/<feed>/);
+    await expect(downloadUpdate(update)).rejects.toThrow(/<feed>/);
   });
 
   it('sanitizes errors from the install path', async () => {
@@ -268,6 +330,6 @@ describe('downloadAndInstallUpdate (issue #1526 — progress + sanitized errors)
       install: vi.fn().mockRejectedValue(new Error('Write C:\\Users\\victim\\foo failed')),
       download: vi.fn().mockResolvedValue(undefined),
     };
-    await expect(downloadAndInstallUpdate(update)).rejects.toThrow(/<path>/);
+    await expect(installUpdate(update)).rejects.toThrow(/<path>/);
   });
 });

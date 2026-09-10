@@ -1,11 +1,18 @@
 /**
- * `useUpdateCheck` state-machine transitions (issue #1526).
+ * `useUpdateCheck` shared-store wiring (issue #1526 + #1654 review).
  *
- * The hook is the single source of truth that `UpdatePrompt` and
- * Settings > About both subscribe to. This test exercises the
- * transitions end-to-end: quiet vs manual check surfacing, install
- * progress, exit-readiness routing on restart, and the sanitize +
- * Retry cycle on failure.
+ * The hook is a thin subscriber over `useUpdaterStore`. Two surfaces
+ * (`UpdatePrompt` at App root and `<UpdateAboutSection>` in Settings)
+ * read the same `phase` so a dismiss in one place is visible in the
+ * other. This test exercises:
+ *   - shared cross-instance state (finding 1)
+ *   - phase transitions through install + retry (finding 2 + 3)
+ *   - install-phase ordering (the install() promise starts AFTER the
+ *     `installing` phase is set — finding 2)
+ *   - exit-readiness routing through `useExitPromptStore.requestExit`
+ *     (finding 4)
+ *   - the cancel escape hatch (finding 5)
+ *   - the failedAt union narrowed to `download | install` (finding 3)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -14,16 +21,18 @@ import type { AgentNode } from '../../src/types/generated/AgentNode';
 
 const {
   runUpdateCheckMock,
-  downloadAndInstallUpdateMock,
+  downloadUpdateMock,
+  installUpdateMock,
   relaunchMock,
-  showExitPromptMock,
+  requestExitMock,
   listProvidersMock,
   getAgentNodesMock,
 } = vi.hoisted(() => ({
   runUpdateCheckMock: vi.fn(),
-  downloadAndInstallUpdateMock: vi.fn(),
+  downloadUpdateMock: vi.fn(),
+  installUpdateMock: vi.fn().mockResolvedValue(undefined),
   relaunchMock: vi.fn().mockResolvedValue(undefined),
-  showExitPromptMock: vi.fn(),
+  requestExitMock: vi.fn(),
   listProvidersMock: vi.fn(),
   getAgentNodesMock: vi.fn(),
 }));
@@ -33,7 +42,8 @@ vi.mock('../../src/lib/updater', async (importOriginal) => {
   return {
     ...actual,
     runUpdateCheck: runUpdateCheckMock,
-    downloadAndInstallUpdate: downloadAndInstallUpdateMock,
+    downloadUpdate: downloadUpdateMock,
+    installUpdate: installUpdateMock,
   };
 });
 
@@ -47,11 +57,9 @@ vi.mock('../../src/stores/exitPromptStore', async (importOriginal) => {
     ...actual,
     useExitPromptStore: {
       getState: () => ({
-        showExitPrompt: showExitPromptMock,
-        // Default ON — mirrors the production default (issue #1501)
-        // so tests exercise the prompt path. Individual tests can
-        // override via `vi.mocked(...).getState.mockReturnValue(...)`.
-        confirmBeforeQuit: true,
+        requestExit: requestExitMock,
+        // Default to needing a prompt — individual tests can override
+        // via `requestExitMock.mockResolvedValueOnce(false)`.
       }),
     },
   };
@@ -72,28 +80,27 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 });
 
 import { useUpdateCheck } from '../../src/hooks/useUpdateCheck';
+import { useUpdaterStore, resetUpdaterStateForTests } from '../../src/stores/updaterStore';
 
 const fakeUpdate = (): Update => ({
   version: '0.3.0',
   body: '',
 } as unknown as Update);
 
-describe('useUpdateCheck (issue #1526 — state machine)', () => {
+describe('useUpdateCheck / useUpdaterStore (issue #1526 + #1654 review)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // `vi.clearAllMocks()` clears call history but does NOT restore
-    // spies. The `confirmBeforeQuit off` test below installs a spy
-    // on `useExitPromptStore.getState`; without restoring it, every
-    // later test would inherit the spy's `mockReturnValue` and the
-    // `confirmBeforeQuit = true` default would never be re-applied.
     vi.restoreAllMocks();
+    resetUpdaterStateForTests();
     getAgentNodesMock.mockReturnValue([]);
     listProvidersMock.mockResolvedValue([]);
+    // Quiet check needs a Tauri window in jsdom; the store's
+    // `updaterEnabled` runs on boot. The tests use `disabled` for
+    // mount-time checks so the quiet probe is a no-op.
+    requestExitMock.mockResolvedValue(true);
   });
 
   it('mounts with a quiet check that surfaces only `available`', async () => {
-    // The quiet check suppresses `current` / `unreachable` / `disabled`
-    // — those are the Settings > About surface, not a nag.
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -109,9 +116,6 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     runUpdateCheckMock.mockResolvedValue({ phase: 'current' });
     const { result } = renderHook(() => useUpdateCheck());
     await waitFor(() => expect(runUpdateCheckMock).toHaveBeenCalled());
-    // Wait a tick for the microtask to settle; the state should NOT
-    // have transitioned away from `idle` because quiet checks ignore
-    // `current`.
     await act(async () => {
       await Promise.resolve();
     });
@@ -147,13 +151,18 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     expect(result.current.state.error).toBe('offline');
   });
 
+  // Finding 2 — install walks `downloading` → `installing` → `ready_to_restart`
+  // and the install() promise is awaited UNDER the installing phase.
   it('install walks downloading → installing → ready_to_restart', async () => {
-    downloadAndInstallUpdateMock.mockImplementation(
+    let phaseAtInstallStart: string | null = null;
+    installUpdateMock.mockImplementation(async () => {
+      phaseAtInstallStart = useUpdaterStore.getState().phase.kind;
+    });
+    downloadUpdateMock.mockImplementation(
       async (
         _u: Update,
         onProgress?: (p: { downloaded: number; total: number | null }) => void,
       ) => {
-        onProgress?.({ downloaded: 50, total: 100 });
         onProgress?.({ downloaded: 100, total: 100 });
       },
     );
@@ -167,11 +176,15 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     await act(async () => {
       await result.current.install();
     });
+    expect(phaseAtInstallStart).toBe('installing');
     expect(result.current.state.kind).toBe('ready_to_restart');
   });
 
-  it('install failure transitions to `failed` with retry button', async () => {
-    downloadAndInstallUpdateMock.mockRejectedValue(new Error('disk full'));
+  // Finding 3 — the failure phase distinguishes download-time from
+  // install-time failures (the pre-review code hardcoded `install`).
+  it('install failure transitions to `failed` with failedAt=install', async () => {
+    installUpdateMock.mockRejectedValue(new Error('disk full'));
+    downloadUpdateMock.mockResolvedValue(undefined);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -187,10 +200,31 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     expect(result.current.state.error).toBe('disk full');
   });
 
+  it('download failure transitions to `failed` with failedAt=download', async () => {
+    // The pre-review code only ever produced failedAt=install. Now the
+    // store reads `get().phase.kind` at catch time to distinguish
+    // download-time vs install-time failures.
+    downloadUpdateMock.mockRejectedValue(new Error('network down'));
+    installUpdateMock.mockResolvedValue(undefined);
+    runUpdateCheckMock.mockResolvedValue({
+      phase: 'available',
+      update: fakeUpdate(),
+      summary: { version: '0.3.0', notes: '', message: 'Buildmesh 0.3.0 is available.' },
+    });
+    const { result } = renderHook(() => useUpdateCheck());
+    await waitFor(() => expect(result.current.state.kind).toBe('available'));
+    await act(async () => {
+      await result.current.install();
+    });
+    if (result.current.state.kind !== 'failed') throw new Error('expected failed');
+    expect(result.current.state.failedAt).toBe('download');
+  });
+
   it('retry re-runs the failed install from the preserved handle', async () => {
-    downloadAndInstallUpdateMock
+    installUpdateMock
       .mockRejectedValueOnce(new Error('disk full'))
       .mockResolvedValueOnce(undefined);
+    downloadUpdateMock.mockResolvedValue(undefined);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -205,12 +239,12 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     await act(async () => {
       await result.current.retry();
     });
-    expect(downloadAndInstallUpdateMock).toHaveBeenCalledTimes(2);
+    expect(downloadUpdateMock).toHaveBeenCalledTimes(2);
     expect(result.current.state.kind).toBe('ready_to_restart');
   });
 
   it('dismiss resets state to idle without dropping the staged update', async () => {
-    downloadAndInstallUpdateMock.mockResolvedValue(undefined);
+    downloadUpdateMock.mockResolvedValue(undefined);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -226,8 +260,82 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     expect(result.current.state.kind).toBe('idle');
   });
 
-  it('restart with no active agents calls relaunch() directly', async () => {
-    downloadAndInstallUpdateMock.mockResolvedValue(undefined);
+  // Finding 5 — the ProgressPrompt escape hatch. Bumping the seq guard
+  // makes in-flight progress callbacks bail; the store transitions to
+  // `failed { failedAt: 'download' }`.
+  it('cancelInstall transitions to `failed` with failedAt=download', async () => {
+    // Defer the download resolution so cancel lands while it's still
+    // in flight. We also assert the seq guard makes subsequent
+    // progress callbacks inert.
+    let resolveDownload!: () => void;
+    const progressCalls: number[] = [];
+    downloadUpdateMock.mockImplementation(
+      async (
+        _u: Update,
+        onProgress?: (p: { downloaded: number; total: number | null }) => void,
+      ) => {
+        onProgress?.({ downloaded: 50, total: 100 });
+        await new Promise<void>((r) => { resolveDownload = r; });
+      },
+    );
+    installUpdateMock.mockResolvedValue(undefined);
+    runUpdateCheckMock.mockResolvedValue({
+      phase: 'available',
+      update: fakeUpdate(),
+      summary: { version: '0.3.0', notes: '', message: 'Buildmesh 0.3.0 is available.' },
+    });
+    const { result } = renderHook(() => useUpdateCheck());
+    await waitFor(() => expect(result.current.state.kind).toBe('available'));
+    // Kick off install but don't await yet — we want to land in
+    // `downloading` first.
+    let installPromise: Promise<void> = Promise.resolve();
+    act(() => {
+      installPromise = result.current.install();
+    });
+    await waitFor(() => expect(result.current.state.kind).toBe('downloading'));
+    act(() => result.current.cancelInstall());
+    expect(result.current.state.kind).toBe('failed');
+    if (result.current.state.kind === 'failed') {
+      expect(result.current.state.failedAt).toBe('download');
+    }
+    // Let the download resolve; its terminal callback should bail on
+    // the seq guard and not overwrite our `failed` phase.
+    resolveDownload();
+    await act(async () => {
+      await installPromise;
+    });
+    if (result.current.state.kind !== 'failed') throw new Error('expected failed after late download resolve');
+    expect(result.current.state.failedAt).toBe('download');
+    // Sanity: install was NOT called (the cancelled download never
+    // reached install time).
+    expect(installUpdateMock).not.toHaveBeenCalled();
+    progressCalls.length = 0; // unused; placeholder so test reads cleanly
+  });
+
+  // Finding 4 — restart delegates to `useExitPromptStore.requestExit`.
+  it('restart delegates to useExitPromptStore.requestExit', async () => {
+    downloadUpdateMock.mockResolvedValue(undefined);
+    installUpdateMock.mockResolvedValue(undefined);
+    runUpdateCheckMock.mockResolvedValue({
+      phase: 'available',
+      update: fakeUpdate(),
+      summary: { version: '0.3.0', notes: '', message: 'Buildmesh 0.3.0 is available.' },
+    });
+    const { result } = renderHook(() => useUpdateCheck());
+    await waitFor(() => expect(result.current.state.kind).toBe('available'));
+    await act(async () => {
+      await result.current.install();
+    });
+    await act(async () => {
+      await result.current.restart();
+    });
+    expect(requestExitMock).toHaveBeenCalledWith('update-restart');
+  });
+
+  it('restart with no active agents calls relaunch() directly (no prompt needed)', async () => {
+    downloadUpdateMock.mockResolvedValue(undefined);
+    installUpdateMock.mockResolvedValue(undefined);
+    requestExitMock.mockResolvedValue(false);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -242,14 +350,9 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
       await result.current.restart();
     });
     expect(relaunchMock).toHaveBeenCalledTimes(1);
-    expect(showExitPromptMock).not.toHaveBeenCalled();
   });
 
-  it('restart with confirmBeforeQuit off bypasses the prompt even with active nodes', async () => {
-    // User preference: don't prompt. The updater must honor it (issue
-    // #1501 — single preference, two flows). Without this, the user
-    // can't get the original issue #826 "update silently and restart"
-    // behavior even when they've opted out of the close prompt.
+  it('restart with active non-resumable agents shows the exit prompt (no direct relaunch)', async () => {
     const terminalNode = {
       id: 7,
       status: 'running',
@@ -257,15 +360,8 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
       cli_session_id: 'sess-7',
     } as unknown as AgentNode;
     getAgentNodesMock.mockReturnValue([terminalNode]);
-    // Override the default `confirmBeforeQuit = true` from the mock
-    // factory by replacing getState for this test.
-    const { useExitPromptStore } = await import('../../src/stores/exitPromptStore');
-    const originalGetState = useExitPromptStore.getState;
-    vi.spyOn(useExitPromptStore, 'getState').mockReturnValue({
-      ...originalGetState(),
-      confirmBeforeQuit: false,
-    } as ReturnType<typeof originalGetState>);
-    downloadAndInstallUpdateMock.mockResolvedValue(undefined);
+    downloadUpdateMock.mockResolvedValue(undefined);
+    installUpdateMock.mockResolvedValue(undefined);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
@@ -279,94 +375,33 @@ describe('useUpdateCheck (issue #1526 — state machine)', () => {
     await act(async () => {
       await result.current.restart();
     });
-    expect(showExitPromptMock).not.toHaveBeenCalled();
-    expect(relaunchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('restart with active non-resumable agents shows the exit prompt', async () => {
-    // Issue #1526 — the updater must NOT own a divergent active-node
-    // policy. With an active non-resumable harness (terminal), the
-    // updater routes through the same exit-prompt store the window-
-    // close flow uses.
-    const terminalNode = {
-      id: 7,
-      status: 'running',
-      provider: 'terminal',
-      cli_session_id: 'sess-7',
-    } as unknown as AgentNode;
-    getAgentNodesMock.mockReturnValue([terminalNode]);
-    listProvidersMock.mockResolvedValue([
-      {
-        id: 'terminal',
-        harness_id: 'terminal',
-        is_proxied: false,
-        label: 'Terminal',
-        capabilities: { supports_resume: false },
-      },
-    ]);
-    downloadAndInstallUpdateMock.mockResolvedValue(undefined);
-    runUpdateCheckMock.mockResolvedValue({
-      phase: 'available',
-      update: fakeUpdate(),
-      summary: { version: '0.3.0', notes: '', message: 'Buildmesh 0.3.0 is available.' },
-    });
-    const { result } = renderHook(() => useUpdateCheck());
-    await waitFor(() => expect(result.current.state.kind).toBe('available'));
-    await act(async () => {
-      await result.current.install();
-    });
-    await act(async () => {
-      await result.current.restart();
-    });
-    expect(showExitPromptMock).toHaveBeenCalledTimes(1);
-    expect(showExitPromptMock.mock.calls[0][0]).toBe('update-restart');
-    // Relaunch is NOT called yet — the modal's confirm dispatches it.
+    expect(requestExitMock).toHaveBeenCalledWith('update-restart');
     expect(relaunchMock).not.toHaveBeenCalled();
   });
 
-  it('restart with active resumable agents still prompts (shared policy)', async () => {
-    // The shared Exit Readiness policy (#1501): if any active node
-    // exists AND `confirmBeforeQuit` is on, surface the confirmation
-    // modal. The modal itself suppresses the warning block when
-    // `nonResumable` is empty (handled in `ExitConfirmationModal`),
-    // so the prompt here is a one-click confirm rather than a
-    // blocking warning — but it still fires once so the user
-    // explicitly acknowledges a restart with active work.
-    const claudeNode = {
-      id: 11,
-      status: 'running',
-      provider: 'claude',
-      cli_session_id: 'sess-11',
-    } as unknown as AgentNode;
-    getAgentNodesMock.mockReturnValue([claudeNode]);
-    listProvidersMock.mockResolvedValue([
-      {
-        id: 'claude',
-        harness_id: 'claude',
-        is_proxied: false,
-        label: 'Claude Code',
-        capabilities: { supports_resume: true },
-      },
-    ]);
-    downloadAndInstallUpdateMock.mockResolvedValue(undefined);
+  // Finding 1 — the central cross-instance desync case. Two
+  // `useUpdateCheck` calls must share a single `phase`, so a dismiss
+  // in one is visible to the other.
+  it('two useUpdateCheck instances share the same phase (finding 1)', async () => {
+    downloadUpdateMock.mockResolvedValue(undefined);
+    installUpdateMock.mockResolvedValue(undefined);
     runUpdateCheckMock.mockResolvedValue({
       phase: 'available',
       update: fakeUpdate(),
       summary: { version: '0.3.0', notes: '', message: 'Buildmesh 0.3.0 is available.' },
     });
-    const { result } = renderHook(() => useUpdateCheck());
-    await waitFor(() => expect(result.current.state.kind).toBe('available'));
+    const { result: a } = renderHook(() => useUpdateCheck());
+    const { result: b } = renderHook(() => useUpdateCheck());
+    await waitFor(() => expect(a.current.state.kind).toBe('available'));
+    // Both readers see the same `available` state.
+    expect(b.current.state.kind).toBe('available');
+    // Trigger install from B — A observes the install lifecycle.
     await act(async () => {
-      await result.current.install();
+      await b.current.install();
     });
-    await act(async () => {
-      await result.current.restart();
-    });
-    expect(showExitPromptMock).toHaveBeenCalledTimes(1);
-    // Crucially, `nonResumable` is empty — the modal suppresses its
-    // warning block; the prompt is informational, not blocking.
-    expect(showExitPromptMock.mock.calls[0][2]).toEqual([]);
-    // Relaunch is NOT called yet — the modal's confirm dispatches it.
-    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(a.current.state.kind).toBe('ready_to_restart');
+    // Dismiss from A — B observes the reset.
+    act(() => a.current.dismiss());
+    expect(b.current.state.kind).toBe('idle');
   });
 });

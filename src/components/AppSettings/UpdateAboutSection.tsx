@@ -2,33 +2,28 @@ import { useEffect, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { useUpdateCheck, type UpdatePhase } from '../../hooks/useUpdateCheck';
 
-// Settings > About section (issue #1526).
+// Settings > About section (issue #1526 + #1654 review).
 //
-// The updater state machine lives in `useUpdateCheck`; this section is
-// the manual surface that drives it. It always renders, even when the
-// updater is disabled in the current build (dev profile, non-Tauri
-// page load) — the version row is always useful, and the manual check
-// button gracefully reports "Update checks are disabled in this build".
+// The updater state machine lives in `useUpdaterStore`; this section
+// is the manual surface that drives it. The version row always
+// renders; the manual check button only renders when the updater is
+// enabled in this build (dev profile, non-Tauri page load, or
+// non-production builds see a disabled notice instead — finding 3).
 //
-// The auto-launch prompt (`<UpdatePrompt />`) and this section share
-// the same hook, so a "Check for updates" click in Settings followed
-// by a launch-time prompt is impossible to desync — both see the
-// same `state`.
+// The auto-launch prompt (`<UpdatePrompt />`) and this section
+// subscribe to the same store, so a "Check for updates" click in
+// Settings followed by a launch-time prompt is impossible to desync.
+// The button is also disabled while a download or install is in
+// flight so a mid-download click can't bump the seq guard and orphan
+// the progress callbacks (finding 7).
 //
 // `current` and `unreachable` are surfaced HERE (not in `UpdatePrompt`)
 // because they're informational rather than nag-worthy. The
 // auto-launch prompt suppresses them so a launching app doesn't
 // bother the user with "you're up to date" noise.
 
-interface UpdateAboutSectionProps {
-  /** Render an "Open Settings" affordance only on the inline surface
-   *  (the full Settings modal already is the settings). Currently
-   *  unused but kept for future drill-in surfaces. */
-  compact?: boolean;
-}
-
-export function UpdateAboutSection({ compact: _compact = false }: UpdateAboutSectionProps) {
-  const { state, check, install, retry, restart, dismiss } = useUpdateCheck();
+export function UpdateAboutSection() {
+  const { state, enabled, check, install, retry, restart, dismiss } = useUpdateCheck();
   const [appVersion, setAppVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -54,15 +49,16 @@ export function UpdateAboutSection({ compact: _compact = false }: UpdateAboutSec
         <span data-testid="settings-about-version">{appVersion ?? '…'}</span>
       </div>
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => void check()}
-          disabled={state.kind === 'checking'}
-          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
-          data-testid="settings-about-check"
-        >
-          {state.kind === 'checking' ? 'Checking…' : 'Check for updates'}
-        </button>
+        {enabled ? (
+          <CheckButton state={state} onCheck={() => void check()} />
+        ) : (
+          <p
+            className="text-sm text-text-muted"
+            data-testid="settings-about-disabled"
+          >
+            Update checks are disabled in this build.
+          </p>
+        )}
         <UpdateStatusLine state={state} />
       </div>
       <UpdateStateActions
@@ -73,6 +69,29 @@ export function UpdateAboutSection({ compact: _compact = false }: UpdateAboutSec
         onDismiss={dismiss}
       />
     </div>
+  );
+}
+
+// Disabled while checking / downloading / installing — a click during
+// any of those phases would bump the seq guard and orphan the
+// in-flight progress callbacks (finding 7).
+function CheckButton({ state, onCheck }: { state: UpdatePhase; onCheck: () => void }) {
+  const busy = state.kind === 'checking' || state.kind === 'downloading' || state.kind === 'installing';
+  const label: string =
+    state.kind === 'checking' ? 'Checking…'
+    : state.kind === 'downloading' ? 'Downloading…'
+    : state.kind === 'installing' ? 'Installing…'
+    : 'Check for updates';
+  return (
+    <button
+      type="button"
+      onClick={onCheck}
+      disabled={busy}
+      className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+      data-testid="settings-about-check"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -112,6 +131,10 @@ function UpdateStatusLine({ state }: { state: UpdatePhase }) {
       break;
     case 'ready_to_restart':
       label = `Buildmesh ${state.summary.version} is ready to install.`;
+      break;
+    case 'restarting':
+      label = `Restarting to apply v${state.summary.version}…`;
+      ariaLive = 'polite';
       break;
     case 'failed':
       label = `Update failed (${state.failedAt}): ${state.error}`;

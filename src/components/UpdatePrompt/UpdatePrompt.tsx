@@ -10,11 +10,12 @@ import { useUpdateCheck, type UpdatePhase } from '../../hooks/useUpdateCheck';
 // body for `available` / `downloading` / `installing` /
 // `ready_to_restart` / `failed`.
 //
-// The Settings > About section subscribes to the same hook so a
-// dismissed prompt doesn't leave stale state behind — but `UpdatePrompt`
-// only mounts once at App root, so its presence is purely a
-// "should we nag on launch" question. The shared state lives in the
-// hook.
+// State lives in `useUpdaterStore` — both this prompt and Settings >
+// About subscribe to the same store, so dismissing one surface leaves
+// the other with the same view. `restarting` is the brief "click
+// registered, awaiting the modal decision" window: we render nothing
+// here so the ExitConfirmationModal can stack on top without competing
+// for input (finding 4 follow-up).
 //
 // aria-live regions name the phase so a screen reader user hears
 // progress ("Checking for updates…", "Downloading v0.3.0…", "Restart
@@ -47,7 +48,7 @@ function formatBytes(n: number): string {
 }
 
 export function UpdatePrompt() {
-  const { state, install, retry, restart, dismiss } = useUpdateCheck();
+  const { state, install, retry, restart, cancelInstall, dismiss } = useUpdateCheck();
 
   // Settings > About owns the manual surface; this prompt only appears
   // for the launch-time nag and the install lifecycle.
@@ -55,7 +56,8 @@ export function UpdatePrompt() {
     state.kind === 'idle' ||
     state.kind === 'checking' ||
     state.kind === 'current' ||
-    state.kind === 'unreachable'
+    state.kind === 'unreachable' ||
+    state.kind === 'restarting'
   ) {
     return null;
   }
@@ -64,7 +66,7 @@ export function UpdatePrompt() {
     return <AvailablePrompt summary={state.summary} onInstall={install} onDismiss={dismiss} />;
   }
   if (state.kind === 'downloading' || state.kind === 'installing') {
-    return <ProgressPrompt phase={state} />;
+    return <ProgressPrompt phase={state} onCancel={cancelInstall} />;
   }
   if (state.kind === 'ready_to_restart') {
     return <ReadyPrompt summary={state.summary} onRestart={restart} onDismiss={dismiss} />;
@@ -126,19 +128,34 @@ function AvailablePrompt({
 
 function ProgressPrompt({
   phase,
+  onCancel,
 }: {
   phase: Extract<UpdatePhase, { kind: 'downloading' | 'installing' }>;
+  onCancel: () => void;
 }) {
   const isDownloading = phase.kind === 'downloading';
   const title = isDownloading ? `Downloading v${phase.summary.version}…` : `Installing v${phase.summary.version}…`;
   const visual = isDownloading ? describeProgress(phase) : null;
-  // Once download/install starts, the work is non-cancellable — closing
-  // the modal would leave the user unsure whether the install is still
-  // running. Disable the close path so the only way out is to let it
-  // finish (or hit Retry on a failure).
-  const noop = () => {};
+  // Finding 5 (issue #1654 review): the previous version trapped the
+  // user — Escape routed to `noop`, the panel had no focusable
+  // elements, and a stalled download left force-quit as the only exit.
+  // The fix has two halves:
+  //   - During `downloading`: surface a real Cancel button. The Tauri
+  //     plugin has no documented cancel seam, so we bump the store's
+  //     seq guard and transition to `failed { failedAt: 'download' }`
+  //     — the in-flight download's progress callbacks bail on the
+  //     guard, and the staged `Update` handle is preserved for retry.
+  //   - During `installing`: install is non-cancellable (the plugin
+  //     has already begun the swap). The Cancel button is disabled
+  //     and labelled to explain why.
+  // Either way, the button itself is the focusable surface Tab needs.
   return (
-    <Modal onClose={noop} labelledBy="update-prompt-title" maxWidth="max-w-sm" closeOnBackdrop={false}>
+    <Modal
+      onClose={isDownloading ? onCancel : () => {}}
+      labelledBy="update-prompt-title"
+      maxWidth="max-w-sm"
+      closeOnBackdrop={isDownloading}
+    >
       <h2 id="update-prompt-title" className="text-sm font-semibold text-text-primary mb-2">
         Update in progress
       </h2>
@@ -163,10 +180,17 @@ function ProgressPrompt({
           <p className="mt-1 text-xs text-text-muted">{visual.label}</p>
         </div>
       )}
-      {/* The close "×" is rendered by the Modal header; with
-          closeOnBackdrop=false the user can still Escape. The footer
-          note explains why — silence feels like a freeze. */}
-      <p className="text-xs text-text-muted">Keep this window open until the update finishes.</p>
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={!isDownloading}
+          className="px-3 py-1.5 text-xs text-text-secondary border border-border-subtle rounded-md hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          data-testid="update-prompt-cancel"
+        >
+          {isDownloading ? 'Cancel download' : 'Installing (cannot cancel)'}
+        </button>
+      </div>
     </Modal>
   );
 }
@@ -218,13 +242,16 @@ function FailedPrompt({
   onDismiss,
 }: {
   summary: { version: string; notes: string; message: string } | null;
-  failedAt: 'check' | 'download' | 'install';
+  failedAt: 'download' | 'install';
   error: string;
   onRetry: () => Promise<void>;
   onDismiss: () => void;
 }) {
+  // Finding 3 (issue #1654 review): the previous copy labelled every
+  // failure "Installing the update failed", including downloads that
+  // dropped at 5%. Narrow `failedAt` to the two phases that actually
+  // produce `failed` (download + install) and render the matching verb.
   const phaseLabel =
-    failedAt === 'check' ? 'Checking for updates' :
     failedAt === 'download' ? 'Downloading the update' :
     'Installing the update';
   return (

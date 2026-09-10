@@ -127,7 +127,17 @@ const URL_RE = /\bhttps?:\/\/[^\s)]+/gi;
 // scrubs the whole header.
 const BEARER_RES = /\b(?:bearer|token|basic)\s+[^\s,)]+/gi;
 const AUTH_RES = /\bauthorization\s*[:=]\s*[^\s,)]+/gi;
-const ABS_PATH_RES = /(?:[A-Za-z]:[\\/]|\\\\)[^\s)]+|\/(?:home|Users|var|tmp|etc)\/[^\s)]+/gi;
+// Absolute paths. Windows paths (`C:\…` and UNC `\\server\share\…`)
+// and POSIX sensitive roots (`/home`, `/Users`, `/var`, `/tmp`,
+// `/etc`) can legitimately contain spaces — `C:\Users\Jane Doe\AppData\…`
+// and `C:\Program Files\Buildmesh\…` are real cases the previous
+// `[^\s)]+` silently leaked (surname + trailing path preserved in the
+// modal). Stop at `,`, `)`, and `\n` (real error-message delimiters)
+// but allow spaces inside the match; require a non-space, non-comma,
+// non-backslash terminator so we don't capture trailing punctuation
+// the error message appended. The reviewer flagged this as a privacy
+// leak (issue #1526 follow-up).
+const ABS_PATH_RES = /(?:[A-Za-z]:[\\/]|\\\\|\/(?:home|Users|var|tmp|etc)\/)(?:[^,\n]*[^\s,\n\\])/gi;
 
 export function sanitizeUpdaterError(raw: unknown): string {
   let text = '';
@@ -173,13 +183,15 @@ export async function runUpdateCheck(): Promise<CheckResult> {
   }
 }
 
-/** Download + install the staged update, calling `onProgress` with
- *  cumulative byte counts as the plugin emits per-chunk events.
- *  Rejects on plugin failure with a sanitized error so the UI never
- *  sees raw URLs / paths / tokens. The native `Update` handle is
- *  re-thrown so callers can preserve downloaded state on a failed
- *  install (the binary is staged but not yet swapped). */
-export async function downloadAndInstallUpdate(
+/** Download the staged update, calling `onProgress` with cumulative
+ *  byte counts as the plugin emits per-chunk events. Resolves once
+ *  the response stream ends. Rejects on plugin failure with a
+ *  sanitized error so the UI never sees raw URLs / paths / tokens.
+ *  The native `Update` handle is NOT modified — callers can pass it
+ *  to `installUpdate` next, or keep it on the `failed` phase so a
+ *  retry resumes the staged binary (the Tauri updater keeps partial
+ *  downloads on disk and re-validates on resume). */
+export async function downloadUpdate(
   update: Update,
   onProgress?: (progress: DownloadProgress) => void,
 ): Promise<void> {
@@ -210,9 +222,22 @@ export async function downloadAndInstallUpdate(
       // `installing`.
       onProgress?.({ downloaded, total });
     });
+  } catch (e) {
+    console.error('[updater] download failed:', e);
+    throw new Error(sanitizeUpdaterError(e));
+  }
+}
+
+/** Install the staged update. The plugin stages the binary on top of
+ *  the running process; `relaunch()` (or app restart) picks it up.
+ *  Rejects on plugin failure with a sanitized error. Callers should
+ *  transition to `installing` BEFORE invoking this so the UI's
+ *  progress surface matches the actual operation. */
+export async function installUpdate(update: Update): Promise<void> {
+  try {
     await update.install();
   } catch (e) {
-    console.error('[updater] download/install failed:', e);
+    console.error('[updater] install failed:', e);
     throw new Error(sanitizeUpdaterError(e));
   }
 }

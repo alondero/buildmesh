@@ -22,10 +22,15 @@ const tauriMocks = vi.hoisted(() => ({
   getAppPreferences: vi.fn(),
   cancelWindowClose: vi.fn(),
   exitApplication: vi.fn(),
+  listProviders: vi.fn(),
 }));
 
 const { relaunchMock } = vi.hoisted(() => ({
   relaunchMock: vi.fn(),
+}));
+
+const agentNodeMocks = vi.hoisted(() => ({
+  getAgentNodes: vi.fn(() => []),
 }));
 
 vi.mock('@tauri-apps/plugin-process', () => ({
@@ -37,6 +42,13 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   getAppPreferences: tauriMocks.getAppPreferences,
   cancelWindowClose: tauriMocks.cancelWindowClose,
   exitApplication: tauriMocks.exitApplication,
+  listProviders: tauriMocks.listProviders,
+}));
+
+vi.mock('../../src/stores/agentNodeStore', () => ({
+  useAgentNodeStore: {
+    getState: () => agentNodeMocks,
+  },
 }));
 
 import { useExitPromptStore } from '../../src/stores/exitPromptStore';
@@ -45,7 +57,9 @@ beforeEach(() => {
   tauriMocks.getAppPreferences.mockReset().mockResolvedValue({ confirm_before_quit: false });
   tauriMocks.cancelWindowClose.mockReset().mockResolvedValue(undefined);
   tauriMocks.exitApplication.mockReset().mockResolvedValue(undefined);
+  tauriMocks.listProviders.mockReset().mockResolvedValue([]);
   relaunchMock.mockReset().mockResolvedValue(undefined);
+  agentNodeMocks.getAgentNodes.mockReset().mockReturnValue([]);
   toastMock.addToast.mockReset();
   useExitPromptStore.setState({ pending: null, exiting: false, confirmBeforeQuit: true });
 });
@@ -158,5 +172,72 @@ describe('useExitPromptStore (issue #1501)', () => {
     // Distinct toast title so the user can tell which flow interrupted.
     expect(toastMock.addToast.mock.calls[0][0]).toBe('Restart failed');
     expect(useExitPromptStore.getState().exiting).toBe(false);
+  });
+});
+
+// Issue #1654 review finding 4 — the active-nodes + providers +
+// partition lookup was duplicated in `useUpdateCheck.restart()` and
+// `WindowCloseGuard`. It lives behind `requestExit` now, so the
+// updater route and the window-close route share one policy.
+describe('useExitPromptStore.requestExit (issue #1654 review — shared policy)', () => {
+  it('returns false when confirmBeforeQuit is off', async () => {
+    useExitPromptStore.setState({ confirmBeforeQuit: false });
+    const result = await useExitPromptStore.getState().requestExit('window-close');
+    expect(result).toBe(false);
+    expect(useExitPromptStore.getState().pending).toBeNull();
+  });
+
+  it('returns false when there are no active nodes', async () => {
+    agentNodeMocks.getAgentNodes.mockReturnValue([]);
+    const result = await useExitPromptStore.getState().requestExit('update-restart');
+    expect(result).toBe(false);
+    expect(useExitPromptStore.getState().pending).toBeNull();
+  });
+
+  it('returns true and shows the prompt with mode=update-restart for active non-resumable nodes', async () => {
+    agentNodeMocks.getAgentNodes.mockReturnValue([
+      {
+        id: 7,
+        status: 'running',
+        provider: 'terminal',
+        cli_session_id: 'sess-7',
+      },
+    ]);
+    tauriMocks.listProviders.mockResolvedValue([
+      {
+        id: 'terminal',
+        harness_id: 'terminal',
+        is_proxied: false,
+        label: 'Terminal',
+        capabilities: { supports_resume: false },
+      },
+    ]);
+    const result = await useExitPromptStore
+      .getState()
+      .requestExit('update-restart');
+    expect(result).toBe(true);
+    const pending = useExitPromptStore.getState().pending;
+    expect(pending?.mode).toBe('update-restart');
+    expect(pending?.activeCount).toBe(1);
+    expect(pending?.nonResumable).toEqual([
+      { id: 7, name: undefined, providerDisplay: 'Terminal' },
+    ]);
+  });
+
+  it('fails closed on listProviders: empty list partitions all unknown harnesses as non-resumable', async () => {
+    // The IPC seam can throw — the policy must still gate, just with
+    // a wider warning. Mirrors the WindowCloseGuard fallback.
+    agentNodeMocks.getAgentNodes.mockReturnValue([
+      { id: 9, status: 'running', provider: 'claude', cli_session_id: 'sess-9' },
+    ]);
+    tauriMocks.listProviders.mockRejectedValueOnce(new Error('ipc down'));
+    const result = await useExitPromptStore
+      .getState()
+      .requestExit('window-close');
+    expect(result).toBe(true);
+    const pending = useExitPromptStore.getState().pending;
+    expect(pending?.mode).toBe('window-close');
+    // Unknown harness → non-resumable (fail-closed).
+    expect(pending?.nonResumable.length).toBe(1);
   });
 });
