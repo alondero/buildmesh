@@ -1,5 +1,6 @@
-//! Antigravity (`agy`) native adapter — token lives in the OS credential
-//! store under `gemini:antigravity`, detection-gated on the `agy` harness.
+//! Antigravity (`agy`) native adapter — token lives in
+//! `<agy_dir>/antigravity-oauth-token` (current CLI) with a
+//! `gemini:antigravity` keyring fallback, detection-gated on the `agy` harness.
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::UsageAdapter;

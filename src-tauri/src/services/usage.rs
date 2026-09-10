@@ -2107,8 +2107,11 @@ pub fn opencode_usage() -> ProviderUsage {
 // behind `retrieveUserQuotaSummary` (weekly + 5-hour shared buckets) with
 // `fetchAvailableModels` as a five-hour-only fallback, and is gated purely
 // by the client User-Agent.
-// Auth is separate from `~/.gemini/oauth_creds.json` — the token lives in the OS
-// credential store under `gemini:antigravity` (written by the agy CLI itself).
+// Auth is separate from `~/.gemini/oauth_creds.json`. Current CLI (1.2+)
+// writes the live blob to `<agy_dir>/antigravity-oauth-token` and refreshes
+// it in place. Older CLIs used the OS credential store under
+// `gemini:antigravity`; that target is left stale after a refresh, so the
+// file is preferred.
 //
 // This path is deliberately best-effort and FRAGILE (staging host, User-Agent
 // gate, no token refresh since the Antigravity OAuth client isn't recoverable).
@@ -2118,8 +2121,12 @@ const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The Antigravity CLI identifies with this User-Agent and the Cloud Code private
 /// API allowlists it. Load-bearing: without it the API returns 403 PERMISSION_DENIED.
 const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
-/// Credential Manager target the agy CLI stores its OAuth token under.
+/// Credential Manager target older agy CLIs stored the OAuth blob under.
+/// Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead
+/// and leaves this target stale — read the file first.
 const AGY_CRED_TARGET: &str = "gemini:antigravity";
+/// Live OAuth blob written by the Antigravity CLI under [`crate::env::agy_dir`].
+const AGY_OAUTH_TOKEN_FILE: &str = "antigravity-oauth-token";
 
 // ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
 //
@@ -2168,18 +2175,43 @@ fn parse_agy_token(blob: &[u8]) -> Result<String, UsageError> {
         .ok_or_else(|| UsageError::NoCredential(AGY_CRED_TARGET.to_string()))
 }
 
-/// Reads the agy OAuth access token from the OS credential store. Windows-only
-/// for now (the agy CLI keyrings differ per platform); elsewhere the provider
-/// simply reports logged-out.
-#[cfg(windows)]
+fn agy_oauth_token_path() -> PathBuf {
+    crate::env::agy_dir().join(AGY_OAUTH_TOKEN_FILE)
+}
+
+/// Reads the agy OAuth access token. Current CLI (1.2+) writes and refreshes
+/// `<agy_dir>/antigravity-oauth-token`; older Windows installs also keep a
+/// blob under `gemini:antigravity` that is no longer updated on refresh.
 fn read_agy_token() -> Result<String, UsageError> {
+    read_agy_token_from(&agy_oauth_token_path(), read_agy_keyring_token)
+}
+
+/// Test seam: prefer a CLI oauth file when it parses, otherwise the keyring
+/// fallback. agy 1.2+ refreshes the file in place and leaves
+/// `gemini:antigravity` stale; using only the keyring 401s the quota RPC
+/// and `assemble_meters` drops the Usage Probe row as logged-out.
+fn read_agy_token_from(
+    file_path: &Path,
+    fallback: impl FnOnce() -> Result<String, UsageError>,
+) -> Result<String, UsageError> {
+    if let Ok(bytes) = fs::read(file_path) {
+        if let Ok(token) = parse_agy_token(&bytes) {
+            return Ok(token);
+        }
+    }
+    fallback()
+}
+
+#[cfg(windows)]
+fn read_agy_keyring_token() -> Result<String, UsageError> {
     parse_agy_token(&windows_cred::read(AGY_CRED_TARGET)?)
 }
 
 #[cfg(not(windows))]
-fn read_agy_token() -> Result<String, UsageError> {
+fn read_agy_keyring_token() -> Result<String, UsageError> {
     Err(UsageError::NoCredential(
-        "Antigravity usage is only available on Windows".to_string(),
+        "Antigravity OAuth token not found (antigravity-oauth-token or gemini:antigravity)"
+            .to_string(),
     ))
 }
 
@@ -3926,6 +3958,55 @@ pub(crate) mod tests {
     fn parse_agy_token_missing_is_error() {
         assert!(parse_agy_token(br#"{"auth_method":"consumer"}"#).is_err());
         assert!(parse_agy_token(br#"{"token":{"access_token":""}}"#).is_err());
+    }
+
+    #[test]
+    fn read_agy_token_from_prefers_cli_oauth_file() {
+        // agy 1.2+ refreshes ~/.gemini/antigravity-cli/antigravity-oauth-token
+        // and leaves the Windows Credential Manager blob stale. Reading only
+        // the keyring 401s retrieveUserQuotaSummary, agy_usage returns
+        // logged_out, and assemble_meters drops the Usage Probe row.
+        let dir = std::env::temp_dir().join(format!(
+            "agy-oauth-file-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(AGY_OAUTH_TOKEN_FILE);
+        fs::write(
+            &path,
+            br#"{"token":{"access_token":"ya29.fromfile","token_type":"Bearer"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(token, "ya29.fromfile");
+    }
+
+    #[test]
+    fn read_agy_token_from_falls_back_when_file_missing() {
+        let path = std::env::temp_dir().join("agy-oauth-does-not-exist.token");
+        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
+        assert_eq!(token, "ya29.from-keyring");
+    }
+
+    #[test]
+    fn read_agy_token_from_falls_back_when_file_unparseable() {
+        let dir = std::env::temp_dir().join(format!(
+            "agy-oauth-bad-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(AGY_OAUTH_TOKEN_FILE);
+        fs::write(&path, br#"{"auth_method":"consumer"}"#).unwrap();
+        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(token, "ya29.from-keyring");
     }
 
     #[test]
