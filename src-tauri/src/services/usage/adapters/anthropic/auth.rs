@@ -921,11 +921,10 @@ mod tests {
         match resolve_claude_auth(&lookup) {
             ClaudeAuthSource::Oauth {
                 token,
-                plan,
                 origin,
+                ..
             } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
-                // plan field is no longer extracted after #1689 cut ProviderUsage.plan
                 assert_eq!(
                     origin,
                     OauthOrigin::ActiveProfile {

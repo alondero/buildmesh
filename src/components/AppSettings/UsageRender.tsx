@@ -149,7 +149,7 @@ export function ExplicitUsageMeter({ meter }: { meter: UsageMeter }) {
  *  month" when monthly spend is set. Returns true if either row would
  *  appear. -0 collapses to 0 in JS so no special-case is needed; a
  *  negative remaining (overdrawn wallet) is informative and counts. */
-export function isBalanceVisible(balance: BillingBalance): boolean {
+function isBalanceVisible(balance: BillingBalance): boolean {
   return balance.remaining !== 0 || balance.monthlySpend != null;
 }
 
