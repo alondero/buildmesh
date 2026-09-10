@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -6,18 +6,24 @@ import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { cancelCircuitRun, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
+import type { SpawnOption } from '../../lib/groups';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { Modal } from '../shared/Modal';
 import { CircuitsIcon } from '../Probe/probeIcons';
 
-export function AgentReviewButton({ node }: { node: AgentNode }) {
+export function AgentReviewButton({ node, providerList }: { node: AgentNode; providerList: SpawnOption[] }) {
   const [open, setOpen] = useState(false);
   const [rounds, setRounds] = useState(3);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [circuits, setCircuits] = useState<AutopilotCircuit[]>([]);
   const [circuitId, setCircuitId] = useState<number | null>(null);
+  const [reviewerProvider, setReviewerProvider] = useState('');
+  const reviewerProviders = useMemo(
+    () => providerList.filter(provider => provider.harness_id !== 'terminal'),
+    [providerList],
+  );
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[node.id]);
   const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
     ? ownership
@@ -51,7 +57,7 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
     setBusy(true);
     setError(null);
     try {
-      await triggerCircuitFromNode(node.id, circuitId, rounds);
+      await triggerCircuitFromNode(node.id, circuitId, rounds, circuitId === null ? reviewerProvider || null : null);
       setOpen(false);
       showRun();
     } catch (reason) {
@@ -106,12 +112,23 @@ export function AgentReviewButton({ node }: { node: AgentNode }) {
             {circuits.map(circuit => <option key={circuit.id} value={circuit.id}>{circuit.name}</option>)}
           </select>
         </label>
-        {circuitId === null ? <><p className="text-xs text-text-secondary mb-4">
+        {circuitId === null ? <>
+        <label className="text-xs block mb-4">Reviewer provider
+          <select value={reviewerProvider} aria-label="Reviewer provider"
+            onChange={e => setReviewerProvider(e.target.value)}
+            className="block w-full mt-1 bg-surface-raised border border-border-subtle rounded-md px-2 py-1">
+            <option value="">Default (app Reviewer provider or this agent)</option>
+            {reviewerProviders.map(provider => (
+              <option key={provider.id} value={provider.id}>{provider.label}</option>
+            ))}
+          </select>
+        </label>
+        <p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
-          The reviewer uses the app-wide Reviewer provider when configured;
-          otherwise it falls back to this agent's provider. Reviewer model and
-          effort still follow the Mesh/harness configuration.
+          The reviewer uses the app-wide Reviewer provider when configured, otherwise this
+          agent's provider — pick a provider above to override it for this review.
+          Reviewer model and effort still follow the Mesh/harness configuration.
           You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">

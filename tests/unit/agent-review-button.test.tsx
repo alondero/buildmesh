@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AgentReviewButton } from '../../src/components/AgentNodeView/AgentReviewButton';
+import type { SpawnOption } from '../../src/lib/groups';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -12,6 +13,25 @@ vi.mock('../../src/lib/tauri', async importOriginal => ({
   listCircuits: list,
 }));
 
+function spawnOption(id: string, label: string): SpawnOption {
+  return {
+    id,
+    label,
+    icon: id,
+    harness_id: id,
+    provider_id: null,
+    is_proxied: false,
+    group_key: id,
+    color: '#fff',
+  };
+}
+
+const PROVIDERS: SpawnOption[] = [
+  spawnOption('anthropic', 'Anthropic'),
+  spawnOption('codex', 'Codex'),
+  spawnOption('terminal', 'Terminal'),
+];
+
 const node = { id: 42, mesh_id: 7, name: 'Fix parser', provider: 'claude', status: 'ready' } as AgentNode;
 
 describe('agent workflow title-bar control', () => {
@@ -22,16 +42,31 @@ describe('agent workflow title-bar control', () => {
     useUIStore.setState({ probeOpen: false });
   });
 
+  function renderButton(value: AgentNode = node) {
+    return render(<AgentReviewButton node={value} providerList={PROVIDERS} />);
+  }
+
   it('starts review for a finished agent and opens its Mesh Circuits', async () => {
-    render(<AgentReviewButton node={node} />);
+    renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     expect(screen.getByRole('heading', { name: 'Review or circuit for Fix parser' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value: '5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null));
     await waitFor(() => expect(useUIStore.getState().probeTab).toBe('circuits'));
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
+  });
+
+  it('parameterises the reviewer harness for the review loop', async () => {
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
+    // Terminal is not a reviewer — it is filtered out of the picker.
+    expect(screen.queryByRole('option', { name: 'Terminal' })).toBeNull();
+    fireEvent.change(select, { target: { value: 'codex' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
   it('offers saved manual Circuits and passes the selected id', async () => {
@@ -39,18 +74,18 @@ describe('agent workflow title-bar control', () => {
       { id: 3, name: 'My workflow', graph_json: JSON.stringify({ nodes: [{ id: 'trigger', type: { type: 'manual' } }], edges: [] }) },
       { id: 4, name: 'Interval only', graph_json: JSON.stringify({ nodes: [{ id: 'trigger', type: { type: 'interval', interval_seconds: 60 } }], edges: [] }) },
     ]);
-    render(<AgentReviewButton node={node} />);
+    renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     await screen.findByRole('option', { name: 'My workflow' });
     expect(screen.queryByRole('option', { name: 'Interval only' })).toBeNull();
     fireEvent.change(screen.getByLabelText('Workflow'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null));
   });
 
   it('keeps an actionable backend error in the dialog', async () => {
     trigger.mockRejectedValue('Resume the agent before starting a review.');
-    render(<AgentReviewButton node={node} />);
+    renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     expect((await screen.findByRole('alert')).textContent).toContain('Resume the agent');
@@ -59,7 +94,7 @@ describe('agent workflow title-bar control', () => {
 
   it('opens the active run instead of starting a duplicate', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state: 'running' } } });
-    render(<AgentReviewButton node={node} />);
+    renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('button', { name: 'View circuit run #91' }));
     expect(trigger).not.toHaveBeenCalled();
@@ -70,7 +105,7 @@ describe('agent workflow title-bar control', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state: 'paused' } } });
     const { cancelCircuitRun } = await import('../../src/lib/tauri');
     const cancel = vi.spyOn(await import('../../src/lib/tauri'), 'cancelCircuitRun').mockResolvedValue();
-    render(<AgentReviewButton node={node} />);
+    renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     expect(screen.queryByRole('button', { name: 'Start review' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel active workflow' }));
@@ -83,12 +118,12 @@ describe('agent workflow title-bar control', () => {
     useAgentNodeStore.setState({ circuitOwnerships: {
       42: { node_id: 42, run_id: 91, circuit_id: 3, circuit_name: 'Review', state },
     } });
-    render(<AgentReviewButton node={{ ...node, status: 'error' }} />);
+    renderButton({ ...node, status: 'error' });
     expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it.each(['suspended', 'archived', 'error'])('disables starting for %s agents', status => {
-    render(<AgentReviewButton node={{ ...node, status: status as AgentNode['status'] }} />);
+    renderButton({ ...node, status: status as AgentNode['status'] });
     expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

@@ -184,8 +184,8 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let source = create_agent_node(mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
-    let run_id = create_node_circuit_run(source.id, None, 3).unwrap();
-    assert_eq!(create_node_circuit_run(source.id, None, 3).unwrap(), run_id);
+    let run_id = create_node_circuit_run(source.id, None, 3, Some("codex".into())).unwrap();
+    assert_eq!(create_node_circuit_run(source.id, None, 3, None).unwrap(), run_id);
     assert!(list_autopilot_circuits(mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
     let preset_count: i64 = write_conn().query_row(
         "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
@@ -197,6 +197,7 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
+    assert_eq!(ctx.get("review.provider"), Some("codex"), "the picked reviewer harness overrides the app-wide default");
     assert!(list_circuit_agent_ownerships().unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
     commit_circuit_advance(run_id, Some("running"), None, &[CircuitStepOp {
         node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
@@ -224,15 +225,22 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
         "claude", None, None, None, None, false, None, None, None).unwrap();
     update_agent_node_status(source.id, SessionStatus::Ready).unwrap();
     let foreign = create_autopilot_circuit(other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
-    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3).unwrap_err().contains("manual Circuit"));
+    assert!(create_node_circuit_run(source.id, Some(foreign.id), 3, None).unwrap_err().contains("manual Circuit"));
     let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
     let timed = create_autopilot_circuit(mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
-    assert!(create_node_circuit_run(source.id, Some(timed.id), 3).is_err());
+    assert!(create_node_circuit_run(source.id, Some(timed.id), 3, None).is_err());
     let manual = create_autopilot_circuit(mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
-    let run = create_node_circuit_run(source.id, Some(manual.id), 3).unwrap();
+    let run = create_node_circuit_run(source.id, Some(manual.id), 3, None).unwrap();
     assert_eq!(get_circuit_run(run).unwrap().unwrap().circuit_id, manual.id);
     cancel_circuit_run(run).unwrap();
-    assert_ne!(create_node_circuit_run(source.id, Some(manual.id), 3).unwrap(), run);
+    // An authored Circuit carries its reviewer provider in its graph, so the
+    // title-bar override must not leak into the run context.
+    let rerun = create_node_circuit_run(source.id, Some(manual.id), 3, Some("codex".into())).unwrap();
+    assert_ne!(rerun, run);
+    let rerun_context = crate::autopilot::circuit::context::CircuitContext::from_json(
+        &get_circuit_run(rerun).unwrap().unwrap().context_json,
+    ).unwrap();
+    assert_ne!(rerun_context.get("review.provider"), Some("codex"));
 }
 
 // ---------------------------------------------------------------------------

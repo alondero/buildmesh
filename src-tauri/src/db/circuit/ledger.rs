@@ -13,7 +13,19 @@ use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunSt
 /// Atomically claim a source agent and create its review run. The source id is
 /// stored relationally on the run; the context copy remains for graph
 /// template expansion and backwards-compatible diagnostics.
-pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+///
+/// `reviewer_provider` is the per-run reviewer provider (a Spawn Option id,
+/// possibly a composite `harness:provider`) chosen at the title-bar Start
+/// Review control. When set it overrides the app-wide Reviewer provider
+/// snapshot in this run's context, so the reviewer agent spawns on the
+/// provider the user picked. It applies to the built-in review preset only:
+/// an authored Circuit carries its own reviewer provider in its graph.
+pub fn create_node_circuit_run(
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
     let mut db = crate::db::write_conn();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
@@ -90,6 +102,9 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
             (tx.last_insert_rowid(), name)
         }
     };
+    let reviewer_override = reviewer_provider
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit_id, &name, node.mesh_id);
     context.with_app_reviewer_provider();
@@ -100,6 +115,9 @@ pub fn create_node_circuit_run(node_id: i64, selected_circuit_id: Option<i64>, m
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() {
+        if let Some(provider) = reviewer_override.as_deref() {
+            context.set("review.provider", provider);
+        }
         context.set("source.review_preset", "1");
         context.set("source.provider", &node.provider);
         context.set(
