@@ -15,8 +15,9 @@ the blocker or request a fresh review. When the source's completion cannot be
 read or classified, a visible approval step lets the user confirm completion
 before review begins.
 
-The reviewer uses the configured Reviewer provider when one is set, otherwise
-the source agent's provider. Model and effort come from the selected reviewer's
+The reviewer uses the provider picked in the Start Review dialog when one is
+chosen, otherwise the configured Reviewer provider, otherwise the source
+agent's provider. Model and effort come from the selected reviewer's
 harness-specific Mesh overrides, then application defaults. Legacy source
 snapshots and shared preset graphs do not override that configuration.
 It receives its working directory, Mesh base ref, name, and latest completion report. It is instructed
@@ -46,7 +47,10 @@ process and is retryable rather than deleting the review evidence.
 By default, reviewers inherit the reviewed agent's harness. The app-wide
 **Reviewer provider** setting in Settings can override that fallback for
 adversarial review; it is snapshotted into each run, so changing Settings does
-not alter a queued review. The built-in review preset is shared per Mesh, so
+not alter a queued review. The Start Review dialog's **Reviewer provider**
+picker overrides the app-wide setting for that one run only; it lists the same
+harness-grouped Spawn Options as the Spawn Menu, minus Terminal. The built-in
+review preset is shared per Mesh, so
 it never stores a provider-specific default from the first agent that used it.
 Explicit reviewer settings in an authored Circuit take precedence; configure
 those in the reviewer `SpawnAgentNode` inspector's Provider field. Model and

@@ -587,8 +587,26 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     Ok(run_id)
 }
 
+/// Start a review or an authored Circuit from an agent node's title bar.
+///
+/// `reviewer_provider` is the optional reviewer provider (a Spawn Option id)
+/// picked at the Start Review control; it becomes the run's reviewer provider
+/// for the built-in review preset (the reviewer agent spawns on it). Authored
+/// Circuits ignore it — their reviewer provider is part of the circuit graph.
+/// A blank value means "inherit"; Terminal is rejected (see
+/// [`crate::db::circuit::ledger::create_node_circuit_run`]).
+///
+/// Retrying for an agent that already owns a live run returns that run's id and
+/// does not apply the new `reviewer_provider` or `max_rounds` — the first
+/// writer wins.
 #[command]
-pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Option<i64>, max_rounds: i32) -> Result<i64, String> {
+pub fn trigger_circuit_from_node(
+    app: AppHandle,
+    node_id: i64,
+    circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
     if !(1..=10).contains(&max_rounds) {
         return Err("Review rounds must be between 1 and 10.".into());
     }
@@ -599,7 +617,7 @@ pub fn trigger_circuit_from_node(app: AppHandle, node_id: i64, circuit_id: Optio
     if node.provider == "terminal" {
         return Err("Review loops require an AI agent.".into());
     }
-    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds)?;
+    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
     crate::autopilot::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?

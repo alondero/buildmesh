@@ -100,7 +100,7 @@ fn create_review_activity_pair(
         // Use the same production circuit creation path as the node-review
         // command so source.* context and the canonical preset stay realistic.
         ReviewFixtureKind::NodeStarted => {
-            let run_id = crate::db::create_node_circuit_run(source.id, None, 3)?;
+            let run_id = crate::db::create_node_circuit_run(source.id, None, 3, None)?;
             let run = crate::db::get_circuit_run(run_id)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("review fixture run {} disappeared", run_id))?;

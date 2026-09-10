@@ -178,7 +178,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
         {openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} compact={compactHeader} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
-        <AgentReviewButton node={node} />
+        <AgentReviewButton node={node} providerList={providerList} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"
           data-testid="grid-resume-button" className="flex h-7 w-7 items-center justify-center rounded-md text-accent-violet hover:bg-accent-violet/10">↻</button>}
         <KebabActions key={node.id} isPinned={node.is_pinned} onTogglePin={handleTogglePin}
