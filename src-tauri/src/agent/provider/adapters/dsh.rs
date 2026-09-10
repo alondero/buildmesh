@@ -4,11 +4,23 @@
 //! `apps/cli/README.md`, it parses only its own flags (`--profile`,
 //! `--patch`, `--dump-default-config`, `--dump-config`, `--help`)
 //! and forwards everything else to the booted profile
-//! (`web`/`headless`/`sdk`/`sdk-minimal`/`acp`/custom).
+//! (`web`/`headless`/`sdk`/`sdk-minimal`/`acp`/custom). The
+//! `--profile` flag is **required** — bare `dsh` exits with
+//! `error: --profile <name> is required`.
 //!
-//! Issue #1365: no profile is validated, so we gate the capability
-//! flags that depend on profile acceptance (resume, model override,
-//! attention, transcript, prefill). The orchestrator's
+//! The adapter bakes `--profile headless` into `base_args` as a
+//! pragmatic stop-gap so the launcher has a working out-of-box
+//! default. `headless` is terminal-friendly (no GUI/web browser)
+//! and does not impose a stdio-protocol contract (unlike `acp`),
+//! so it does not require a wire-format change to Buildmesh's
+//! current PTY rendering path. Profile validation remains open
+//! (issue #1365). Users can override per-step via the
+//! `supports_extra_args` escape hatch
+//! (`extra_args = "--profile web"`).
+//!
+//! Issue #1365: no profile is fully validated, so we still gate the
+//! capability flags that depend on profile acceptance (resume,
+//! model override, attention, transcript, prefill). The orchestrator's
 //! `SessionIdMode` plumbing (prepare.rs:249) routes `None` when
 //! `supports_resume = false`, so `session_assign_args` and
 //! `resume_args` are never called. The default wire formatters
@@ -31,6 +43,16 @@ fn shell_for(platform: Platform) -> WindowsShell {
     }
 }
 
+/// Upstream profile name baked into the spawn recipe. The `dsh`
+/// launcher requires `--profile <name>`; bare `dsh` exits with
+/// `error: --profile <name> is required`. `headless` is a
+/// pragmatic stop-gap picked to unblock out-of-box launches — it
+/// is terminal-friendly (no GUI/web browser) and does not impose a
+/// stdio-protocol contract (unlike `acp`). Profile validation
+/// remains open (issue #1365). Override per-step via
+/// `extra_args = "--profile <other>"`.
+const DSH_BAKED_PROFILE: &str = "headless";
+
 impl AgentProvider for DshAdapter {
     fn id(&self) -> &'static str {
         "dsh"
@@ -47,7 +69,10 @@ impl AgentProvider for DshAdapter {
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "dsh",
-            base_args: Vec::new(),
+            base_args: vec![
+                "--profile".into(),
+                DSH_BAKED_PROFILE.to_string(),
+            ],
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
@@ -81,12 +106,12 @@ impl AgentProvider for DshAdapter {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
     fn supports_extra_args(&self) -> bool {
-        // Escape hatch for users to manually inject `--profile <name>`
-        // (or anything else the launcher accepts) until the
-        // capability layer knows which profile to advertise. The
-        // user's string is tokenised by `extra_args_args` and
-        // appended verbatim — whether bare `dsh` accepts the
-        // resulting argv is unverified.
+        // Escape hatch for users to override the baked profile
+        // (e.g. `--profile web` / `--profile acp`) or inject any other
+        // launcher-accepted flag. The default `--profile headless`
+        // is baked into `spawn_recipe`; `extra_args` is appended after
+        // it in `default_prepare`. Whether the booted profile accepts
+        // the resulting argv is unverified — issue #1365.
         true
     }
     fn self_assigns_session_id(&self) -> bool {
@@ -109,13 +134,16 @@ mod tests {
     }
 
     #[test]
-    fn spawn_recipe_is_bare_dsh_with_per_platform_shell() {
+    fn spawn_recipe_carries_baked_profile_and_per_platform_shell() {
         for platform in [Platform::Linux, Platform::Macos] {
             let recipe = DSH.spawn_recipe(platform, EnvType::Windows);
             assert_eq!(recipe.binary, "dsh");
-            assert!(
-                recipe.base_args.is_empty(),
-                "no profile / no app args while gated; got {:?}",
+            assert_eq!(
+                recipe.base_args,
+                vec!["--profile".to_string(), DSH_BAKED_PROFILE.to_string()],
+                "dsh launcher requires --profile <name>; bare dsh exits with \
+                 `error: --profile <name> is required` (issue #1365). \
+                 Override per-step via supports_extra_args. got {:?}",
                 recipe.base_args
             );
             assert!(recipe.trailing_args.is_empty());
@@ -128,7 +156,12 @@ mod tests {
         }
         let win_recipe = DSH.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(win_recipe.binary, "dsh");
-        assert!(win_recipe.base_args.is_empty());
+        assert_eq!(
+            win_recipe.base_args,
+            vec!["--profile".to_string(), DSH_BAKED_PROFILE.to_string()],
+            "Windows spawn recipe must also carry --profile <baked>; got {:?}",
+            win_recipe.base_args
+        );
         assert!(win_recipe.trailing_args.is_empty());
         assert!(matches!(win_recipe.windows_shell, WindowsShell::Cmd));
     }
@@ -153,6 +186,12 @@ mod tests {
     /// neither flag regardless of whether the user supplied values.
     /// This is the production path; gating the test to `Assign` would
     /// exercise a code path the orchestrator never takes.
+    ///
+    /// Also asserts the baked `--profile headless` survives
+    /// `default_prepare` — `spawn_recipe` alone does not exercise
+    /// the orchestrator's prepend/append layers (extra_args,
+    /// sandbox, prefill), and a regression in any of them would
+    /// re-expose the bare-`dsh` launcher-exit failure.
     #[test]
     fn default_prepare_emits_no_session_id_or_model() {
         let input = HarnessLaunchInput {
@@ -170,6 +209,12 @@ mod tests {
         let prepared = default_prepare(&DSH, input);
         assert_eq!(prepared.recipe.binary, "dsh");
         let args = &prepared.recipe.base_args;
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--profile" && w[1] == DSH_BAKED_PROFILE),
+            "baked `--profile <name>` from spawn_recipe must survive default_prepare; \
+             got {args:?}"
+        );
         assert!(
             !args.iter().any(|a| a == "--session-id"),
             "--session-id must not be in the recipe when supports_resume = false; \
