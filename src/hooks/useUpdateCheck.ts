@@ -1,58 +1,52 @@
-import { useCallback, useEffect, useState } from 'react';
-import { type Update } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
-import { runUpdateCheck } from '../lib/updater';
+// Thin React adapter over `useUpdaterStore` (issue #1526 + #1654 review).
+//
+// The state machine lives in the shared Zustand store so both
+// `UpdatePrompt` and Settings > About subscribe to one source of truth
+// (finding 1). This hook owns three thin responsibilities:
+//   - fire the one-time boot quiet check (idempotent across surfaces),
+//   - fire the one-time `updaterEnabled()` probe so Settings knows
+//     whether to render the button or a disabled notice (finding 3),
+//   - subscribe to the current `phase` for rendering.
+//
+// Action closures (`check`, `install`, …) come straight from the
+// store's `getState()` so they don't re-bind on every render — they
+// don't need to.
 
-export interface UpdateCheckState {
-  /** True when an update is pending and the user hasn't dismissed the prompt. */
-  available: boolean;
-  update: Update | null;
-  installing: boolean;
-  /** Download + install the pending update, then relaunch into the new version. */
-  install: () => Promise<void>;
-  /** Dismiss the prompt for this session ("Later"). */
-  dismiss: () => void;
-}
+import { useEffect } from 'react';
+import { useUpdaterStore, type UpdateCheckApi } from '../stores/updaterStore';
 
-// Checks once on mount (guarded to production Tauri builds inside
-// `runUpdateCheck`) and drives the <UpdatePrompt> dialog. Kept separate from
-// the presentational component so the check/install wiring is testable via
-// plugin mocks. Issue #826.
-export function useUpdateCheck(): UpdateCheckState {
-  const [update, setUpdate] = useState<Update | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+export type { UpdatePhase } from '../stores/updaterStore';
 
+export function useUpdateCheck(): UpdateCheckApi {
+  const state = useUpdaterStore((s) => s.phase);
+  const enabled = useUpdaterStore((s) => s.enabled);
+
+  // Fire the boot-time probes exactly once across every component that
+  // mounts this hook. The store guards re-entry with module-level
+  // flags, so React StrictMode's double-invoke (and any second
+  // surface mounting its own copy of the hook) is a no-op.
   useEffect(() => {
-    let cancelled = false;
-    runUpdateCheck().then((u) => {
-      if (!cancelled && u) setUpdate(u);
-    });
-    return () => {
-      cancelled = true;
-    };
+    void useUpdaterStore.getState().startEnabledCheck();
+    void useUpdaterStore.getState().startQuietCheck();
   }, []);
 
-  const install = useCallback(async () => {
-    if (!update) return;
-    setInstalling(true);
-    try {
-      await update.downloadAndInstall();
-      await relaunch();
-    } catch (e) {
-      // Surface in the log bridge; re-enable the button so the user can retry.
-      console.error('[updater] install failed:', e);
-      setInstalling(false);
-    }
-  }, [update]);
-
-  const dismiss = useCallback(() => setDismissed(true), []);
+  // Bind action closures from the live store so callers always get the
+  // latest implementations (the store re-creates them on Zustand
+  // re-renders, but the public surface is stable across renders).
+  const api = useUpdaterStore.getState();
 
   return {
-    available: !!update && !dismissed,
-    update,
-    installing,
-    install,
-    dismiss,
+    state,
+    // Tri-state: `null` while the boot probe is in flight, `true` /
+    // `false` once resolved. The Settings > About surface renders a
+    // neutral "checking…" while null instead of briefly flashing the
+    // disabled notice (round-2 minor 1).
+    enabled,
+    check: api.check,
+    install: api.install,
+    retry: api.retry,
+    restart: api.restart,
+    cancelInstall: api.cancelInstall,
+    dismiss: api.dismiss,
   };
 }

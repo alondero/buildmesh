@@ -6,6 +6,7 @@ import { HarnessOrderList } from './HarnessOrderList';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
+import { UpdateAboutSection } from './UpdateAboutSection';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -1983,6 +1984,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             authorized devices live in the app database.
           </p>
         </div>
+
+        {/* Issue #1526 — manual update surface. The auto-launch prompt
+            (UpdatePrompt) handles nag-style flow; Settings exposes
+            current version + manual check + install progress for users
+            who want to drive it themselves. */}
+        <UpdateAboutSection />
         </section>
 
         <section
