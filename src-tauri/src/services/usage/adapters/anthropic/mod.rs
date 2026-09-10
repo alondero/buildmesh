@@ -38,6 +38,24 @@ fn scope_limitation_detail(origin: &OauthOrigin) -> String {
     }
 }
 
+/// Remediation for expired/revoked credentials (non-scope 401/403).
+fn auth_failure_detail(origin: &OauthOrigin) -> String {
+    match origin {
+        OauthOrigin::Env => {
+            "Claude OAuth token rejected — set a fresh CLAUDE_CODE_OAUTH_TOKEN or unset it to use /login credentials"
+                .to_string()
+        }
+        OauthOrigin::Login => {
+            "Claude login expired — run /login in the Claude CLI".to_string()
+        }
+        OauthOrigin::NamedProfile { name } | OauthOrigin::ActiveProfile { name } => {
+            format!(
+                "Anthropic profile `{name}` authentication failed — run `ant auth login --profile {name}`"
+            )
+        }
+    }
+}
+
 pub(crate) struct AnthropicAdapter;
 
 impl UsageAdapter for AnthropicAdapter {
@@ -208,10 +226,7 @@ fn classify_oauth_auth_failure(status: u16, body: &str, origin: &OauthOrigin) ->
         usage.detail = Some(detail);
         return usage;
     }
-    logged_out(
-        PROVIDER,
-        "Claude login expired — run /login in the Claude CLI".to_string(),
-    )
+    logged_out(PROVIDER, auth_failure_detail(origin))
 }
 
 fn is_oauth_scope_failure(status: u16, body: &str) -> bool {
@@ -563,6 +578,59 @@ mod tests {
                 usage.error
             );
         }
+    }
+
+    #[test]
+    fn env_token_401_guides_fresh_token_not_login() {
+        let port = spawn_loopback(1, move |request| {
+            let _ =
+                request.respond(tiny_http::Response::from_string("denied").with_status_code(401));
+        });
+        let mut lookup = with_file(OAUTH_JSON);
+        lookup
+            .env
+            .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(!usage.logged_in);
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "env-token 401 must mention the env var; error={error:?}"
+        );
+        assert!(
+            !error.contains("run /login"),
+            "env-token 401 must not claim /login repairs CLAUDE_CODE_OAUTH_TOKEN"
+        );
+    }
+
+    #[test]
+    fn named_profile_401_guides_ant_auth_login_with_profile_name() {
+        let port = spawn_loopback(1, move |request| {
+            let _ =
+                request.respond(tiny_http::Response::from_string("denied").with_status_code(401));
+        });
+        let mut lookup = FakeLookup::default();
+        lookup.env.insert("ANTHROPIC_PROFILE".into(), "work".into());
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup.files.insert(
+            cfg.join("configs").join("work.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("work.json"),
+            r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
+        );
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(!usage.logged_in);
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("ant auth login --profile work"),
+            "named-profile 401 must name the profile; error={error:?}"
+        );
+        assert!(
+            !error.contains("run /login"),
+            "/login cannot repair ANTHROPIC_PROFILE credentials"
+        );
     }
 
     #[test]

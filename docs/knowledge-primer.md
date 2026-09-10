@@ -86,9 +86,12 @@ below a *working* `/login` credential (expired tokens and fetch 401/403 fall
 through / retry) and above a missing login. `user:profile` scope failures are HTTP 403 with the explicit scope message:
 env tokens mention `setup-token`, Claude Code `/login` credentials guide
 `/login`, and named `ANTHROPIC_PROFILE` credentials guide
-`ant auth login --profile` (because `/login` cannot repair that higher-priority
-profile). HTTP 401 remains an expired/revoked credential even if the body
-mentions scopes. Native OAuth reads the platform store (macOS
+`ant auth login --profile <actual-name>` (because `/login` cannot repair that
+higher-priority profile). Non-scope 401/403 auth failures are likewise
+origin-aware: env tokens guide refreshing or unsetting
+`CLAUDE_CODE_OAUTH_TOKEN`, profiles guide `ant auth login --profile
+<actual-name>`, and `/login` store credentials guide `/login`. HTTP 401
+remains an expired/revoked credential even if the body mentions scopes. Native OAuth reads the platform store (macOS
 Keychain service `Claude Code-credentials`, suffixed from `CLAUDE_CONFIG_DIR`,
 with `.credentials.json` as fallback when Keychain is missing or unusable) and
 queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.
