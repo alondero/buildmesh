@@ -126,10 +126,9 @@ fn fetch_oauth_usage(
 
     match request.send() {
         Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
-            logged_out(
-                PROVIDER,
-                "Claude login expired — run /login in the Claude CLI".to_string(),
-            )
+            let status = response.status().as_u16();
+            let body = response.text().unwrap_or_default();
+            classify_oauth_auth_failure(status, &body)
         }
         Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
             PROVIDER,
@@ -182,6 +181,28 @@ enum ProfilePlan {
     Found(String),
     Forbidden,
     Unavailable,
+}
+
+/// Distinguish expired/revoked credentials from missing `user:profile` scope.
+/// Scope failures keep the account logged in with an explicit limitation;
+/// expired credentials remain `logged_out` so active-profile retry can run.
+fn classify_oauth_auth_failure(_status: u16, body: &str) -> ProviderUsage {
+    if is_oauth_scope_failure(body) {
+        let mut usage = unavailable(PROVIDER, PLAN_SCOPE_DETAIL.to_string());
+        usage.detail = Some(PLAN_SCOPE_DETAIL.to_string());
+        return usage;
+    }
+    logged_out(
+        PROVIDER,
+        "Claude login expired — run /login in the Claude CLI".to_string(),
+    )
+}
+
+fn is_oauth_scope_failure(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("scope requirement")
+        || lower.contains("user:profile")
+        || lower.contains("permission_error")
 }
 
 fn fetch_oauth_plan(
@@ -523,6 +544,52 @@ mod tests {
                 usage.error
             );
         }
+    }
+
+    #[test]
+    fn usage_scope_forbidden_stays_logged_in_with_limitation() {
+        // Anthropic returns 403 from /usage when the token lacks user:profile
+        // (common for setup-token). That is not an expired login.
+        let port = spawn_loopback(1, move |request| {
+            assert!(!request.url().contains("/profile"));
+            let _ = request.respond(
+                tiny_http::Response::from_string(
+                    r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                )
+                .with_status_code(403),
+            );
+        });
+        let mut lookup = with_file(OAUTH_JSON);
+        lookup.env.insert(
+            "CLAUDE_CODE_OAUTH_TOKEN".into(),
+            "sk-ant-oat01-setup".into(),
+        );
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(
+            usage.logged_in,
+            "scope failure must not look like a logged-out/expired credential"
+        );
+        assert!(usage.plan.is_none());
+        assert!(
+            usage
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("user:profile")
+                || usage
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("user:profile"),
+            "error={:?} detail={:?}",
+            usage.error,
+            usage.detail
+        );
+        assert!(!usage
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("login expired"));
     }
 
     #[test]

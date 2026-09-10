@@ -67,9 +67,15 @@ and must not present a dormant OAuth login as active. Environment API keys,
 bearer tokens, and `apiKeyHelper` outrank stored OAuth. `CLAUDE_CODE_OAUTH_TOKEN`
 uses that token for the request and derives plan from usage-body plan fields or
 the token's own `/api/oauth/profile`, never from a dormant local login.
-`claude setup-token` tokens are model-request-only (`user:inference`); when
-profile access is forbidden, spend may still render but plan stays blank with
-an explicit detail rather than inventing a plan name. Named Anthropic profiles
+**Exception — `claude setup-token`:** those tokens are model-request-only
+(`user:inference`) and commonly lack `user:profile`. Anthropic's `/usage` and
+`/profile` endpoints then return a scope/`permission_error` rather than a
+usable plan. Buildmesh keeps the account logged in, surfaces an explicit
+scope limitation (not "login expired"), and does not invent a plan name.
+Full `/login` OAuth (or a token that includes `user:profile`) is required for
+Enterprise plan + spend together. This is an intentional exception to the
+"Enterprise OAuth accounts show plan and spend" acceptance criterion for
+inference-only env tokens. Named Anthropic profiles
 are mode-aware: `user_oauth` uses the profile credential for usage, while
 `oidc_federation` (named, active, or env-configured) reports
 `managed_externally`. An active `user_oauth` profile ranks below a *working*
