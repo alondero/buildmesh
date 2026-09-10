@@ -363,10 +363,24 @@ impl AgentProvider for GrokAdapter {
     /// hook directory is the only trustable Grok location available here.
     fn provision_attention_hooks(
         &self,
-        _resolved: &ResolvedPath,
+        resolved: &ResolvedPath,
         _runtime: &LaunchRuntime,
         _node_id: i64,
     ) -> Result<(), String> {
+        if resolved.env_type == EnvType::WindowsInterop {
+            let mut command = crate::process_util::command_no_window("wslinfo");
+            command.arg("--networking-mode");
+            let mirrored = crate::process_util::run_command_with_timeout(command, "WSL networking mode", std::time::Duration::from_secs(5))
+                .is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "mirrored");
+            if !mirrored { return Err("Grok's Windows HTTP callbacks require mirrored WSL networking; the interactive harness can still run.".into()); }
+        }
+        if cfg!(windows) && resolved.env_type == EnvType::Wsl {
+            let mut command = crate::process_util::command_no_window("wsl.exe");
+            command.args(["--", "wslinfo", "--networking-mode"]);
+            let mirrored = crate::process_util::run_command_with_timeout(command, "WSL networking mode", std::time::Duration::from_secs(5))
+                .is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "mirrored");
+            if !mirrored { return Err("Grok's native HTTP attention hooks require WSL mirrored networking; the interactive harness can still run.".into()); }
+        }
         // Issue #1366 — mint the process-wide hook token **here**, not
         // in `spawn_environment::wrap` (which fires for every agent
         // spawn including Claude / Codex / AGY). Scoping the mint
@@ -388,7 +402,10 @@ impl AgentProvider for GrokAdapter {
         tracing::info!(
             "grok provision_attention_hooks: minted runtime hook token {token}"
         );
-        let dir = grok_home()?;
+        let dir = if resolved.env_type != EnvType::Windows {
+            crate::env::cli_dir_for_spawn(grok_home()?, ".grok/hooks", &resolved.spawn_path)
+                .ok_or_else(|| "could not resolve the Grok runtime home".to_string())?
+        } else { grok_home()? };
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
         ensure_hooks_json(&dir.join(HOOK_FILE))

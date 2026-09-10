@@ -18,6 +18,7 @@ pub fn default_harness_profiles() -> Vec<HarnessProfile> {
         id: "terminal".to_string(),
         name: "Terminal".to_string(),
         harness: "terminal".to_string(),
+        runtime: None, wsl_distro: None,
     }]
 }
 
@@ -44,6 +45,33 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
         }
     }
     profiles
+}
+
+pub fn harness_runtime(profile_id: &str) -> Option<crate::models::EnvType> {
+    resolved_harness_profile(profile_id)?.runtime
+}
+
+pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
+    let (harness_id, _) = crate::agent::provider::parse_spawn_option_id(profile_id);
+    let profiles = harness_profiles();
+    let preferred = crate::agent::detection::preferred_profiles(&crate::agent::detection::currently_installed_profiles(profiles.clone()),
+        crate::agent::provider::Platform::current(),
+        if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
+    if let Some(profile) = preferred.iter().find(|p| p.id == harness_id) { return Some(profile.clone()); }
+    // Canonical ids follow the currently preferred installation; explicit
+    // runtime ids below retain their saved profile for existing sessions.
+    if let Some(canonical) = crate::agent::detection::canonical_harness(harness_id) {
+        let matching: Vec<_> = preferred.iter().filter(|p| p.harness == canonical).collect();
+        if matching.len() == 1 { return Some(matching[0].clone()); }
+    }
+    if let Some(profile) = profiles.iter().find(|p| p.id == harness_id) {
+        return Some(profile.clone());
+    }
+    // Circuit definitions use canonical harness ids. Only an unambiguous
+    // installation can supply a runtime for those ids.
+    let mut matching = preferred.into_iter().filter(|p| p.harness == harness_id);
+    let profile = matching.next()?;
+    if matching.next().is_some() { None } else { Some(profile) }
 }
 
 /// The user's stored spawn-menu harness order — a list of row ids applied by

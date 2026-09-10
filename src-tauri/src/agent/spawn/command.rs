@@ -61,6 +61,8 @@ pub fn build_spawn_command_prepared(
     let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux
+    } else if resolved.env_type == EnvType::WindowsInterop {
+        Platform::Windows
     } else {
         Platform::current()
     };
@@ -140,6 +142,12 @@ pub fn build_spawn_command_prepared(
     let mut command_wsl_env = apply_routing_env(&mut cmd, routing);
     if let Some(key) = apply_codex_proxy_credential(&mut cmd, routing, provider_enum) {
         command_wsl_env.push(key);
+    }
+    if resolved.env_type == EnvType::WindowsInterop && provider_enum == Provider::Codex {
+        if let Some(home) = routing.launch_runtime().harness_home.or_else(|| std::env::var("CODEX_HOME").ok()) {
+            cmd.env("CODEX_HOME", crate::env::windows_path_from_wsl(&home));
+            command_wsl_env.push("CODEX_HOME");
+        }
     }
     spawn_environment::apply_wsl_env(
         &mut cmd,

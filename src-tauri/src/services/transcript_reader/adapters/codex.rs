@@ -33,9 +33,10 @@ impl TranscriptAdapter for CodexAdapter {
     }
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
-        // Codex keys sessions globally by id; `node_path` is ignored.
-        let _ = ctx.node_path;
-        find_codex_rollout(ctx.session_id)
+        // Session ids are global within the selected runtime home.
+        let home = env::codex_dir_for_env(env::runtime_for_spawn_path(ctx.node_path), ctx.node_path)?;
+        let home = PathBuf::from(env::to_host_path(&home.to_string_lossy()));
+        find_codex_rollout_in(&home.join("sessions"), ctx.session_id)
     }
 
     fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
@@ -67,13 +68,8 @@ impl TranscriptAdapter for CodexAdapter {
 /// `<codex home>/sessions/YYYY/MM/DD/`. Codex cannot relocate its sessions
 /// dir per-project (issue #885), so the global one is walked — fixed depth
 /// 3, at most a few hundred day dirs, <10ms cold.
-fn find_codex_rollout(session_id: &str) -> Option<PathBuf> {
-    find_codex_rollout_in(&env::codex_dir().join("sessions"), session_id)
-}
-
-/// Pure walk over an explicit sessions root, split from
-/// [`find_codex_rollout`] so tests drive it against a temp directory
-/// instead of `~/.codex`. Walks newest-first (years, months, days each
+/// Walk an explicit runtime sessions root. Tests use temporary directories.
+/// Walks newest-first (years, months, days each
 /// sorted descending) so the common case — a recent session — terminates
 /// after a handful of dirs.
 pub(crate) fn find_codex_rollout_in(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {

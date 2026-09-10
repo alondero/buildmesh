@@ -206,6 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn test_to_host_path_preserves_windows_path() {
         let result = to_host_path("C:\\Users\\test\\file.txt".to_string());
         assert_eq!(result, "C:\\Users\\test\\file.txt");

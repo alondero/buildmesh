@@ -15,6 +15,8 @@ pub enum EnvType {
     #[default]
     Windows,
     Wsl,
+    /// Windows executable reached through interoperability from a Linux WSL host.
+    WindowsInterop,
 }
 
 impl std::fmt::Display for EnvType {
@@ -22,6 +24,7 @@ impl std::fmt::Display for EnvType {
         match self {
             EnvType::Windows => write!(f, "windows"),
             EnvType::Wsl => write!(f, "wsl"),
+            EnvType::WindowsInterop => write!(f, "windowsinterop"),
         }
     }
 }
@@ -41,6 +44,7 @@ impl EnvType {
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "wsl" => EnvType::Wsl,
+            "windowsinterop" => EnvType::WindowsInterop,
             _ => EnvType::Windows,
         }
     }
@@ -80,6 +84,8 @@ pub enum Provider {
     /// Freebuff CLI (`freebuff`) — interactive AI coding agent harness.
     /// See `agent::provider::adapters::freebuff` (issue #1437).
     Freebuff,
+    /// Meta Muse Code, executed in a Unix runtime.
+    Muse,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -101,6 +107,7 @@ impl Provider {
             Provider::Dsh,
             Provider::CommandCode,
             Provider::Freebuff,
+            Provider::Muse,
             Provider::Terminal,
         ]
     }
@@ -128,6 +135,7 @@ impl Provider {
             "dsh" | "deepseek-harness" | "deepseek" => Provider::Dsh,
             "commandcode" | "command-code" | "cmdc" | "cmd" => Provider::CommandCode,
             "freebuff" => Provider::Freebuff,
+            "muse" => Provider::Muse,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -163,6 +171,7 @@ impl Provider {
             Provider::Dsh => &adapters::DSH,
             Provider::CommandCode => &adapters::COMMANDCODE,
             Provider::Freebuff => &adapters::FREEBUFF,
+            Provider::Muse => &adapters::MUSE,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -182,6 +191,7 @@ impl std::fmt::Display for Provider {
             Provider::Dsh => write!(f, "dsh"),
             Provider::CommandCode => write!(f, "commandcode"),
             Provider::Freebuff => write!(f, "freebuff"),
+            Provider::Muse => write!(f, "muse"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

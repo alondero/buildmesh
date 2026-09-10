@@ -20,8 +20,10 @@
 mod environment;
 mod host_path;
 mod mesh_row;
+mod windows_interop;
 
 pub use environment::*;
+pub(crate) use windows_interop::*;
 pub use host_path::*;
 pub use mesh_row::mesh_row;
 

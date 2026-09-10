@@ -27,7 +27,7 @@ pub mod pairing_compat;
 #[allow(unused_imports)]
 pub use harness::{
     default_harness_profiles, harness_capabilities_for, harness_order, harness_profiles,
-    is_known_harness_id, merge_detected_profiles, resolve_harness_provider, set_harness_order,
+    is_known_harness_id, merge_detected_profiles, resolve_harness_provider, harness_runtime, resolved_harness_profile, set_harness_order,
 };
 
 // ----- Re-exports: catalog -----------------------------------------------

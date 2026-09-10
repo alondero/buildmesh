@@ -106,6 +106,12 @@ pub(super) async fn launch_process(
         );
     }
     let adapter = provider.adapter();
+    if sandbox && resolved.env_type == crate::models::EnvType::WindowsInterop {
+        return Err("The Linux process sandbox cannot contain a Windows harness. Turn off the mesh sandbox to launch through WSL interoperability.".into());
+    }
+    if sandbox && cfg!(windows) && resolved.env_type == crate::models::EnvType::Wsl {
+        return Err("The Windows process sandbox cannot contain a WSL harness. Turn off the mesh sandbox to launch this harness in WSL.".into());
+    }
 
     // Resolve configuration values through the per-field cascade (issue
     // #1149 prefactor; #1150 fills the application slot; #1151 fills the

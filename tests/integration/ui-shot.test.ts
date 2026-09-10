@@ -80,7 +80,7 @@ describe('ui-shot mock mode', () => {
         '--steps', circuitSteps,
       ]);
 
-      expect(result.code).toBe(0);
+      expect(result.code, result.stderr).toBe(0);
       expect(result.stdout).toContain('Saved');
       expect((await stat(output)).size).toBeGreaterThan(0);
     } finally {

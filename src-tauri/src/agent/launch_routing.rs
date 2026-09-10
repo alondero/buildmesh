@@ -93,6 +93,17 @@ pub fn prepare(
     provider: Provider,
     resolved: &ResolvedPath,
 ) -> Result<PreparedLaunchRouting, String> {
+    if resolved.env_type == crate::models::EnvType::WindowsInterop && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none()) {
+        return Err("Windows harnesses require an interoperable WSL host with powershell.exe on PATH.".into());
+    }
+    if let Some(distro) = preferences::resolved_harness_profile(spawn_option_id)
+        .and_then(|profile| profile.wsl_distro)
+    {
+        if resolved.env_type == crate::models::EnvType::Wsl
+            && crate::env::get_default_wsl_distro().as_deref() != Some(distro.as_str()) {
+            return Err(format!("This harness belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh, or select a harness from the current default distribution."));
+        }
+    }
     let Some((pairing, account)) =
         preferences::resolve_stored_pairing_and_account(spawn_option_id)?
     else {

@@ -48,7 +48,8 @@ pub fn ensure_trusted(resolved: &ResolvedPath) {
         // Windows file alone.
         return;
     }
-    let Some(home) = home_dir() else { return };
+    let home = if resolved.env_type == EnvType::WindowsInterop { crate::env::windows_cli_home("") } else { home_dir() };
+    let Some(home) = home else { return };
     ensure_trusted_with_home(resolved, &home);
 }
 
@@ -62,7 +63,8 @@ fn ensure_trusted_with_home(resolved: &ResolvedPath, home: &Path) {
     for (relative, label) in TARGETS {
         // Errors are logged inside `update_settings_file`; a broken trust
         // update is never fatal to a spawn.
-        update_settings_file(&home.join(relative), label, &resolved.host_path);
+        let project_path = if resolved.env_type == EnvType::WindowsInterop { &resolved.spawn_path } else { &resolved.host_path };
+        update_settings_file(&home.join(relative), label, project_path);
     }
 }
 
@@ -145,11 +147,9 @@ fn trusted_workspaces_array(
         .and_then(|v| v.as_array_mut())
 }
 
-/// Windows uses `\` as separator; macOS/Linux use `/`. The `cfg!` is the
-/// *target* triple so a Windows build always normalizes regardless of the
-/// runtime environment.
+/// Windows process paths retain Windows separator rules even when the host is Linux.
 fn normalize_path(p: &str) -> String {
-    if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") || crate::env::is_windows_path(p) {
         p.replace('/', "\\")
     } else {
         p.to_string()
@@ -163,7 +163,7 @@ fn normalize_path(p: &str) -> String {
 /// platforms.)
 fn matches_existing(existing: &serde_json::Value, candidate: &str) -> bool {
     let Some(s) = existing.as_str() else { return false };
-    if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") || crate::env::is_windows_path(candidate) {
         s.eq_ignore_ascii_case(candidate)
     } else {
         s == candidate
@@ -242,6 +242,19 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn windows_interop_trusts_process_path_in_supplied_runtime_home() {
+        let home = TempDir::new().unwrap();
+        write_file(home.path(), ".claude/settings.json", r#"{"trustedWorkspaces":[]}"#);
+        let resolved = ResolvedPath {
+            host_path: "/host/repository".into(), raw_path: "/host/repository".into(),
+            spawn_path: "C:/work/project".into(), env_type: EnvType::WindowsInterop,
+        };
+        drive(home.path(), &resolved);
+        drive(home.path(), &resolved);
+        assert_eq!(read_trusted(home.path(), ".claude/settings.json"), vec![r"C:\work\project"]);
     }
 
     #[test]
@@ -401,13 +414,7 @@ mod tests {
 
     #[test]
     fn normalize_path_windows_target() {
-        if cfg!(target_os = "windows") {
-            assert_eq!(normalize_path("C:/work/proj"), "C:\\work\\proj");
-        } else {
-            // Cross-compile check: when building for non-windows the path
-            // is preserved as-is.
-            assert_eq!(normalize_path("C:/work/proj"), "C:/work/proj");
-        }
+        assert_eq!(normalize_path("C:/work/proj"), "C:\\work\\proj");
     }
 
     #[test]

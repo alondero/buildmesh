@@ -54,12 +54,12 @@ fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
     serde_json::json!({
         "type": "command",
-        "command": format!(
-            "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}"
-        ),
-        "commandWindows": format!(
+        "command": if cfg!(windows) { format!(
+            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}; fi"
+        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}") },
+        "commandWindows": crate::env::windows_attention_command(Some(&url)).unwrap_or_else(|| format!(
             "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
-        ),
+        )),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -86,6 +86,7 @@ static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
 pub fn runtime_identity(env_type: EnvType) -> &'static str {
     match env_type {
         EnvType::Wsl => "wsl",
+        EnvType::WindowsInterop => "windows-interop",
         EnvType::Windows if cfg!(target_os = "windows") => "native-windows",
         EnvType::Windows if cfg!(target_os = "macos") => "native-macos",
         EnvType::Windows => "native-linux",
@@ -463,6 +464,12 @@ fn runtime_codex_home(
     env_type: EnvType,
     runtime: &LaunchRuntime,
 ) -> Result<(PathBuf, Option<String>), String> {
+    if env_type == EnvType::WindowsInterop {
+        let home = runtime.harness_home.as_deref().map(|home| PathBuf::from(crate::env::to_host_path(home)))
+            .or_else(|| crate::env::codex_dir_for_env(env_type, ""))
+            .ok_or_else(|| "Windows Codex home is unavailable".to_string())?;
+        return Ok((home, None));
+    }
     if env_type == EnvType::Windows {
         return Ok((
             runtime
@@ -515,7 +522,7 @@ fn runtime_wsl_distro(
     env_type: EnvType,
     runtime: &LaunchRuntime,
 ) -> Result<Option<String>, String> {
-    if env_type == EnvType::Windows {
+    if matches!(env_type, EnvType::Windows | EnvType::WindowsInterop) {
         return Ok(None);
     }
     runtime
@@ -535,7 +542,7 @@ fn codex_trust_config_path(
 }
 
 fn trust_project_path(resolved: &ResolvedPath) -> String {
-    let path = if resolved.env_type == EnvType::Wsl {
+    let path = if matches!(resolved.env_type, EnvType::Wsl | EnvType::WindowsInterop) {
         &resolved.spawn_path
     } else {
         &resolved.host_path
@@ -627,7 +634,7 @@ fn ensure_project_trust_content(
 }
 
 fn project_keys_match(existing: &str, candidate: &str, env_type: EnvType) -> bool {
-    if env_type == EnvType::Windows {
+    if matches!(env_type, EnvType::Windows | EnvType::WindowsInterop) {
         let normalize = |path: &str| path.replace('/', "\\");
         let existing = normalize(existing);
         let candidate = normalize(candidate);
@@ -658,8 +665,8 @@ pub fn materialize_proxy_profile(
                 .ok_or_else(|| "verified WSL distribution identity is missing".to_string())?;
             materialize_wsl_profile(distro, &install.codex_home, profile_name, &content)
         }
-        EnvType::Windows => {
-            materialize_native_profile_at(Path::new(&install.codex_home), profile_name, &content)
+        EnvType::Windows | EnvType::WindowsInterop => {
+            materialize_native_profile_at(Path::new(&crate::env::to_host_path(&install.codex_home)), profile_name, &content)
         }
     }
 }
@@ -697,7 +704,11 @@ fn codex_output(
     wsl_distro: Option<&str>,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
-    let mut command = if env_type == EnvType::Wsl {
+    let mut command = if env_type == EnvType::WindowsInterop {
+        let args = args.iter().map(|arg| crate::env::powershell_literal(arg)).collect::<Vec<_>>().join(" ");
+        let command = crate::env::powershell_command(&format!("& codex {args}; exit $LASTEXITCODE"));
+        return crate::process_util::run_command_with_timeout(command, "Windows Codex probe", std::time::Duration::from_secs(20));
+    } else if env_type == EnvType::Wsl {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
             "-d",
@@ -765,7 +776,11 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
             "proxied Codex requires codex-cli >= 0.144.0; found {version}"
         ));
     }
-    let executable = if env_type == EnvType::Wsl {
+    let executable = if env_type == EnvType::WindowsInterop {
+        let command = crate::env::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -ErrorAction Stop).Source");
+        let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", std::time::Duration::from_secs(10))?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else if env_type == EnvType::Wsl {
         let out = crate::process_util::command_no_window("wsl.exe")
             .args([
                 "-d",
@@ -807,7 +822,10 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
     if executable.is_empty() {
         return Err("Codex executable identity is unavailable".into());
     }
-    let codex_home = if let Some(distro) = wsl_distro.as_deref() {
+    let codex_home = if env_type == EnvType::WindowsInterop {
+        let home = crate::env::codex_dir_for_env(env_type, "").ok_or_else(|| "Windows Codex home unavailable".to_string())?;
+        crate::env::windows_path_from_wsl(&home.to_string_lossy())
+    } else if let Some(distro) = wsl_distro.as_deref() {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
             "-d",
@@ -2001,6 +2019,8 @@ web_search = true
             let windows = handler["commandWindows"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
+            let decoded_windows = crate::env::decode_powershell_command(windows);
+            let windows = decoded_windows.as_deref().unwrap_or(windows);
             assert!(
                 !command.contains("cmd.exe") && !command.contains("sh -c"),
                 "{event} unix command must not nest a shell Codex already launches: {command}"
@@ -2025,7 +2045,7 @@ web_search = true
                 "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
             );
             assert!(
-                command.contains("-o /dev/null") && windows.contains("-o NUL"),
+                command.contains("-o /dev/null") && windows.contains(if crate::env::is_wsl_host() { "-o /dev/null" } else { "-o NUL" }),
                 "{event} must discard HTTP body; Codex Stop treats non-JSON stdout as failure: {command} / {windows}"
             );
         }

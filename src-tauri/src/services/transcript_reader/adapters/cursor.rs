@@ -29,7 +29,7 @@ impl TranscriptAdapter for CursorAdapter {
         // check happens at the reader's call site (matches the legacy
         // `locate_transcript` Cursor arm).
         Some(cursor_transcript_path_in(
-            &env::cursor_dir(),
+            &env::cli_dir_for_spawn(env::cursor_dir(), ".cursor", ctx.node_path)?,
             ctx.session_id,
             ctx.node_path,
         ))

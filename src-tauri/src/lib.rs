@@ -226,11 +226,9 @@ pub fn run() {
             }
 
             // Auto-detect installed agent harnesses and populate dynamic profiles
-            // (PRD #534 / issue #536). A dep-free in-process PATH scan — a few
-            // hundred cached stat() calls, typically a couple of ms — so it runs
-            // inline here. Additive merge: only newly-found tools are added, so
-            // it's safe to re-run on every launch. Failure is non-fatal (the
-            // legacy provider list still works), so we log and continue.
+            // Native PATH/config scan plus a bounded probe of the default WSL
+            // distribution. Additive merge preserves existing profile identities.
+            // Failure is non-fatal; legacy provider entries remain available.
             let scan_start = std::time::Instant::now();
             let detected = agent::detection::detect_installed_profiles();
             match preferences::merge_detected_profiles(detected) {

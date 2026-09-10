@@ -35,6 +35,7 @@ const REQUIRED_HARNESSES: InspectorHarnessId[] = [
   'dsh',
   'commandcode',
   'freebuff',
+  'muse',
   'terminal',
 ];
 

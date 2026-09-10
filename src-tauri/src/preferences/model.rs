@@ -37,6 +37,14 @@ pub struct HarnessProfile {
     pub name: String,
     /// Backing executor; for this slice a legacy [`crate::models::Provider`] id.
     pub harness: String,
+    /// Explicit execution environment; absent profiles follow the mesh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime: Option<crate::models::EnvType>,
+    /// Distribution that owned discovery. Never silently substitute another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wsl_distro: Option<String>,
 }
 
 /// How a [`ProviderAccount`] is billed — drives how usage is rendered (issue #537).

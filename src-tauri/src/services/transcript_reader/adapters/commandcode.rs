@@ -40,7 +40,7 @@ impl TranscriptAdapter for CommandCodeAdapter {
     }
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
-        let env_type = EnvType::from(env::env_for_path(Path::new(ctx.node_path)));
+        let env_type = env::runtime_for_spawn_path(ctx.node_path);
         let sessions_dir = commandcode_sessions_dir(env_type, ctx.node_path)?;
         let path = commandcode_transcript_path_in(&sessions_dir, ctx.session_id);
         path.exists().then_some(path)
@@ -108,7 +108,7 @@ pub(crate) fn commandcode_sessions_dir(
     env_type: EnvType,
     spawn_path: &str,
 ) -> Option<PathBuf> {
-    let normalized = env::normalize_unc_to_wsl(spawn_path);
+    let normalized = if env_type == EnvType::Wsl { env::normalize_unc_to_wsl(spawn_path) } else { std::borrow::Cow::Borrowed(spawn_path) };
     let projects = env::commandcode_projects_dir(env_type, &normalized)?;
     let slug = commandcode_project_slug(&normalized);
     if slug.is_empty() {

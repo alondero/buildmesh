@@ -46,6 +46,31 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    #[test]
+    fn harness_runtime_persists_and_legacy_switch_restores_mesh_runtime() {
+        let _serial = serial();
+        let temp = tempfile::tempdir().unwrap();
+        crate::db::init(&temp.path().join("db.sqlite")).unwrap();
+        crate::preferences::init_for_tests(temp.path().to_path_buf());
+        crate::preferences::merge_detected_profiles(vec![crate::preferences::HarnessProfile {
+            id: "muse-wsl-test".into(), name: "Muse (WSL)".into(), harness: "muse".into(),
+            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Ubuntu".into()),
+        }]).unwrap();
+        let path = format!("C:/buildmesh-runtime-{}", uuid::Uuid::new_v4());
+        let mesh = crate::db::create_mesh("Runtime test", &path).unwrap();
+        let node = crate::db::create_agent_node(mesh.id, "Muse", &path, "main", crate::models::EnvType::Windows,
+            "muse-wsl-test", None, None, None, None, false, None, None, None).unwrap();
+        assert_eq!(node.env, crate::models::EnvType::Wsl);
+        assert_eq!(crate::db::get_agent_node_by_id(node.id).unwrap().env, crate::models::EnvType::Wsl);
+        crate::db::set_agent_node_provider(node.id, "terminal").unwrap();
+        let node = crate::db::get_agent_node_by_id(node.id).unwrap();
+        assert_eq!(node.provider, "terminal");
+        assert_eq!(node.env, crate::models::EnvType::Windows);
+        crate::db::set_agent_node_provider(node.id, "muse-wsl-test").unwrap();
+        assert_eq!(crate::db::get_agent_node_by_id(node.id).unwrap().env, crate::models::EnvType::Wsl);
+        crate::preferences::reset_for_tests();
+    }
+
     /// Test: creating a project with a duplicate path should NOT crash.
     /// Expected behavior: return the existing project (idempotent upsert).
     #[test]

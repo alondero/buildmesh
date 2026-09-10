@@ -31,7 +31,9 @@ impl TranscriptAdapter for AgyAdapter {
     }
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
-        agy_locator_in(&env::agy_brain_dir(), ctx.session_id)
+        let home = env::agy_dir_for_env(env::runtime_for_spawn_path(ctx.node_path), ctx.node_path)?;
+        let home = PathBuf::from(env::to_host_path(&home.to_string_lossy()));
+        agy_locator_in(&home.join("brain"), ctx.session_id)
     }
 
     fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {

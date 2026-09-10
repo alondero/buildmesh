@@ -2,7 +2,7 @@
 
 ![Buildmesh Wordmark](./src/assets/wordmark.png)
 
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
@@ -36,6 +36,9 @@ Buildmesh itself has no host dependencies — it bundles WebView2 on Win 11 and 
 
 - **`Terminal` harness** — works out of the box (PowerShell on Windows; routed through `wsl.exe` on WSL meshes).
 - **Every other harness** — install the agent CLI on the host (or inside WSL for a WSL mesh), then sign in or add an API key from **App Settings → Providers**. Buildmesh detects the CLI binary on `PATH` and surfaces enabled harnesses in the Spawn Menu.
+
+Buildmesh shows one entry per detected harness, preferring the host's native installation. On Windows, it also checks the default WSL distribution and adds **(WSL: distribution)** entries only for harnesses absent natively, such as Muse. Native Windows harnesses can run in WSL-backed meshes too. When Buildmesh itself runs inside WSL, Windows-only installations appear as **(Windows)** entries if Windows interoperability and `powershell.exe` are available. Restart Buildmesh after installing or removing a harness. Sign in inside the selected runtime. Cross-runtime worktrees stay managed by Buildmesh; use Buildmesh to remove them. WSL-backed repositories must be trusted by Windows Git, and Windows harnesses must support network-share paths. Muse supports fresh prompts and session resume; transcript display and turn-completion hooks are not yet available. Cross-runtime Grok attention hooks require mirrored networking. Process sandboxing cannot contain a harness across the Windows/WSL boundary.
+
 - **(Optional) `gh` CLI** — only required for the GitHub Issues / PR features.
 - **(Optional) WSL2** — only for hybrid Windows/WSL meshes.
 
@@ -86,7 +89,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 ## Features
 
 ### Multi-agent orchestration
-- **Twelve harnesses, one workflow**: Claude Code, Codex, Antigravity, OpenCode, Grok Code, Cursor, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, and a plain `Terminal` harness — switch harnesses per Agent Node. Some harnesses pair with a *Model Provider* (Anthropic, MiniMax, Kimi) so each Agent Node can carry live quota / balance widgets; custom Claude-compatible endpoints attach as proxied providers.
+- **Thirteen harnesses, one workflow**: Claude Code, Codex, Antigravity, OpenCode, Grok Code, Cursor, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and a plain `Terminal` harness — switch harnesses per Agent Node. Some harnesses pair with a *Model Provider* (Anthropic, MiniMax, Kimi) so each Agent Node can carry live quota / balance widgets; custom Claude-compatible endpoints attach as proxied providers.
 - **Multi-mesh workspaces**: open several meshes side by side. Each mesh is its own grid of agent terminals.
 - **Tiled grid view**: split each mesh into a 1–6 pane grid. Layouts are saved per mesh.
 - **Persistent terminals**: agents run as durable background processes and their PTY state survives mesh and pane switches. Quitting the app prompts you to confirm when there are non-resumable sessions; on relaunch anything still running is restored automatically and anything suspended shows up in the Resume menu. The plain `Terminal` harness and any harness that hasn't yet captured a session id are **non-resumable** — exiting loses their progress.

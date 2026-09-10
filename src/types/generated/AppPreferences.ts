@@ -23,7 +23,7 @@ default_provider: string | null,
  * from `default_provider`: adversarial review commonly uses a different
  * harness than implementation.
  */
-reviewer_provider: string | null,
+reviewer_provider: string | null, 
 /**
  * MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
  * (#537) — kept so existing preferences.json files still load and the stored

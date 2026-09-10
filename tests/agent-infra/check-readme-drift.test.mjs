@@ -180,7 +180,7 @@ test('passes when the README count claim uses Arabic numerals', () => {
   // "12 harnesses" — numeral form, not the English word.
   const readme = fixtureReadme({
     labels: labelsFromHarnessLabel,
-    countNumeral: '12',
+    countNumeral: String(parseProviderVariants(realProviderTypes).length),
   });
   const { failures } = checkReadmeDrift({
     readme,

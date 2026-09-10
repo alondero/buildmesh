@@ -42,6 +42,13 @@ struct Detectable {
 /// "installed" so a shell-function or alias install still surfaces.
 const DETECTABLE: &[Detectable] = &[
     Detectable {
+        id: "muse",
+        name: "Meta Muse",
+        harness: "muse",
+        binaries: &["muse"],
+        config_dirs: &[],
+    },
+    Detectable {
         id: "claude",
         name: "Claude Code",
         harness: "anthropic",
@@ -180,6 +187,7 @@ pub fn detect_profiles(
             id: d.id.to_string(),
             name: d.name.to_string(),
             harness: d.harness.to_string(),
+            runtime: None, wsl_distro: None,
         })
         .collect()
 }
@@ -243,13 +251,246 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     }
     let exts = path_exts();
     let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
-    detect_profiles(&path_dirs, &ext_refs, home.as_deref(), &|p| p.exists())
+    // npm's Windows prefix also contains extensionless POSIX shims. They
+    // belong to the Windows installation, not an independent Linux install.
+    if crate::env::is_wsl_host() {
+        path_dirs.retain(|dir| !DETECTABLE.iter().any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
+        if let Ok(path) = std::env::join_paths(&path_dirs) { let _ = NATIVE_WSL_PATH.set(path); }
+    }
+    let mut profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.is_file());
+    if cfg!(windows) {
+        // Explicit Windows entries also work in WSL-backed meshes. Keep the
+        // legacy entries so existing node identities retain their semantics.
+        let native = profiles.iter().map(|p| runtime_profile(p, crate::models::EnvType::Windows));
+        profiles.extend(native.collect::<Vec<_>>());
+        profiles.extend(detect_wsl_profiles());
+    }
+    if crate::env::is_wsl_host() { profiles.extend(detect_windows_from_wsl()); }
+    let _ = CURRENT_INSTALLATIONS.set(profiles.iter().map(|profile| profile.id.clone()).collect());
+    profiles
+}
+
+static NATIVE_WSL_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+
+pub(crate) fn native_wsl_path() -> Option<&'static std::ffi::OsStr> {
+    NATIVE_WSL_PATH.get().map(|path| path.as_os_str())
+}
+
+static CURRENT_INSTALLATIONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub(crate) fn currently_installed_profiles(profiles: Vec<HarnessProfile>) -> Vec<HarnessProfile> {
+    match CURRENT_INSTALLATIONS.get() {
+        Some(ids) => filter_installed_profiles(profiles, ids),
+        None => profiles,
+    }
+}
+
+fn filter_installed_profiles(profiles: Vec<HarnessProfile>, ids: &[String]) -> Vec<HarnessProfile> {
+    profiles.into_iter().filter(|p| !is_automatic_profile(p) || ids.contains(&p.id)).collect()
+}
+
+pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {
+    DETECTABLE.iter().find(|tool| tool.id == id || tool.harness == id).map(|tool| tool.harness)
+}
+
+fn is_automatic_profile(p: &HarnessProfile) -> bool {
+    DETECTABLE.iter().any(|tool| p.harness == tool.harness && (p.id == tool.id || p.id == format!("{}-windows", tool.id) || p.id.starts_with(&format!("{}-wsl-", tool.id))))
+}
+
+fn runtime_profile(profile: &HarnessProfile, runtime: crate::models::EnvType) -> HarnessProfile {
+    let label = match runtime {
+        crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop => "Windows",
+        crate::models::EnvType::Wsl => "WSL",
+    };
+    HarnessProfile {
+        id: format!("{}-{}", profile.id, label.to_ascii_lowercase()),
+        name: format!("{} ({label})", profile.name),
+        harness: profile.harness.clone(),
+        runtime: Some(runtime), wsl_distro: None,
+    }
+}
+
+/// Preserve custom profiles while choosing one installed runtime per built-in
+/// harness. Canonical native ids stay stable for saved provider pairings.
+pub(crate) fn preferred_profiles(
+    profiles: &[HarnessProfile], host: crate::agent::provider::Platform, distro: Option<&str>,
+) -> Vec<HarnessProfile> {
+    use crate::agent::provider::Platform;
+    use crate::models::EnvType;
+    let automatic = |p: &HarnessProfile, tool: &Detectable| p.harness == tool.harness &&
+        (p.id == tool.id || p.id == format!("{}-windows", tool.id) || p.id.starts_with(&format!("{}-wsl-", tool.id)));
+    let mut result: Vec<_> = profiles.iter().filter(|p| !DETECTABLE.iter().any(|tool| automatic(p, tool))).cloned().collect();
+    for tool in DETECTABLE {
+        let candidates: Vec<_> = profiles.iter().filter(|p| automatic(p, tool)).collect();
+        let chosen = candidates.iter().filter_map(|p| {
+            let rank = match (host, p.runtime) {
+                (Platform::Windows, Some(EnvType::Windows)) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => 0,
+                (_, None) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => 1,
+                (Platform::Windows, Some(EnvType::Wsl)) if p.wsl_distro.as_deref().is_none_or(|d| distro.is_none_or(|current| d == current)) => 2,
+                (Platform::Linux, Some(EnvType::WindowsInterop)) => 2,
+                _ => return None,
+            };
+            Some((rank, *p))
+        }).min_by_key(|(rank, _)| *rank);
+        if let Some((rank, chosen)) = chosen {
+            let mut chosen = chosen.clone();
+            if rank < 2 {
+                if let Some(legacy) = candidates.iter().find(|p| p.id == tool.id) {
+                    chosen.id = legacy.id.clone();
+                    chosen.name = legacy.name.clone();
+                } else { chosen.name = tool.name.into(); }
+            }
+            result.push(chosen);
+        }
+    }
+    result
+}
+
+fn detect_windows_from_wsl() -> Vec<HarnessProfile> {
+    let mut script = String::from("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ");
+    for tool in DETECTABLE {
+        script.push_str(&format!("if (Get-Command '{}' -CommandType Application -ErrorAction SilentlyContinue) {{ [Console]::WriteLine('buildmesh-harness:{}') }}; ", if tool.id == "commandcode" { "cmdc" } else { tool.binaries[0] }, tool.id));
+    }
+    let command = crate::env::powershell_command(&script);
+    let Ok(output) = crate::process_util::run_command_with_timeout(command, "Windows harness detection", std::time::Duration::from_secs(15)) else { return Vec::new(); };
+    if !output.status.success() { return Vec::new(); }
+    // Probe the actual mount roots once. Host-path readers never spawn tools.
+    let mounts = ('a'..='z').filter_map(|drive| {
+        let mut command = crate::process_util::command_no_window("wslpath");
+        command.args(["-u", &format!("{drive}:\\")]);
+        let output = crate::process_util::run_command_with_timeout(command, "WSL drive mount", std::time::Duration::from_secs(2)).ok()?;
+        output.status.success().then(|| (drive, String::from_utf8_lossy(&output.stdout).trim().into()))
+    }).collect();
+    crate::env::set_wsl_drive_mounts(mounts);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    DETECTABLE.iter().filter(|tool| stdout.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
+        .map(|tool| HarnessProfile { id: format!("{}-windows", tool.id), name: format!("{} (Windows)", tool.name),
+            harness: tool.harness.into(), runtime: Some(crate::models::EnvType::WindowsInterop), wsl_distro: None })
+        .collect()
+}
+
+/// One bounded login-shell probe, with executable checks rather than config
+/// directory heuristics: a stale guest config must not advertise a launch.
+fn detect_wsl_profiles() -> Vec<HarnessProfile> {
+    let Some(distro) = crate::env::get_default_wsl_distro() else { return Vec::new(); };
+    let mut script = String::from("export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; ");
+    for drive in 'a'..='z' {
+        script.push_str(&format!("mount=$(wslpath -u '{drive}:\\' 2>/dev/null) && printf 'buildmesh-mount:{drive}:%s\\n' \"$mount\"; "));
+    }
+    for tool in DETECTABLE {
+        let binary = if tool.id == "commandcode" { "cmd" } else { tool.binaries[0] };
+        script.push_str(&format!(
+            "if command -v {binary} >/dev/null 2>&1; then printf 'buildmesh-harness:{}\\n'; fi; ",
+            tool.id,
+        ));
+    }
+    let mut command = crate::process_util::command_no_window("wsl.exe");
+    command.args(["-d", &distro, "--cd", "~", "--exec", "sh", "-lc", &script]);
+    match crate::process_util::run_command_with_timeout(command, "WSL harness detection", std::time::Duration::from_secs(10)) {
+        Ok(output) if output.status.success() => {
+            let output = String::from_utf8_lossy(&output.stdout);
+            let mounts = output.lines().filter_map(|line| {
+                let (drive, mount) = line.strip_prefix("buildmesh-mount:")?.split_once(':')?;
+                let drive = drive.chars().next()?;
+                (drive.is_ascii_lowercase() && mount.starts_with('/')).then(|| (drive, mount.to_string()))
+            }).collect();
+            crate::env::set_wsl_drive_mounts(mounts);
+            profiles_from_wsl_probe(&output, &distro)
+        },
+        Ok(_) | Err(_) => Vec::new(),
+    }
+}
+
+fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
+    DETECTABLE.iter().filter(|tool| output.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
+        .map(|tool| {
+            let mut profile = runtime_profile(&HarnessProfile {
+                id: tool.id.into(), name: tool.name.into(), harness: tool.harness.into(), runtime: None, wsl_distro: None,
+            }, crate::models::EnvType::Wsl);
+            profile.id.push_str(&format!("-{}", hex::encode(distro.as_bytes())));
+            profile.name = format!("{} (WSL: {distro})", tool.name);
+            profile.wsl_distro = Some(distro.into());
+            profile
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn removed_native_installation_exposes_foreign_fallback() {
+        use crate::models::EnvType;
+        use crate::agent::provider::Platform;
+        let profiles = vec![
+            crate::preferences::HarnessProfile { id: "mcode".into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime: None, wsl_distro: None },
+            crate::preferences::HarnessProfile { id: "mcode-windows".into(), name: "MiniMax Code (Windows)".into(), harness: "mcode".into(), runtime: Some(EnvType::Windows), wsl_distro: None },
+            crate::preferences::HarnessProfile { id: "mcode-wsl-test".into(), name: "MiniMax Code (WSL)".into(), harness: "mcode".into(), runtime: Some(EnvType::Wsl), wsl_distro: None },
+            crate::preferences::HarnessProfile { id: "custom".into(), name: "Custom".into(), harness: "anthropic".into(), runtime: None, wsl_distro: None },
+        ];
+        let installed = super::filter_installed_profiles(profiles, &["mcode-wsl-test".into()]);
+        let menu = super::preferred_profiles(&installed, Platform::Windows, None);
+        assert_eq!(menu.len(), 2);
+        assert_eq!(menu.iter().find(|p| p.harness == "mcode").unwrap().runtime, Some(EnvType::Wsl));
+        assert!(menu.iter().any(|p| p.id == "custom"));
+    }
+
+    #[test]
+    fn preferred_installations_deduplicate_native_and_cross_runtime_copies() {
+        use crate::models::EnvType;
+        use crate::agent::provider::Platform;
+        let profile = |id: &str, harness: &str, runtime| crate::preferences::HarnessProfile {
+            id: id.into(), name: if harness == "mcode" { "MiniMax Code".into() } else { "Meta Muse (WSL)".into() },
+            harness: harness.into(), runtime, wsl_distro: None,
+        };
+        let profiles = vec![profile("mcode", "mcode", None), profile("mcode-windows", "mcode", Some(EnvType::Windows)),
+            profile("mcode-wsl-test", "mcode", Some(EnvType::Wsl)), profile("muse-wsl-test", "muse", Some(EnvType::Wsl))];
+        let menu = super::preferred_profiles(&profiles, Platform::Windows, Some("Ubuntu"));
+        assert_eq!(menu.len(), 2);
+        let mcode = menu.iter().find(|p| p.harness == "mcode").unwrap();
+        assert_eq!(mcode.id, "mcode");
+        assert_eq!(mcode.name, "MiniMax Code");
+        assert_eq!(mcode.runtime, Some(EnvType::Windows));
+        assert_eq!(menu.iter().find(|p| p.harness == "muse").unwrap().runtime, Some(EnvType::Wsl));
+        let mut linux = profiles;
+        linux.iter_mut().find(|p| p.id == "mcode-windows").unwrap().runtime = Some(EnvType::WindowsInterop);
+        linux.push(profile("grok-windows", "grok", Some(EnvType::WindowsInterop)));
+        let menu = super::preferred_profiles(&linux, Platform::Linux, None);
+        assert_eq!(menu.len(), 2);
+        assert_eq!(menu.iter().find(|p| p.harness == "mcode").unwrap().runtime, None);
+        assert_eq!(menu.iter().find(|p| p.harness == "grok").unwrap().runtime, Some(EnvType::WindowsInterop));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Muse installed in the default WSL distribution"]
+    fn live_wsl_detection_finds_muse_and_drive_mounts() {
+        let profiles = super::detect_wsl_profiles();
+        let muse = profiles.iter().find(|p| p.harness == "muse").expect("Muse must be discovered");
+        assert_eq!(muse.runtime, Some(crate::models::EnvType::Wsl));
+        assert_eq!(muse.wsl_distro, crate::env::get_default_wsl_distro());
+        let host = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let guest = crate::env::windows_to_wsl(&host);
+        let mut command = crate::process_util::command_no_window("wsl.exe");
+        command.args(["-d", muse.wsl_distro.as_deref().unwrap(), "--exec", "wslpath", "-u", &host]);
+        let output = crate::process_util::run_command_with_timeout(command, "verify mount", std::time::Duration::from_secs(10)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(guest, String::from_utf8(output.stdout).unwrap().trim());
+        assert_eq!(std::fs::canonicalize(crate::env::to_host_path(&guest)).unwrap(), std::fs::canonicalize(host).unwrap());
+    }
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn wsl_probe_only_advertises_known_executables_with_explicit_runtime() {
+        let profiles = profiles_from_wsl_probe("welcome\nbuildmesh-harness:muse\nbuildmesh-harness:codex\nbuildmesh-harness:unknown\nbuildmesh-harness:muse\n", "Ubuntu");
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["muse-wsl-5562756e7475", "codex-wsl-5562756e7475"]);
+        assert_eq!(profiles[0].name, "Meta Muse (WSL: Ubuntu)");
+        assert_eq!(profiles[0].wsl_distro.as_deref(), Some("Ubuntu"));
+        assert_eq!(profiles[0].harness, "muse");
+        assert_eq!(profiles[0].runtime, Some(crate::models::EnvType::Wsl));
+        assert!(profiles_from_wsl_probe("command not found", "Ubuntu").is_empty());
+    }
 
     /// Build an `exists` closure that reports the given paths (as strings) as
     /// present and everything else as absent. Backslashes are normalised to `/`
