@@ -25,17 +25,16 @@ const PLAN_SCOPE_DETAIL_ENV: &str = "Plan unavailable — token lacks user:profi
 /// Claude Code `/login` store tokens that predate the scope.
 const PLAN_SCOPE_DETAIL_RELOGIN: &str =
     "Plan unavailable — OAuth token lacks user:profile scope; run /login to refresh credentials";
-/// Named `ANTHROPIC_PROFILE` stays above `/login`, so re-auth the profile itself.
-const PLAN_SCOPE_DETAIL_NAMED_PROFILE: &str = "Plan unavailable — OAuth token lacks user:profile scope; re-authenticate the Anthropic profile with `ant auth login --profile <name>`";
-/// Active Anthropic profile (not Claude Code `/login` store).
-const PLAN_SCOPE_DETAIL_ACTIVE_PROFILE: &str = "Plan unavailable — OAuth token lacks user:profile scope; re-authenticate the active Anthropic profile (`ant auth login`)";
 
-fn scope_limitation_detail(origin: OauthOrigin) -> &'static str {
+fn scope_limitation_detail(origin: &OauthOrigin) -> String {
     match origin {
-        OauthOrigin::Env => PLAN_SCOPE_DETAIL_ENV,
-        OauthOrigin::Login => PLAN_SCOPE_DETAIL_RELOGIN,
-        OauthOrigin::NamedProfile => PLAN_SCOPE_DETAIL_NAMED_PROFILE,
-        OauthOrigin::ActiveProfile => PLAN_SCOPE_DETAIL_ACTIVE_PROFILE,
+        OauthOrigin::Env => PLAN_SCOPE_DETAIL_ENV.to_string(),
+        OauthOrigin::Login => PLAN_SCOPE_DETAIL_RELOGIN.to_string(),
+        OauthOrigin::NamedProfile { name } | OauthOrigin::ActiveProfile { name } => {
+            format!(
+                "Plan unavailable — OAuth token lacks user:profile scope; re-authenticate the Anthropic profile with `ant auth login --profile {name}`"
+            )
+        }
     }
 }
 
@@ -87,7 +86,7 @@ fn anthropic_usage_with_urls(
             plan,
             origin,
         } => {
-            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan, origin);
+            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan, origin.clone());
             if !usage.logged_in && origin == OauthOrigin::Login {
                 if let Some(ClaudeAuthSource::Oauth {
                     token: fallback_token,
@@ -145,7 +144,7 @@ fn fetch_oauth_usage(
         Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
             let status = response.status().as_u16();
             let body = response.text().unwrap_or_default();
-            classify_oauth_auth_failure(status, &body, origin)
+            classify_oauth_auth_failure(status, &body, &origin)
         }
         Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
             PROVIDER,
@@ -170,7 +169,7 @@ fn fetch_oauth_usage(
                     match fetch_oauth_plan(&client, profile_url, token) {
                         ProfilePlan::Found(label) => plan = Some(label),
                         ProfilePlan::Forbidden => {
-                            detail = Some(scope_limitation_detail(origin).to_string());
+                            detail = Some(scope_limitation_detail(&origin));
                         }
                         ProfilePlan::Unavailable => {}
                     }
@@ -202,9 +201,9 @@ enum ProfilePlan {
 /// Scope failures are HTTP 403 with the explicit scope message and keep the
 /// account logged in; 401 (even with similar text) remains `logged_out` so
 /// active-profile retry can run.
-fn classify_oauth_auth_failure(status: u16, body: &str, origin: OauthOrigin) -> ProviderUsage {
+fn classify_oauth_auth_failure(status: u16, body: &str, origin: &OauthOrigin) -> ProviderUsage {
     if is_oauth_scope_failure(status, body) {
-        let detail = scope_limitation_detail(origin).to_string();
+        let detail = scope_limitation_detail(origin);
         let mut usage = unavailable(PROVIDER, detail.clone());
         usage.detail = Some(detail);
         return usage;
@@ -649,13 +648,51 @@ mod tests {
         let detail = usage.detail.as_deref().unwrap_or_default();
         let error = usage.error.as_deref().unwrap_or_default();
         assert!(
-            detail.contains("ant auth login --profile")
-                || error.contains("ant auth login --profile"),
-            "named profile must recommend ant auth login --profile; detail={detail:?} error={error:?}"
+            detail.contains("ant auth login --profile work")
+                || error.contains("ant auth login --profile work"),
+            "named profile must include the actual profile name; detail={detail:?} error={error:?}"
+        );
+        assert!(
+            !detail.contains("<name>") && !error.contains("<name>"),
+            "must not leave a placeholder profile name"
         );
         assert!(
             !detail.contains("run /login") && !error.contains("run /login"),
             "/login cannot repair ANTHROPIC_PROFILE credentials"
+        );
+    }
+
+    #[test]
+    fn active_named_profile_scope_failure_includes_actual_profile_name() {
+        let port = spawn_loopback(1, move |request| {
+            let _ = request.respond(
+                tiny_http::Response::from_string(
+                    r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                )
+                .with_status_code(403),
+            );
+        });
+        let mut lookup = FakeLookup::default();
+        let cfg = lookup.home.join(".config").join("anthropic");
+        lookup
+            .files
+            .insert(cfg.join("active_config"), "agents".into());
+        lookup.files.insert(
+            cfg.join("configs").join("agents.json"),
+            r#"{"authentication":{"type":"user_oauth"}}"#.into(),
+        );
+        lookup.files.insert(
+            cfg.join("credentials").join("agents.json"),
+            r#"{"access_token":"sk-ant-oat01-agents","subscriptionType":"enterprise"}"#.into(),
+        );
+        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        assert!(usage.logged_in);
+        let detail = usage.detail.as_deref().unwrap_or_default();
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("ant auth login --profile agents")
+                || error.contains("ant auth login --profile agents"),
+            "active non-default profile must name itself; detail={detail:?} error={error:?}"
         );
     }
 

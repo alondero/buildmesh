@@ -29,16 +29,16 @@ pub(crate) const PLATFORM_PROFILE: &str = "Anthropic profile";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 /// Where an OAuth token came from — used for auth-failure fallback policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OauthOrigin {
     /// `CLAUDE_CODE_OAUTH_TOKEN` (including `claude setup-token`).
     Env,
     /// Named `ANTHROPIC_PROFILE` with `user_oauth`.
-    NamedProfile,
+    NamedProfile { name: String },
     /// Claude Code `/login` credential store.
     Login,
     /// Active Anthropic `user_oauth` profile (below working `/login`).
-    ActiveProfile,
+    ActiveProfile { name: String },
 }
 
 /// Non-secret description of the credential Claude will actually use.
@@ -158,7 +158,12 @@ pub(crate) fn resolve_claude_auth(lookup: &impl AuthLookup) -> ClaudeAuthSource 
 
     let anthropic_cfg = anthropic_config_dir(lookup);
     if let Some(name) = var("ANTHROPIC_PROFILE").filter(|value| !value.trim().is_empty()) {
-        return resolve_named_profile(lookup, &anthropic_cfg, &name, OauthOrigin::NamedProfile);
+        return resolve_named_profile(
+            lookup,
+            &anthropic_cfg,
+            &name,
+            OauthOrigin::NamedProfile { name: name.clone() },
+        );
     }
     if federation_env_active(var) {
         return managed(PLATFORM_PROFILE, "federation_env", b"configured");
@@ -189,7 +194,12 @@ pub(crate) fn active_user_oauth(
     if profile_auth_mode(lookup, anthropic_cfg, &name) != Some(ProfileAuthMode::UserOauth) {
         return None;
     }
-    match resolve_named_profile(lookup, anthropic_cfg, &name, OauthOrigin::ActiveProfile) {
+    match resolve_named_profile(
+        lookup,
+        anthropic_cfg,
+        &name,
+        OauthOrigin::ActiveProfile { name: name.clone() },
+    ) {
         source @ ClaudeAuthSource::Oauth { .. } => Some(source),
         _ => None,
     }
@@ -321,7 +331,7 @@ fn read_oauth_store(
     let service = keychain_service_for(config_dir, &default_config_dir(lookup));
     if let Ok(body) = lookup.read_keychain(&service) {
         // Unusable Keychain data is a miss: fall through to the file store.
-        if let Ok(source) = parse_oauth_json(&body, origin) {
+        if let Ok(source) = parse_oauth_json(&body, origin.clone()) {
             return source;
         }
     }
@@ -912,7 +922,12 @@ mod tests {
             } => {
                 assert_eq!(token, "sk-ant-oat01-profile");
                 assert_eq!(plan.as_deref(), Some("Enterprise"));
-                assert_eq!(origin, OauthOrigin::ActiveProfile);
+                assert_eq!(
+                    origin,
+                    OauthOrigin::ActiveProfile {
+                        name: "default".into()
+                    }
+                );
             }
             other => panic!("expired /login must fall through to active profile, got {other:?}"),
         }
