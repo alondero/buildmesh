@@ -357,7 +357,6 @@ fn push_window(
     window: CodexRateWindow,
     label_override: Option<String>,
     windows: &mut Vec<UsageWindow>,
-    highest: &mut Option<f64>,
 ) {
     let Some(used) = window.used_percent.and_then(|n| n.to_f64()) else {
         return;
@@ -383,9 +382,6 @@ fn push_window(
         .reset_at
         .and_then(|n| n.to_i64())
         .and_then(rfc3339_from_epoch);
-    if highest.is_none_or(|h| used > h) {
-        *highest = Some(used);
-    }
     windows.push(UsageWindow {
         label,
         used_percent: Some(used),
@@ -397,17 +393,15 @@ fn push_rate_limits(
     limits: CodexRateLimits,
     label_prefix: Option<&str>,
     windows: &mut Vec<UsageWindow>,
-    highest: &mut Option<f64>,
 ) {
     if let Some(primary) = limits.primary_window {
-        push_window(primary, label_prefix.map(str::to_string), windows, highest);
+        push_window(primary, label_prefix.map(str::to_string), windows);
     }
     if let Some(secondary) = limits.secondary_window {
         push_window(
             secondary,
             label_prefix.map(str::to_string),
             windows,
-            highest,
         );
     }
     for additional in limits.additional_rate_limits {
@@ -415,7 +409,6 @@ fn push_rate_limits(
             additional,
             label_prefix.map(str::to_string),
             windows,
-            highest,
         );
     }
 }
@@ -425,10 +418,9 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
     let mut windows = Vec::new();
-    let mut highest_used: Option<f64> = None;
 
     if let Some(rate_limit) = resp.rate_limit {
-        push_rate_limits(rate_limit, None, &mut windows, &mut highest_used);
+        push_rate_limits(rate_limit, None, &mut windows);
     }
     for additional in resp.additional_rate_limits.unwrap_or_default() {
         match additional {
@@ -438,12 +430,11 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
                         limits,
                         Some(named.limit_name.as_str()),
                         &mut windows,
-                        &mut highest_used,
                     );
                 }
             }
             CodexAdditionalLimit::Window(window) => {
-                push_window(window, None, &mut windows, &mut highest_used);
+                push_window(window, None, &mut windows);
             }
         }
     }
@@ -492,13 +483,15 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
 
-    let detail = if !windows.is_empty() {
-        highest_used.map(|u| format!("{:.1}% remaining", (100.0 - u).max(0.0)))
-    } else if meters.is_empty() && balance.is_none() {
+    let detail = if windows.is_empty() && meters.is_empty() && balance.is_none() {
         Some("No active Codex rate-limit windows".to_string())
     } else {
         None
     };
+    // The bar's fill width is the inverse of "% remaining", so emitting
+    // the string on top of the bar would duplicate the same number. The
+    // "No active" fallback above stays because it explains a different
+    // case (why nothing is rendered), not a redundant percentage.
 
     Ok(CodexParsed {
         plan,
@@ -614,7 +607,7 @@ mod tests {
         );
         assert_eq!(parsed.windows[1].label, "Weekly");
         assert_eq!(parsed.windows[1].used_percent, Some(42.0));
-        assert_eq!(parsed.detail.as_deref(), Some("58.0% remaining"));
+        assert!(parsed.detail.is_none());
         assert!(parsed.plan.is_none());
         assert!(parsed.meters.is_empty());
     }
@@ -627,7 +620,7 @@ mod tests {
         assert_eq!(parsed.windows[0].label, "5-hour");
         assert_eq!(parsed.windows[0].used_percent, Some(50.0));
         assert!(parsed.windows[0].resets_at.is_none());
-        assert_eq!(parsed.detail.as_deref(), Some("50.0% remaining"));
+        assert!(parsed.detail.is_none());
     }
 
     #[test]
@@ -647,7 +640,7 @@ mod tests {
         assert_eq!(parsed.windows[1].label, "Weekly");
         assert_eq!(parsed.windows[2].label, "24h");
         assert_eq!(parsed.windows[2].used_percent, Some(30.0));
-        assert_eq!(parsed.detail.as_deref(), Some("70.0% remaining"));
+        assert!(parsed.detail.is_none());
     }
 
     #[test]
@@ -694,7 +687,7 @@ mod tests {
         assert_eq!(parsed.windows[0].label, "5-hour");
         assert_eq!(parsed.windows[0].used_percent, Some(18.5));
         assert_eq!(parsed.windows[1].label, "Weekly");
-        assert_eq!(parsed.detail.as_deref(), Some("58.0% remaining"));
+        assert!(parsed.detail.is_none());
         assert!(parsed.meters.is_empty());
         assert!(parsed.balance.is_none());
     }
@@ -718,7 +711,7 @@ mod tests {
             }
             other => panic!("expected metered spend, got {other:?}"),
         }
-        assert_eq!(parsed.detail.as_deref(), Some("70.0% remaining"));
+        assert!(parsed.detail.is_none());
     }
 
     #[test]
@@ -766,7 +759,7 @@ mod tests {
         let parsed = parse_codex_response(json).unwrap();
         assert_eq!(parsed.windows.len(), 1);
         assert_eq!(parsed.windows[0].label, "5-hour");
-        assert_eq!(parsed.detail.as_deref(), Some("90.0% remaining"));
+        assert!(parsed.detail.is_none());
     }
 
     #[test]
@@ -782,6 +775,25 @@ mod tests {
         assert_eq!(
             parsed.detail.as_deref(),
             Some("No active Codex rate-limit windows")
+        );
+    }
+
+    // The bar's fill width is the inverse of "% remaining"; emitting the
+    // computed string on top would duplicate the same number.
+    #[test]
+    fn parse_codex_response_does_not_emit_percent_remaining_when_windows_are_present() {
+        let json = r#"{
+            "rate_limit": {
+                "primary_window": {"used_percent": 44.0, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 56.0, "limit_window_seconds": 604800}
+            }
+        }"#;
+        let parsed = parse_codex_response(json).unwrap();
+        assert_eq!(parsed.windows.len(), 2);
+        assert!(
+            parsed.detail.is_none(),
+            "detail must not duplicate bar percentages; got: {:?}",
+            parsed.detail
         );
     }
 
@@ -965,7 +977,7 @@ mod tests {
         assert_eq!(usage.windows.len(), 2);
         assert_eq!(usage.windows[0].label, "5-hour");
         assert_eq!(usage.windows[0].used_percent, Some(18.5));
-        assert_eq!(usage.detail.as_deref(), Some("58.0% remaining"));
+        assert!(usage.detail.is_none());
 
         let _ = fs::remove_dir_all(&home);
     }

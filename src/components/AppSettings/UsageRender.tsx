@@ -143,15 +143,21 @@ export function ExplicitUsageMeter({ meter }: { meter: UsageMeter }) {
   }
 }
 
-/** Cash-balance view for a pay-as-you-go account (issue #537). */
+/** Cash-balance view for a pay-as-you-go account (issue #537).
+ *  Hides "Balance remaining" when zero — there is nothing to compare
+ *  against on a fresh wallet — but keeps "Spent this month" so a user
+ *  spending against an exhausted balance still sees live spend. */
 export function BalanceCard({ balance }: { balance: BillingBalance }) {
   const fmt = (n: number) => `${balance.currency} ${n.toFixed(2)}`;
+  const showRemaining = balance.remaining > 0;
   return (
     <div className="mt-2 space-y-1">
-      <div className="flex justify-between text-xs">
-        <span className="text-text-muted">Balance remaining</span>
-        <span className="font-medium font-mono text-text-primary">{fmt(balance.remaining)}</span>
-      </div>
+      {showRemaining && (
+        <div className="flex justify-between text-xs">
+          <span className="text-text-muted">Balance remaining</span>
+          <span className="font-medium font-mono text-text-primary">{fmt(balance.remaining)}</span>
+        </div>
+      )}
       {balance.monthlySpend != null && (
         <div className="flex justify-between text-xs">
           <span className="text-text-muted">Spent this month</span>
@@ -226,11 +232,6 @@ export function UsagePanel({
       || explicitMeters.length > 0;
     return (
       <div>
-        {meter.usage.plan && (
-          <p className="text-xs text-text-secondary mb-2 break-words" data-testid="usage-plan-label">
-            Plan: {meter.usage.plan}
-          </p>
-        )}
         {meter.usage.windows.map(w => (
           <UsageBar key={w.label} window={w} />
         ))}

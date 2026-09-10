@@ -274,21 +274,33 @@ describe('ExplicitUsageMeter (issue #1671 states)', () => {
     expect(screen.getByText(label)).toBeTruthy();
   });
 
-  it('renders the provider plan label and keeps long billing-source text wrappable at 240px', () => {
+  it('does NOT render the provider plan label (glanceable noise — user does not find it actionable)', () => {
+    // Plan type strings like "prolite" carry no decision-making content at
+    // a glance; the bars / balance / metered meter below already carry
+    // the live state.
+    render(
+      <UsagePanel
+        account={account({ name: 'Claude' })}
+        meter={meter({ usage: usage({ plan: 'prolite' }) })}
+      />,
+    );
+    expect(screen.queryByText(/Plan:/)).toBeNull();
+    expect(screen.queryByText(/prolite/)).toBeNull();
+  });
+
+  it('keeps long billing-source text wrappable at 240px (separate from the removed plan label)', () => {
     const { container } = render(
       <div style={{ width: 240 }}>
         <UsagePanel
           account={account({ name: 'Claude' })}
           meter={meter({
             usage: usage({
-              plan: 'Enterprise negotiated monthly billing plan',
               meters: [{ state: 'managed_externally', platform: 'A very long external cloud billing platform name' }],
             }),
           })}
         />
       </div>,
     );
-    expect(screen.getByText(/Plan: Enterprise negotiated/)).toBeTruthy();
     const managed = screen.getByTestId('usage-state-managed-externally');
     expect(managed.classList.contains('break-words')).toBe(true);
     expect(container.querySelector('.truncate [data-testid="usage-state-managed-externally"]')).toBeNull();
