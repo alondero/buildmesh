@@ -15,7 +15,7 @@ use auth::{
     active_user_oauth, anthropic_config_dir_for, cache_identity_from, resolve_claude_auth,
     AuthLookup, ClaudeAuthSource, OauthOrigin, ProductionLookup,
 };
-use parse::{parse_anthropic_usage, parse_oauth_profile_plan};
+use parse::parse_anthropic_usage;
 
 const PROVIDER: &str = "anthropic";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -91,7 +91,6 @@ fn anthropic_usage_with_urls(
             logged_in: true,
             windows: vec![],
             balance: None,
-            plan: None,
             meters: vec![UsageMeter::ManagedExternally {
                 platform: platform.to_string(),
             }],
@@ -100,16 +99,14 @@ fn anthropic_usage_with_urls(
         },
         ClaudeAuthSource::Missing { error } => logged_out(PROVIDER, error.to_string()),
         ClaudeAuthSource::Oauth {
-            token,
-            plan,
-            origin,
+            token, origin, ..
         } => {
-            let usage = fetch_oauth_usage(usage_url, profile_url, &token, plan, origin.clone());
+            let usage = fetch_oauth_usage(usage_url, profile_url, &token, origin.clone());
             if !usage.logged_in && origin == OauthOrigin::Login {
                 if let Some(ClaudeAuthSource::Oauth {
                     token: fallback_token,
-                    plan: fallback_plan,
                     origin: fallback_origin,
+                    ..
                 }) = active_user_oauth(lookup, &anthropic_config_dir_for(lookup))
                 {
                     if fallback_token != token {
@@ -117,7 +114,6 @@ fn anthropic_usage_with_urls(
                             usage_url,
                             profile_url,
                             &fallback_token,
-                            fallback_plan,
                             fallback_origin,
                         );
                     }
@@ -145,7 +141,6 @@ fn fetch_oauth_usage(
     usage_url: &str,
     profile_url: &str,
     token: &str,
-    known_plan: Option<String>,
     origin: OauthOrigin,
 ) -> ProviderUsage {
     let client = match shared_client() {
@@ -181,23 +176,23 @@ fn fetch_oauth_usage(
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
             Ok(parsed) => {
-                let mut plan = known_plan.or(parsed.plan);
-                let mut detail = None;
-                if plan.is_none() {
-                    match fetch_oauth_plan(&client, profile_url, token) {
-                        ProfilePlan::Found(label) => plan = Some(label),
-                        ProfilePlan::Forbidden => {
-                            detail = Some(scope_limitation_detail(&origin));
-                        }
-                        ProfilePlan::Unavailable => {}
-                    }
-                }
+                // Always probe /oauth/profile, even when /usage succeeded:
+                // a token may lack `user:profile` while still returning a
+                // 200 from /usage with whatever default data Anthropic
+                // chooses to surface. The profile endpoint catches the
+                // missing scope precisely via 403 + scope body. Performance
+                // is one extra HTTP round-trip per meter refresh — the
+                // trade was made deliberately in #1689 / #1694.
+                let detail = if oauth_profile_scope_failure(&client, profile_url, token) {
+                    Some(scope_limitation_detail(&origin))
+                } else {
+                    None
+                };
                 ProviderUsage {
                     provider: PROVIDER.to_string(),
                     logged_in: true,
                     windows: parsed.windows,
                     balance: None,
-                    plan,
                     meters: parsed.meters,
                     detail,
                     error: None,
@@ -209,10 +204,30 @@ fn fetch_oauth_usage(
     }
 }
 
-enum ProfilePlan {
-    Found(String),
-    Forbidden,
-    Unavailable,
+/// Hit `/oauth/profile` and report whether the response is a 403 with the
+/// `user:profile` scope-failure body. Used to surface the OAuth scope
+/// limitation message in `usage.detail` even when /usage itself
+/// returned 200 (a token can succeed at /usage while missing the
+/// profile scope; the profile endpoint is the precise signal).
+fn oauth_profile_scope_failure(
+    client: &reqwest::blocking::Client,
+    profile_url: &str,
+    token: &str,
+) -> bool {
+    let response = match client
+        .get(profile_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+    {
+        Ok(response) => response,
+        Err(_) => return false,
+    };
+    if response.status().as_u16() != 403 {
+        return false;
+    }
+    let body = response.text().unwrap_or_default();
+    is_oauth_scope_failure(403, &body)
 }
 
 /// Distinguish expired/revoked credentials from missing `user:profile` scope.
@@ -237,37 +252,6 @@ fn is_oauth_scope_failure(status: u16, body: &str) -> bool {
     }
     let lower = body.to_ascii_lowercase();
     lower.contains("scope requirement") && lower.contains("user:profile")
-}
-
-fn fetch_oauth_plan(
-    client: &reqwest::blocking::Client,
-    profile_url: &str,
-    token: &str,
-) -> ProfilePlan {
-    let Ok(response) = client
-        .get(profile_url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-    else {
-        return ProfilePlan::Unavailable;
-    };
-    let status = response.status().as_u16();
-    let body = response.text().unwrap_or_default();
-    if status == 401 || status == 403 {
-        return if is_oauth_scope_failure(status, &body) {
-            ProfilePlan::Forbidden
-        } else {
-            ProfilePlan::Unavailable
-        };
-    }
-    if !(200..300).contains(&status) {
-        return ProfilePlan::Unavailable;
-    }
-    match parse_oauth_profile_plan(&body) {
-        Some(label) => ProfilePlan::Found(label),
-        None => ProfilePlan::Unavailable,
-    }
 }
 
 #[cfg(test)]
@@ -308,11 +292,18 @@ mod tests {
         format!("http://127.0.0.1:{port}/oauth/usage")
     }
 
+    // After #1689 the Anthropic adapter always issues a second HTTP
+    // request to /oauth/profile for scope-failure detection. Most tests
+    // don't care about the profile response; the test loopback answers
+    // it with a 200 + empty body (which `oauth_profile_scope_failure`
+    // interprets as "no scope failure, no detail to surface"). Tests
+    // that need a 403-from-profile path override the closure.
+
     #[test]
-    fn consumer_oauth_fetch_keeps_windows_and_plan() {
+    fn consumer_oauth_fetch_keeps_windows() {
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_thread = Arc::clone(&hits);
-        let port = spawn_loopback(1, move |request| {
+        let port = spawn_loopback(2, move |request| {
             hits_thread.fetch_add(1, Ordering::SeqCst);
             let auth = request
                 .headers()
@@ -321,37 +312,36 @@ mod tests {
                 .map(|header| header.value.as_str().to_string())
                 .unwrap_or_default();
             assert_eq!(auth, "Bearer sk-ant-oat01-secret");
-            let _ = request.respond(
-                tiny_http::Response::from_string(CONSUMER_BODY)
-                    .with_status_code(200)
-                    .with_header(
-                        tiny_http::Header::from_bytes(
-                            &b"Content-Type"[..],
-                            &b"application/json"[..],
-                        )
-                        .unwrap(),
-                    ),
-            );
+            let body = if request.url().to_string().contains("/profile") {
+                "{}"
+            } else {
+                CONSUMER_BODY
+            };
+            let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
 
         let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Pro"));
         assert_eq!(usage.windows.len(), 2);
         assert!(usage.meters.is_empty());
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // /usage + /profile both succeed.
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(!format!("{usage:?}").contains("sk-ant-"));
+        // /profile returned 200, so detail stays unset.
+        assert!(usage.detail.is_none());
     }
 
     #[test]
-    fn enterprise_oauth_fetch_shows_plan_and_spend() {
-        let port = spawn_loopback(1, move |request| {
-            let _ = request.respond(
-                tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
-            );
+    fn enterprise_oauth_fetch_shows_spend() {
+        let port = spawn_loopback(2, move |request| {
+            let body = if request.url().to_string().contains("/profile") {
+                "{}"
+            } else {
+                ENTERPRISE_SPEND_BODY
+            };
+            let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
         let usage = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert!(usage.windows.is_empty());
         match &usage.meters[..] {
             [UsageMeter::Metered { amount }] => {
@@ -361,11 +351,15 @@ mod tests {
             }
             other => panic!("expected enterprise spend, got {other:?}"),
         }
+        assert!(usage.detail.is_none());
     }
 
     #[test]
-    fn env_oauth_token_fetch_gets_plan_from_profile_not_stale_file() {
-        // Stale local login is Pro; the env token's profile is Enterprise.
+    fn env_oauth_token_does_not_use_stale_login_file_plan() {
+        // Stale local login file is "pro"; the env token is a separate
+        // credential. After #1689 the plan label is no longer surfaced,
+        // so this test now only asserts that the env token's own spend
+        // body drives the meter (no leakage from the stale login).
         let port = spawn_loopback(2, move |request| {
             let auth = request
                 .headers()
@@ -374,9 +368,8 @@ mod tests {
                 .map(|header| header.value.as_str().to_string())
                 .unwrap_or_default();
             assert_eq!(auth, "Bearer sk-ant-oat01-env");
-            let path = request.url().to_string();
-            let body = if path.contains("/profile") {
-                r#"{"organization":{"organization_type":"claude_enterprise"}}"#
+            let body = if request.url().to_string().contains("/profile") {
+                "{}"
             } else {
                 ENTERPRISE_SPEND_BODY
             };
@@ -387,11 +380,6 @@ mod tests {
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert_eq!(
-            usage.plan.as_deref(),
-            Some("Enterprise"),
-            "plan must come from the env token profile, not the stale Pro login file"
-        );
         match &usage.meters[..] {
             [UsageMeter::Metered { amount }] => {
                 assert_eq!(amount.used, 25.0);
@@ -428,7 +416,6 @@ mod tests {
         );
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert!(usage.plan.is_none(), "must not invent or borrow a plan");
         assert!(
             usage
                 .detail
@@ -445,10 +432,15 @@ mod tests {
     }
 
     #[test]
-    fn rejected_login_retries_active_user_oauth_profile() {
+    fn rejected_login_retries_active_user_oauth() {
+        // First /usage call uses the expired login token (401). The
+        // adapter then retries with the active user_oauth profile and
+        // succeeds, hitting /usage again. After the successful /usage,
+        // /profile is also called for scope-failure detection. Total
+        // hits: 3.
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_thread = Arc::clone(&hits);
-        let port = spawn_loopback(2, move |request| {
+        let port = spawn_loopback(3, move |request| {
             let auth = request
                 .headers()
                 .iter()
@@ -456,15 +448,25 @@ mod tests {
                 .map(|header| header.value.as_str().to_string())
                 .unwrap_or_default();
             let n = hits_thread.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                assert_eq!(auth, "Bearer sk-ant-oat01-expired-login");
-                let _ = request
-                    .respond(tiny_http::Response::from_string("denied").with_status_code(401));
-            } else {
-                assert_eq!(auth, "Bearer sk-ant-oat01-profile");
-                let _ = request.respond(
-                    tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY).with_status_code(200),
-                );
+            match n {
+                0 => {
+                    assert_eq!(auth, "Bearer sk-ant-oat01-expired-login");
+                    let _ = request
+                        .respond(tiny_http::Response::from_string("denied").with_status_code(401));
+                }
+                1 => {
+                    assert_eq!(auth, "Bearer sk-ant-oat01-profile");
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(ENTERPRISE_SPEND_BODY)
+                            .with_status_code(200),
+                    );
+                }
+                _ => {
+                    // /profile from the retry path
+                    assert_eq!(auth, "Bearer sk-ant-oat01-profile");
+                    let _ = request
+                        .respond(tiny_http::Response::from_string("{}").with_status_code(200));
+                }
             }
         });
 
@@ -486,12 +488,62 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
         assert!(matches!(
             usage.meters.first(),
             Some(UsageMeter::Metered { .. })
         ));
+    }
+
+    // Spec test for #1689: /usage may return 200 with valid data while
+    // /oauth/profile returns 403 missing user:profile. The adapter must
+    // surface the OAuth scope-limitation message in `detail` even when
+    // /usage itself returned success — that's the new behaviour this PR
+    // introduces (the unconditional /profile probe).
+    #[test]
+    fn usage_ok_profile_scope_failure_surfaces_limitation_detail() {
+        let port = spawn_loopback(2, move |request| {
+            let path = request.url().to_string();
+            if path.contains("/profile") {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        r#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#,
+                    )
+                    .with_status_code(403),
+                );
+            } else {
+                let _ = request.respond(
+                    tiny_http::Response::from_string(CONSUMER_BODY).with_status_code(200),
+                );
+            }
+        });
+        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        assert!(usage.logged_in, "scope failure must stay logged in");
+        let detail = usage.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("user:profile"),
+            "detail should name the missing scope; got detail={detail:?}"
+        );
+        // The windows from the successful /usage call are still surfaced.
+        assert_eq!(usage.windows.len(), 2);
+    }
+
+    // Negative companion: /profile returns 200 with a body that does NOT
+    // match the scope-failure predicate. detail stays unset.
+    #[test]
+    fn usage_ok_profile_200_leaves_detail_unset() {
+        let port = spawn_loopback(2, move |request| {
+            let body = if request.url().to_string().contains("/profile") {
+                r#"{"organization":{"organization_type":"claude_enterprise"}}"#
+            } else {
+                CONSUMER_BODY
+            };
+            let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
+        });
+        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        assert!(usage.logged_in);
+        assert!(usage.detail.is_none());
+        assert_eq!(usage.windows.len(), 2);
     }
 
     #[test]
@@ -503,8 +555,13 @@ mod tests {
                 "used_credits": 325
             }
         }"#;
-        let port = spawn_loopback(1, move |request| {
-            let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
+        let port = spawn_loopback(2, move |request| {
+            let b = if request.url().to_string().contains("/profile") {
+                "{}"
+            } else {
+                body
+            };
+            let _ = request.respond(tiny_http::Response::from_string(b).with_status_code(200));
         });
         let usage = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
         match &usage.meters[..] {
@@ -656,7 +713,6 @@ mod tests {
             usage.logged_in,
             "scope failure must not look like a logged-out/expired credential"
         );
-        assert!(usage.plan.is_none());
         let detail = usage.detail.as_deref().unwrap_or_default();
         let error = usage.error.as_deref().unwrap_or_default();
         assert!(
@@ -806,7 +862,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(!usage
             .detail
@@ -858,7 +913,6 @@ mod tests {
 
         let usage = anthropic_usage_with(&lookup, &loopback_url(port));
         assert!(usage.logged_in);
-        assert_eq!(usage.plan.as_deref(), Some("Enterprise"));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert!(!usage
             .detail

@@ -143,19 +143,37 @@ export function ExplicitUsageMeter({ meter }: { meter: UsageMeter }) {
   }
 }
 
-/** Cash-balance view for a pay-as-you-go account (issue #537). */
+/** Whether `BalanceCard` would render any row for a given balance.
+ *  `BalanceCard` hides "Balance remaining" when exactly zero (a fresh
+ *  wallet has nothing to compare against) and only renders "Spent this
+ *  month" when monthly spend is set. Returns true if either row would
+ *  appear. -0 collapses to 0 in JS so no special-case is needed; a
+ *  negative remaining (overdrawn wallet) is informative and counts. */
+function isBalanceVisible(balance: BillingBalance): boolean {
+  return balance.remaining !== 0 || balance.monthlySpend != null;
+}
+
+/** Cash-balance view for a pay-as-you-go account (issue #537).
+ *  Returns null when nothing is renderable (e.g.
+ *  `{ remaining: 0, monthlySpend: null }`) so the parent doesn't show
+ *  an empty box. */
 export function BalanceCard({ balance }: { balance: BillingBalance }) {
+  if (!isBalanceVisible(balance)) return null;
   const fmt = (n: number) => `${balance.currency} ${n.toFixed(2)}`;
+  const showRemaining = balance.remaining !== 0;
+  const showSpend = balance.monthlySpend != null;
   return (
     <div className="mt-2 space-y-1">
-      <div className="flex justify-between text-xs">
-        <span className="text-text-muted">Balance remaining</span>
-        <span className="font-medium font-mono text-text-primary">{fmt(balance.remaining)}</span>
-      </div>
-      {balance.monthlySpend != null && (
+      {showRemaining && (
+        <div className="flex justify-between text-xs">
+          <span className="text-text-muted">Balance remaining</span>
+          <span className="font-medium font-mono text-text-primary">{fmt(balance.remaining)}</span>
+        </div>
+      )}
+      {showSpend && (
         <div className="flex justify-between text-xs">
           <span className="text-text-muted">Spent this month</span>
-          <span className="font-mono text-text-primary">{fmt(balance.monthlySpend)}</span>
+          <span className="font-mono text-text-primary">{fmt(balance.monthlySpend!)}</span>
         </div>
       )}
     </div>
@@ -221,20 +239,23 @@ export function UsagePanel({
     // choosing one by billing mode (#574 AC3). Also unhides MiniMax's
     // quota bars that the old billing-mode XOR suppressed.
     const explicitMeters = meter.usage.meters ?? [];
+    // Mirror BalanceCard's render predicate via the shared helper so the
+    // panel and the card cannot desynchronize. A balance with no
+    // remaining (exact zero) and no monthly spend contributes nothing
+    // and would be skipped by the BalanceCard null-return below; don't
+    // count it as "has meters" or the panel would hide "Unavailable"
+    // and show a blank box.
+    const balanceRendersContent = meter.usage.balance != null
+      && isBalanceVisible(meter.usage.balance);
     const hasMeters = meter.usage.windows.length > 0
-      || meter.usage.balance != null
+      || balanceRendersContent
       || explicitMeters.length > 0;
     return (
       <div>
-        {meter.usage.plan && (
-          <p className="text-xs text-text-secondary mb-2 break-words" data-testid="usage-plan-label">
-            Plan: {meter.usage.plan}
-          </p>
-        )}
         {meter.usage.windows.map(w => (
           <UsageBar key={w.label} window={w} />
         ))}
-        {meter.usage.balance && <BalanceCard balance={meter.usage.balance} />}
+        {meter.usage.balance && balanceRendersContent && <BalanceCard balance={meter.usage.balance} />}
         {explicitMeters.map((usageMeter, index) => (
           <div key={index} className="mt-2 first:mt-0">
             <ExplicitUsageMeter meter={usageMeter} />

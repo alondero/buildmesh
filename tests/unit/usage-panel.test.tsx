@@ -49,7 +49,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
 }
 
 function usage(over: Partial<ProviderUsage> = {}): ProviderUsage {
-  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, plan: null, meters: [], detail: null, error: null, ...over };
+  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, meters: [], detail: null, error: null, ...over };
 }
 
 function meter(over: Partial<ProviderMeters> = {}): ProviderMeters {
@@ -126,6 +126,26 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
       />,
     );
     expect(screen.getByText('Unavailable')).toBeTruthy();
+  });
+
+  it('shows "Unavailable" when balance is zero and there is no spend (would render empty box otherwise)', () => {
+    // A fresh Codex-Business wallet whose /wham/usage returns
+    // `{ credits: { balance: 0 } }` arrives as balance != null with
+    // remaining === 0 and monthlySpend === null. The BalanceCard returns
+    // null in that case, but the panel still needs to render the
+    // "Unavailable" fallback rather than an empty box. Pin the
+    // interaction between the two predicates.
+    render(
+      <UsagePanel
+        account={account({ id: 'codex' })}
+        meter={meter({
+          provider: 'codex',
+          usage: usage({ provider: 'codex', balance: { remaining: 0, monthlySpend: null, currency: 'credits' } }),
+        })}
+      />,
+    );
+    expect(screen.getByText('Unavailable')).toBeTruthy();
+    expect(screen.queryByText(/0\.00 credits/)).toBeNull();
   });
 
   it('renders both quota windows and a cash balance together (#574 AC3)', () => {
@@ -274,21 +294,29 @@ describe('ExplicitUsageMeter (issue #1671 states)', () => {
     expect(screen.getByText(label)).toBeTruthy();
   });
 
-  it('renders the provider plan label and keeps long billing-source text wrappable at 240px', () => {
+  it('does NOT render the provider plan label (glanceable noise — user does not find it actionable)', () => {
+    render(
+      <UsagePanel
+        account={account({ name: 'Claude' })}
+        meter={meter({ usage: usage() })}
+      />,
+    );
+    expect(screen.queryByText(/Plan:/)).toBeNull();
+  });
+
+  it('keeps long billing-source text wrappable at 240px (separate from the removed plan label)', () => {
     const { container } = render(
       <div style={{ width: 240 }}>
         <UsagePanel
           account={account({ name: 'Claude' })}
           meter={meter({
             usage: usage({
-              plan: 'Enterprise negotiated monthly billing plan',
               meters: [{ state: 'managed_externally', platform: 'A very long external cloud billing platform name' }],
             }),
           })}
         />
       </div>,
     );
-    expect(screen.getByText(/Plan: Enterprise negotiated/)).toBeTruthy();
     const managed = screen.getByTestId('usage-state-managed-externally');
     expect(managed.classList.contains('break-words')).toBe(true);
     expect(container.querySelector('.truncate [data-testid="usage-state-managed-externally"]')).toBeNull();

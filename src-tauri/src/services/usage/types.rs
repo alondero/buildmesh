@@ -100,10 +100,6 @@ pub struct ProviderUsage {
     /// report utilization via `windows` instead (issue #537).
     #[serde(default)]
     pub balance: Option<BillingBalance>,
-    /// Provider-reported plan or billing-source label. Buildmesh displays this
-    /// verbatim and does not infer equivalence between provider plan names.
-    #[serde(default)]
-    pub plan: Option<String>,
     /// New explicit meters. Kept alongside `windows` and `balance` so existing
     /// adapters remain source-compatible while provider migrations land.
     #[serde(default)]
@@ -167,7 +163,6 @@ pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
         logged_in: false,
         windows: vec![],
         balance: None,
-        plan: None,
         meters: vec![],
         detail: None,
         error: Some(error),
@@ -184,7 +179,6 @@ pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
         logged_in: true,
         windows: vec![],
         balance: None,
-        plan: None,
         meters: vec![],
         detail: None,
         error: Some(error),
@@ -211,7 +205,25 @@ mod tests {
         )
         .expect("legacy ProviderUsage should remain compatible");
 
-        assert!(usage.plan.is_none());
+        assert!(usage.meters.is_empty());
+    }
+
+    // After #1689 dropped `plan: Option<String>` from ProviderUsage, a
+    // cached payload from before that cut must still parse: the IPC
+    // route and the mobile HTTP route both replay cached
+    // `get_provider_meters` responses on reconnect. Serde's default
+    // ignores unknown fields, but a regression that re-introduces
+    // `#[serde(deny_unknown_fields)]` would break this — pin the lenient
+    // behavior here so the regression is caught at the type layer.
+    #[test]
+    fn legacy_payload_with_plan_field_still_deserializes() {
+        let usage: ProviderUsage = serde_json::from_str(
+            r#"{"provider":"anthropic","loggedIn":true,"windows":[],"balance":null,"plan":"pro","meters":[],"detail":null,"error":null}"#,
+        )
+        .expect("pre-#1689 payload with plan field must still parse");
+
+        assert_eq!(usage.provider, "anthropic");
+        assert!(usage.logged_in);
         assert!(usage.meters.is_empty());
     }
 

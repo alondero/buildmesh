@@ -247,7 +247,6 @@ where
                 logged_in: true,
                 windows,
                 balance: None,
-                plan: None,
                 meters: vec![],
                 detail,
                 error: None,

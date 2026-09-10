@@ -22,7 +22,6 @@ const USAGE_FIXTURES = {
         loggedIn: true,
         windows: [],
         balance: null,
-        plan: 'Enterprise negotiated monthly billing plan',
         meters: [
           {
             state: 'metered',
@@ -73,7 +72,8 @@ test.describe('explicit Usage Meter states', () => {
 
       const panel = page.getByTestId('usage-panel-anthropic');
       await expect(panel).toBeVisible();
-      await expect(panel.getByText('Plan: Enterprise negotiated monthly billing plan')).toBeVisible();
+      // Plan label is suppressed on the glanceable Usage Meter (informational noise at this surface).
+      await expect(panel.getByText(/Plan:/)).toHaveCount(0);
       await expect(panel.getByText('USD 25.00')).toBeVisible();
       await expect(panel.getByText('USD 100.00')).toBeVisible();
       await expect(panel.getByText('USD 75.00')).toBeVisible();
