@@ -224,11 +224,52 @@ pub(crate) fn wsl_home() -> Option<PathBuf> {
 }
 
 pub(super) fn parse_wsl_home_output(output: &[u8]) -> Option<PathBuf> {
+    parse_marked_wsl_path(output, "__BUILDMESH_WSL_HOME__")
+}
+
+fn parse_marked_wsl_path(output: &[u8], marker: &str) -> Option<PathBuf> {
     let output = String::from_utf8(output.to_vec()).ok()?;
     output.lines().rev().find_map(|line| {
-        let home = line.strip_prefix("__BUILDMESH_WSL_HOME__")?.trim();
+        let home = line.strip_prefix(marker)?.trim();
         home.starts_with('/').then(|| PathBuf::from(home))
     })
+}
+
+pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
+    parse_marked_wsl_path(output, "__BUILDMESH_WSL_CODEX_HOME__")
+}
+
+/// Resolve the Codex state directory from the selected WSL environment. This
+/// keeps a guest-side `CODEX_HOME` override visible to transcript discovery
+/// without forwarding the Windows host's variable into the guest.
+pub(crate) fn wsl_codex_home() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return Some(codex_dir());
+    }
+    static CODEX_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| {
+        let mut command = command_no_window("wsl.exe");
+        command.args([
+            "-d",
+            &get_default_wsl_distro()?,
+            "--cd",
+            "~",
+            "--exec",
+            "sh",
+            "-lc",
+            "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"",
+        ]);
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "WSL Codex home",
+            std::time::Duration::from_secs(10),
+        )
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_wsl_codex_home_output(&output.stdout)
+    });
+    CODEX_HOME.clone()
 }
 
 /// Runtime paths are already translated for the process. A UNC spawn path
@@ -347,11 +388,11 @@ pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<P
         // CODEX_HOME belongs to the process that owns the environment. A
         // Linux Buildmesh must not reinterpret its own value as a Windows
         // harness setting, and a Windows host value must not leak into WSL.
-        EnvType::WindowsInterop => super::windows_cli_home(".codex"),
+        EnvType::WindowsInterop => super::windows_codex_home(),
         EnvType::Windows => Some(codex_dir()),
         EnvType::Wsl => {
             let _ = spawn_path;
-            wsl_home().map(|home| home.join(".codex"))
+            wsl_codex_home()
         }
     }
 }

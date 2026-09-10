@@ -155,11 +155,14 @@ The Linux backend now distinguishes Windows interoperability from its legacy nat
 Automatic menu rows are filtered against executable observations from startup, then selected native-first. Historical preferences remain available for existing sessions. Windows npm shim directories are excluded from Linux-native detection and the native child PATH. Windows Command Code discovery probes `cmdc`, not the operating system's `cmd.exe`.
 
 Reverse Windows discovery reads WSL's `/proc/mounts` once and accepts both
-native `drvfs` entries and WSL's `9p` entries tagged with `aname=drvfs`; it no
-longer launches one `wslpath` process per drive. Guest-home probes emit a
-Buildmesh marker so login banners cannot become part of the cached path, and
-Codex's host `CODEX_HOME` remains scoped to native launches instead of crossing
-the WSL boundary through `WSLENV`.
+native `drvfs` entries and WSL's `9p` entries tagged with `aname=drvfs`; it
+retains the mount point reported by WSL (including configured roots such as
+`/drives/c`) and no longer launches one `wslpath` process per drive. Guest-home
+probes emit a Buildmesh marker so login banners cannot become part of the
+cached path. Codex state discovery follows the selected runtime's effective
+home: guest-side `CODEX_HOME` is read inside WSL, while Windows interoperability
+probes the Windows-side override; neither runtime inherits the other process's
+host variable through `WSLENV`.
 
 Follow-up checks:
 

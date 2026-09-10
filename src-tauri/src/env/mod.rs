@@ -178,6 +178,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_guest_codex_home_override_after_probe_marker() {
+        let output = b"__BUILDMESH_WSL_CODEX_HOME__/var/lib/codex\r\n";
+        assert_eq!(
+            environment::parse_wsl_codex_home_output(output).as_deref(),
+            Some(std::path::Path::new("/var/lib/codex"))
+        );
+    }
+
+    #[test]
     fn cursor_dir_uses_the_current_environment_home() {
         let expected = match current_env() {
             Environment::Wsl => std::env::var("HOME")

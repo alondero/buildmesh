@@ -257,6 +257,7 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         path_dirs.retain(|dir| !DETECTABLE.iter().any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
         if let Ok(path) = std::env::join_paths(&path_dirs) { let _ = NATIVE_WSL_PATH.set(path); }
     }
+    let executable_profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.exists());
     let mut profiles = detect_profiles(&path_dirs, &ext_refs, home.as_deref(), &|p| p.exists());
     if cfg!(windows) {
         // Explicit Windows entries also work in WSL-backed meshes. Keep the
@@ -267,6 +268,7 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     }
     if crate::env::is_wsl_host() { profiles.extend(detect_windows_from_wsl()); }
     let _ = CURRENT_INSTALLATIONS.set(profiles.iter().map(|profile| profile.id.clone()).collect());
+    let _ = CURRENT_EXECUTABLES.set(executable_profiles.iter().map(|profile| profile.id.clone()).collect());
     profiles
 }
 
@@ -277,6 +279,7 @@ pub(crate) fn native_wsl_path() -> Option<&'static std::ffi::OsStr> {
 }
 
 static CURRENT_INSTALLATIONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static CURRENT_EXECUTABLES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 pub(crate) fn currently_installed_profiles(profiles: Vec<HarnessProfile>) -> Vec<HarnessProfile> {
     match CURRENT_INSTALLATIONS.get() {
@@ -315,6 +318,20 @@ fn runtime_profile(profile: &HarnessProfile, runtime: crate::models::EnvType) ->
 pub(crate) fn preferred_profiles(
     profiles: &[HarnessProfile], host: crate::agent::provider::Platform, distro: Option<&str>,
 ) -> Vec<HarnessProfile> {
+    preferred_profiles_with_executables(
+        profiles,
+        host,
+        distro,
+        CURRENT_EXECUTABLES.get().map(Vec::as_slice),
+    )
+}
+
+fn preferred_profiles_with_executables(
+    profiles: &[HarnessProfile],
+    host: crate::agent::provider::Platform,
+    distro: Option<&str>,
+    executable_ids: Option<&[String]>,
+) -> Vec<HarnessProfile> {
     use crate::agent::provider::Platform;
     use crate::models::EnvType;
     let automatic = |p: &HarnessProfile, tool: &Detectable| p.harness == tool.harness &&
@@ -323,9 +340,17 @@ pub(crate) fn preferred_profiles(
     for tool in DETECTABLE {
         let candidates: Vec<_> = profiles.iter().filter(|p| automatic(p, tool)).collect();
         let chosen = candidates.iter().filter_map(|p| {
+            let native_executable = executable_ids.is_none_or(|ids| {
+                let id = match p.runtime {
+                    Some(EnvType::Windows) => p.id.strip_suffix("-windows").unwrap_or(&p.id),
+                    None => &p.id,
+                    Some(EnvType::Wsl | EnvType::WindowsInterop) => return false,
+                };
+                ids.iter().any(|installed| installed == id)
+            });
             let rank = match (host, p.runtime) {
-                (Platform::Windows, Some(EnvType::Windows)) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => 0,
-                (_, None) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => 1,
+                (Platform::Windows, Some(EnvType::Windows)) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => if native_executable { 0 } else { 3 },
+                (_, None) if crate::models::Provider::from_db_str(tool.harness).adapter().available_on().contains(&host) => if native_executable { 1 } else { 3 },
                 (Platform::Windows, Some(EnvType::Wsl)) if p.wsl_distro.as_deref().is_none_or(|d| distro.is_none_or(|current| d == current)) => 2,
                 (Platform::Linux, Some(EnvType::WindowsInterop)) => 2,
                 _ => return None,
@@ -374,11 +399,17 @@ fn wsl_drive_mounts_from_proc() -> Vec<(char, String)> {
 
 fn parse_wsl_drive_mount(line: &str) -> Option<(char, String)> {
     let fields: Vec<_> = line.split_whitespace().collect();
-    let mount = fields.get(1)?.strip_suffix('/').unwrap_or(fields[1]);
+    let source = fields.first()?;
+    let mount_field = decode_proc_mount_field(fields.get(1)?)?;
+    let mount = mount_field.strip_suffix('/').unwrap_or(&mount_field);
     let fstype = fields.get(2)?;
     let options = fields.get(3).copied().unwrap_or_default();
-    let drive = mount.strip_prefix("/mnt/")?.chars().next()?;
-    if mount.len() != "/mnt/a".len() || !drive.is_ascii_alphabetic() {
+    if !mount.starts_with('/') || mount == "/" {
+        return None;
+    }
+    let drive = windows_drive_from_mount(source, options)
+        .or_else(|| mount.rsplit('/').find(|part| part.len() == 1)?.chars().next())?;
+    if !drive.is_ascii_alphabetic() {
         return None;
     }
     let is_drivefs = fstype.eq_ignore_ascii_case("drvfs")
@@ -389,6 +420,46 @@ fn parse_wsl_drive_mount(line: &str) -> Option<(char, String)> {
                 .is_some_and(|name| name.eq_ignore_ascii_case("aname=drvfs"))
         });
     is_drivefs.then(|| (drive.to_ascii_lowercase(), mount.to_string()))
+}
+
+fn decode_proc_mount_field(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1..=index + 3].iter().all(|byte| (b'0'..=b'7').contains(byte))
+        {
+            let byte = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            decoded.push(char::from(byte));
+            index += 4;
+        } else {
+            let character = value[index..].chars().next()?;
+            decoded.push(character);
+            index += character.len_utf8();
+        }
+    }
+    Some(decoded)
+}
+
+fn windows_drive_from_mount(source: &str, options: &str) -> Option<char> {
+    let source_drive = source
+        .as_bytes()
+        .get(0..2)
+        .filter(|drive| drive[0].is_ascii_alphabetic() && drive[1] == b':')
+        .map(|drive| drive[0] as char);
+    source_drive.or_else(|| {
+        options.split(';').find_map(|option| {
+            let path = option.strip_prefix("path=")?;
+            path.as_bytes()
+                .get(0..2)
+                .filter(|drive| drive[0].is_ascii_alphabetic() && drive[1] == b':')
+                .map(|drive| drive[0] as char)
+        })
+    })
 }
 
 /// One bounded login-shell probe, with executable checks rather than config
@@ -446,10 +517,16 @@ mod tests {
             r#"C:\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\;uid=1000 0 0"#,
             r#"tmpfs /tmp tmpfs rw 0 0"#,
             r#"D:\134 /mnt/d drvfs rw 0 0"#,
-            r#"E:\134 /mnt/extra 9p rw,noatime,aname=drvfs 0 0"#,
+            r#"E:\134 /drives/e 9p rw,noatime,aname=drvfs 0 0"#,
+            r#"F:\134 /Windows\040Drives/f 9p rw,noatime,aname=drvfs 0 0"#,
         ];
         let parsed: Vec<_> = mounts.iter().filter_map(|line| super::parse_wsl_drive_mount(line)).collect();
-        assert_eq!(parsed, vec![('c', "/mnt/c".into()), ('d', "/mnt/d".into())]);
+        assert_eq!(parsed, vec![
+            ('c', "/mnt/c".into()),
+            ('d', "/mnt/d".into()),
+            ('e', "/drives/e".into()),
+            ('f', "/Windows Drives/f".into()),
+        ]);
     }
 
     #[test]
@@ -493,6 +570,19 @@ mod tests {
         assert_eq!(menu.len(), 2);
         assert_eq!(menu.iter().find(|p| p.harness == "mcode").unwrap().runtime, None);
         assert_eq!(menu.iter().find(|p| p.harness == "grok").unwrap().runtime, Some(EnvType::WindowsInterop));
+    }
+
+    #[test]
+    fn executable_foreign_install_beats_stale_native_config_directory() {
+        use crate::agent::provider::Platform;
+        use crate::models::EnvType;
+        let profile = |id: &str, runtime| crate::preferences::HarnessProfile {
+            id: id.into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime, wsl_distro: None,
+        };
+        let profiles = vec![profile("mcode", None), profile("mcode-wsl-test", Some(EnvType::Wsl))];
+        let menu = super::preferred_profiles_with_executables(&profiles, Platform::Windows, Some("Ubuntu"), Some(&[]));
+        let chosen = menu.iter().find(|p| p.harness == "mcode").unwrap();
+        assert_eq!(chosen.runtime, Some(EnvType::Wsl));
     }
 
     #[cfg(windows)]

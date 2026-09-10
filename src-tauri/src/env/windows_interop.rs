@@ -71,6 +71,32 @@ pub(crate) fn windows_cli_home(relative: &str) -> Option<std::path::PathBuf> {
     ))))
 }
 
+/// Resolve Windows Codex's effective state directory from the Windows
+/// environment. A Linux host's `CODEX_HOME` is intentionally never consulted.
+pub(crate) fn windows_codex_home() -> Option<std::path::PathBuf> {
+    if !is_wsl_host() {
+        return None;
+    }
+    static CODEX_HOME: Lazy<Option<std::path::PathBuf>> = Lazy::new(|| {
+        let command = powershell_command(
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $path = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { Join-Path $env:USERPROFILE '.codex' } else { $env:CODEX_HOME }; [Console]::Write($path)",
+        );
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "Windows Codex home",
+            std::time::Duration::from_secs(10),
+        )
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let home = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        super::is_windows_path(&home)
+            .then(|| std::path::PathBuf::from(super::to_host_path(&home)))
+    });
+    CODEX_HOME.clone()
+}
+
 pub(crate) fn powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }

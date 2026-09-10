@@ -250,7 +250,7 @@ for legacy in "$d"/bm*.config.toml; do
       exit !ok
     }' "$legacy"; then rm -f "$legacy"; fi
 done"#;
-const WSL_CODEX_HOME_SCRIPT: &str = "printf %s \"${CODEX_HOME:-$HOME/.codex}\"";
+const WSL_CODEX_HOME_SCRIPT: &str = "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"";
 
 fn materialize_wsl_profile(
     distro: &str,
@@ -500,7 +500,7 @@ fn runtime_codex_home(
         &distro,
         "--exec",
         "sh",
-        "-c",
+        "-lc",
         WSL_CODEX_HOME_SCRIPT,
     ]);
     let output = command
@@ -777,12 +777,19 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
                 wsl_distro.as_deref().expect("WSL distribution was resolved"),
                 "--exec",
                 "sh",
-                "-c",
-                "command -v codex",
+                "-lc",
+                "printf '__BUILDMESH_WSL_CODEX_EXECUTABLE__%s\\n' \"$(command -v codex)\"",
             ])
             .output()
             .map_err(|e| format!("failed to locate WSL Codex executable: {e}"))?;
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("__BUILDMESH_WSL_CODEX_EXECUTABLE__"))
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .unwrap_or_default()
+            .to_string()
     } else {
         let locator = if cfg!(target_os = "windows") {
             "where.exe"
@@ -822,17 +829,19 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
             distro,
             "--exec",
             "sh",
-            "-c",
+            "-lc",
             WSL_CODEX_HOME_SCRIPT,
         ]);
         let output = command
             .output()
             .map_err(|e| format!("failed to resolve WSL Codex home: {e}"))?;
-        let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() || home.is_empty() {
+        let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
+            return Err("WSL Codex home identity is unavailable".into());
+        };
+        if !output.status.success() {
             return Err("WSL Codex home identity is unavailable".into());
         }
-        home
+        home.to_string_lossy().into_owned()
     } else {
         native_codex_home()?.to_string_lossy().into_owned()
     };
@@ -1316,12 +1325,15 @@ mod tests {
     fn wsl_profile_materializes_in_default_and_explicit_codex_home() {
         let distro = crate::env::detect_default_wsl_distro().expect("WSL distribution");
         let default_home = crate::process_util::command_no_window("wsl.exe")
-            .args(["-d", &distro, "--exec", "sh", "-c", WSL_CODEX_HOME_SCRIPT])
+            .args(["-d", &distro, "--exec", "sh", "-lc", WSL_CODEX_HOME_SCRIPT])
             .env_remove("CODEX_HOME")
             .output()
             .unwrap();
         assert!(default_home.status.success());
-        let default_home = String::from_utf8_lossy(&default_home.stdout).trim().to_string();
+        let default_home = crate::env::parse_wsl_codex_home_output(&default_home.stdout)
+            .expect("WSL Codex home marker")
+            .to_string_lossy()
+            .into_owned();
         assert!(!default_home.is_empty());
         let explicit_home = format!("/tmp/buildmesh-codex-profile-test-{}", std::process::id());
 
