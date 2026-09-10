@@ -1,0 +1,22 @@
+{
+  "plan_type": "enterprise",
+  "rate_limit": null,
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "balance": "17000.50"
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": {
+      "limit": "25000",
+      "used": "8000",
+      "remaining": "17000",
+      "used_percent": 32,
+      "remaining_percent": 68,
+      "reset_after_seconds": 86400,
+      "reset_at": 1778137680
+    }
+  },
+  "additional_rate_limits": null
+}

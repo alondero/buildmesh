@@ -10,9 +10,9 @@ Architecture Decision Record: [ADR-0026](../adr/0026-openai-and-codex-usage-mete
 
 Buildmesh tracks and renders provider usage metrics in the **Providers** and **Usage** views across two core paradigms:
 1. **Subscription Quotas (Plan Quota):** Rolling time-window usage meters (e.g. 5-hour rolling limits, weekly caps) with countdown timers to reset timestamps.
-2. **Pay-As-You-Go Balances (Cash / Credits):** Wallet balances and current billing month spend figures.
+2. **Pay-As-You-Go Balances (Cash / Credits):** Wallet balances, credit remaining, and current billing month spend figures, including capped monthly spend controls.
 
-This document specifies the end-to-end wire contract, reverse-engineered schema mappings, passive credential discovery routines, and error degradation policies for **Codex CLI** (ChatGPT subscription usage) and **OpenAI Platform API** (organization spend).
+This document specifies the end-to-end wire contract, reverse-engineered schema mappings, passive credential discovery routines, and error degradation policies for **Codex CLI** (ChatGPT plan usage, including Business and Enterprise spend controls) and **OpenAI Platform API** (organization spend). OpenAI Platform organisation spend is a separate meter from Codex ChatGPT Business/Enterprise spend.
 
 ---
 
@@ -95,8 +95,11 @@ impl CodexAuthFile {
 
 ### 2.4 Upstream API Payload Schema
 
+Consumer rolling-window replies (Plus, Pro, and similar) typically look like:
+
 ```json
 {
+  "plan_type": "plus",
   "rate_limit": {
     "primary_window": {
       "used_percent": 18.5,
@@ -107,23 +110,69 @@ impl CodexAuthFile {
       "used_percent": 42.0,
       "limit_window_seconds": 604800,
       "reset_at": 1755892800
-    },
-    "additional_rate_limits": []
-  }
+    }
+  },
+  "credits": null,
+  "spend_control": null,
+  "additional_rate_limits": null
 }
 ```
 
+Business and Enterprise replies may set `rate_limit` to `null` and instead report credits and an individual spend control. Amounts are often decimal strings:
+
+```json
+{
+  "plan_type": "enterprise",
+  "rate_limit": null,
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "balance": "17000.50"
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": {
+      "limit": "25000",
+      "used": "8000",
+      "remaining": "17000",
+      "used_percent": 32,
+      "reset_at": 1778137680
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "codex_other",
+      "metered_feature": "codex_other",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 30.0,
+          "limit_window_seconds": 3600,
+          "reset_at": 1755288000
+        }
+      }
+    }
+  ]
+}
+```
+
+A mixed reply may include both rolling windows and spend/credit fields. `plan_type` is an opaque provider label; unknown names must not fail the parse. Nested `rate_limit.additional_rate_limits` window objects remain accepted for older fixtures.
+
 ### 2.5 Mapping to Buildmesh Wire Contract (`ProviderUsage`)
 
+- **Plan:** `plan_type` maps to `ProviderUsage.plan` verbatim when non-empty.
 - **Window Mapping:**
-  - `primary_window`: Mapped to `UsageWindow`. Dynamic label derived from `limit_window_seconds`:
+  - `rate_limit.primary_window` / `secondary_window`: Mapped to `UsageWindow`. Dynamic label derived from `limit_window_seconds`:
     - `18000` seconds (5 hours) → Label `"5-hour"`.
     - `604800` seconds (7 days) → Label `"Weekly"`.
     - Other durations → Formatted dynamically (e.g. `"{N}h"`, `"{N}d"`).
+  - Top-level `additional_rate_limits` named buckets append their windows, labelled with `limit_name` plus the duration.
   - `used_percent`: Kept as consumption percentage (`0.0` to `100.0`) in `UsageWindow.used_percent`.
   - `reset_at`: Converted from Unix epoch integer seconds to RFC3339 string:
     `chrono::DateTime::from_timestamp(reset_at, 0).map(|dt| dt.to_rfc3339())`.
-  - `detail`: Populated with human-readable remaining summary (e.g. `"81.5% remaining · resets in 2h 33m"`).
+  - `rate_limit: null` (or a missing object) is valid. It is not a shape error.
+- **Credits:** `credits.unlimited` maps to `UsageMeter::Unlimited`. A numeric `credits.balance` is retained as `BillingBalance.remaining` with currency `"credits"`.
+- **Spend control:** `spend_control.individual_limit` maps to `UsageMeter::Metered` (or `NoIndividualLimit` when a used amount is present without a limit), carrying used, optional limit/remaining, percentage, unit `"credits"`, and reset.
+- **Detail:** When quota windows exist, populated with remaining-percentage phrasing from the highest-used window. Spend-only replies do not invent a "no rate-limit windows" error when credits or spend meters are present.
 
 ---
 
@@ -221,6 +270,7 @@ export interface ProviderUsage {
 1. **Passive Read-Only Invariant:** Buildmesh must never execute OAuth token refresh requests or modify `~/.codex/auth.json` on disk.
 2. **Normalization Invariant:** `used_percent` is always stored as 0.0 to 100.0 consumption. Remaining percentage calculation is deferred to presentation or formatted into `detail`.
 3. **Degradation Invariant:** Lack of organization admin permissions on OpenAI project keys must never fail agent node execution or show false "logged-out" alerts.
+4. **Nullable Codex `rate_limit`:** A ChatGPT Business or Enterprise body with `rate_limit: null` is a valid spend or credit snapshot, not a malformed payload. HTTP `401`/`403` remain authentication errors; `429` and network failures remain temporary availability errors.
 
 ---
 

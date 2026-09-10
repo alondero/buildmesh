@@ -43,7 +43,10 @@ a verbatim `plan` label and explicit `meters`: `metered` carries a
 reset), `no_individual_limit` carries the same amount without inventing a
 limit, and `unlimited`, `managed_externally`, and `unavailable` distinguish
 valid non-percentage states. The UI renders zero as zero; only an absent legacy
-percentage or an explicit unavailable state is labelled "Unavailable".
+percentage or an explicit unavailable state is labelled "Unavailable". The Codex
+adapter maps ChatGPT `plan_type`, rolling windows, top-level extra rate limits,
+credit balance, and `spend_control.individual_limit` into that contract; a null
+`rate_limit` is a valid Business/Enterprise snapshot rather than a parse error.
 
 **Usage cache identity.** The five-minute cache is keyed by provider plus an
 opaque account/authentication-source fingerprint selected through the

@@ -85,7 +85,7 @@ pub struct FreebuffAuth {
 ///    `/home/<USERNAME>/.config/manicode/credentials.json` mapped via
 ///    `env::to_host_path` so the UNC string never escapes the
 ///    `host_path` module. Mirrors the WSL fallback in
-///    `discover_codex_auth_paths` (issue #1108, spec §2.2 #3).
+///    Codex's WSL auth fallback (issue #1108, spec §2.2 #3).
 ///
 /// Resolution is strictly passive — the candidates are returned; the
 /// caller walks them in order. We never wake a sleeping WSL distro; if

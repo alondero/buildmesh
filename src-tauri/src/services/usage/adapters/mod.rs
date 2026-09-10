@@ -3,9 +3,9 @@
 //! Each file is one drop-in adapter. Thin wrappers that still delegate to the
 //! legacy `usage.rs` fetchers are an intentional intermediate step (issue
 //! #1657 step 4): the catalog already dispatches through the seam, so the seam
-//! is the test surface even before `usage.rs` reaches zero HTTP code. Future
-//! commits move each provider's credential-plus-fetch-plus-parse code + its
-//! pure `parse_*` tests into its file unchanged, then delete the legacy fn.
+//! is the test surface even before `usage.rs` reaches zero HTTP code. Codex
+//! owns its fetch and parse in `codex.rs` (issue #1672); other providers still
+//! migrate one file at a time.
 
 pub(crate) mod agy;
 pub(crate) mod anthropic;
