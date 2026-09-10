@@ -87,6 +87,9 @@ pub fn register_circuit(node_id: i64) {
     let mut nodes = NODES.lock().unwrap();
     let state = nodes.entry(node_id).or_default();
     state.circuit_owned = true;
+    // A borrowed source may already be silent when the circuit attaches.
+    // Start observing silence now without inventing a report/turn boundary.
+    state.last_output.get_or_insert_with(std::time::Instant::now);
 }
 
 /// Is this node under Autopilot management (fast, in-memory)?
@@ -132,8 +135,8 @@ pub(crate) fn has_turn_start(node_id: i64) -> bool {
         .is_some()
 }
 
-/// Milliseconds since the node last produced PTY output, or `None` if it has
-/// produced none since registration (or isn't piloted).
+/// Milliseconds since the last PTY output (or initial circuit attachment).
+/// Legacy-only nodes with no output and unregistered nodes return `None`.
 pub fn millis_since_last_output(node_id: i64) -> Option<u128> {
     NODES
         .lock()
@@ -598,6 +601,18 @@ mod tests {
         on_output(id, "redraw");
         assert!(begin_circuit_wait_probe(id, "wait").is_none());
         assert!(begin_circuit_wait_probe(id, "another-gate").is_some());
+        unregister(id);
+    }
+
+    #[test]
+    fn circuit_attachment_starts_quiet_observation_without_fabricating_a_turn() {
+        let id = -920_086;
+        register_circuit(id);
+        assert!(millis_since_last_output(id).is_some());
+        assert!(!has_turn_start(id));
+        let started = NODES.lock().unwrap().get(&id).unwrap().last_output;
+        register_circuit(id);
+        assert_eq!(NODES.lock().unwrap().get(&id).unwrap().last_output, started);
         unregister(id);
     }
 

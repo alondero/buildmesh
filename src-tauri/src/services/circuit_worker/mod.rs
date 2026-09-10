@@ -745,6 +745,7 @@ fn drive_run(
         }
     }
     restore_run_evaluators(&view);
+    recover_run_observers(app, &view);
 
     for event in observe(app, active, &view) {
         let transition = advance(&mut view, &event);
@@ -1096,6 +1097,43 @@ fn restore_run_evaluators(view: &RunView) {
     }
 }
 
+fn recover_run_observers(app: &AppHandle, view: &RunView) {
+    recover_run_observers_with(view,
+        |id| crate::agent::process::PROCESS_REGISTRY.is_alive(&id),
+        |id| {
+            crate::services::session_recovery::recover_live_node(id)?;
+            let node = db::get_agent_node_by_id(id).map_err(|e| e.to_string())?;
+            if crate::preferences::resolve_harness_provider(&node.provider).adapter().id() == "commandcode" {
+                if let Some(session_id) = node.cli_session_id.as_deref().filter(|id| !id.is_empty()) {
+                    let path = crate::env::node_working_path(&node).spawn_path;
+                    crate::services::commandcode_watcher::start_for_session(id, session_id, &path, node.env, app)?;
+                }
+            }
+            Ok(())
+        });
+}
+
+fn recover_run_observers_with(
+    view: &RunView,
+    is_alive: impl Fn(i64) -> bool,
+    mut recover: impl FnMut(i64) -> Result<(), String>,
+) {
+    if view.state != RunState::Running { return; }
+    let agents: HashSet<_> = view.steps.iter().filter_map(|step| step.agent_node_id)
+        .chain(view.context.source_agent_id()).collect();
+    for id in agents {
+        if !is_alive(id) { continue; }
+        // Identity is needed to observe a yield for transcript-driven
+        // harnesses. Recovery cannot itself depend on an observed yield.
+        let key = "circuit:recover-observer";
+        let Some(probe) = crate::autopilot::evaluator::begin_circuit_wait_probe(id, key) else { continue; };
+        crate::autopilot::evaluator::note_circuit_probe(id, key, probe);
+        if let Err(error) = recover(id) {
+            tracing::warn!("circuits: observer recovery for agent {id}: {error}");
+        }
+    }
+}
+
 /// Observe the world and turn it into pure events for this run.
 fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
     let mut events = Vec::new();
@@ -1304,10 +1342,10 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
             let Ok(node) = db::get_agent_node_by_id(id) else { continue; };
             progress = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
             let yielded = matches!(node.status, SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed);
-            let reason = if !yielded {
-                String::new()
-            } else if node.cli_session_id.as_deref().is_none_or(str::is_empty) && progress.is_none() {
+            let reason = if node.cli_session_id.as_deref().is_none_or(str::is_empty) && progress.is_none() {
                 "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
+            } else if !yielded {
+                String::new()
             } else {
                 step.error.clone().unwrap_or_else(|| "Waiting for a fresh agent report; retrying observation every 10 seconds.".into())
             };
@@ -2467,6 +2505,29 @@ mod tests {
     }
 
     #[test]
+    fn observer_recovery_includes_silent_borrowed_sources_and_is_throttled() {
+        let source = 9_860_001;
+        let mut view = RunView { run_id: 86, graph: CircuitGraph::agent_review(None, None, 3),
+            context: CircuitContext::new(), steps: vec![], state: RunState::Running };
+        view.context.set("source.agent_id", source.to_string());
+        restore_run_evaluators(&view);
+        let mut recovered = Vec::new();
+        recover_run_observers_with(&view, |_| true, |id| { recovered.push(id); Ok(()) });
+        assert_eq!(recovered, vec![source]);
+        recover_run_observers_with(&view, |_| true, |_| panic!("recovery must respect the probe cooldown"));
+        assert!(!crate::autopilot::evaluator::has_turn_start(source));
+        crate::autopilot::evaluator::unregister(source);
+
+        restore_run_evaluators(&view);
+        recover_run_observers_with(&view, |_| false, |_| panic!("dead processes must not acquire observers"));
+        view.state = RunState::Cancelled;
+        recover_run_observers_with(&view, |_| true, |_| panic!("cancelled runs must not acquire observers"));
+        view.state = RunState::Paused;
+        recover_run_observers_with(&view, |_| true, |_| panic!("paused runs must not acquire observers"));
+        crate::autopilot::evaluator::unregister(source);
+    }
+
+    #[test]
     fn cancellation_marker_invalidates_batches_until_durable_ack() {
         let run_id = 9_876_543_210_i64;
         let permit = begin_circuit_effect_batch(run_id);
@@ -2650,6 +2711,8 @@ mod tests {
             };
             view.context.set("source.agent_id", "3759");
             view.context.set("source.review_preset", "1");
+            view.context.set("source.provider", "commandcode");
+            view.context.set("review.provider", "agy");
             if legacy {
                 view.graph.nodes.iter_mut().find(|n| n.id == "await_fixes").unwrap().kind =
                     CircuitNodeKind::LlmTurnClassifier { target_node_id: Some("$source".into()) };
@@ -2657,6 +2720,12 @@ mod tests {
             let capacity = Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
             advance(&mut view, &CircuitEvent::Triggered);
             advance(&mut view, &CircuitEvent::Tick(capacity));
+            let mut tracker = crate::services::commandcode_watcher::TurnTracker::default();
+            let native_report = |text: &str| serde_json::json!({"type":"message", "id":"entry", "message": {
+                "role":"assistant", "content":[{"type":"text", "text":text}],
+                "meta":{"source":"model", "messageId":text}}}).to_string();
+            assert_eq!(tracker.observe_transcript_line(&native_report("Implementation report")),
+                Some(crate::services::commandcode_watcher::TerminalTransition::TurnCompleted));
             let classification = classify_gate_report(&view, "await_source", SessionStatus::Ready, "Implementation report", |_| None);
             advance(&mut view, &CircuitEvent::TurnClassified {
                 node_id: "await_source".into(), classification, output: Some("Implementation report".into()),
@@ -2665,6 +2734,9 @@ mod tests {
             for round in 1..=3 {
                 assert_eq!(scheduled.effects.iter().filter(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")).count(), 1);
                 assert_eq!(view.step("reviewer").unwrap().attempt, round);
+                let (provider, config) = resolve_review_spawn_inputs(&view, "reviewer", None, ExplicitSpawnOverrides::default(), None);
+                assert_eq!(provider.as_deref(), Some("agy"));
+                assert_eq!(config.model, None);
                 let reviewer_id = 4000 + i64::from(round);
                 view.attach_agent_node("reviewer", reviewer_id);
                 let report = format!("Round {round}: {}", if round == 3 { "Approved" } else { "Changes requested: add regression tests" });
@@ -2691,6 +2763,9 @@ mod tests {
                 view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
                 advance(&mut view, &CircuitEvent::Tick(capacity));
                 let fixes = "Fixes made; some optional tests remain.";
+                assert_eq!(tracker.observe_transcript_line(r#"{"type":"user_turn"}"#), None);
+                assert_eq!(tracker.observe_transcript_line(&native_report(fixes)),
+                    Some(crate::services::commandcode_watcher::TerminalTransition::TurnCompleted));
                 let classification = classify_gate_report(&view, "await_fixes", SessionStatus::Ready, fixes, |_| None);
                 scheduled = advance(&mut view, &CircuitEvent::TurnClassified { node_id: "await_fixes".into(), classification, output: Some(fixes.into()) });
                 scheduled.effects.extend(advance(&mut view, &CircuitEvent::Tick(capacity)).effects);
@@ -4189,13 +4264,15 @@ mod tests {
             Some("parent-provider"),
         );
         assert_eq!(provider.as_deref(), Some("source-provider"));
-        assert_eq!(explicit.model.as_deref(), Some("source-model"));
-        assert_eq!(explicit.effort.as_deref(), Some("source-effort"));
+        assert_eq!(explicit.model, None, "preset metadata must not override the selected harness configuration");
+        assert_eq!(explicit.effort, None);
 
         let mut configured_context = CircuitContext::new();
         configured_context.set("source.review_preset", "1");
         configured_context.set("source.provider", "source-provider");
         configured_context.set("review.provider", "reviewer-provider");
+        configured_context.set("source.model", "incompatible-source-model");
+        configured_context.set("source.effort", "incompatible-source-effort");
         let configured_view = RunView {
             run_id: 3,
             graph: CircuitGraph::agent_review_with_provider(
@@ -4208,14 +4285,16 @@ mod tests {
             context: configured_context,
             steps: vec![],
         };
-        let (provider, _) = resolve_review_spawn_inputs(
+        let (provider, explicit) = resolve_review_spawn_inputs(
             &configured_view,
             "reviewer",
             Some("stale-graph-provider".into()),
-            ExplicitSpawnOverrides::default(),
+            ExplicitSpawnOverrides { model: Some("stale-preset-model".into()), effort: Some("stale-preset-effort".into()), ..Default::default() },
             Some("parent-provider"),
         );
         assert_eq!(provider.as_deref(), Some("reviewer-provider"));
+        assert_eq!(explicit.model, None);
+        assert_eq!(explicit.effort, None);
     }
 
     #[test]
