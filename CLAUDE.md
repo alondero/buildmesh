@@ -10,6 +10,9 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 - Test: `npm test` (unit + integration) · `npm run test:e2e` (needs app on :1991) · `npm run test:ci` (all three)
 - Typecheck/build: `npm run build` (runs `tsc`, desktop `vite build`, then mobile `vite build --mode mobile`)
 - Rust: `cargo test` / `cargo clippy` (run inside `src-tauri/`)
+- **Frontend test env.** Run Vitest with `NODE_ENV=test`: if `NODE_ENV=production` is exported in the shell, every React render test fails with `React.act is not a function` (a harness error, not a code failure). A fresh worktree has no local `node_modules` — deps resolve from the main checkout, so `tests/integration/ui-shot*.test.ts` fail on a missing Vite unless you `npm install` in the worktree.
+- **Rust DB tests are not parallel-safe** (they share one process-global DB): run `cargo test --lib … -- --test-threads=1` for a trustworthy verdict; parallel runs report phantom count mismatches in `db::circuit_tests` (see `buildmesh-gh1655-circuit-tests-isolation`).
+- **Preserve mixed line endings.** Files that are mostly CRLF with a few bare-LF lines (e.g. `src/lib/tauri.ts`) can be renormalised by an edit into a large phantom diff. Compare `git diff --stat` against `git diff --stat --ignore-cr-at-eol` before committing.
 
 ## Hard rules — cause real breakage, do not violate
 - **Never** call `.dispose()` on an xterm.js terminal unless the agent node is deleted → permanent terminal blanking. `TerminalManager` is a singleton; instances survive React remounts.
