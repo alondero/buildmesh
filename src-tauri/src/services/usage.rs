@@ -2107,11 +2107,10 @@ pub fn opencode_usage() -> ProviderUsage {
 // behind `retrieveUserQuotaSummary` (weekly + 5-hour shared buckets) with
 // `fetchAvailableModels` as a five-hour-only fallback, and is gated purely
 // by the client User-Agent.
-// Auth is separate from `~/.gemini/oauth_creds.json`. Current CLI (1.2+)
-// writes the live blob to `<agy_dir>/antigravity-oauth-token` and refreshes
-// it in place. Older CLIs used the OS credential store under
-// `gemini:antigravity`; that target is left stale after a refresh, so the
-// file is preferred.
+// Auth is separate from `~/.gemini/oauth_creds.json`. Credential discovery
+// (CLI oauth file + keyring fallback, Shape-vs-NoCredential contract, 401
+// retry across sources) lives in `usage::adapters::agy` so new token-source
+// lore does not accrue in this module (#1657).
 //
 // This path is deliberately best-effort and FRAGILE (staging host, User-Agent
 // gate, no token refresh since the Antigravity OAuth client isn't recoverable).
@@ -2121,12 +2120,6 @@ const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The Antigravity CLI identifies with this User-Agent and the Cloud Code private
 /// API allowlists it. Load-bearing: without it the API returns 403 PERMISSION_DENIED.
 const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
-/// Credential Manager target older agy CLIs stored the OAuth blob under.
-/// Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead
-/// and leaves this target stale — read the file first.
-const AGY_CRED_TARGET: &str = "gemini:antigravity";
-/// Live OAuth blob written by the Antigravity CLI under [`crate::env::agy_dir`].
-const AGY_OAUTH_TOKEN_FILE: &str = "antigravity-oauth-token";
 
 // ─── OpenCode Go (live `_server billing.get` probe) ────────────────────────
 //
@@ -2154,66 +2147,6 @@ const AGY_OAUTH_TOKEN_FILE: &str = "antigravity-oauth-token";
 /// everywhere.
 const OPENCODE_SERVER_ID: &str =
     "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
-
-#[derive(Deserialize)]
-struct AgyTokenField {
-    access_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AgyCred {
-    token: Option<AgyTokenField>,
-}
-
-/// Parses the agy credential blob (`{ "token": { "access_token": … }, … }`).
-fn parse_agy_token(blob: &[u8]) -> Result<String, UsageError> {
-    let text = std::str::from_utf8(blob).map_err(|e| UsageError::Shape(e.to_string()))?;
-    let cred: AgyCred = serde_json::from_str(text).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.token
-        .and_then(|t| t.access_token)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UsageError::NoCredential(AGY_CRED_TARGET.to_string()))
-}
-
-fn agy_oauth_token_path() -> PathBuf {
-    crate::env::agy_dir().join(AGY_OAUTH_TOKEN_FILE)
-}
-
-/// Reads the agy OAuth access token. Current CLI (1.2+) writes and refreshes
-/// `<agy_dir>/antigravity-oauth-token`; older Windows installs also keep a
-/// blob under `gemini:antigravity` that is no longer updated on refresh.
-fn read_agy_token() -> Result<String, UsageError> {
-    read_agy_token_from(&agy_oauth_token_path(), read_agy_keyring_token)
-}
-
-/// Test seam: prefer a CLI oauth file when it parses, otherwise the keyring
-/// fallback. agy 1.2+ refreshes the file in place and leaves
-/// `gemini:antigravity` stale; using only the keyring 401s the quota RPC
-/// and `assemble_meters` drops the Usage Probe row as logged-out.
-fn read_agy_token_from(
-    file_path: &Path,
-    fallback: impl FnOnce() -> Result<String, UsageError>,
-) -> Result<String, UsageError> {
-    if let Ok(bytes) = fs::read(file_path) {
-        if let Ok(token) = parse_agy_token(&bytes) {
-            return Ok(token);
-        }
-    }
-    fallback()
-}
-
-#[cfg(windows)]
-fn read_agy_keyring_token() -> Result<String, UsageError> {
-    parse_agy_token(&windows_cred::read(AGY_CRED_TARGET)?)
-}
-
-#[cfg(not(windows))]
-fn read_agy_keyring_token() -> Result<String, UsageError> {
-    Err(UsageError::NoCredential(
-        "Antigravity OAuth token not found (antigravity-oauth-token or gemini:antigravity)"
-            .to_string(),
-    ))
-}
 
 /// Reads the Buildmesh-owned OpenCode Console credential as the full DTO so
 /// callers can consume the optional `server_id` (issue #972) — and so the
@@ -2323,7 +2256,7 @@ fn opencode_live_request_parts(cred: &OpenCodeConsoleCred) -> Option<(String, St
 /// `CredWriteW` / `CredDeleteW`) was extracted out of this module for #956
 /// and now lives at [`crate::services::windows_cred`]; the local
 /// `cfg(windows)` `use` at the top of `usage` keeps the call sites
-/// (`read_agy_token`, `read_opencode_console_credential`) reading naturally.
+/// (`adapters::agy` keyring read, `read_opencode_console_credential`) reading naturally.
 ///
 /// [`crate::services::windows_cred`]: crate::services::windows_cred
 
@@ -2562,8 +2495,65 @@ fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), Us
     Ok((windows, detail))
 }
 
+/// True when an Antigravity HTTP helper reported 401/403 — the bearer was
+/// rejected, so a different credential source may still succeed.
+fn agy_http_auth_failure(err: &UsageError) -> bool {
+    match err {
+        UsageError::Shape(msg) => msg.contains("HTTP 401") || msg.contains("HTTP 403"),
+        UsageError::NoCredential(_) => false,
+    }
+}
+
+/// One-token attempt: quota summary, then model-API fallback. Returns
+/// `Err` on auth rejection or hard failure so the caller can try the next
+/// credential source.
+fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsage, UsageError> {
+    // retrieveUserQuotaSummary is the HTTP surface behind `agy /usage`: both
+    // the 5-hour and weekly shared buckets, without booting the CLI. Empty
+    // body is enough (project is optional). Fall back to fetchAvailableModels
+    // when the summary RPC is missing or empty so older backends still show
+    // the five-hour meter.
+    match agy_quota_summary(client, token) {
+        Ok((windows, detail)) => {
+            return Ok(ProviderUsage {
+                provider: "agy".to_string(),
+                logged_in: true,
+                windows,
+                balance: None,
+                plan: None,
+                meters: vec![],
+                detail,
+                error: None,
+            });
+        }
+        Err(error) if agy_http_auth_failure(&error) => return Err(error),
+        Err(error) => {
+            tracing::debug!(
+                "Antigravity quota summary unavailable; falling back to model API: {error}"
+            );
+        }
+    }
+    // fetchAvailableModels needs the user's cloudaicompanion project, which
+    // loadCodeAssist hands back.
+    let project = agy_load_project(client, token)?;
+
+    Ok(fetch_usage(
+        "agy",
+        |c| {
+            c.post(format!("{AGY_HOST}/v1internal:fetchAvailableModels"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("User-Agent", AGY_USER_AGENT)
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({ "project": project }))
+        },
+        parse_agy_models,
+    ))
+}
+
 pub fn agy_usage() -> ProviderUsage {
-    let token = match read_agy_token() {
+    use crate::services::usage::adapters::agy::collect_agy_access_tokens_default;
+
+    let tokens = match collect_agy_access_tokens_default() {
         Ok(t) => t,
         Err(e) => return logged_out("agy", e.to_string()),
     };
@@ -2575,47 +2565,40 @@ pub fn agy_usage() -> ProviderUsage {
         Err(e) => return logged_out("agy", format!("Client error: {e}")),
     };
 
-    // retrieveUserQuotaSummary is the HTTP surface behind `agy /usage`: both
-    // the 5-hour and weekly shared buckets, without booting the CLI. Empty
-    // body is enough (project is optional). Fall back to fetchAvailableModels
-    // when the summary RPC is missing or empty so older backends still show
-    // the five-hour meter.
-    match agy_quota_summary(&client, &token) {
-        Ok((windows, detail)) => {
-            return ProviderUsage {
-                provider: "agy".to_string(),
-                logged_in: true,
-                windows,
-                balance: None,
-                plan: None,
-                meters: vec![],
-                detail,
-                error: None,
-            };
-        }
-        Err(error) => {
-            tracing::debug!(
-                "Antigravity quota summary unavailable; falling back to model API: {error}"
-            );
+    let last = tokens.len().saturating_sub(1);
+    for (idx, cred) in tokens.iter().enumerate() {
+        match try_agy_usage_with_token(&client, &cred.access_token) {
+            Ok(usage) => {
+                tracing::debug!(
+                    target: "services::usage::agy",
+                    source = cred.source.as_str(),
+                    "Antigravity usage fetch succeeded"
+                );
+                return usage;
+            }
+            Err(error) if agy_http_auth_failure(&error) && idx < last => {
+                tracing::debug!(
+                    target: "services::usage::agy",
+                    source = cred.source.as_str(),
+                    next = tokens[idx + 1].source.as_str(),
+                    error = %error,
+                    "Antigravity auth rejected; trying next credential source"
+                );
+                continue;
+            }
+            Err(error) => {
+                // Auth rejection on the last source, or loadCodeAssist failure
+                // after quota-summary fell through — logged-out so
+                // assemble_meters can drop an unauthenticated row.
+                return logged_out("agy", error.to_string());
+            }
         }
     }
-    // fetchAvailableModels needs the user's cloudaicompanion project, which
-    // loadCodeAssist hands back.
-    let project = match agy_load_project(&client, &token) {
-        Ok(p) => p,
-        Err(e) => return logged_out("agy", e.to_string()),
-    };
 
-    fetch_usage(
+    logged_out(
         "agy",
-        |c| {
-            c.post(format!("{AGY_HOST}/v1internal:fetchAvailableModels"))
-                .header("Authorization", format!("Bearer {token}"))
-                .header("User-Agent", AGY_USER_AGENT)
-                .header("Content-Type", "application/json")
-                .json(&serde_json::json!({ "project": project }))
-        },
-        parse_agy_models,
+        "Antigravity OAuth token not found (antigravity-oauth-token or gemini:antigravity)"
+            .to_string(),
     )
 }
 
@@ -3949,64 +3932,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parse_agy_token_extracts_nested_access_token() {
-        let blob = br#"{"token":{"access_token":"ya29.agytok","token_type":"Bearer","refresh_token":"1//ref","expiry":"2026-05-31T12:00:00Z"},"auth_method":"consumer"}"#;
-        assert_eq!(parse_agy_token(blob).unwrap(), "ya29.agytok");
-    }
-
-    #[test]
-    fn parse_agy_token_missing_is_error() {
-        assert!(parse_agy_token(br#"{"auth_method":"consumer"}"#).is_err());
-        assert!(parse_agy_token(br#"{"token":{"access_token":""}}"#).is_err());
-    }
-
-    #[test]
-    fn read_agy_token_from_prefers_cli_oauth_file() {
-        // agy 1.2+ refreshes ~/.gemini/antigravity-cli/antigravity-oauth-token
-        // and leaves the Windows Credential Manager blob stale. Reading only
-        // the keyring 401s retrieveUserQuotaSummary, agy_usage returns
-        // logged_out, and assemble_meters drops the Usage Probe row.
-        let dir = std::env::temp_dir().join(format!(
-            "agy-oauth-file-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(AGY_OAUTH_TOKEN_FILE);
-        fs::write(
-            &path,
-            br#"{"token":{"access_token":"ya29.fromfile","token_type":"Bearer"},"auth_method":"consumer"}"#,
-        )
-        .unwrap();
-        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
-        let _ = fs::remove_dir_all(&dir);
-        assert_eq!(token, "ya29.fromfile");
-    }
-
-    #[test]
-    fn read_agy_token_from_falls_back_when_file_missing() {
-        let path = std::env::temp_dir().join("agy-oauth-does-not-exist.token");
-        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
-        assert_eq!(token, "ya29.from-keyring");
-    }
-
-    #[test]
-    fn read_agy_token_from_falls_back_when_file_unparseable() {
-        let dir = std::env::temp_dir().join(format!(
-            "agy-oauth-bad-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(AGY_OAUTH_TOKEN_FILE);
-        fs::write(&path, br#"{"auth_method":"consumer"}"#).unwrap();
-        let token = read_agy_token_from(&path, || Ok("ya29.from-keyring".to_string())).unwrap();
-        let _ = fs::remove_dir_all(&dir);
-        assert_eq!(token, "ya29.from-keyring");
+    fn agy_http_auth_failure_detects_401_and_403() {
+        assert!(agy_http_auth_failure(&UsageError::Shape(
+            "retrieveUserQuotaSummary HTTP 401".into()
+        )));
+        assert!(agy_http_auth_failure(&UsageError::Shape(
+            "loadCodeAssist HTTP 403 — try re-authenticating via the Antigravity CLI".into()
+        )));
+        assert!(!agy_http_auth_failure(&UsageError::Shape(
+            "retrieveUserQuotaSummary HTTP 500".into()
+        )));
+        assert!(!agy_http_auth_failure(&UsageError::NoCredential(
+            "missing".into()
+        )));
     }
 
     #[test]
