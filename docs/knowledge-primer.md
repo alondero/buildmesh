@@ -219,7 +219,7 @@ Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server 
 - ❌ Call `dispose()` on an xterm.js Terminal — causes permanent terminal blanking
 - ❌ Pass Linux paths (e.g. `/home/user/`) to non-WSL APIs — causes "file not found"
 - ❌ Spawn cwrap directly without `cmd.exe /c` on Windows — ConPTY breaks
-- ❌ Spawn a provider CLI to fetch a Usage Meter when the CLI is wrapping an HTTP endpoint we can call ourselves. `get_provider_meters` waits for every provider, so a multi-second CLI boot stalls the whole Usage Probe (#1324 spawned `agy --print /usage` ≈6s; the same payload is `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` in ~250ms, User-Agent gated, token `gemini:antigravity`). `fetchAvailableModels` is five-hour-only fallback.
+- ❌ Spawn a provider CLI to fetch a Usage Meter when the CLI is wrapping an HTTP endpoint we can call ourselves. `get_provider_meters` waits for every provider, so a multi-second CLI boot stalls the whole Usage Probe (#1324 spawned `agy --print /usage` ≈6s; the same payload is `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` in ~250ms, User-Agent gated). Token discovery lives in `usage::adapters::agy`: prefer `<agy_dir>/antigravity-oauth-token` (Windows: `%USERPROFILE%\.gemini\antigravity-cli\antigravity-oauth-token`, honouring `GEMINI_HOME` / `ANTIGRAVITY_HOME`), then Windows Credential Manager `gemini:antigravity`. Corrupt CLI-file JSON surfaces as Shape (no keyring fallback); missing/empty falls through. On HTTP 401/403, try the next source before logged-out. `fetchAvailableModels` is five-hour-only fallback.
 - ❌ Lock the DB mutex in nested calls — causes deadlocks
 - ❌ Do blocking network / git-shell-out / slow-libgit2 / SQLite (`db::*`) / `std::fs::*` / `preferences::load`/`save` work directly on an `async fn` (or `#[command(async)]`) command — it parks a tokio worker and, at scale, starves the pool (UI stays alive, keystrokes + WebSocket streaming + probes hang). Use the `*_blocking` sync-core + `run_blocking` wrapper; see *Command Threading* (issue #1380).
 - ❌ Give a Probe tab root its own `overflow-y-auto` — `ProbePanel` already wraps it in one, so you get two stacked scroll owners and an unpredictable scroll surface (#1468). Root is layout-only; one inner body scrolls. And don't `truncate` unbounded text (errors, trigger identities, node ids) at the dock's 240px minimum — it clips exactly the tail that carries the diagnosis. See *Probe Panel shell*.
@@ -240,10 +240,12 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
   - `cfg(windows)` only. Non-Windows callers see `NoCredential(...)` from their `cfg`-gated helpers instead.
 
 - **Known targets** (extend-only — never delete from this list without a migration ticket):
-  - `gemini:antigravity` — written by the Antigravity CLI, read-only here (issue #917).
+  - `gemini:antigravity` — written by older Antigravity CLIs, read-only here. Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead and leaves this target stale; the Usage Meter prefers the file, then this keyring, and retries the alternate source on HTTP 401/403.
   - `opencode:console` — written by Buildmesh for the OpenCode Go OAuth dance (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }` (RFC-3339 string for `expires_at`, mirroring the original #957 fixture so the live probe still parses; the `server_id` field is the SolidStart deployment id captured into the `X-Server-Id` header).
 
 - **Operator commands** for diagnosing drift:
+  - `cmdkey /list | findstr antigravity` — confirm the legacy `gemini:antigravity` keyring target is present (metadata only; does not dump the blob).
+  - `Get-Content $env:USERPROFILE\.gemini\antigravity-cli\antigravity-oauth-token` (or `$env:GEMINI_HOME\antigravity-cli\antigravity-oauth-token`) — inspect the live CLI oauth file; redact before pasting. Compare `token.expiry` against the keyring blob when the Usage Probe drops Antigravity.
   - `cmdkey /list:opencode:console` — read the current blob's user/credential metadata without dumping bytes.
   - `cmdkey /list:buildmesh-test-*` — find any leftover test credentials from a failing test that didn't clean up. Each unit test uses a uuid-suffixed target name so collisions are vanishingly rare.
 
