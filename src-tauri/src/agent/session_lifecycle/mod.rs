@@ -485,11 +485,6 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     }
 
     fn emit_lifecycle_changed(&self, payload: LifecycleChangedPayload) {
-        if payload.kind == LifecycleKind::TurnCompleted {
-            crate::services::usage::adapters::muse_code::record_turn_for_provider(
-                payload.provider.as_deref(),
-            );
-        }
         // Desktop: Tauri event bus reaches only the webview.
         let _ = self.app.emit("agent-lifecycle", &payload);
         // Mobile: the same wire shape fanned into the /ws/events broadcast.

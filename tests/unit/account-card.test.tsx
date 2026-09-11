@@ -99,6 +99,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       />,
     );
     expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
+    await waitFor(() => expect(getMuseCodeSubscriptionTier).toHaveBeenCalled());
     const select = await screen.findByRole('combobox', { name: /muse code subscription plan/i });
     await user.selectOptions(select, 'high');
     await waitFor(() => expect(setMuseCodeSubscriptionTier).toHaveBeenCalledWith('high'));

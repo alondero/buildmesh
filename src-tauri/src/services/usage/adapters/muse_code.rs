@@ -3,15 +3,20 @@
 //! is `tier_limit − local_count` (or unavailable when the user has not chosen
 //! a tier). Never scrapes dashboards, reads credential files, or treats MSP
 //! token events as quota.
+//!
+//! `record_turn` is the counting seam for a future MSP `turn/start`. Muse
+//! currently has no attention hook, transcript, or MSP transport, so production
+//! does not increment automatically.
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::types::{
-    unavailable, MuseCodeTier, ProviderUsage, UsageAmount, UsageError, UsageMeter, UsageWindow,
+    unavailable, MuseCodeTier, ProviderUsage, UsageAmount, UsageError, UsageMeter,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Drop-in [`UsageAdapter`] for `muse-code`.
@@ -44,9 +49,7 @@ impl UsageAdapter for MuseCodeAdapter {
     }
 
     fn cache_identity(&self, _accounts: &[ProviderAccount]) -> UsageIdentityFingerprint {
-        let tier = load_store()
-            .ok()
-            .and_then(|store| store.tier)
+        let tier = selected_tier()
             .map(|tier| tier.label())
             .unwrap_or("unconfigured");
         UsageIdentityFingerprint::new("muse-code-tier", tier.as_bytes())
@@ -58,63 +61,65 @@ impl UsageAdapter for MuseCodeAdapter {
 }
 
 pub(crate) fn selected_tier() -> Option<MuseCodeTier> {
-    load_store().ok().and_then(|store| store.tier)
+    with_store(|store| Ok((false, store.tier))).ok().flatten()
 }
 
 pub(crate) fn set_tier(tier: Option<MuseCodeTier>) -> Result<(), String> {
-    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = load_store().unwrap_or_default();
-    store.tier = tier;
-    save_store(&store).map_err(|e| e.to_string())?;
+    with_store(|store| {
+        store.tier = tier;
+        Ok((true, ()))
+    })
+    .map_err(|e| store_error_message(&e))?;
     crate::services::usage::invalidate_provider_cache("muse-code");
     Ok(())
 }
 
 /// Count one Muse Code request against the current 5-hour window.
+///
+/// Automatic counting is blocked until MSP `turn/start` exists. Muse installs
+/// no attention hook and produces no transcript, so nothing in production
+/// currently calls this. Tests and a future MSP transport should.
 pub(crate) fn record_turn() {
-    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(mut store) = load_store() else {
-        return;
-    };
-    if store.tier.is_none() {
-        return;
-    }
-    let now = now_ms();
-    reset_window_if_elapsed(&mut store, now);
-    if store.window_start_ms.is_none() {
-        store.window_start_ms = Some(now);
-    }
-    store.count = store.count.saturating_add(1);
-    let _ = save_store(&store);
-    crate::services::usage::invalidate_provider_cache("muse-code");
-}
-
-/// `TurnCompleted` is the observable request boundary until MSP `turn/start`
-/// is wired. Provider ids are harness/spawn-option strings, including WSL
-/// profiles such as `muse-wsl-…`.
-pub(crate) fn record_turn_for_provider(provider: Option<&str>) {
-    if is_muse_provider(provider) {
-        record_turn();
-    }
-}
-
-fn is_muse_provider(provider: Option<&str>) -> bool {
-    provider.is_some_and(|id| {
-        id == "muse" || id.starts_with("muse-") || id.ends_with(":muse") || id.contains(":muse-")
+    if with_store(|store| {
+        if store.tier.is_none() {
+            return Ok((false, false));
+        }
+        let now = now_ms();
+        reset_window_if_elapsed(store, now);
+        if store.window_start_ms.is_none() {
+            store.window_start_ms = Some(now);
+        }
+        store.count = store.count.saturating_add(1);
+        Ok((true, true))
     })
+    .ok()
+    == Some(true)
+    {
+        crate::services::usage::invalidate_provider_cache("muse-code");
+    }
 }
 
 fn muse_code_usage() -> ProviderUsage {
-    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = match load_store() {
-        Ok(store) => store,
-        Err(e) => return unavailable("muse-code", e.to_string()),
-    };
-    let now = now_ms();
-    if reset_window_if_elapsed(&mut store, now) {
-        let _ = save_store(&store);
+    match with_store(|store| {
+        let now = now_ms();
+        let dirty = reset_window_if_elapsed(store, now);
+        Ok((dirty, usage_from_store(store)))
+    }) {
+        Ok(usage) => usage,
+        Err(e) => unavailable("muse-code", store_error_message(&e)),
     }
-    usage_from_store(&store)
+}
+
+/// Holds [`STORE_LOCK`] for the duration of `f`. Return `true` from `f` to
+/// persist the mutated store. Nested store access must not call this again.
+fn with_store<T>(f: impl FnOnce(&mut MuseCodeStore) -> Result<(bool, T), UsageError>) -> Result<T, UsageError> {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = read_store()?;
+    let (dirty, value) = f(&mut store)?;
+    if dirty {
+        write_store(&store)?;
+    }
+    Ok(value)
 }
 
 fn usage_from_store(store: &MuseCodeStore) -> ProviderUsage {
@@ -134,8 +139,8 @@ fn usage_from_store(store: &MuseCodeStore) -> ProviderUsage {
     };
 
     let limit = tier.request_limit();
-    let used = store.count.min(limit);
-    let remaining = limit.saturating_sub(used);
+    let used = store.count;
+    let remaining = limit.saturating_sub(used.min(limit));
     let used_percent = if limit == 0 {
         None
     } else {
@@ -145,7 +150,7 @@ fn usage_from_store(store: &MuseCodeStore) -> ProviderUsage {
         chrono::DateTime::from_timestamp_millis(start.saturating_add(WINDOW_MS))
             .map(|dt| dt.to_rfc3339())
     });
-    let exhausted = store.count >= limit;
+    let exhausted = used >= limit;
     let amount = UsageAmount {
         used: used as f64,
         limit: Some(limit as f64),
@@ -154,7 +159,6 @@ fn usage_from_store(store: &MuseCodeStore) -> ProviderUsage {
         used_percent,
         resets_at: resets_at.clone(),
     };
-    let window_label = format!("{} · 5-hour", tier.label());
     let detail = if exhausted {
         match &resets_at {
             Some(when) => Some(format!(
@@ -173,11 +177,9 @@ fn usage_from_store(store: &MuseCodeStore) -> ProviderUsage {
     ProviderUsage {
         provider: "muse-code".to_string(),
         logged_in: true,
-        windows: vec![UsageWindow {
-            label: window_label,
-            used_percent,
-            resets_at,
-        }],
+        // UsagePanel renders both `windows` and `meters`. Discrete request
+        // counts live on UsageMeter::Metered only so the card is not stacked.
+        windows: vec![],
         balance: None,
         meters: vec![UsageMeter::Metered { amount }],
         detail,
@@ -215,7 +217,18 @@ fn store_path() -> PathBuf {
         .join(STORE_FILE)
 }
 
-fn load_store() -> Result<MuseCodeStore, UsageError> {
+fn store_error_message(error: &UsageError) -> String {
+    match error {
+        UsageError::Shape(msg) => msg.clone(),
+        UsageError::NoCredential(msg) => format!("No credential found at {msg}"),
+    }
+}
+
+fn store_io_error(op: &str, path: &Path, error: impl std::fmt::Display) -> UsageError {
+    UsageError::Shape(format!("{op} {}: {error}", path.display()))
+}
+
+fn read_store() -> Result<MuseCodeStore, UsageError> {
     #[cfg(test)]
     if STORE_PATH.with(|cell| cell.borrow().is_none()) {
         return Ok(MEMORY_STORE.with(|cell| cell.borrow().clone()));
@@ -224,25 +237,31 @@ fn load_store() -> Result<MuseCodeStore, UsageError> {
     if !path.exists() {
         return Ok(MuseCodeStore::default());
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| UsageError::NoCredential(format!("{} ({e})", path.display())))?;
+    let content = fs::read_to_string(&path).map_err(|e| store_io_error("failed to read", &path, e))?;
     serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))
 }
 
-fn save_store(store: &MuseCodeStore) -> Result<(), UsageError> {
+fn write_store(store: &MuseCodeStore) -> Result<(), UsageError> {
     #[cfg(test)]
     if STORE_PATH.with(|cell| cell.borrow().is_none()) {
         MEMORY_STORE.with(|cell| *cell.borrow_mut() = store.clone());
         return Ok(());
     }
     let path = store_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| UsageError::NoCredential(format!("{} ({e})", parent.display())))?;
-    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
+        UsageError::Shape(format!("{} has no parent directory", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(|e| store_io_error("failed to create", parent, e))?;
     let json = serde_json::to_string(store).map_err(|e| UsageError::Shape(e.to_string()))?;
-    fs::write(&path, json)
-        .map_err(|e| UsageError::NoCredential(format!("{} ({e})", path.display())))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| store_io_error("failed to create temporary", parent, e))?;
+    temporary
+        .write_all(json.as_bytes())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|e| store_io_error("failed to write temporary", parent, e))?;
+    temporary
+        .persist(&path)
+        .map_err(|e| store_io_error("failed to replace", &path, e.error))?;
     Ok(())
 }
 
@@ -345,7 +364,11 @@ mod tests {
                 assert_eq!(amount.unit, "requests");
                 assert_eq!(amount.used_percent, Some(0.0));
                 assert!(amount.resets_at.is_none());
-                assert_eq!(usage.windows[0].label, "Everyday · 5-hour");
+                assert!(
+                    usage.windows.is_empty(),
+                    "metered request counts must not also emit a percentage window: {:?}",
+                    usage.windows
+                );
                 assert!(usage.detail.is_none());
             },
         );
@@ -432,9 +455,10 @@ mod tests {
                 record_turn();
                 let usage = fetch();
                 let amount = metered(&usage);
-                assert_eq!(amount.used, 50.0);
+                assert_eq!(amount.used, 51.0);
                 assert_eq!(amount.remaining, Some(0.0));
                 assert_eq!(amount.limit, Some(50.0));
+                assert!(usage.windows.is_empty());
                 let detail = usage.detail.as_deref().expect("exhausted notice");
                 assert!(
                     detail.contains("Everyday allowance exhausted"),
@@ -469,21 +493,42 @@ mod tests {
     }
 
     #[test]
-    fn record_turn_for_provider_counts_muse_harness_ids_only() {
-        with_env(
-            T0,
-            MuseCodeStore {
-                tier: Some(MuseCodeTier::Everyday),
-                ..MuseCodeStore::default()
-            },
-            || {
-                record_turn_for_provider(Some("codex"));
-                record_turn_for_provider(Some("muse"));
-                record_turn_for_provider(Some("muse-wsl-ubuntu"));
-                record_turn_for_provider(None);
-                let usage = fetch();
-                assert_eq!(metered(&usage).used, 2.0);
-            },
+    fn store_io_failure_stays_logged_in_and_is_not_a_missing_credential() {
+        reset_for_tests();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("muse-code-usage.json");
+        fs::create_dir_all(&path).unwrap();
+        STORE_PATH.with(|cell| *cell.borrow_mut() = Some(path));
+        NOW_MS.with(|cell| *cell.borrow_mut() = Some(T0));
+        let _guard = EnvGuard;
+        let usage = fetch();
+        assert!(usage.logged_in, "disk failure must not look like logout: {usage:?}");
+        let error = usage.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("failed to read"),
+            "expected a store I/O error, got {error:?}"
         );
+        assert!(
+            !error.to_ascii_lowercase().contains("no credential"),
+            "I/O must not masquerade as missing credentials, got {error:?}"
+        );
+        assert_eq!(selected_tier(), None);
+    }
+
+    #[test]
+    fn selected_tier_round_trips_through_the_locked_disk_store() {
+        reset_for_tests();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("muse-code-usage.json");
+        STORE_PATH.with(|cell| *cell.borrow_mut() = Some(path.clone()));
+        NOW_MS.with(|cell| *cell.borrow_mut() = Some(T0));
+        let _guard = EnvGuard;
+        set_tier(Some(MuseCodeTier::High)).unwrap();
+        assert_eq!(selected_tier(), Some(MuseCodeTier::High));
+        let usage = fetch();
+        assert!(usage.windows.is_empty());
+        assert_eq!(metered(&usage).limit, Some(150.0));
+        let persisted = fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("high"), "got {persisted}");
     }
 }
