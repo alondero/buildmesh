@@ -156,7 +156,7 @@ export class BuildRunTerminalRegistry {
   // build/run panes only read the size at creation, so Ctrl/Cmd+/- and the
   // title-bar zoom slider left them at their old text size. Keyed by the
   // composite instance key (strings, unlike the agent registry's node ids).
-  private fontSizeManager = new FontSizeManager<string>();
+  private fontSizeManager = new FontSizeManager();
 
   getInstance(sessionId: number, mode: BuildRunMode, useWorktree: boolean): BuildRunInstance | undefined {
     return this.instances.get(instanceKey(sessionId, mode, useWorktree));

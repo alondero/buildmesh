@@ -386,5 +386,66 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(screen.getByTestId('zoom-panel').hasAttribute('data-tauri-drag-region')).toBe(false);
       expect(screen.getByTestId('zoom-slider').hasAttribute('data-tauri-drag-region')).toBe(false);
     });
+
+    it('returns focus to the trigger when dismissed with Escape', async () => {
+      // The focus restore runs in requestAnimationFrame (mirroring
+      // BuildRunDropdown); run it synchronously in jsdom.
+      const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+        cb(0);
+        return 1;
+      });
+      try {
+        await renderTitleBar();
+        const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+        zoom.focus();
+        fireEvent.click(zoom);
+        expect(screen.getByTestId('zoom-panel')).toBeTruthy();
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+
+        expect(screen.queryByTestId('zoom-panel')).toBeNull();
+        expect(document.activeElement).toBe(zoom);
+      } finally {
+        raf.mockRestore();
+      }
+    });
+
+    it('wires the disclosure contract: aria-controls, aria-valuetext, hidden glyphs', async () => {
+      await renderTitleBar();
+      const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+      // Closed: no aria-controls pointing at an absent panel.
+      expect(zoom.getAttribute('aria-controls')).toBeNull();
+
+      fireEvent.click(zoom);
+      const panel = screen.getByTestId('zoom-panel');
+      expect(zoom.getAttribute('aria-controls')).toBe(panel.id);
+      expect(panel.id).not.toBe('');
+
+      const slider = screen.getByTestId('zoom-slider');
+      expect(slider.getAttribute('aria-valuetext')).toBe(`${TERMINAL_FONT_SIZE_DEFAULT}px`);
+
+      // The decorative A/A swatches must not be announced.
+      const glyphs = Array.from(panel.querySelectorAll('span')).filter(
+        (span) => span.textContent === 'A',
+      );
+      expect(glyphs).toHaveLength(2);
+      for (const glyph of glyphs) expect(glyph.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('disables Reset at the default size and re-enables it after a change', async () => {
+      await renderTitleBar();
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom terminal text size' }));
+
+      const reset = screen.getByTestId('zoom-reset') as HTMLButtonElement;
+      expect(reset.disabled).toBe(true);
+      expect(reset.className).toContain('disabled:text-text-muted/60');
+
+      fireEvent.change(screen.getByTestId('zoom-slider'), { target: { value: '15' } });
+      expect(reset.disabled).toBe(false);
+
+      fireEvent.click(reset);
+      expect(terminalFontSize()).toBe(TERMINAL_FONT_SIZE_DEFAULT);
+      expect(reset.disabled).toBe(true);
+    });
   });
 });

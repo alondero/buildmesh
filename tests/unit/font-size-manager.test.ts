@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FontSizeManager } from '../../src/components/Terminal/FontSizeManager';
-import { setTerminalFontSize } from '../../src/components/Terminal/terminalConfig';
+import {
+  TERMINAL_FONT_SIZE_DEFAULT,
+  setTerminalFontSize,
+} from '../../src/components/Terminal/terminalConfig';
 
 describe('FontSizeManager', () => {
   let manager: FontSizeManager;
@@ -11,6 +14,11 @@ describe('FontSizeManager', () => {
 
   afterEach(() => {
     manager.destroy();
+    // `_terminalFontSize` is a module-level singleton, so a test that zooms
+    // would otherwise leak that value into every later test in this file
+    // (and make the next `setTerminalFontSize` a no-op if it happened to
+    // pick the same number). Reset to the default for isolation.
+    setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
   });
 
   describe('register/unregister', () => {
@@ -108,26 +116,42 @@ describe('FontSizeManager', () => {
   // manager has to accept string keys too.
   describe('string keys (build/run composite keys)', () => {
     it('propagates the global size to a string-keyed entry and unregisters it', () => {
-      const stringManager = new FontSizeManager<string>();
-      try {
-        const terminal = { options: { fontSize: 10 } };
-        const fit = vi.fn();
-        stringManager.register('9|build|false', terminal, fit);
-        expect(stringManager.has('9|build|false')).toBe(true);
+      const stringManager = new FontSizeManager();
+      const terminal = { options: { fontSize: 10 } };
+      const fit = vi.fn();
+      stringManager.register('9|build|false', terminal, fit);
+      expect(stringManager.has('9|build|false')).toBe(true);
 
-        // 13 is unused by the numeric-key tests above, so this can't leave the
-        // module-level size on a value that makes a later `setTerminalFontSize`
-        // a no-op.
-        setTerminalFontSize(13);
+      setTerminalFontSize(14);
 
-        expect(terminal.options.fontSize).toBe(13);
-        expect(fit).toHaveBeenCalledOnce();
+      expect(terminal.options.fontSize).toBe(14);
+      expect(fit).toHaveBeenCalledOnce();
 
-        stringManager.unregister('9|build|false');
-        expect(stringManager.size).toBe(0);
-      } finally {
-        stringManager.destroy();
-      }
+      stringManager.unregister('9|build|false');
+      expect(stringManager.size).toBe(0);
+      stringManager.destroy();
+    });
+  });
+
+  describe('fan-out isolation', () => {
+    it('keeps notifying other entries after one measureAndFit throws', () => {
+      const brokenFit = vi.fn(() => {
+        throw new Error('pane mid-teardown');
+      });
+      const healthyFit = vi.fn();
+      const healthyTerminal = { options: { fontSize: 10 } };
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      manager.register(1, { options: { fontSize: 10 } }, brokenFit);
+      manager.register(2, healthyTerminal, healthyFit);
+
+      expect(() => setTerminalFontSize(16)).not.toThrow();
+
+      // The healthy pane still got the new size + a refit despite the
+      // sibling throwing first.
+      expect(healthyTerminal.options.fontSize).toBe(16);
+      expect(healthyFit).toHaveBeenCalledOnce();
+      warn.mockRestore();
     });
   });
 });

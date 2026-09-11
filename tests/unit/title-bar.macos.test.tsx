@@ -112,6 +112,17 @@ describe('TitleBar on macOS', () => {
       expect(screen.getByRole('button', { name: 'Open mobile remote access' })).toBeTruthy();
     });
 
+    it('uses the macOS chord in the zoom trigger tooltip (⌘, not Ctrl)', async () => {
+      await renderTitleBar();
+      const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+      const title = zoom.getAttribute('title') ?? '';
+      // Sourced from the shortcut catalog's macKey, so the tooltip can't
+      // drift from the real binding on this platform.
+      expect(title).toContain('⌘+=');
+      expect(title).toContain('⌘+-');
+      expect(title).not.toContain('Ctrl');
+    });
+
     it('wordmark still carries data-tauri-drag-region; the traffic lights themselves do NOT', async () => {
       await renderTitleBar();
       expect(screen.getByAltText('Buildmesh').hasAttribute('data-tauri-drag-region')).toBe(true);
