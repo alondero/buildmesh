@@ -10,9 +10,27 @@
  * `serde` skips `cert_path` when it's `None` so the HTTP JSON has only the
  * 4 fingerprint/issuer/validity fields.
  *
+ * `root_generation` (issue #1527) is a monotonically-increasing counter
+ * that bumps every time the root CA is minted. The frontend stores the
+ * last-acked value and only shows the "root rotated — please re-install
+ * on your phone" banner when the value changes; a leaf renewal leaves
+ * `root_generation` untouched, so the banner does **not** fire on
+ * routine DHCP/VPN churn.
+ *
  * Generated to `src/types/generated/CertChainStatus.ts` (ADR-0009, issue #359).
  */
 export type CertChainStatus = { root_fingerprint_sha256: string, leaf_fingerprint_sha256: string, leaf_issuer: string, valid_until: string, 
+/**
+ * Monotonic counter that bumps every time the root CA is minted
+ * (issue #1527). Annotates as `i32` because `serde_json` emits
+ * `u64` as a JS number — the TS type agrees (rather than the
+ * `bigint` ts-rs defaults to) so the frontend can compare with
+ * `===` and store it in a plain `useState<number>`. Realistic
+ * range fits comfortably in i32: each reset adds 1, and a single
+ * user is unlikely to reset more than a handful of times in the
+ * lifetime of an install.
+ */
+root_generation: number, 
 /**
  * Absolute path to `ca.der`. `Some` for the desktop Tauri command
  * response; `None` (and serialised-as-absent) for the HTTP route — see

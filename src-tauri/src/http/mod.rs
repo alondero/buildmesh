@@ -531,6 +531,18 @@ fn acceptor_cache() -> &'static parking_lot::Mutex<Option<CachedAcceptor>> {
     CACHED_ACCEPTOR.get_or_init(|| parking_lot::Mutex::new(None))
 }
 
+/// Invalidate the cached `TlsAcceptor` so the next `reapply_binding` rebuilds
+/// from disk (issue #1527). The cache is keyed by `tls::interface_san_key`,
+/// which is unchanged across a `reset_trusted_certificates` call — so the
+/// cache would happily hand back the pre-reset acceptor otherwise, and the
+/// listener would serve a leaf signed by the wiped root until the next bind
+/// (or app restart). Exposed for the explicit-reset path in
+/// `commands::network::reset_trusted_certificates`; bind paths must NOT call
+/// this directly — they re-key naturally via `tls::interface_san_key`.
+pub(crate) fn clear_cached_acceptor() {
+    *acceptor_cache().lock() = None;
+}
+
 /// Get the TLS acceptor for `interface_ips`, reusing the cached one if its
 /// SAN key still matches. Otherwise rebuild — load or generate the persisted
 /// cert + parse it into a `ServerConfig` — **off-thread** so the blocking

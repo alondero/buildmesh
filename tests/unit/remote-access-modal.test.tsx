@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NetworkStatus } from '../../src/types/generated/NetworkStatus';
@@ -41,7 +41,26 @@ const SAMPLE_CERT: CertChainStatus = {
     '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11',
   leaf_issuer: 'CN=Buildmesh Dev Root CA',
   valid_until: '2035-01-01 00:00:00',
+  // Issue #1527: root_generation is the banner-gating counter. The
+  // sample starts at 1 so existing tests don't need to opt in, and
+  // reset-flow tests can build a "post-reset" cert with a higher value.
+  root_generation: 1,
   cert_path: 'C:\\Users\\alond\\AppData\\Roaming\\com.alond.buildmesh\\tls\\ca.der',
+};
+
+/** A "post-reset" cert — same shape as `SAMPLE_CERT` but every value
+ *  bumped so the test can prove the modal actually re-fetched the
+ *  chain from the server instead of shallow-spreading (issue #1527 PR
+ *  review: stale-fingerprint bug). The generation counter is `2` so
+ *  it's strictly greater than `SAMPLE_CERT.root_generation` and the
+ *  banner renders. */
+const POST_RESET_CERT: CertChainStatus = {
+  ...SAMPLE_CERT,
+  root_fingerprint_sha256:
+    'FF:EE:DD:CC:BB:AA:99:88:77:66:55:44:33:22:11:00:FF:EE:DD:CC:BB:AA:99:88:77:66:55:44:33:22:11:00',
+  leaf_fingerprint_sha256:
+    '00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF',
+  root_generation: 2,
 };
 
 describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
@@ -129,6 +148,11 @@ describe('RemoteAccessModal', () => {
     vi.mocked(invoke).mockReset();
     toDataURL.mockClear();
     openUrl.mockClear();
+    // Wipe the persisted ack-generation between tests — the new banner
+    // tests depend on a clean slate so a stale value from a previous
+    // run can't accidentally surface or suppress the banner (issue
+    // #1527).
+    localStorage.removeItem('buildmesh.ackedRootGeneration');
   });
 
   function mockBackend(
@@ -169,6 +193,11 @@ describe('RemoteAccessModal', () => {
           return mobileconfig === null
             ? Promise.reject(new Error('mobileconfig unavailable'))
             : Promise.resolve(mobileconfig);
+        // Issue #1527: explicit Reset button IPC. The default mock
+        // resolves with the cert's current generation + 1 — tests that
+        // want a specific return value pass it via `invokeOnce` below.
+        case 'reset_trusted_certificates':
+          return Promise.resolve((cert?.root_generation ?? 0) + 1);
         default:
           return Promise.resolve({});
       }
@@ -739,5 +768,253 @@ describe('RemoteAccessModal', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
     clearTimeoutSpy.mockRestore();
+  });
+
+  // --- issue #1527: explicit Reset flow ----------------------------------
+  // The reset button mints a fresh root + leaf server-side and returns
+  // the new generation. The frontend must (a) re-fetch the certStatus
+  // to surface the new fingerprints, (b) re-mint the iOS install-QR
+  // (the old one is signed by the wiped key and would silently fail to
+  // install on the phone), and (c) surface the "trusted root was reset"
+  // banner without immediately hiding it again. The previous version
+  // of `handleResetCertificates` shallow-spread the certStatus (leaving
+  // stale fingerprints), skipped the iOS QR re-mint, AND updated
+  // `ackedRootGeneration` to the new generation — killing the banner
+  // for the very user who triggered the rotation.
+  //
+  // Three tests pin the contract below:
+  //   1. Reset click → IPC fires + certStatus refreshed + banner visible
+  //   2. Banner persists across modal opens when localStorage has an
+  //      older generation than the server's
+  //   3. "Got it" dismisses the banner AND writes the new generation
+  //      to localStorage so it stays hidden across subsequent opens
+
+  it('reset click fires IPC, refreshes certStatus + iOS QR, and surfaces the banner', async () => {
+    const user = userEvent.setup();
+    // jsdom doesn't implement `window.confirm` — stub it so the
+    // destructive-action gate in `handleResetCertificates` lets the
+    // IPC chain through. We return `true` for the same reason the
+    // real modal does: the test wants to exercise the post-confirm
+    // reset flow. A separate `it` (or test parameter) can stub
+    // `confirm` to `false` to assert the gate's blocking behavior.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    // Override the IPC chain entirely — we need per-call tracking that
+    // the default `mockBackend` helper doesn't expose. The shape
+    // mirrors `mockBackend`'s defaults for the un-tracked commands.
+    let certStatusCalls = 0;
+    let mobileconfigCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_root_token':
+          return Promise.resolve('root-tok');
+        case 'get_local_ip':
+          return Promise.resolve('192.168.1.10');
+        case 'get_network_status':
+          return Promise.resolve(
+            status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+          );
+        case 'get_cert_chain_status':
+          certStatusCalls++;
+          return Promise.resolve(certStatusCalls === 2 ? POST_RESET_CERT : SAMPLE_CERT);
+        case 'get_root_cert_mobileconfig':
+          mobileconfigCalls++;
+          return Promise.resolve(mobileconfigCalls === 2 ? 'UkVTVEVSVEVE' : 'QUJDREVGRw==');
+        case 'reset_trusted_certificates':
+          return Promise.resolve(2);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    // Sanity: initial load returns SAMPLE_CERT (gen 1) and no banner.
+    await screen.findByTestId('remote-access-cert-fingerprint');
+    expect(screen.queryByTestId('remote-access-root-rotated-banner')).toBeNull();
+
+    // Confirm the reset IPC and the auto-confirmed dialog. jsdom
+    // defaults `window.confirm` to true; no spy needed.
+    const resetButton = await screen.findByTestId('remote-access-cert-reset');
+    await user.click(resetButton);
+
+    // After the reset promise chain resolves:
+    //   - get_cert_chain_status fired a SECOND time and returned POST_RESET_CERT
+    //   - get_root_cert_mobileconfig fired a SECOND time (iOS QR re-mint)
+    //   - the banner is visible (ackedRootGeneration lags the new gen)
+    await waitFor(() =>
+      expect(screen.getByTestId('remote-access-root-rotated-banner')).toBeTruthy(),
+    );
+    expect(certStatusCalls).toBeGreaterThanOrEqual(2);
+    expect(mobileconfigCalls).toBeGreaterThanOrEqual(2);
+
+    // The banner and the qr section share a render tree — only one
+    // mounts at a time (banner takes priority while `ackedRootGeneration`
+    // lags the server). To verify the post-reset fingerprint is in
+    // state, dismiss the banner first by tapping "Got it" (which writes
+    // the new generation to localStorage), then assert on the freshly-
+    // unmasked fingerprint element. The previous shallow-spread
+    // `{ ...prev, root_generation: newGen }` would have left
+    // `root_fingerprint_sha256` pointing to the deleted root's hash —
+    // this assertion catches that.
+    await user.click(screen.getByTestId('remote-access-root-rotated-ack'));
+    const fp = await screen.findByTestId('remote-access-cert-fingerprint');
+    expect(fp.textContent).toBe(POST_RESET_CERT.root_fingerprint_sha256);
+    // And the iOS QR was re-generated with the post-reset mobileconfig
+    // payload. The init fetch encoded `QUJDREVGRw==`; the re-mint
+    // encodes `UkVTVEVSVEVE`. The exact order of `QRCode.toDataURL`
+    // calls is non-deterministic (parallel Promise.allSettled), so we
+    // assert on the contents of `mock.calls` rather than which call was
+    // last.
+    const payloads = toDataURL.mock.calls.map(c => c[0]);
+    expect(
+      payloads.some(
+        (p): p is string =>
+          typeof p === 'string' && p.startsWith('data:application/x-apple-aspen-config;base64,UkVTVEVSVEVE'),
+      ),
+    ).toBe(true);
+
+    confirmSpy.mockRestore();
+  });
+
+  it('surfaces the banner on every open when persisted acked generation lags the server', async () => {
+    // The banner must persist across modal closes: a user who resets,
+    // closes the modal, and reopens it days later should still see the
+    // re-install prompt until they tap "Got it". The previous in-
+    // component state reset to `null` on every mount (issue #1527 PR
+    // review: dead-banner bug). Persisted `localStorage` value here:
+    // the user last acknowledged generation `0`, the server is now on
+    // generation `1`, so the banner must render.
+    localStorage.setItem('buildmesh.ackedRootGeneration', '0');
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    const banner = await screen.findByTestId('remote-access-root-rotated-banner');
+    expect(banner).toBeTruthy();
+    // And the "Got it" button is present — that's how the user dismisses
+    // the banner without re-resetting.
+    expect(within(banner).getByTestId('remote-access-root-rotated-ack')).toBeTruthy();
+  });
+
+  it('does not surface the banner when persisted acked generation matches the server', async () => {
+    // The inverse: if localStorage says "I last saw generation 1" and
+    // the server is on generation 1, the banner must NOT render. This
+    // is the steady state after the user taps "Got it" once.
+    localStorage.setItem('buildmesh.ackedRootGeneration', '1');
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    // Wait for the cert status to load (proves the modal is fully
+    // initialised) — then assert the banner is absent. Using
+    // `findByTestId` for the fingerprint is the canonical "modal is
+    // ready" signal; the absence of the banner is then meaningful, not
+    // a race against the init effect.
+    await screen.findByTestId('remote-access-cert-fingerprint');
+    expect(screen.queryByTestId('remote-access-root-rotated-banner')).toBeNull();
+  });
+
+  it('"Got it" dismisses the banner and persists the new generation to localStorage', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('buildmesh.ackedRootGeneration', '0');
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    const banner = await screen.findByTestId('remote-access-root-rotated-banner');
+    await user.click(within(banner).getByTestId('remote-access-root-rotated-ack'));
+
+    // The banner disappears immediately. We can't assert on its absence
+    // (React 19 would silently keep it until next render), so we wait
+    // for the queryByTestId to flip from "found" to "null".
+    await waitFor(() =>
+      expect(screen.queryByTestId('remote-access-root-rotated-banner')).toBeNull(),
+    );
+    // And the persisted generation is now 1 (the server's current
+    // value), so a future modal open won't re-render the banner.
+    expect(localStorage.getItem('buildmesh.ackedRootGeneration')).toBe('1');
+  });
+
+  // --- issue #1527: iOS QR regeneration failure must not nuke the modal.
+  // Round-2 review flagged that the reset path's `setError(formatError(e))`
+  // for an iOS-mobileconfig failure unmounts the entire modal (the
+  // `error` branch replaces tabs + connect QR + Android install QR +
+  // fingerprint + reset button with a single error string). The right
+  // contract mirrors the init() path's silent-failure: clear the iOS
+  // QR so the tab hides, console.warn for diagnosis, and leave every
+  // other affordance functional. This test pins that contract.
+  it('reset click with iOS mobileconfig failure keeps the modal functional (no fatal setError)', async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let mobileconfigCalls = 0;
+    let certStatusCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_root_token':
+          return Promise.resolve('root-tok');
+        case 'get_local_ip':
+          return Promise.resolve('192.168.1.10');
+        case 'get_network_status':
+          return Promise.resolve(
+            status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+          );
+        case 'get_cert_chain_status':
+          certStatusCalls++;
+          // Init returns gen 1; post-reset re-fetch returns gen 2 so
+          // the banner condition (`2 > 1`) actually triggers after
+          // the reset. A no-op reset would not exercise the contract
+          // we're testing (the banner wouldn't render in the first
+          // place).
+          return Promise.resolve(certStatusCalls === 2 ? POST_RESET_CERT : SAMPLE_CERT);
+        case 'get_root_cert_mobileconfig':
+          mobileconfigCalls++;
+          // Init fetch succeeds; the post-reset re-mint rejects. The
+          // reset path must catch and gracefully hide the iOS tab.
+          return mobileconfigCalls === 2
+            ? Promise.reject(new Error('PKCS#7 CMS sign failed'))
+            : Promise.resolve('QUJDREVGRw==');
+        case 'reset_trusted_certificates':
+          return Promise.resolve(2);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<RemoteAccessModal onClose={() => {}} />);
+    await screen.findByTestId('remote-access-cert-fingerprint');
+
+    await user.click(screen.getByTestId('remote-access-cert-reset'));
+
+    // The banner must still surface — the cert was reset, the modal
+    // is functional. If `setError` had been called, the entire modal
+    // body would be unmounted and the banner wouldn't exist.
+    await waitFor(() =>
+      expect(screen.getByTestId('remote-access-root-rotated-banner')).toBeTruthy(),
+    );
+    // The fingerprint must still be readable (the cert-status fetch
+    // succeeded); dismiss the banner to verify.
+    await user.click(screen.getByTestId('remote-access-root-rotated-ack'));
+    const fp = await screen.findByTestId('remote-access-cert-fingerprint');
+    expect(fp.textContent).toBe(POST_RESET_CERT.root_fingerprint_sha256);
+    // The connect-QR is still rendered.
+    expect(screen.getByTestId('remote-access-connect-qr')).toBeTruthy();
+    // console.warn fired (not console.error — using setError would
+    // have routed through the React error boundary and logged here).
+    expect(warnSpy).toHaveBeenCalled();
+    // Banner dismiss wrote the new generation to localStorage; a
+    // future modal open won't re-render it.
+    expect(localStorage.getItem('buildmesh.ackedRootGeneration')).toBe('2');
+
+    confirmSpy.mockRestore();
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 });
