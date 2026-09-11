@@ -12,7 +12,9 @@ import { describe, it, expect } from 'vitest';
 import { formatDurationMs, runDurationMs } from '../../src/components/Circuits/circuitGraphModel';
 import {
   activityStatusToken,
+  annotateCircuitRows,
   buildCircuitProbeRows,
+  circuitGraphFacts,
   countActiveRuns,
   countRunningSteps,
   circuitActivityStats,
@@ -82,6 +84,8 @@ describe('run diagnostics', () => {
         'node.review_classifier.review_verdict': 'approved', 'node.review_classifier.review_verdict_attempt': '3',
       }) }, steps: [step('review_classifier', 'completed')] };
       expect(reviewResult(approved, reviewCircuit)?.label).toBe('Review approved');
+      // The recorded pass number enriches the run-level summary.
+      expect(reviewResult(approved, reviewCircuit)?.detail).toContain('Approved on pass 3.');
       expect(runNeedsAttention(approved, reviewCircuit)).toBe(false);
       expect(runBelongsToActivity(approved)).toBe(false);
       approved.steps[0].outcome = 'working';
@@ -124,6 +128,32 @@ describe('run diagnostics', () => {
       expect(runBelongsToActivity(exhausted)).toBe(false);
       expect(reviewResult(exhausted, reviewCircuitMetadata(circuit))?.label).toBe('Review limit reached');
     });
+
+    it('parses each circuit graph once into a node index for step role labels', () => {
+      const circuit = {
+        ...row().circuit,
+        graph_json: JSON.stringify({
+          version: 3,
+          nodes: [
+            { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+            {
+              id: 'implementer',
+              type: {
+                type: 'spawn_agent_node', prompt: 'x', name: null, provider: null,
+                model: null, effort: null, extra_args: null, timeout_seconds: null,
+              },
+            },
+          ],
+          edges: [],
+        }),
+      };
+      const [annotated] = annotateCircuitRows([{ circuit, runs: [] }]);
+      expect(annotated.nodeIndex.get('verdict')?.type.type).toBe('review_verdict');
+      expect(annotated.nodeIndex.get('implementer')?.type.type).toBe('spawn_agent_node');
+      // The review metadata still comes from the same single parse.
+      expect(circuitGraphFacts(circuit).reviewCircuit).toEqual({ verdictNodeId: 'verdict', retryNodeIds: [] });
+    });
+
     it('keeps only live runs in Activity and every terminal run in History', () => {
       const pending = detail(1, 'pending');
       const running = detail(6, 'running', '2026-08-22 10:01:00');

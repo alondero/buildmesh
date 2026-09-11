@@ -83,11 +83,14 @@ import {
   circuitActivityStats,
   countActiveRuns,
   pendingAdmissionDetail,
+  runBelongsToActivity,
   type CircuitProbeView,
 } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { focusAgentNode } from '../../lib/focusAgentNode';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
 
@@ -380,6 +383,13 @@ export function CircuitsProbeTab() {
   const meshRunCapacity = meshRow?.circuit_run_capacity ?? 0;
   const [rows, setRows] = useState<CircuitWithRuns[]>([]);
   const [queue, setQueue] = useState<CircuitQueueEntry[]>([]);
+  /**
+   * The mesh whose snapshot is currently in `rows`/`queue`, or null while a
+   * fetch is in flight. A focus request must not be resolved against the
+   * previous mesh's rows (or the empty initial state) — that would misreport
+   * the target run as out-of-window and consume the request for good.
+   */
+  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -432,6 +442,75 @@ export function CircuitsProbeTab() {
    * refetch land without snapping a card the user just opened shut.
    */
   const [runExpandOverrides, setRunExpandOverrides] = useState<Record<number, boolean>>({});
+
+  // ---- Cross-surface focus ----
+  // A node kebab / review modal asks for a specific run; reveal it, open it,
+  // and flash a highlight so the eye lands in the right place.
+  const pendingCircuitRunFocus = useUIStore((s) => s.pendingCircuitRunFocus);
+  const consumeCircuitRunFocus = useUIStore((s) => s.consumeCircuitRunFocus);
+  const [highlightRunId, setHighlightRunId] = useState<number | null>(null);
+  const [focusNotice, setFocusNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (pendingCircuitRunFocus === null) return;
+    // Wait for the snapshot that belongs to the active mesh. On first mount
+    // `rows`/`queue` are empty, and during a mesh switch they still hold the
+    // OUTGOING mesh's data — resolving against either would misreport the run
+    // as out-of-window and consume the request before the real data lands.
+    if (activeMeshId === null || loadedMeshId !== activeMeshId) return;
+    const runId = pendingCircuitRunFocus;
+    const detail = rows.flatMap(({ runs }) => runs).find((d) => d.run.id === runId) ?? null;
+    if (detail !== null) {
+      setFocusNotice(null);
+      // A previous search / attention filter is a reason the target run would
+      // not render at all; clear it so linking always lands on the card.
+      setHistorySearch('');
+      setHistoryAttentionOnly(false);
+      setView(runBelongsToActivity(detail) ? 'activity' : 'history');
+      setRunExpandOverrides((prev) => ({ ...prev, [runId]: true }));
+      setHighlightRunId(runId);
+    } else if (queue.some((entry) => entry.run.id === runId)) {
+      setFocusNotice(null);
+      setView('queue');
+      setHighlightRunId(runId);
+    } else {
+      // The run is outside the fetched window (an older terminal run). Fall
+      // back to a History search rather than silently doing nothing.
+      setView('history');
+      setHistoryAttentionOnly(false);
+      setHistorySearch(String(runId));
+      setFocusNotice(`Run #${runId} is outside the loaded window — filtered History to it.`);
+    }
+    consumeCircuitRunFocus();
+  }, [pendingCircuitRunFocus, activeMeshId, loadedMeshId, rows, queue, consumeCircuitRunFocus]);
+
+  // Scroll after the commit that rendered the run, then clear the flash.
+  useEffect(() => {
+    if (highlightRunId === null) return;
+    const el =
+      document.querySelector(`[data-testid="run-card-${highlightRunId}"]`) ??
+      document.querySelector(`[data-testid="queue-run-${highlightRunId}"]`);
+    el?.scrollIntoView?.({ block: 'center' });
+    const timer = setTimeout(() => setHighlightRunId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [highlightRunId]);
+
+  // Resolve an Agent Node's display name for the run cards. Read through
+  // `getState()` so a name edit does not have to re-render the whole ledger;
+  // the name is only read at render, and node rows change far more often than
+  // the ledger does.
+  const agentName = useCallback(
+    (nodeId: number) => useAgentNodeStore.getState().nodesById[nodeId]?.name ?? null,
+    []
+  );
+  const handleFocusAgent = useCallback((nodeId: number) => {
+    if (!focusAgentNode(nodeId)) {
+      // The node was archived or deleted since the run was rendered; say so
+      // rather than leaving the click feeling broken.
+      setFocusNotice(`Agent node #${nodeId} is no longer available.`);
+    }
+  }, []);
+
   /**
    * Clock the duration labels measure a live run against.
    *
@@ -469,6 +548,7 @@ export function CircuitsProbeTab() {
     if (activeMeshId === null) {
       setRows([]);
       setQueue([]);
+      setLoadedMeshId(null);
       return;
     }
     try {
@@ -487,14 +567,22 @@ export function CircuitsProbeTab() {
         return next;
       });
       setLoadError(null);
+      setLoadedMeshId(activeMeshId);
     } catch (err) {
       if (requestId !== loadRequestRef.current) return;
       console.error('Failed to load circuits:', err);
       setLoadError(formatError(err));
+      // The fetch is over (even though it failed), so a pending focus request
+      // must not wait forever; absence of the run is then a real answer.
+      setLoadedMeshId(activeMeshIdRef.current === activeMeshId ? activeMeshId : null);
     }
   }, [activeMeshId]);
 
   useEffect(() => {
+    // Any mesh change invalidates the snapshot identity: `rows` still belongs
+    // to the outgoing mesh until the new fetch lands, and a focus request must
+    // wait for that rather than resolve against stale data.
+    setLoadedMeshId(null);
     void load();
     return () => {
       // Invalidate an in-flight snapshot before a mesh switch or unmount.
@@ -700,6 +788,15 @@ export function CircuitsProbeTab() {
           {actionError ?? loadError}
         </div>
       )}
+      {focusNotice !== null && (
+        <div
+          className="px-3 py-1 text-xs text-text-secondary shrink-0 break-words"
+          role="status"
+          data-testid="circuits-focus-notice"
+        >
+          {focusNotice}
+        </div>
+      )}
       {view === 'manage' && <CircuitCreateForm
         busy={busy}
         newName={newName}
@@ -870,7 +967,7 @@ export function CircuitsProbeTab() {
         ) : (
           <ul className="flex flex-col gap-1 p-2">
             {view === 'history' && <li className="text-2xs text-text-muted px-1">History · failed and needs-review runs first, then newest finished runs (windowed per circuit)</li>}
-            {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit }) => {
+            {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit, nodeIndex }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {
@@ -987,6 +1084,10 @@ export function CircuitsProbeTab() {
                           key={detail.run.id}
                           detail={detail}
                           reviewCircuit={reviewCircuit}
+                          nodeIndex={nodeIndex}
+                          agentName={agentName}
+                          onFocusAgent={handleFocusAgent}
+                          focused={highlightRunId === detail.run.id}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
                           onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}
