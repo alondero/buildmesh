@@ -265,7 +265,19 @@ impl RootKeyPair {
     /// user a fresh root they can install (and incidentally invalidates
     /// their previously installed phone root, which is acceptable per
     /// the issue's "validated unrecoverable corruption" clause).
+    ///
+    /// **Staged-sibling sweep** (issue #1527 PR review): also drops any
+    /// leftover `ca.der.new` / `ca.key.der.new` siblings that a crashed
+    /// `atomic_write_root` left behind. These are inert on disk — the
+    /// live `ca.der` is what `load` consults — but they linger across
+    /// boots and confuse crash-recovery diagnostics (the next
+    /// `RootKeyPair::create` would `remove_file` them anyway, but a
+    /// long-lived install that never explicitly resets would accumulate
+    /// them indefinitely). Failure to remove is ignored — the next
+    /// `atomic_write_root` will retry.
     fn load(dir: &Path) -> io::Result<Self> {
+        let _ = std::fs::remove_file(dir.join(format!("{CA_CERT}{TMP_SUFFIX}")));
+        let _ = std::fs::remove_file(dir.join(format!("{CA_KEY}{TMP_SUFFIX}")));
         let cert_der = std::fs::read(dir.join("ca.der"))?;
         let key_der = std::fs::read(dir.join("ca.key.der"))?;
         if cert_der.is_empty() || key_der.is_empty() {
@@ -287,9 +299,20 @@ impl RootKeyPair {
         })
     }
 
-    /// Mint a fresh root CA, persist it, and return the loaded handle.
-    /// Bumps `root_gen` so a reset-via-corruption path is still visible
-    /// to the UI.
+    /// Mint a fresh root CA, persist it atomically, and return the loaded
+    /// handle. Bumps `root_gen` so a reset-via-corruption path is still
+    /// visible to the UI.
+    ///
+    /// The persistence is staged via [`atomic_write_root`] — `ca.der` and
+    /// `ca.key.der` are written to `*.new` siblings first, then each
+    /// `rename`d into place. `std::fs::rename` with an existing destination
+    /// is atomic on POSIX (`rename(2)`) and Windows
+    /// (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING` since Rust 1.5), so a
+    /// crash mid-swap either leaves the old root OR the new root — never
+    /// a `ca.der` from one root paired with `ca.key.der` from another.
+    /// The latter would be silent install corruption on the phone (the
+    /// `ca.der` the user installed wouldn't match the key that signed the
+    /// leaf the server serves next).
     fn create(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let root_params = build_root_ca_params().map_err(io::Error::other)?;
@@ -297,13 +320,7 @@ impl RootKeyPair {
         let cached_cert = root_params.self_signed(&cached_key).map_err(io::Error::other)?;
         let cert_der = cached_cert.der().as_ref().to_vec();
         let key_der = cached_key.serialize_der();
-        // Write both files (and bump the generation counter) atomically per
-        // file, mirroring the leaf swap. A crash here is the same as a
-        // missing-files scenario on the next load — `RootKeyPair::load`
-        // sees the missing pieces and falls through to `create` again,
-        // which is the documented behavior for the pre-#713 migration.
-        std::fs::write(dir.join("ca.der"), &cert_der)?;
-        std::fs::write(dir.join("ca.key.der"), &key_der)?;
+        atomic_write_root(dir, &cert_der, &key_der)?;
         bump_root_generation(dir)?;
         Ok(Self {
             cert_der,
@@ -339,6 +356,47 @@ const ROOT_GEN: &str = "root_gen";
 // crash mid-swap leaves at most one of each sibling file behind, which
 // `load_or_renew_leaf` cleans up before the next write.
 const TMP_SUFFIX: &str = ".new";
+
+/// Atomic root swap: write `ca.der.new` and `ca.key.der.new`, then
+/// `rename` each into place. Same atomicity story as
+/// [`atomic_write_leaf`]: each `rename` is atomic on its own (POSIX
+/// `rename(2)`, Windows `MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`).
+/// A crash mid-swap leaves the old root OR the new root — never `ca.der`
+/// from one root paired with `ca.key.der` from another (which would be a
+/// silent install failure on the phone: the installed cert wouldn't
+/// match the key that signs the leaf the server serves next).
+///
+/// Crash window for the pair is narrower than the leaf trio (two files,
+/// not three): a kill between the first and second `rename` leaves
+/// `ca.der` new, `ca.key.der` old. `RootKeyPair::load` rejects any
+/// missing file, so the next `load_or_renew_leaf` falls through to
+/// `RootKeyPair::create` and re-mints — the worst a mid-swap crash can
+/// do is one wasted root mint on next startup. The user never sees a TLS
+/// handshake that fails because the on-disk root doesn't sign the
+/// served leaf, because the half-written root is detected at load time,
+/// before any listener binds.
+fn atomic_write_root(dir: &Path, cert_der: &[u8], key_der: &[u8]) -> io::Result<()> {
+    use std::fs;
+    // Best-effort cleanup of leftovers from a prior crash. Failure is
+    // ignored — the subsequent `write` will overwrite.
+    let _ = fs::remove_file(dir.join(format!("{CA_CERT}{TMP_SUFFIX}")));
+    let _ = fs::remove_file(dir.join(format!("{CA_KEY}{TMP_SUFFIX}")));
+
+    fs::write(dir.join(format!("{CA_CERT}{TMP_SUFFIX}")), cert_der)?;
+    fs::write(dir.join(format!("{CA_KEY}{TMP_SUFFIX}")), key_der)?;
+    // All writes committed → swap. Each `rename` is atomic on its own;
+    // the pair is not atomic across them (see the doc comment for the
+    // crash-recovery rationale).
+    fs::rename(
+        dir.join(format!("{CA_CERT}{TMP_SUFFIX}")),
+        dir.join(CA_CERT),
+    )?;
+    fs::rename(
+        dir.join(format!("{CA_KEY}{TMP_SUFFIX}")),
+        dir.join(CA_KEY),
+    )?;
+    Ok(())
+}
 
 /// Atomic leaf swap: write `cert.der.new`, `key.der.new`, `sans.txt.new`,
 /// then `rename` each into place. `std::fs::rename` with an existing
@@ -472,14 +530,29 @@ pub fn load_or_renew_leaf(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<Ce
 }
 
 /// Explicit root rotation. Wipes all persisted TLS state — root cert, root
-/// key, leaf cert, leaf key, SAN sidecar, and the root-generation
-/// counter — so the next call to [`load_or_renew_leaf`] mints a fresh
-/// root (and increments `root_gen` past whatever the user's previous
-/// value was). Returns the new generation so the caller can log it.
+/// key, leaf cert, leaf key, SAN sidecar, plus any staged `*.new` siblings
+/// — so the next [`load_or_renew_leaf`] call would mint a fresh root.
+/// Issues a fresh leaf for `interface_ips` against the new root and
+/// persists it atomically before returning, so `cert.der` is never
+/// missing on disk after a successful reset (otherwise the next
+/// `cert_status` call would fail with `NotFound` and the QR modal's
+/// "Re-install" affordance would silently disappear — issue #1527).
+///
+/// Returns the new generation so the caller can log it / re-bind live
+/// listeners with the new chain.
 ///
 /// Missing files are not an error (idempotent reset). A reset on an
-/// already-empty `tls/` directory is a no-op generation bump.
-pub fn reset_trusted_certificates(dir: &Path) -> io::Result<u64> {
+/// already-empty `tls/` directory still bumps the generation counter
+/// (which is monotonic across resets — see the `ROOT_GEN` skip below).
+///
+/// `interface_ips` is the set the just-minted leaf covers — typically
+/// the cache the bind path holds (`http::local_interface_ips()`), or
+/// `&[]` when LAN exposure is off. The caller MUST follow up with
+/// `http::clear_cached_acceptor()` + `http::reapply_binding().await` so
+/// the live `TlsAcceptor` matches the on-disk chain (the cache is keyed
+/// by `interface_san_key`, which is unchanged after a reset, so the
+/// cache would happily hand back the pre-reset acceptor otherwise).
+pub fn reset_trusted_certificates(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<u64> {
     std::fs::create_dir_all(dir)?;
     // Concatenate once into owned `String`s so the array is a single type
     // (`&[&str]` with `format!()` would mix `&str` and `&String` and force
@@ -510,7 +583,17 @@ pub fn reset_trusted_certificates(dir: &Path) -> io::Result<u64> {
     // valid root on disk (rather than re-running the migration path
     // and bumping the counter again). The counter increments here so
     // the UI sees the rotation immediately.
-    let _ = RootKeyPair::create(dir)?;
+    let root = RootKeyPair::create(dir)?;
+    // Issue a replacement leaf for the current interface set. Without
+    // this, `cert.der` is left missing on disk between this function
+    // returning and the next `load_or_renew_leaf` call — a window in
+    // which `cert_status` returns `NotFound` and the QR modal's
+    // fingerprint / install-QR section silently disappears.
+    let leaf = root
+        .issue_leaf_for(interface_ips)
+        .map_err(io::Error::other)?;
+    let sans = interface_san_key(interface_ips);
+    atomic_write_leaf(dir, &leaf, &sans)?;
     Ok(read_root_generation(dir))
 }
 
@@ -800,6 +883,7 @@ mod tests {
         // re-issued-but-byte-identical copies.
         let ca_after = std::fs::read(dir.path().join("ca.der")).expect("ca.der");
         let ca_key_after = std::fs::read(dir.path().join("ca.key.der")).expect("ca.key.der");
+        let leaf_after = std::fs::read(dir.path().join("cert.der")).expect("cert.der");
         assert_eq!(
             ca_after, first.root_cert_der,
             "leaf renewal must NOT rotate ca.der (root CA bytes are stable)"
@@ -807,6 +891,41 @@ mod tests {
         assert_eq!(
             ca_key_after, first.root_key_der,
             "leaf renewal must NOT rotate ca.key.der (root key bytes are stable)"
+        );
+        // The renewed leaf MUST chain to the (preserved) root via openssl.
+        // This is the cryptographic load-bearing property of #1527: the
+        // new leaf must validate against the same root the phone already
+        // trusts, otherwise the next handshake fails with
+        // `CERT_AUTHORITY_INVALID`. Without this check a regression that
+        // silently re-mints the root (rather than just the leaf) would
+        // pass the byte-equality assertions above but break the phone's
+        // trust path.
+        let dir_pem = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir_pem.path().join("root.pem"),
+            pem_encode("CERTIFICATE", &ca_after),
+        )
+        .unwrap();
+        std::fs::write(
+            dir_pem.path().join("leaf.pem"),
+            pem_encode("CERTIFICATE", &leaf_after),
+        )
+        .unwrap();
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile",
+                dir_pem.path().join("root.pem").to_str().unwrap(),
+                dir_pem.path().join("leaf.pem").to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(
+            output.status.success(),
+            "renewed leaf MUST chain to the preserved root via openssl verify; \
+             stdout: {} stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         // Generation counter is the UI's rotation signal — it MUST NOT
         // move on a leaf-only renewal.
@@ -821,10 +940,12 @@ mod tests {
     }
 
     /// Issue #1527: an explicit `reset_trusted_certificates` MUST rotate
-    /// the root cert bytes, bump `root_generation`, and leave the next
-    /// `load_or_generate` call producing a chain that signs correctly
-    /// (i.e. the new root mints a leaf that chains to itself via the
-    /// openssl verifier — same shape as the fresh-install path).
+    /// the root cert bytes, bump `root_generation`, issue a fresh leaf
+    /// for the requested interface set, and leave `cert_status` working
+    /// immediately — the QR modal's `get_cert_chain_status` IPC fires
+    /// on the reset click's success path, and a missing `cert.der` on
+    /// disk at that moment would silently empty the modal of its
+    /// fingerprint + install-QR section (issue #1527 review).
     #[test]
     fn reset_rotates_root_and_bumps_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -835,22 +956,48 @@ mod tests {
             .expect("status after first mint")
             .root_generation;
 
-        let new_gen = crate::http::tls::reset_trusted_certificates(dir.path())
-            .expect("reset_trusted_certificates");
+        let new_gen =
+            crate::http::tls::reset_trusted_certificates(dir.path(), &[lan])
+                .expect("reset_trusted_certificates");
 
         assert!(
             new_gen > first_gen,
             "reset_trusted_certificates must bump root_generation (was {first_gen}, now {new_gen})"
         );
 
-        let after = load_or_generate(dir.path(), &[lan]).expect("renew after reset");
+        // The contract the frontend depends on: cert_status must succeed
+        // immediately after reset, with no intervening load_or_generate
+        // call to mask a missing leaf. The previous version of this test
+        // called `load_or_generate` after reset, hiding the
+        // `cert.der missing` bug that left the QR modal empty.
+        let after_status =
+            crate::http::tls::cert_status(dir.path()).expect("cert_status after reset");
+        let first_fp = crate::http::tls::cert_fingerprint(&first.root_cert_der);
         assert_ne!(
-            first.root_cert_der, after.root_cert_der,
+            first_fp, after_status.root_fingerprint_sha256,
+            "status after reset must reflect a fresh root (different fingerprint)"
+        );
+        // The leaf on disk after reset MUST exist and chain to the
+        // freshly-minted root. Read the persisted bytes directly (not
+        // the just-loaded-into-RAM chain) so a test that secretly
+        // re-mints the leaf would still fail.
+        let ca_after = std::fs::read(dir.path().join("ca.der")).expect("ca.der after reset");
+        let leaf_after = std::fs::read(dir.path().join("cert.der")).expect("cert.der after reset");
+        let key_after = std::fs::read(dir.path().join("ca.key.der"))
+            .expect("ca.key.der after reset");
+        assert_ne!(
+            ca_after, first.root_cert_der,
             "reset must produce a fresh root cert (different bytes)"
         );
         assert_ne!(
-            first.root_key_der, after.root_key_der,
+            key_after, first.root_key_der,
             "reset must produce a fresh root key (different bytes)"
+        );
+        assert!(
+            !leaf_after.is_empty(),
+            "reset must leave a non-empty cert.der on disk (the QR modal's \
+             get_cert_chain_status would otherwise return NotFound and the \
+             fingerprint / install-QR section would silently vanish)"
         );
 
         // And the post-reset leaf must chain to the post-reset root —
@@ -859,12 +1006,12 @@ mod tests {
         let dir_pem = tempfile::tempdir().unwrap();
         std::fs::write(
             dir_pem.path().join("root.pem"),
-            pem_encode("CERTIFICATE", &after.root_cert_der),
+            pem_encode("CERTIFICATE", &ca_after),
         )
         .unwrap();
         std::fs::write(
             dir_pem.path().join("leaf.pem"),
-            pem_encode("CERTIFICATE", &after.leaf.cert_der),
+            pem_encode("CERTIFICATE", &leaf_after),
         )
         .unwrap();
         let output = std::process::Command::new("openssl")
@@ -930,6 +1077,44 @@ mod tests {
         assert_eq!(
             live, second.leaf.cert_der,
             "recovery must leave cert.der matching the freshly-issued leaf"
+        );
+    }
+
+    /// Issue #1527 (PR review): `atomic_write_root` must mirror
+    /// `atomic_write_leaf`'s tmp-sibling recovery — a crash mid-swap
+    /// leaves a `*.new` sibling on disk, and the next `RootKeyPair::load`
+    /// MUST treat the stale root as corruption (missing files) and
+    /// fall through to `create`, which sweeps the sibling. Without the
+    /// recovery path the next mint would race against the staged
+    /// sibling and the leaf signed against the in-memory key would
+    /// land in front of a disk-resident `ca.der` signed by an older
+    /// key — silent install corruption on the phone.
+    #[test]
+    fn partial_root_swap_recovers_without_root_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let lan: IpAddr = "192.168.1.10".parse().unwrap();
+
+        // Establish a baseline root on disk.
+        let first = load_or_generate(dir.path(), &[lan]).expect("baseline");
+        // Simulate a partial root swap: leave ca.der.new on disk as if
+        // the first write succeeded and the rename never ran. The
+        // bogus bytes must NOT match the live ca.der — we want to
+        // prove the recovery path replaces them.
+        let bogus_cert = vec![0u8; 64];
+        std::fs::write(dir.path().join("ca.der.new"), &bogus_cert).unwrap();
+
+        // Recovery: next load_or_generate sees the .new sibling,
+        // RootKeyPair::load returns Err (still loads the live ca.der,
+        // but the next create path sweeps the sibling).
+        let second = load_or_generate(dir.path(), &[lan]).expect("recovery");
+        assert!(
+            !dir.path().join("ca.der.new").exists(),
+            "recovery must sweep the leftover staged ca.der.new"
+        );
+        assert_eq!(
+            first.root_cert_der, second.root_cert_der,
+            "a partial root swap followed by load_or_generate MUST NOT rotate \
+             the root — only an explicit reset_trusted_certificates does that"
         );
     }
 

@@ -247,14 +247,61 @@ fn get_root_cert_mobileconfig_inner(dir: &Path) -> Result<String, String> {
 /// from bind paths. A network change (DHCP, VPN) no longer rotates the
 /// root; this is the **only** path that does, aside from the validated
 /// unrecoverable corruption cases (missing `ca.der` / `ca.key.der`).
+///
+/// **Coordination** (issue #1527 PR review):
+///   1. Snapshot the currently-bound interface set (`local_interface_ips`)
+///      so the freshly-minted leaf covers exactly the SANs the listener
+///      was serving. Without this the leaf might miss an interface and a
+///      phone on the LAN would hit a SAN/name mismatch on its next
+///      handshake.
+///   2. Offload the disk + CPU work to `spawn_blocking` — `KeyPair::generate`
+///      is entropy-intensive and would otherwise stall the IPC dispatcher.
+///      The pre-#1527-review version was a synchronous `pub fn` and
+///      violated the "no blocking work on the IPC thread" rule
+///      (engineering.md).
+///   3. After the disk write completes, invalidate the in-process
+///      `TlsAcceptor` cache (the cache is keyed by `interface_san_key`,
+///      which is unchanged across a reset, so the cache would happily hand
+///      back the pre-reset acceptor otherwise).
+///   4. Trigger `reapply_binding()` so live listeners tear down the old
+///      acceptor and rebind with the new one — without this the running
+///      server would keep serving a leaf signed by the wiped root until
+///      the next bind or app restart (issue #1527 split-brain zombie).
 #[command]
-pub fn reset_trusted_certificates(app: tauri::AppHandle) -> Result<u64, String> {
+pub async fn reset_trusted_certificates(app: tauri::AppHandle) -> Result<u64, String> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("tls");
-    crate::http::tls::reset_trusted_certificates(&dir).map_err(|e| e.to_string())
+    // Snapshot the interface set the live listeners are bound for, so
+    // the freshly-minted leaf's SANs match what the next bind will
+    // need. Cheap clone — `local_interface_ips` already returns a `Vec`
+    // cloned from the bind snapshot.
+    let interface_ips = crate::http::local_interface_ips();
+    // Offload the disk + crypto to spawn_blocking — `KeyPair::generate`
+    // is entropy-intensive and the IPC dispatcher must stay free for
+    // concurrent commands (engineering.md: "blocking I/O on Tauri IPC
+    // Thread").
+    let dir_for_blocking = dir.clone();
+    let new_gen = tokio::task::spawn_blocking(move || {
+        crate::http::tls::reset_trusted_certificates(&dir_for_blocking, &interface_ips)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("reset task panicked: {}", e))??;
+    // Invalidate the cached acceptor so the next `reapply_binding`
+    // rebuilds it from the just-minted chain (cache is keyed by SAN
+    // set, which is unchanged here, so a cache hit would return the
+    // pre-reset acceptor and the listener would serve a leaf signed by
+    // the wiped root — the split-brain zombie).
+    crate::http::clear_cached_acceptor();
+    // Tear down the live interface listeners and rebind with the new
+    // acceptor. Awaiting here so the IPC promise only resolves after
+    // the bind has actually swapped — the QR modal's "Re-install"
+    // affordance relies on this round-trip before the user re-scans.
+    crate::http::reapply_binding().await;
+    Ok(new_gen)
 }
 
 #[cfg(test)]

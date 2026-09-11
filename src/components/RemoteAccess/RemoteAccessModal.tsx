@@ -1,5 +1,5 @@
 import { formatError } from '../../lib/errorUtils';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import QRCode from 'qrcode';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -11,6 +11,17 @@ import type { CertChainStatus } from '../../types/generated/CertChainStatus';
 interface RemoteAccessModalProps {
   onClose: () => void;
 }
+
+// Issue #1527: the "trusted root was reset" banner must surface across
+// modal opens — the previous in-component `useState` was reset on every
+// mount, so the banner could only render in the same session that
+// triggered the reset (issue #1527 PR review: dead-banner bug). We
+// persist the last-acknowledged generation to `localStorage` so a
+// user who closes the modal after a reset, then reopens it later,
+// still sees the banner until they tap "Got it". A single key
+// scoped per-app (the `buildmesh` namespace) avoids collision with
+// any other webview localStorage state.
+const ACKED_ROOT_GENERATION_KEY = 'buildmesh.ackedRootGeneration';
 
 /**
  * Build the URL the phone should hit from the server's *realized* network
@@ -80,6 +91,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // interface change. `null` means "first mount — don't flash a banner
   // just because the counter starts at 1"; the user has to see the
   // counter move past what they last saw to be notified.
+  //
+  // Persisted to `localStorage` so a user who closes the modal after a
+  // reset, then reopens it days later, still sees the banner until they
+  // tap "Got it". The previous in-component `useState` reset to `null`
+  // on every mount — the banner could only render in the same session
+  // that triggered the reset (issue #1527 PR review: dead-banner bug).
+  // Reads run once on mount (see the `useEffect` below) and writes run
+  // from `handleAckBanner` only — never silently on every render.
   const [ackedRootGeneration, setAckedRootGeneration] = useState<number | null>(null);
   // True while the explicit reset action is in-flight. Disables the
   // button to prevent double-clicks; cleared on success or error.
@@ -163,8 +182,20 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // happens to be > 0. The user has to see the counter INCREASE
         // past this value (via reset or unrecoverable corruption) to be
         // prompted to re-install.
-        if (cert && ackedRootGeneration === null) {
-          setAckedRootGeneration(cert.root_generation);
+        //
+        // Functional `setState` is load-bearing here: the
+        // `ackedRootGeneration` captured in this closure is the value
+        // from the render that triggered this effect — which is `null`
+        // for the initial render regardless of whether the
+        // localStorage hydrate (declared just below) has already set a
+        // non-null value. Functional setState reads the CURRENT value
+        // at the time React processes the update, so if the hydrate
+        // already wrote `0` (or any prior-acked value), we skip the
+        // seed and preserve it.
+        if (cert) {
+          setAckedRootGeneration(current =>
+            current === null ? cert.root_generation : current,
+          );
         }
         // Hoist the install URL once — the QR payload and the fallback
         // link must stay in sync, and `${origin}/install-cert.der` has
@@ -273,6 +304,31 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     };
   }, []);
 
+  // Issue #1527: hydrate `ackedRootGeneration` from `localStorage` so the
+  // banner survives a modal close + reopen. Read once on mount and let
+  // `init()`'s "seed if null" branch handle the no-prior-value case
+  // (otherwise a freshly-installed user — `localStorage` is empty, but
+  // `certStatus.root_generation` could already be 1 from a previous
+  // install — would see the banner flash on first open). A corrupted
+  // or non-numeric value is treated as absent; the seed branch falls
+  // through and the banner doesn't render (correct: we have no evidence
+  // the user has acknowledged the current generation).
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(ACKED_ROOT_GENERATION_KEY);
+      if (stored !== null) {
+        const parsed = Number(stored);
+        if (Number.isFinite(parsed)) {
+          setAckedRootGeneration(parsed);
+        }
+      }
+    } catch {
+      // localStorage access can throw in private windows / iframe sandbox
+      // configs. Fall through to the seed branch — banner stays hidden on
+      // this open and the user can re-trigger via explicit Reset.
+    }
+  }, []);
+
   const handleCopyCertPath = async () => {
     // Narrow `cert_path` against the optional TS field (skipped in the HTTP
     // route's JSON via `#[serde(skip_serializing_if = "Option::is_none")]`).
@@ -322,11 +378,27 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const handleResetCertificates = async () => {
     // Explicit user gesture — never auto-invoked. Wipes the persisted
     // TLS state on the server side. After this the server mints a fresh
-    // root on the next bind, the user's phone loses trust, and they
-    // must re-install via the install-QR above. We re-read certStatus
-    // on success so the new generation shows up immediately and the
-    // banner reflects the current state (the user just triggered the
-    // rotation, so they don't need a banner telling them — they know).
+    // root + leaf, the user's phone loses trust, and they must
+    // re-install via the install-QR above.
+    //
+    // Three things must happen on success (issue #1527 PR review):
+    //   1. Re-fetch `certStatus` (don't shallow-copy) so the new
+    //      `root_fingerprint_sha256` / `leaf_fingerprint_sha256` land
+    //      in state. The previous shallow-spread left the UI showing
+    //      the *deleted* root's fingerprint — a user who compared
+    //      against what they last installed would see the cert "match"
+    //      when the server's chain was actually fresh.
+    //   2. Re-mint the iOS install-QR. `installIosQrDataUrl` is built
+    //      once on mount and pins the base64 of the *just-wiped* root
+    //      key's signature — scanning the stale QR installs a
+    //      `.mobileconfig` signed by the deleted key, which iOS rejects
+    //      with a "Profile not signed by a trusted source" error and a
+    //      silent install failure.
+    //   3. Do NOT update `ackedRootGeneration` here — letting it lag
+    //      behind the new generation is the entire point. After reset,
+    //      `certStatus.root_generation > ackedRootGeneration` becomes
+    //      true and the banner surfaces in this same session (and on
+    //      every subsequent modal open, until the user taps "Got it").
     if (resetting) return;
     if (!window.confirm(
       'Reset the trusted root certificate? Your phone will stop trusting this server ' +
@@ -334,15 +406,79 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     )) return;
     setResetting(true);
     try {
-      const newGen = await api.resetTrustedCertificates();
-      setCertStatus(prev => prev ? { ...prev, root_generation: newGen } : prev);
-      setAckedRootGeneration(newGen);
+      await api.resetTrustedCertificates();
+      // Re-fetch the full snapshot — NOT a shallow spread. The server
+      // has just minted a fresh keypair, so every fingerprint is
+      // different. Reading `getCertChainStatus` again also surfaces a
+      // post-reset `cert.der` failure (issue #1527: the previous code
+      // relied on the IPC command succeeding, but `cert.der` was
+      // missing on disk between reset and the next bind — `cert_status`
+      // returned `NotFound` and the modal's fingerprint section
+      // silently disappeared).
+      const fresh = await api.getCertChainStatus();
+      setCertStatus(fresh);
+      // Re-mint the iOS install-QR. The QR encodes a
+      // `data:application/x-apple-aspen-config;base64,…` payload
+      // whose PKCS#7/CMS signature uses the freshly-minted root key.
+      // The connect-QR (token URL) doesn't need to change; the
+      // install-Android QR doesn't either (it points at
+      // `/install-cert.der` which serves the live `ca.der`). Only the
+      // iOS profile QR is signed by the key, so it's the only one that
+      // must be rebuilt.
+      try {
+        const b64 = await api.getRootCertMobileconfig();
+        const payload = `data:application/x-apple-aspen-config;base64,${b64}`;
+        const iosQr = await QRCode.toDataURL(payload, {
+          width: 384,
+          margin: 2,
+          color: { dark: '#e0e0e0', light: '#1a1a1a' },
+        });
+        setInstallIosQrDataUrl(iosQr);
+      } catch (e) {
+        // Don't fail the whole modal for an iOS-QR-only failure.
+        // `setError` here would unmount every other affordance
+        // (connect QR, Android install QR, fingerprint, reset button)
+        // — the reviewer's whole point. Mirror the init() silent-
+        // failure contract instead: clear the iOS QR so the tab hides,
+        // log to console.warn for the diagnosis surface (`/use`,
+        // `/verify` tail the log), and leave the modal usable for
+        // every other path. The user has the Android install-QR as a
+        // working remediation for the same root.
+        console.warn('failed to regenerate iOS install-QR after reset:', e);
+        setInstallIosQrDataUrl(null);
+      }
+      // Note: NOT calling `setAckedRootGeneration(newGen)` — that's the
+      // banner-killing bug the previous version had. The localStorage
+      // value from before the reset is the "I last saw this generation"
+      // sentinel; bumping it here would defeat the banner's purpose.
     } catch (e) {
       setError(formatError(e));
     } finally {
       setResetting(false);
     }
   };
+
+  // Acknowledge the "trusted root was reset" banner. Persists the
+  // current generation to `localStorage` so the banner stays hidden
+  // across modal opens until the next rotation. Issue #1527: the
+  // previous in-component state was reset on every mount, so the
+  // banner could only render in the same session that triggered the
+  // reset.
+  const handleAckBanner = useCallback(() => {
+    if (!certStatus) return;
+    setAckedRootGeneration(certStatus.root_generation);
+    try {
+      window.localStorage.setItem(
+        ACKED_ROOT_GENERATION_KEY,
+        String(certStatus.root_generation),
+      );
+    } catch {
+      // localStorage write can fail in private-window / iframe-sandbox
+      // configs. The in-component state is already updated, so the
+      // banner hides for THIS session — only the cross-session
+      // persistence is lost. The user can still re-trigger via Reset.
+    }
+  }, [certStatus]);
 
   return (
     <Modal onClose={onClose} labelledBy="remote-access-title" maxWidth="max-w-lg" className="p-8">
@@ -379,6 +515,13 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           // is either an explicit Reset or the (rare) unrecoverable
           // corruption path; in both cases the phone has stopped
           // trusting the server, so re-install is required.
+          //
+          // The banner has a "Got it" button that writes the current
+          // generation to `localStorage` (via `handleAckBanner`) so the
+          // banner stays hidden across modal opens until the next
+          // rotation. Without the explicit ack, the banner would either
+          // re-appear on every modal open (annoying) or never disappear
+          // (useless) — neither serves the rotation signal.
           <div
             data-testid="remote-access-root-rotated-banner"
             role="alert"
@@ -393,6 +536,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               on this modal. (A network address change does NOT cause this —
               only an explicit reset.)
             </div>
+            <button
+              data-testid="remote-access-root-rotated-ack"
+              onClick={handleAckBanner}
+              className="mt-2 text-xs font-medium text-status-warning hover:underline"
+              type="button"
+            >
+              Got it
+            </button>
           </div>
         ) : qrDataUrl ? (
           <div className="flex flex-col items-center">

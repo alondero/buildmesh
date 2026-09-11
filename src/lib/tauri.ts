@@ -1422,7 +1422,11 @@ export const getCertChainStatus = () =>
  *  persisted root + leaf + SAN sidecar + generation counter so the next
  *  bind mints a fresh root. The user's phone loses trust and must
  *  re-install via the install-QR. Returns the new `root_generation` so
- *  the UI can confirm the rotation took and seed its last-acked value.
+ *  the UI can confirm the rotation took and re-fetch cert_status. The
+ *  backend command also invalidates the live `TlsAcceptor` cache and
+ *  triggers a rebind, so the iOS `.mobileconfig` QR (which the desktop
+ *  re-mints after a reset) actually chains to the cert the listener is
+ *  now serving.
  *
  *  **Idempotent**: calling on an already-empty tls/ dir is a no-op
  *  generation bump. Frontend exposes this as a Settings affordance;
