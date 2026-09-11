@@ -265,7 +265,7 @@ mod windows {
     fn acquire_transaction(admin: &Path) -> Result<Option<Transaction>, String> {
         let path = admin.join(format!("{TRANSACTION_PREFIX}lock"));
         const POLL_INTERVAL: Duration = Duration::from_millis(25);
-        const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+        const WAIT_TIMEOUT: Duration = Duration::from_millis(1_520);
         let deadline = Instant::now() + WAIT_TIMEOUT;
         loop {
             match OpenOptions::new()
