@@ -41,10 +41,12 @@ mod windows {
     use std::io::Write;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{symlink_dir, symlink_file, MetadataExt, OpenOptionsExt};
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
 
     pub(crate) const TEST_FAIL_AFTER_CANDIDATES: u8 = 1;
     pub(crate) const TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION: u8 = 2;
+    pub(crate) const TEST_HOLD_LOCK_AFTER_ACQUIRE: u8 = 3;
 
     #[cfg(test)]
     thread_local! {
@@ -106,6 +108,30 @@ mod windows {
         file: Option<fs::File>,
     }
 
+    impl Spec {
+        fn leaf(self) -> &'static str {
+            self.path.rsplit('/').next().unwrap_or(self.path)
+        }
+
+        fn candidate_path(self, root: &Path, operation: &str) -> PathBuf {
+            let path = root.join(self.path);
+            let parent = path.parent().unwrap_or(root);
+            parent.join(format!(
+                "{TRANSACTION_PREFIX}{operation}-{}.candidate",
+                self.leaf()
+            ))
+        }
+
+        fn backup_path(self, root: &Path, operation: &str) -> PathBuf {
+            let path = root.join(self.path);
+            let parent = path.parent().unwrap_or(root);
+            parent.join(format!(
+                "{}{TRANSACTION_PREFIX}{operation}.backup",
+                self.leaf()
+            ))
+        }
+    }
+
     impl Drop for Transaction {
         fn drop(&mut self) {
             let _ = self.file.take();
@@ -129,6 +155,9 @@ mod windows {
             return Err("Muse context repair is already running for this worktree".into());
         };
         let _transaction = transaction;
+        if consume_test_fault(TEST_HOLD_LOCK_AFTER_ACQUIRE) {
+            std::thread::sleep(Duration::from_millis(150));
+        }
         let index = repo
             .index()
             .map_err(|e| format!("Muse context: cannot read Git index: {e}"))?;
@@ -235,59 +264,55 @@ mod windows {
 
     fn acquire_transaction(admin: &Path) -> Result<Option<Transaction>, String> {
         let path = admin.join(format!("{TRANSACTION_PREFIX}lock"));
-        let create_lock = || {
-            OpenOptions::new()
+        const POLL_INTERVAL: Duration = Duration::from_millis(25);
+        const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
+            match OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .share_mode(0)
                 .open(&path)
-        };
-        match create_lock() {
-            Ok(mut file) => {
-                let _ = writeln!(file, "{}", std::process::id());
-                file.sync_all()
-                    .map_err(|e| format!("Muse context: cannot flush lock: {e}"))?;
-                Ok(Some(Transaction {
-                    path,
-                    file: Some(file),
-                }))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // A live transaction holds the file with share mode zero. If
-                // we can open it exclusively, it is a crash residue and can
-                // be removed safely; no age heuristic can mistake a
-                // suspended live process for a stale owner.
-                match OpenOptions::new().read(true).share_mode(0).open(&path) {
-                    Ok(file) => {
-                        drop(file);
-                        let _ = fs::remove_file(&path);
-                        match create_lock() {
-                            Ok(mut file) => {
-                                let _ = writeln!(file, "{}", std::process::id());
-                                file.sync_all()
-                                    .map_err(|e| format!("Muse context: cannot flush lock: {e}"))?;
-                                Ok(Some(Transaction {
-                                    path,
-                                    file: Some(file),
-                                }))
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                                Ok(None)
-                            }
-                            Err(error) => Err(format!(
-                                "Muse context: cannot acquire transaction lock: {error}"
-                            )),
+            {
+                Ok(mut file) => {
+                    let _ = writeln!(file, "{}", std::process::id());
+                    file.sync_all()
+                        .map_err(|e| format!("Muse context: cannot flush lock: {e}"))?;
+                    return Ok(Some(Transaction {
+                        path: path.clone(),
+                        file: Some(file),
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A live transaction holds the file with share mode zero.
+                    // If we can open it exclusively, it is crash residue and
+                    // can be removed safely; no age heuristic can mistake a
+                    // suspended live process for a stale owner.
+                    match OpenOptions::new().read(true).share_mode(0).open(&path) {
+                        Ok(file) => {
+                            drop(file);
+                            let _ = fs::remove_file(&path);
+                            continue;
+                        }
+                        Err(error) if lock_is_held(&error) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Muse context: cannot inspect transaction lock: {error}"
+                            ));
                         }
                     }
-                    Err(error) if lock_is_held(&error) => Ok(None),
-                    Err(error) => Err(format!(
-                        "Muse context: cannot inspect transaction lock: {error}"
-                    )),
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Muse context: cannot acquire transaction lock: {error}"
+                    ));
                 }
             }
-            Err(error) => Err(format!(
-                "Muse context: cannot acquire transaction lock: {error}"
-            )),
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -310,15 +335,8 @@ mod windows {
             let operation = &name[TRANSACTION_PREFIX.len()..name.len() - 4];
             for spec in SPECS {
                 let path = root.join(spec.path);
-                let parent = path.parent().unwrap_or(root);
-                let leaf = spec.path.rsplit('/').next().unwrap_or(spec.path);
-                let candidate =
-                    parent.join(format!("{TRANSACTION_PREFIX}{operation}-{leaf}.candidate"));
-                let backup = parent.join(format!(
-                    "{}{TRANSACTION_PREFIX}{}.backup",
-                    spec.path.rsplit('/').next().unwrap_or(spec.path),
-                    operation
-                ));
+                let candidate = spec.candidate_path(root, operation);
+                let backup = spec.backup_path(root, operation);
                 let candidate_exists = path_exists_any(&candidate);
                 let backup_exists = path_exists_any(&backup);
                 if !candidate_exists && !backup_exists {
@@ -348,7 +366,7 @@ mod windows {
                 if !backup_exists {
                     continue;
                 }
-                if !path.exists() && !path.is_symlink() {
+                if !path_exists_any(&path) {
                     if !placeholder_matches(&backup, spec) {
                         return Err(format!(
                             "Muse context recovery found an invalid backup: {}",
@@ -356,16 +374,26 @@ mod windows {
                         ));
                     }
                     move_no_replace(&backup, &path)?;
-                } else if link_matches(&path, spec) && link_traversable(&path, spec) {
+                } else if link_matches(&path, spec) {
                     if !placeholder_matches(&backup, spec) {
                         return Err(format!(
                             "Muse context recovery found an invalid backup: {}",
                             backup.display()
                         ));
                     }
-                    fs::remove_file(&backup).map_err(|e| {
-                        format!("Muse context: cannot discard completed backup: {e}")
-                    })?;
+                    if link_traversable(&path, spec) {
+                        fs::remove_file(&backup).map_err(|e| {
+                            format!("Muse context: cannot discard completed backup: {e}")
+                        })?;
+                    } else {
+                        remove_link(&path, spec).map_err(|e| {
+                            format!(
+                                "Muse context recovery cannot remove owned link {}: {e}",
+                                path.display()
+                            )
+                        })?;
+                        move_no_replace(&backup, &path)?;
+                    }
                 } else {
                     return Err(format!(
                         "Muse context recovery found an occupied path: {}",
@@ -458,17 +486,15 @@ mod windows {
                 spec.path
             ));
         }
-        let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
         let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical_target.starts_with(&canonical_root) {
+        if !canonical_target.starts_with(root) {
             return Err(format!(
                 "Muse context: target for {} escapes the worktree",
                 spec.path
             ));
         }
-        let leaf = full.file_name().unwrap().to_string_lossy();
-        let temp = parent.join(format!("{TRANSACTION_PREFIX}{operation}-{leaf}.candidate"));
-        let backup = parent.join(format!("{leaf}{TRANSACTION_PREFIX}{operation}.backup"));
+        let temp = spec.candidate_path(root, operation);
+        let backup = spec.backup_path(root, operation);
         Ok(Some(Candidate {
             spec,
             path: full,
@@ -623,12 +649,13 @@ mod windows {
 
     fn rollback(installed: &[&Candidate]) {
         for candidate in installed.iter().rev() {
-            // Do not unlink by pathname after a separate ownership check: an
-            // editor or Git could replace the path between those operations.
-            // Leave an expected link plus its manifest/backup for the next
-            // recovery pass; preserve any unexpected object in place.
-            if path_exists_any(&candidate.path) {
-                continue;
+            // Remove only the exact link this transaction installed. An
+            // unexpected replacement remains in place and keeps the backup
+            // recoverable for a later, explicit repair attempt.
+            if link_matches(&candidate.path, candidate.spec) {
+                if remove_link(&candidate.path, candidate.spec).is_err() {
+                    continue;
+                }
             }
             if placeholder_matches(&candidate.backup, candidate.spec) {
                 let _ = move_no_replace(&candidate.backup, &candidate.path);
@@ -709,6 +736,7 @@ mod tests {
         use super::arm_windows_fault;
         use crate::agent::provider::{AgentProvider, Platform};
         use crate::models::EnvType;
+        use std::os::windows::fs::symlink_dir;
         use std::path::Path;
         use std::process::{Command, Stdio};
         use tempfile::TempDir;
@@ -955,27 +983,103 @@ mod tests {
         }
 
         #[test]
-        fn preserves_backup_when_directory_rollback_recovery_is_blocked() {
+        fn rolls_back_owned_directory_link_after_validation_failure() {
             let temp = fixture();
             let root = temp.path();
             arm_windows_fault(super::super::windows::TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION);
 
             assert!(prepare_muse_context(root.to_str().unwrap()).is_err());
-            std::fs::create_dir_all(root.join(".claude/skills")).unwrap();
-            std::fs::remove_dir(root.join(".agents/skills")).unwrap();
-            std::fs::create_dir(root.join(".agents/skills")).unwrap();
+            assert!(!std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read(root.join(".agents/skills")).unwrap(),
+                super::super::SKILLS_TARGET
+            );
+            assert!(transaction_files(root, ".agents", ".backup").is_empty());
+
+            // The failed transaction's manifest is harmless residue. The next
+            // launch removes it and leaves the missing target untouched.
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn recovers_dangling_owned_directory_link_after_failed_rollback() {
+            let temp = fixture();
+            let root = temp.path();
+            let operation = "failed-rollback";
+            let alias = root.join(".agents/skills");
+            let backup = root.join(".agents").join(format!(
+                "skills{}{operation}.backup",
+                super::super::TRANSACTION_PREFIX
+            ));
+            std::fs::rename(&alias, &backup).unwrap();
+            symlink_dir("../.claude/skills", &alias).unwrap();
+            std::fs::remove_dir_all(root.join(".claude/skills")).unwrap();
+            assert!(std::fs::symlink_metadata(root.join(".claude/skills")).is_err());
+            std::fs::write(
+                root.join(".git").join(format!(
+                    "{}{operation}.txn",
+                    super::super::TRANSACTION_PREFIX
+                )),
+                b"version=1\n",
+            )
+            .unwrap();
+
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+
+            assert!(!std::fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read(&alias).unwrap(), super::super::SKILLS_TARGET);
+            assert!(!backup.exists());
+            assert!(!root
+                .join(".git")
+                .join(format!(
+                    "{}{operation}.txn",
+                    super::super::TRANSACTION_PREFIX
+                ))
+                .exists());
+        }
+
+        #[test]
+        fn preserves_backup_when_directory_rollback_recovery_is_blocked() {
+            let temp = fixture();
+            let root = temp.path();
+            let operation = "blocked-recovery";
+            let alias = root.join(".agents/skills");
+            let backup = root.join(".agents").join(format!(
+                "skills{}{operation}.backup",
+                super::super::TRANSACTION_PREFIX
+            ));
+            std::fs::rename(&alias, &backup).unwrap();
+            std::fs::create_dir(&alias).unwrap();
+            std::fs::write(
+                root.join(".git").join(format!(
+                    "{}{operation}.txn",
+                    super::super::TRANSACTION_PREFIX
+                )),
+                b"version=1\n",
+            )
+            .unwrap();
 
             assert!(prepare_muse_context(root.to_str().unwrap()).is_err());
-            assert!(root.join(".agents/skills").is_dir());
+            assert!(alias.is_dir());
             assert_eq!(
                 transaction_files(root, ".agents", ".backup").len(),
                 1,
                 "failed recovery must preserve the directory alias backup"
             );
 
-            std::fs::remove_dir(root.join(".agents/skills")).unwrap();
+            std::fs::remove_dir(&alias).unwrap();
             prepare_muse_context(root.to_str().unwrap()).unwrap();
-            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+            assert!(std::fs::symlink_metadata(&alias)
                 .unwrap()
                 .file_type()
                 .is_symlink());
@@ -1031,27 +1135,22 @@ mod tests {
             let root = temp.path().to_path_buf();
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
             let workers = (0..4)
-                .map(|_| {
+                .map(|worker_id| {
                     let barrier = std::sync::Arc::clone(&barrier);
                     let root = root.clone();
                     std::thread::spawn(move || {
                         barrier.wait();
+                        if worker_id == 0 {
+                            arm_windows_fault(super::super::windows::TEST_HOLD_LOCK_AFTER_ACQUIRE);
+                        }
                         prepare_muse_context(root.to_str().unwrap())
                     })
                 })
                 .collect::<Vec<_>>();
 
-            let mut successes = 0;
             for worker in workers {
-                match worker.join().unwrap() {
-                    Ok(()) => successes += 1,
-                    Err(error) => assert!(
-                        error.contains("already running"),
-                        "unexpected concurrent repair error: {error}"
-                    ),
-                }
+                worker.join().unwrap().unwrap();
             }
-            assert!(successes >= 1);
             assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
                 .unwrap()
                 .file_type()
