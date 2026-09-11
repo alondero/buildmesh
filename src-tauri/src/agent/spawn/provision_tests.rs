@@ -3,10 +3,32 @@ use crate::git::worktree::provision::{
     adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
     locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
 };
+use crate::models::{EnvType, Provider};
 use tempfile::TempDir;
 
 /// Atomic counter for unique bare-repo paths (one per test run).
 static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn muse_context_repair_skips_native_wsl_filesystem() {
+    assert!(!should_prepare_muse_context(
+        Provider::Muse,
+        EnvType::Wsl,
+        EnvType::Wsl
+    ));
+    assert!(!should_prepare_muse_context(
+        Provider::Anthropic,
+        EnvType::Windows,
+        EnvType::Wsl
+    ));
+    if cfg!(target_os = "windows") {
+        assert!(should_prepare_muse_context(
+            Provider::Muse,
+            EnvType::Windows,
+            EnvType::Wsl
+        ));
+    }
+}
 
 #[test]
 fn provider_provisioning_runs_hooks_after_trust_failure() {

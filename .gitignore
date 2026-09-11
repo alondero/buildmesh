@@ -70,6 +70,10 @@ test-results/
 docs/superpowers/
 
 # Claude, Codex, AGY, and other Agent Harnesses (runtime, local settings, and ephemeral files)
+# Muse context repair transaction residue (lock/manifest files live under .git;
+# candidate and backup files can live beside the repaired aliases).
+.buildmesh-muse-context-*
+*.buildmesh-muse-context-*.backup
 .commandcode/
 .codex/
 CODEX.local.md
