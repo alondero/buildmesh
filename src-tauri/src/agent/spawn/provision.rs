@@ -464,6 +464,21 @@ pub(super) async fn provision_workspace(
         Ok(())
     }).await?;
 
+    // Muse's WSL runtime scans project rules and skills before the PTY is
+    // usable. Windows Git may have checked the tracked symlinks out as plain
+    // pointer files, so repair only the exact committed aliases at this
+    // launch boundary. This is shared by fresh, resume, root and warm paths.
+    if provider == Provider::Muse
+        && cfg!(target_os = "windows")
+        && resolved.env_type == crate::models::EnvType::Wsl
+    {
+        let context_path = resolved.host_path.clone();
+        crate::blocking::run_blocking("muse_context_links", move || {
+            crate::git::ai_context_runtime::prepare_muse_context(&context_path)
+        })
+        .await?;
+    }
+
     timer.checkpoint("before_provider_preflight");
     let routing_harness_id = node.provider.clone();
     let routing_resolved = resolved.clone();
