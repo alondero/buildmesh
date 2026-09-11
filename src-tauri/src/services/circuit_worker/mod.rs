@@ -738,7 +738,7 @@ fn drive_run(
         if lost {
             db::commit_circuit_advance(active.run.id, Some("failed"), None, &[])
                 .map_err(|e| e.to_string())?;
-            close_run_agents(app, &view);
+            close_run_agents(&view);
             crate::autopilot::evaluator::unregister(source);
             let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
             return Ok(());
@@ -804,13 +804,8 @@ fn drive_run(
                 )
                 .map_err(|commit_err| format!("effect-failure commit also failed: {}", commit_err))?;
                 view.state = RunState::Failed;
-                let _ = app.emit(
-                    "circuit-run-updated",
-                    CircuitRunUpdatedPayload {
-                        run_id: active.run.id,
-                        state: "failed".to_string(),
-                    },
-                );
+                // No emit here: the terminal branch below emits the single
+                // "failed" event after `close_run_agents` sweeps the agents.
                 Vec::new()
             }
         };
@@ -821,10 +816,13 @@ fn drive_run(
         for effect_event in effect_events {
             let outcome = advance(&mut view, &effect_event);
             let outcome_changed = persist_transition(active.run.id, &mut view, &outcome)?;
-            if !outcome.step_writes.is_empty()
-                || outcome.run_state_changed
-                || outcome.context_changed
-                || outcome_changed
+            // A terminal state is emitted once, after the cleanup sweep below,
+            // so a run does not fan out two refetches on the way out.
+            if !view.state.is_terminal()
+                && (!outcome.step_writes.is_empty()
+                    || outcome.run_state_changed
+                    || outcome.context_changed
+                    || outcome_changed)
             {
                 let _ = app.emit(
                     "circuit-run-updated",
@@ -838,11 +836,13 @@ fn drive_run(
 
         // Live ledger: every step transition or state change refreshes
         // the Probe tab, not just terminal ones — otherwise a long agent
-        // run renders as a frozen list until it finishes.
-        if !transition.step_writes.is_empty()
-            || transition.run_state_changed
-            || transition.context_changed
-            || turn_boundary_changed
+        // run renders as a frozen list until it finishes. Terminal states are
+        // held back to the single post-cleanup emit in the branch below.
+        if !view.state.is_terminal()
+            && (!transition.step_writes.is_empty()
+                || transition.run_state_changed
+                || transition.context_changed
+                || turn_boundary_changed)
         {
             let _ = app.emit(
                 "circuit-run-updated",
@@ -856,7 +856,17 @@ fn drive_run(
         // Terminal review runs release processes while retaining recovery
         // checkpoints. Ordinary completed graphs opt out via cleanup intent.
         if view.state.is_terminal() {
-            close_run_agents(app, &view);
+            close_run_agents(&view);
+            // The one terminal emit, after `close_run_agents` has archived the
+            // run's remaining agents — so the frontend resync observes the
+            // retired rows instead of racing the sweep.
+            let _ = app.emit(
+                "circuit-run-updated",
+                CircuitRunUpdatedPayload {
+                    run_id: active.run.id,
+                    state: view.state.as_db_str().to_string(),
+                },
+            );
             break;
         }
     }
@@ -905,7 +915,12 @@ pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &T
 /// Retire every agent attached to a failed circuit run. The operation is
 /// idempotent with the normal close effect: a missing row simply means a
 /// previous cleanup already won the race.
-fn close_run_agents(app: &AppHandle, view: &RunView) {
+///
+/// Deliberately emits nothing itself: both callers emit the terminal
+/// `circuit-run-updated` *after* this sweep returns, so the frontend resync
+/// observes the archived rows. The periodic `retry_failed_cleanup` sweep has no
+/// such caller and emits its own event.
+fn close_run_agents(view: &RunView) {
     let eligible = db::list_failed_circuit_agents_for_cleanup().unwrap_or_default();
     let mut agent_ids = HashSet::new();
     for agent_node_id in view.steps.iter().filter_map(|step| step.agent_node_id) {
@@ -915,9 +930,7 @@ fn close_run_agents(app: &AppHandle, view: &RunView) {
         match db::get_agent_node_by_id(agent_node_id) {
             Ok(_) => {
                 let Some(claim) = db::claim_circuit_agent_cleanup(agent_node_id).unwrap_or(None) else { continue };
-                if let Err(error) = archive_failed_circuit_agent(agent_node_id, &claim, |run_id, state| {
-                    let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id, state });
-                }) {
+                if let Err(error) = archive_failed_circuit_agent(agent_node_id, &claim, |_, _| {}) {
                     tracing::warn!(
                         "circuits: failed to clean up agent {} after run failure: {}",
                         agent_node_id,
