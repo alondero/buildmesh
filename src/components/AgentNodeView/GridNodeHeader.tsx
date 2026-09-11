@@ -33,8 +33,8 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
-import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone } from '../../lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone, type AutopilotOutcome } from '../../lib/autopilotNodePresentation';
+import { AutopilotIndicatorGlyph, AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
 import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
@@ -47,8 +47,15 @@ interface GridNodeHeaderProps {
   nodeId: number;
   titleNodeId?: number;
   activity?: ActivityStatus;
-  attentionCount?: number;
-  onAttention?: () => void;
+  /// Card-level attention outcome covering every member that needs a human
+  /// (aggregated by `resolveAutopilotOutcome`, which describes the focused
+  /// session and exposes the rest for cycling). Null/absent renders no chip.
+  /// Replaces the old bare "N needs attention" count, which named neither the
+  /// outcome nor the action required.
+  attentionOutcome?: AutopilotOutcome | null;
+  /// Focus the next attention session; the card owns cycling through every
+  /// member the chip aggregates.
+  onReveal?: () => void;
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
   /// dnd-kit drag listeners/attributes that turn the whole title bar into the
   /// reorder/swap drag handle. Undefined when dragging is disabled (e.g. the
@@ -89,7 +96,7 @@ export const HEADER_TIER_BREAKPOINTS = {
   menuWidth: 240,
 } as const;
 
-export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attentionCount = 0, onAttention, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
+export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attentionOutcome, onReveal, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const titleNode = useAgentNodeStore(s => s.nodesById[titleNodeId]);
   const renameAgentNode = useAgentNodeStore(s => s.renameAgentNode);
@@ -148,7 +155,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   };
   const showDetails = () => { activateNode(node.id); openProbeTab('properties'); };
   const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
-  const attentionTone = activity?.tone === 'error' ? 'text-status-error bg-status-error-bg' : 'text-status-warning bg-status-warning/10';
+  const outcomeCount = attentionOutcome?.nodeIds.length ?? 0;
 
   return (
     <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header" data-node-id={node.id}
@@ -170,12 +177,15 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} />}
       </div>
-        {attentionCount > 0 && <button type="button" onPointerDown={event => event.stopPropagation()}
-        onClick={event => { event.stopPropagation(); onAttention?.(); }}
-        aria-label={`${attentionCount} ${attentionCount === 1 ? 'session needs' : 'sessions need'} attention. Show next session`}
-        title={`${activity?.label ?? 'Needs attention'} · Show next session`}
-         className={`flex h-7 shrink-0 items-center gap-1 rounded-sm px-1.5 text-2xs font-medium ${attentionTone}`}>
-        <span aria-hidden="true">!</span><span>{attentionCount}</span>{width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span>needs attention</span>}
+        {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
+        onClick={event => { event.stopPropagation(); onReveal?.(); }}
+        aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
+        title={attentionOutcome.detail}
+        data-testid="autopilot-outcome-chip" data-outcome={attentionOutcome.kind}
+        className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${AUTOPILOT_PILL_CLASSES[attentionOutcome.tone]}`}>
+        <AutopilotIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
+        {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
+        {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
