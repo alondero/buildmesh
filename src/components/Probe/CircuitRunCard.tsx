@@ -102,8 +102,8 @@ export function CircuitRunCard({
   focused = false,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
-  const activity = runActivity(run, steps, capacity);
   const review = reviewResult(detail, reviewCircuit);
+  const activity = runActivity(run, steps, capacity, review);
   const progress = runStepProgress(steps);
   const duration = runDurationMs(run, now);
   const stale = isRunStale(run, now);

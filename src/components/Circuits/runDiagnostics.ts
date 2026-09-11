@@ -425,7 +425,8 @@ export interface RunActivity {
 export function runActivity(
   run: { state: string },
   steps: Array<Pick<StepLike, 'node_id' | 'status' | 'error_message'>>,
-  capacity: CircuitCapacity
+  capacity: CircuitCapacity,
+  review: { needsAttention: boolean } | null = null
 ): RunActivity {
   const firstWith = (status: string) => steps.find((s) => s.status === status) ?? null;
   const running = firstWith('running');
@@ -450,7 +451,15 @@ export function runActivity(
       // render "Failed" and nothing else — the run row has no error column
       // of its own, so if no step recorded a message there is nothing for
       // the card to show. Say where to look instead of leaving it blank.
-      detail: failedWithoutMessageDetail(steps, failed !== null),
+      //
+      // An unapproved review is the exception: the review graph ends the run
+      // by design (the round limit was reached, or the reviewer could not
+      // give a verdict) and records that ending as a gate *outcome*, never as
+      // a failed step. The card's review line already states the reason, so
+      // the generic "the worker failed the run" fallback would be false.
+      detail: review?.needsAttention === true
+        ? null
+        : failedWithoutMessageDetail(steps, failed !== null),
     };
   }
   if (run.state === 'completed') {

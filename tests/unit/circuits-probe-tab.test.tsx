@@ -1230,6 +1230,39 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.queryByTestId('run-agent-open-31')).toBeNull();
   });
 
+  it('reports an exhausted review without blaming the worker', async () => {
+    const REVIEW_CIRCUIT: AutopilotCircuit = {
+      ...CIRCUIT,
+      graph_json: JSON.stringify({
+        version: 2,
+        nodes: [
+          { id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+          { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } },
+        ],
+        edges: [],
+      }),
+    };
+    // An exhausted review fails the run by design: the retry gate finishes
+    // with a `failed` *outcome* (its status stays completed) and no step
+    // records an error, so the generic fallback must not fire.
+    const RUN_EXHAUSTED: CircuitRunDetail = {
+      run: { ...RUN_DONE.run, id: 32, state: 'failed' },
+      steps: [
+        step({ node_id: 'review_classifier', status: 'completed', outcome: 'completed' }),
+        step({ node_id: 'review_retry', status: 'completed', outcome: 'failed', attempt: 3 }),
+      ],
+    };
+    mockBackend({ circuits: [REVIEW_CIRCUIT], runs: [RUN_EXHAUSTED] });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    expect((await screen.findByTestId('run-state-32')).textContent).toBe('Review limit reached');
+    // The review line below already explains the ending; a reason line
+    // claiming the worker failed the run would contradict it.
+    expect(screen.queryByTestId('run-reason-32')).toBeNull();
+    expect(screen.getByText(/No final approval is recorded/)).toBeTruthy();
+  });
+
   it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
