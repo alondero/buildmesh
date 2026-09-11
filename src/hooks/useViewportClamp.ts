@@ -9,7 +9,7 @@
  *   - `src/components/Sidebar/ProviderDropdown.tsx` (#814)
  *
  * (`BuildRunDropdown` used to share the pattern but moved to the
- * portaled `useAnchoredPosition` positioning — see issue #1731 — for
+ * portaled `useAnchoredPosition` positioning — see PR #1699 — for
  * the same overflow-clipping reason the PR pill and kebab moved.)
  *
  * The pattern: the menu is anchored at its trigger (`right-0 top-full
@@ -45,7 +45,7 @@
  * explicitly leaves MeshItem's anchor mechanism out of scope.
  * `KebabActions` and the portaled PR pill use `useAnchoredPosition` for
  * trigger-relative fixed coordinates (and `BuildRunDropdown` joined them
- * in issue #1731); this hook remains for menus whose
+ * via PR #1699); this hook remains for menus whose
  * existing anchor is already expressed in CSS and only needs vertical
  * clamping.
  */

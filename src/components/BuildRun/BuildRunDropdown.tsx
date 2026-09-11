@@ -62,7 +62,7 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     enabled: isOpen,
   });
 
-  // Issue #1731 — the menu is portaled to `document.body` and anchored
+  // The menu is portaled to `document.body` and anchored
   // with `useAnchoredPosition` `fixed` coordinates, for the same reason
   // the PR pill (#1585) and the kebab (#1589) were portaled before it:
   // the header row is `overflow-hidden` (#1650 compact title bar) and an
@@ -105,7 +105,10 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     // trigger's onClick would toggle it back open in the same tick (a
     // flicker + state race). The menu popup carries the attribute too
     // because the portal removes it from the trigger's subtree.
-    <div className="relative">
+    // No wrapper element: the menu is portaled, so nothing needs a
+    // `relative` positioning context — the header trio stays flat
+    // children of the header row, matching the kebab/PR-pill peers.
+    <>
       <button
         ref={triggerRef}
         data-dropdown-for={isOpen ? dropdownId('buildrun', node.id) : undefined}
@@ -150,7 +153,10 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
           role="menu"
           aria-label="Build, run, or open a terminal"
           data-dropdown-for={dropdownId('buildrun', node.id)}
-          className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right py-1 min-w-[176px]"
+          // z-[100] — same stacking tier as the other portaled menus
+          // from this header (PrPill, kebab, NodeActivityTabs) so a z-50
+          // overlay elsewhere in document.body can never interleave.
+          className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-[100] animate-scale-in origin-top-right py-1 min-w-[176px]"
           style={{ top: 0, left: 0, visibility: 'hidden' }}
         >
           <button
@@ -181,6 +187,6 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
         </div>,
         document.body,
       )}
-    </div>
+    </>
   );
 }
