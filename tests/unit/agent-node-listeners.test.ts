@@ -151,8 +151,8 @@ describe('attachAgentNodeListeners', () => {
       { method: 'patchCircuitOwnershipState', args: [9, 'running'] },
       { method: 'patchCircuitOwnershipState', args: [9, 'paused'] },
       { method: 'patchCircuitOwnershipState', args: [9, 'completed'] },
-      // Terminal transitions also resync the node list — a terminal run has
-      // already deleted its `CloseAgentNode` agents (ghost-tab fix).
+      // Terminal transitions also resync the node list — for the agents a
+      // failed-run sweep archives (deleted agents ride `node-deleted`).
       { method: 'fetchAgentNodes', args: [] },
       { method: 'patchCircuitOwnershipState', args: [9, 'failed'] },
       { method: 'fetchAgentNodes', args: [] },

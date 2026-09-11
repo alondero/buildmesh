@@ -129,9 +129,9 @@ export async function attachAgentNodeListeners(
       if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
         surface.patchCircuitOwnershipState(payload.run_id, payload.state);
       }
-      // Terminal runs have already deleted their attached `CloseAgentNode`
-      // agents (the approved/blocked/feedback verdicts, plus failed-run
-      // cleanup), so resync to drop the now-stale cards/tabs.
+      // A terminal run has swept its remaining agents — a failed-run sweep
+      // *archives* them, and archive emits no per-node event — so resync to
+      // drop those cards. Deleted agents ride `node-deleted` instead.
       if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
         void surface.fetchAgentNodes();
       }
