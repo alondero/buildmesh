@@ -103,6 +103,18 @@ function DeepSeekIcon({ className, title }: InlineIconProps) {
   );
 }
 
+function MuseIcon({ className, title }: InlineIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path
+        fill="currentColor"
+        d="M4 18V6h2.4l5.6 8.4L17.6 6H20v12h-2.2V9.6L12.4 18h-.8L6.2 9.6V18H4z"
+      />
+    </svg>
+  );
+}
+
 function CommandCodeIcon({ className, title }: InlineIconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
@@ -139,6 +151,7 @@ const BRANDS: readonly BrandRegistration[] = [
   { id: 'openrouter', icon: { kind: 'inline', component: OpenRouterIcon }, chipHex: '#615EFF', chipClass: 'bg-gray-500' },
   { id: 'grok', icon: { kind: 'image', src: grokLogo }, chipHex: '#0A0A0A', chipClass: 'bg-gray-500' },
   { id: 'freebuff', icon: { kind: 'image', src: freebuffLogo }, chipHex: '#f97316', chipClass: 'bg-orange-500' },
+  { id: 'muse-code', aliases: ['muse'], icon: { kind: 'inline', component: MuseIcon }, chipHex: '#0866FF', chipClass: 'bg-blue-600' },
 ];
 
 const BRAND_REGISTRY = new Map<string, Brand>();

@@ -46,6 +46,7 @@ import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderPairing } from '../types/generated/ProviderPairing';
 import type { PairingVerification } from '../types/generated/PairingVerification';
+import type { MuseCodeTier } from '../types/generated/MuseCodeTier';
 import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RealizedBind } from '../types/generated/RealizedBind';
@@ -1275,13 +1276,20 @@ export const removeProviderPairing = async (
 // `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
 // mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
 // the wire, the rest are snake_case.
-export type { UsageWindow, UsageAmount, UsageMeter, ProviderUsage, BillingBalance, ProviderMeters };
+export type { UsageWindow, UsageAmount, UsageMeter, ProviderUsage, BillingBalance, ProviderMeters, MuseCodeTier };
 
 /** The detection-gated Providers page rows: one entry per provider relevant to
  *  this host, each carrying its Usage Meters (or a "usage not tracked" marker).
  *  Reuses the `ProviderUsage` wire shape (issue #574). */
 export const getProviderMeters = (forceRefresh: boolean) =>
   _invoke<ProviderMeters[]>('get_provider_meters', { forceRefresh });
+
+/** User-selected Muse Code subscription plan used by the local request counter. */
+export const getMuseCodeSubscriptionTier = () =>
+  _invoke<MuseCodeTier | null>('get_muse_code_subscription_tier');
+
+export const setMuseCodeSubscriptionTier = (tier: MuseCodeTier | null) =>
+  _invoke('set_muse_code_subscription_tier', { tier });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //

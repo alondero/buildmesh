@@ -11,8 +11,8 @@
 use super::adapter::{api_key_for, UsageAdapter};
 use super::adapters::{
     AgyAdapter, AnthropicAdapter, CodexAdapter, CommandcodeAdapter, CursorAdapter, DeepseekAdapter,
-    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, OpenaiAdapter, OpencodeAdapter,
-    OpenrouterAdapter,
+    FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter, OpenaiAdapter,
+    OpencodeAdapter, OpenrouterAdapter,
 };
 use super::cache::UsageCache;
 use super::types::ProviderUsage;
@@ -32,8 +32,9 @@ static COMMANDCODE_ADAPTER: CommandcodeAdapter = CommandcodeAdapter;
 static OPENAI_ADAPTER: OpenaiAdapter = OpenaiAdapter;
 static DEEPSEEK_ADAPTER: DeepseekAdapter = DeepseekAdapter;
 static FREEBUFF_ADAPTER: FreebuffAdapter = FreebuffAdapter;
+static MUSE_CODE_ADAPTER: MuseCodeAdapter = MuseCodeAdapter;
 
-static USAGE_METERS: [&'static dyn UsageAdapter; 13] = [
+static USAGE_METERS: [&'static dyn UsageAdapter; 14] = [
     &ANTHROPIC_ADAPTER,
     &CODEX_ADAPTER,
     &CURSOR_ADAPTER,
@@ -53,6 +54,9 @@ static USAGE_METERS: [&'static dyn UsageAdapter; 13] = [
     &DEEPSEEK_ADAPTER,
     // Freebuff self-authenticates through its CLI-managed credentials file.
     &FREEBUFF_ADAPTER,
+    // Muse Code subscription quota is counted locally against Meta's published
+    // static tier table. Detection-gated on the `muse` harness.
+    &MUSE_CODE_ADAPTER,
 ];
 
 /// Seam entry point: `catalog.dispatch(id).fetch(accounts)` proves the seam
@@ -248,6 +252,7 @@ mod tests {
         assert_eq!(native_harness("codex"), Some("codex"));
         assert_eq!(native_harness("freebuff"), Some("freebuff"));
         assert_eq!(native_harness("opencode"), Some("opencode"));
+        assert_eq!(native_harness("muse-code"), Some("muse"));
         // Keyed meters have no harness gate — card always visible.
         assert_eq!(native_harness("minimax"), None);
         assert_eq!(native_harness("kimi"), None);
@@ -337,6 +342,7 @@ mod tests {
             ("openai", None),
             ("deepseek", None),
             ("freebuff", Some("freebuff")),
+            ("muse-code", Some("muse")),
         ];
         for (id, harness) in cases {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
@@ -403,6 +409,7 @@ mod tests {
             "openai",
             "deepseek",
             "freebuff",
+            "muse-code",
         ] {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
             assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");

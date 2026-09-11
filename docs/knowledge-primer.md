@@ -47,6 +47,11 @@ percentage or an explicit unavailable state is labelled "Unavailable". The Codex
 adapter maps ChatGPT `plan_type`, rolling windows, top-level extra rate limits,
 credit balance, and `spend_control.individual_limit` into that contract; a null
 `rate_limit` is a valid Business/Enterprise snapshot rather than a parse error.
+Muse Code (`muse-code`) has no account-level quota API: the adapter counts
+local requests against Meta's published Everyday/High/Power 5-hour limits after
+the user selects a tier, and renders `unavailable` until that selection exists.
+Never derive remaining Muse Code allowance from MSP token/context events, and
+never fold it into a Meta Model API pay-as-you-go wallet.
 
 **Usage cache identity.** The five-minute cache is keyed by provider plus an
 opaque account/authentication-source fingerprint selected through the

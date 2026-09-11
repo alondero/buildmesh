@@ -15,6 +15,7 @@ import type {
   PairingVerification,
   DeviceSession,
   RealizedBind,
+  MuseCodeTier,
 } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import { optimisticToggle } from '../../lib/optimisticToggle';
@@ -319,6 +320,8 @@ export function AccountCard({
         </div>
       </div>
 
+      {account.id === 'muse-code' && <MuseCodePlanSelect />}
+
       {(showApiKey || showBilling) && (
         <button
           onClick={() => setShowCreds(v => !v)}
@@ -389,6 +392,81 @@ export function AccountCard({
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+const MUSE_CODE_PLANS: { value: MuseCodeTier | ''; label: string }[] = [
+  { value: '', label: 'Not selected' },
+  { value: 'everyday', label: 'Everyday (50 requests / 5 hours)' },
+  { value: 'high', label: 'High (150 requests / 5 hours)' },
+  { value: 'power', label: 'Power (500 requests / 5 hours)' },
+];
+
+function MuseCodePlanSelect() {
+  const [tier, setTier] = useState<MuseCodeTier | ''>('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getMuseCodeSubscriptionTier().then(
+      value => {
+        if (!cancelled) setTier(value ?? '');
+      },
+      err => {
+        if (!cancelled) setError(formatError(err));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async (next: MuseCodeTier | '') => {
+    const previous = tier;
+    setTier(next);
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setMuseCodeSubscriptionTier(next === '' ? null : next);
+    } catch (e) {
+      setTier(previous);
+      setError(formatError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3">
+      <label className="block text-sm text-text-muted mb-1" htmlFor="muse-code-plan">
+        Muse Code plan
+      </label>
+      <select
+        id="muse-code-plan"
+        value={tier}
+        disabled={busy}
+        onChange={e => {
+          void save(e.target.value as MuseCodeTier | '');
+        }}
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+        aria-label="Muse Code subscription plan"
+      >
+        {MUSE_CODE_PLANS.map(plan => (
+          <option key={plan.value || 'none'} value={plan.value}>
+            {plan.label}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-sm text-text-muted">
+        Meta does not publish live remaining quota. Buildmesh counts requests locally against the published 5-hour allowance.
+      </p>
+      {error && (
+        <p role="alert" className="mt-1 text-sm text-status-error">
+          {error}
+        </p>
       )}
     </div>
   );
