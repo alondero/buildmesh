@@ -196,33 +196,35 @@ describe('BuildRunDropdown', () => {
     });
   });
 
-  describe('viewport clamping (issue #837 — hook wired in)', () => {
-    // Issue #837 — apply/no-apply, the `rect.top - MARGIN` cap, the
-    // custom-margin option, and the cleanup behaviour are all pinned
-    // in `tests/unit/use-viewport-clamp.test.tsx`. The smoke here
-    // proves the hook is wired into BuildRunDropdown — a regression
-    // that swapped the hook for a no-op would flip this assertion.
-    it('wires the useViewportClamp hook in (smoke: overflow rect produces a translateY transform)', () => {
-      const rectSpy = vi
-        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-        .mockReturnValue({
-          top: 600,
-          bottom: 900,
-          left: 0,
-          right: 200,
-          width: 200,
-          height: 300,
-          x: 0,
-          y: 600,
-          toJSON: () => ({}),
-        } as DOMRect);
+  describe('portal + fixed positioning (issue #1731)', () => {
+    // The header row is `overflow-hidden` (#1650 compact title bar), which
+    // clipped the old inline `absolute right-0 top-full` menu to the ~36px
+    // header strip — only one menu item was ever visible. Same root cause
+    // the PR pill (#1585) and the kebab (#1589) were portaled for. The
+    // menu now renders into `document.body` and is positioned by the
+    // shared `useAnchoredPosition` hook (`fixed` viewport coordinates).
+    it('renders the menu into document.body, not inside the trigger wrapper', () => {
+      const onBuildRun = vi.fn();
+      const { container } = render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const menu = screen.getByRole('menu', { name: /Build, run/ });
+      expect(menu.parentElement).toBe(document.body);
+      // Nothing menu-shaped inside the component's own DOM anymore.
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+    });
 
+    it('uses fixed positioning placed by useAnchoredPosition (no header clipping)', () => {
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       openMenu();
-      const menu = document.querySelector('[role="menu"]') as HTMLElement;
-      expect(menu.style.transform).toMatch(/translateY\(-/);
-      rectSpy.mockRestore();
+      const menu = screen.getByRole('menu', { name: /Build, run/ });
+      expect(menu.className).toMatch(/\bfixed\b/);
+      // The hook's first layout pass has run by the time the effect
+      // flushes: the menu carries real viewport coordinates (not the
+      // inline `top: 0; left: 0` neutral start) and is visible.
+      expect(menu.style.top).not.toBe('');
+      expect(menu.style.left).not.toBe('');
+      expect(menu.style.visibility).toBe('');
     });
   });
 
@@ -249,22 +251,21 @@ describe('BuildRunDropdown', () => {
     // and must scope correctly per node id (multiple dropdowns can be
     // mounted simultaneously, one per agent node in the grid).
 
-    it('scopes the dropdown with data-dropdown-for=<node.id> on the outer wrapper', () => {
+    it('scopes the dropdown with data-dropdown-for=<node.id> on the trigger and the portaled menu', () => {
       // The hook's selector is built from `String(open)`, so a
       // mismatch (e.g. a boolean coercion) would silently break the
       // scoping across sibling dropdowns. Pin the attribute value
-      // AND the placement: the attribute lives on the OUTER wrapper
-      // (not the menu popup) so a click on the trigger is "inside"
-      // and doesn't race with the toggle.
+      // AND the placement: the attribute lives on the trigger AND
+      // the portaled menu popup (the portal removes the menu from
+      // the wrapper's subtree, so both ends must be tagged for
+      // `closest()` to classify a click on either as "inside").
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       openMenu();
-      const wrapper = document.querySelector('[data-dropdown-for]') as HTMLElement;
-      expect(wrapper).toBeTruthy();
-      expect(wrapper.getAttribute('data-dropdown-for')).toBe(`buildrun-${NODE.id}`);
-      // The menu itself does NOT carry the attribute (only the wrapper).
-      const menu = document.querySelector('[role="menu"]') as HTMLElement;
-      expect(menu.hasAttribute('data-dropdown-for')).toBe(false);
+      const trigger = screen.getByLabelText('Open build menu');
+      expect(trigger.getAttribute('data-dropdown-for')).toBe(`buildrun-${NODE.id}`);
+      const menu = screen.getByRole('menu', { name: /Build, run/ });
+      expect(menu.getAttribute('data-dropdown-for')).toBe(`buildrun-${NODE.id}`);
     });
 
     it('closes the menu on mousedown outside the scoped element', () => {

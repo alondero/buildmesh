@@ -1,8 +1,9 @@
 import { useState, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { AgentNode } from '../../stores/agentNodeStore';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
-import { useViewportClamp } from '../../hooks/useViewportClamp';
+import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { dropdownId } from '../../lib/dropdownId';
 
 interface BuildRunDropdownProps {
@@ -30,6 +31,12 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   // `node.id` (not a boolean) matters in the grid — multiple
   // `BuildRunDropdown`s render simultaneously (one per agent node),
   // so a click on a sibling's body must close *this* one.
+  //
+  // The menu is portaled to `document.body` (see below), so the trigger
+  // AND the popup both carry the attribute — same dual placement the
+  // portaled kebab uses in `GridNodeHeader` (issue #814). The portal
+  // moves the menu out of the wrapper's subtree, so a click inside the
+  // portaled menu would otherwise read as "outside".
   useClickOutside<string>(isOpen ? dropdownId('buildrun', node.id) : null, () => setIsOpen(false));
 
   // Issue #814 / #837 — Escape closes the menu and returns focus to the
@@ -55,16 +62,18 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     enabled: isOpen,
   });
 
-  // Issue #837 — viewport clamping is now the shared `useViewportClamp`
-  // hook. Mirrors the pattern at `ProviderDropdown.tsx:76`. The hook
-  // runs BEFORE the browser paints so the user never sees the unclamped
-  // position; `right-0 top-full mt-1` anchoring is preserved and only a
-  // `translateY` offset is applied, so the open animation
-  // (`animate-scale-in origin-top-right`) still plays cleanly. The
-  // shift cap (`rect.top - MARGIN`, not `rect.top - rect.height -
-  // MARGIN`) is the "subtle fix a hook would lock in once" the issue
-  // called out.
-  useViewportClamp(menuRef, [isOpen]);
+  // Issue #1731 — the menu is portaled to `document.body` and anchored
+  // with `useAnchoredPosition` `fixed` coordinates, for the same reason
+  // the PR pill (#1585) and the kebab (#1589) were portaled before it:
+  // the header row is `overflow-hidden` (#1650 compact title bar) and an
+  // inline `absolute right-0 top-full` menu gets clipped to the ~36px
+  // header strip — only one menu item was ever visible, and the
+  // `useViewportClamp` shift made it worse by pulling the menu up under
+  // the clip window. Fixed coordinates are viewport-scoped and immune
+  // to ancestor overflow; the hook also follows the trigger on scroll
+  // and clamps the menu inside the viewport (flipping above when there
+  // is no room below).
+  useAnchoredPosition(triggerRef, menuRef, isOpen, { align: 'end' });
 
   const handleBuild = async () => {
     setIsOpen(false);
@@ -88,18 +97,18 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   const menuId = useId();
 
   return (
-    // Issue #814 — `data-dropdown-for={node.id}` lives on the OUTER
-    // wrapper (not the menu popup). The `useClickOutside` hook's
-    // selector is `[data-dropdown-for="<open>"]`, so any element
-    // inside this wrapper (the trigger button, the menu items) is
-    // considered "inside" and the hook won't fire on those clicks.
-    // Placing the attribute on the popup alone would misclassify a
-    // click on the trigger as "outside" — the document mousedown
-    // would close the menu, then the trigger's onClick would toggle
-    // it back open in the same tick (a flicker + state race).
-    <div className="relative" data-dropdown-for={isOpen ? dropdownId('buildrun', node.id) : undefined}>
+    // Issue #814 — `data-dropdown-for={node.id}` lives on the trigger
+    // (and on the portaled menu popup below). The `useClickOutside`
+    // hook's selector is `[data-dropdown-for="<open>"]`, so a click on
+    // the trigger is "inside" and the hook won't fire on it — without
+    // that, the document mousedown would close the menu, then the
+    // trigger's onClick would toggle it back open in the same tick (a
+    // flicker + state race). The menu popup carries the attribute too
+    // because the portal removes it from the trigger's subtree.
+    <div className="relative">
       <button
         ref={triggerRef}
+        data-dropdown-for={isOpen ? dropdownId('buildrun', node.id) : undefined}
         type="button"
         onClick={() => setIsOpen(!isOpen)}
         aria-haspopup="menu"
@@ -125,24 +134,24 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
         </svg>
       </button>
 
-      {isOpen && (
+      {isOpen && createPortal(
         // Issue #814 — `role="menu"` + `aria-label` complete the WAI-ARIA
         // menu contract (item role + keyboard nav lives below). The menu
         // id is wired to the trigger's `aria-controls` for screen-reader
-        // navigation. Viewport clamp applies a transient `translateY` so
-        // the menu doesn't overflow the bottom edge of the window when
-        // the trigger sits low on the page.
+        // navigation. Positioning is handled by `useAnchoredPosition`
+        // (fixed, viewport-scoped, scroll-following) — see the comment
+        // above the hook call.
         //
-        // `data-dropdown-for` lives on the OUTER wrapper (not here) so
-        // the `useClickOutside` hook scopes the entire trigger+menu
-        // surface — a click on the trigger doesn't fire close. See the
-        // wrapper comment above.
+        // `data-dropdown-for` lives on the trigger (above) AND this
+        // portaled popup so `useClickOutside` treats both as "inside".
         <div
           ref={menuRef}
           id={menuId}
           role="menu"
           aria-label="Build, run, or open a terminal"
-          className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right"
+          data-dropdown-for={dropdownId('buildrun', node.id)}
+          className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right py-1 min-w-[176px]"
+          style={{ top: 0, left: 0, visibility: 'hidden' }}
         >
           <button
             role="menuitem"
@@ -169,7 +178,8 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
           >
             {node.use_worktree ? 'Terminal in worktree' : 'Terminal'}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

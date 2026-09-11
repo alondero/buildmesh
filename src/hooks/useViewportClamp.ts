@@ -2,12 +2,15 @@
  * useViewportClamp — shift a menu up when it would overflow the
  * viewport's bottom edge.
  *
- * Issue #837 — extracted from two call sites where the same
+ * Issue #837 — extracted from call sites where the same
  * `useLayoutEffect` that reads `getBoundingClientRect()` and applies
- * `translateY(-shift)` was duplicated:
+ * `translateY(-shift)` was duplicated. Remaining call site:
  *
- *   - `src/components/BuildRun/BuildRunDropdown.tsx` (#814)
  *   - `src/components/Sidebar/ProviderDropdown.tsx` (#814)
+ *
+ * (`BuildRunDropdown` used to share the pattern but moved to the
+ * portaled `useAnchoredPosition` positioning — see issue #1731 — for
+ * the same overflow-clipping reason the PR pill and kebab moved.)
  *
  * The pattern: the menu is anchored at its trigger (`right-0 top-full
  * mt-1` for the dropdown cases) and rendered *before* the browser
@@ -41,7 +44,8 @@
  * anchored at the click point rather than a trigger. The issue
  * explicitly leaves MeshItem's anchor mechanism out of scope.
  * `KebabActions` and the portaled PR pill use `useAnchoredPosition` for
- * trigger-relative fixed coordinates; this hook remains for menus whose
+ * trigger-relative fixed coordinates (and `BuildRunDropdown` joined them
+ * in issue #1731); this hook remains for menus whose
  * existing anchor is already expressed in CSS and only needs vertical
  * clamping.
  */
