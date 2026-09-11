@@ -77,7 +77,7 @@ describe('attachAgentNodeListeners', () => {
 
     await attachAgentNodeListeners(surface);
 
-    // Ten event subscriptions should be live after attach — one per
+    // Thirteen event subscriptions should be live after attach — one per
     // event the store cares about. We read the setup's listener map
     // directly rather than going through `listen`'s mock, because
     // the mock returns Promise<unlistenFn> per call and doesn't

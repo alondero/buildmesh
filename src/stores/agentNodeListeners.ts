@@ -101,11 +101,11 @@ export interface AgentNodeActionSurface {
 // `node_id` alias for vocabulary consistency inside the store.
 const SESSION_ID_KEY = 'session_id';
 
-/// Circuit run states after which the run has retired its attached agents.
-/// A `CloseAgentNode` step deletes those rows directly in the DB and emits no
-/// per-node event, so the node list must be refetched when a run reaches one
-/// of these states. Without the refetch the deleted agent lingers in the grid
-/// as a ghost tab, and closing it later fails with "Query returned no rows".
+/// Circuit run states after which the run's remaining agents have been swept.
+/// Deleted agents arrive via `node-deleted`, but a failed-run sweep *archives*
+/// the agents still attached to the run — archive must not dispose their
+/// terminals, and it emits no per-node event — so refetch on these states to
+/// drop the archived cards.
 const TERMINAL_CIRCUIT_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
 
 /**

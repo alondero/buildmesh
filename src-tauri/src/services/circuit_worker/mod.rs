@@ -821,10 +821,13 @@ fn drive_run(
         for effect_event in effect_events {
             let outcome = advance(&mut view, &effect_event);
             let outcome_changed = persist_transition(active.run.id, &mut view, &outcome)?;
-            if !outcome.step_writes.is_empty()
-                || outcome.run_state_changed
-                || outcome.context_changed
-                || outcome_changed
+            // A terminal state is emitted once, after the cleanup sweep below,
+            // so a run does not fan out two refetches on the way out.
+            if !view.state.is_terminal()
+                && (!outcome.step_writes.is_empty()
+                    || outcome.run_state_changed
+                    || outcome.context_changed
+                    || outcome_changed)
             {
                 let _ = app.emit(
                     "circuit-run-updated",
@@ -838,11 +841,13 @@ fn drive_run(
 
         // Live ledger: every step transition or state change refreshes
         // the Probe tab, not just terminal ones — otherwise a long agent
-        // run renders as a frozen list until it finishes.
-        if !transition.step_writes.is_empty()
-            || transition.run_state_changed
-            || transition.context_changed
-            || turn_boundary_changed
+        // run renders as a frozen list until it finishes. Terminal states are
+        // held back to the single post-cleanup emit in the branch below.
+        if !view.state.is_terminal()
+            && (!transition.step_writes.is_empty()
+                || transition.run_state_changed
+                || transition.context_changed
+                || turn_boundary_changed)
         {
             let _ = app.emit(
                 "circuit-run-updated",
@@ -857,11 +862,9 @@ fn drive_run(
         // checkpoints. Ordinary completed graphs opt out via cleanup intent.
         if view.state.is_terminal() {
             close_run_agents(app, &view);
-            // `close_run_agents` archives the run's remaining agents, but the
-            // terminal emit above ran *before* this sweep. A frontend refetch
-            // driven by that earlier emit could observe the still-active rows
-            // and keep their cards. Re-emit now that cleanup has settled so the
-            // resync sees the retired rows.
+            // The one terminal emit, after `close_run_agents` has archived the
+            // run's remaining agents — so the frontend resync observes the
+            // retired rows instead of racing the sweep.
             let _ = app.emit(
                 "circuit-run-updated",
                 CircuitRunUpdatedPayload {
