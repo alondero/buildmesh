@@ -42,6 +42,24 @@ describe('ProviderIcon', () => {
     }
   });
 
+  it('renders the Meta infinity-loop mark for the WSL Muse profile ids (muse-wsl, muse-wsl-<hash>)', () => {
+    // WSL profile ids (built by `agent/detection.rs::detect_wsl_profiles`)
+    // carry the form `<harness>-wsl[-<distrohash>]` and show up as native
+    // Spawn Option rows whose `id == profile.id`. The brand registry
+    // must strip the runtime suffix so the Muse WSL row renders the
+    // official Meta mark — the same one the native `muse` row uses —
+    // not the wire `meta.icon` "M" fallback glyph. Without the suffix
+    // strip, the WSL Meta Code row silently degrades to the placeholder
+    // the recent #1711 commit replaced for every other Muse surface.
+    for (const id of ['muse-wsl', 'muse-wsl-5562756e7475']) {
+      const { container } = render(<ProviderIcon providerId={id} />);
+      expect(container.querySelector('svg')).toBeTruthy();
+      expect(container.querySelector('span.bg-text-muted')).toBeNull();
+      const d = container.querySelector('svg path')?.getAttribute('d') ?? '';
+      expect(d).toContain('M6.915 4.03');
+    }
+  });
+
   it('renders the Claude Code mark for the detected "claude" profile id (#534)', () => {
     // Startup auto-detection (detection.rs) registers Claude Code with id
     // "claude", but the icon map historically only keyed the Claude mark under

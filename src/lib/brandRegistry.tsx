@@ -167,5 +167,19 @@ for (const { aliases = [], ...brand } of BRANDS) {
 export function brandFor(id: string): Brand | undefined {
   const separator = id.indexOf(':');
   const brandId = separator === -1 ? id : id.slice(separator + 1);
-  return BRAND_REGISTRY.get(brandId);
+  const direct = BRAND_REGISTRY.get(brandId);
+  if (direct) return direct;
+  // Runtime-suffix strip: the WSL auto-detector
+  // (`agent/detection.rs::detect_wsl_profiles`) builds profile ids as
+  // `<harness>-wsl-<distrohash>` and manual config may use `<harness>-wsl`.
+  // Native Spawn `ProviderInfo` rows carry `id == profile.id` (no `:`),
+  // so the brand lookup must recognise the runtime suffix and fall back
+  // to the harness's brand record — otherwise the WSL row renders the
+  // wire `meta.icon` glyph instead of the registered brand mark (the
+  // official Meta infinity-loop mark for `muse-wsl`, etc.).
+  const wslSuffix = brandId.match(/^(.+)-wsl(?:-\w+)?$/);
+  if (wslSuffix) {
+    return BRAND_REGISTRY.get(wslSuffix[1]);
+  }
+  return undefined;
 }
