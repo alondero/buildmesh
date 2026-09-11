@@ -9,6 +9,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { openSettingsPane } from '../utils/settings-panes';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ProviderInfo } from '../../src/lib/tauri';
 
@@ -172,6 +173,10 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
 
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+
+    // The default-provider picker now lives on the Providers pane, so the role
+    // query (which excludes hidden content) needs that pane active.
+    await openSettingsPane('Providers');
 
     // The default-provider `<select>` is now aria-labelled so this query is
     // unambiguous (the Auto-naming picker is also a combobox). Reaching in via

@@ -1,5 +1,5 @@
 /**
- * Settings → General → Agent Harness defaults: application-level model +
+ * Settings → Harnesses → Agent Harness defaults: application-level model +
  * effort defaults per Agent Harness (issue #1150 / #1148). Pinned contract:
  *
  *   * Capability gating — a harness with `supports_model_override = false`

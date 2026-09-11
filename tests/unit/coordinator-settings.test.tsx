@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { openSettingsPane } from '../utils/settings-panes';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -73,11 +73,12 @@ describe('Coordinator Read API settings section', () => {
     await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /coordinator read api/i });
-    // "loopback" now also appears in the LAN/VPN exposure section (issue #501),
-    // so match presence rather than a single occurrence; "tunnel" stays unique
-    // to the coordinator copy.
-    expect(screen.getAllByText(/loopback/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/tunnel/i)).toBeTruthy();
+    // The explanatory copy now lives behind the section's ⓘ affordance, so
+    // reveal it before asserting on the loopback / own-tunnel wording.
+    fireEvent.click(screen.getByRole('button', { name: 'About Coordinator Read API' }));
+    const tip = await screen.findByRole('tooltip');
+    expect(tip.textContent).toMatch(/loopback/i);
+    expect(tip.textContent).toMatch(/tunnel/i);
   });
 
   it('enables the API and mints a read-scoped token', async () => {

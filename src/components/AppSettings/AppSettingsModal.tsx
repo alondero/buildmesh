@@ -20,6 +20,7 @@ import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValu
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { Modal, ModalCloseButton } from '../shared/Modal';
+import { SettingsRow, SettingsSection } from './SettingsRow';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { isWindows } from '../../lib/platform';
@@ -36,13 +37,14 @@ async function getHostPairingVerifications(): Promise<PairingVerification[]> {
   return (await Promise.all(runtimes.map((runtime) => api.getPairingVerifications(runtime)))).flat();
 }
 
-/** The Settings sub-panes. One long scroll of unrelated sections outgrew
- *  itself; each pane groups settings by concern (behaviour defaults /
- *  provider credentials / spawn-menu composition / network reachability).
- *  All panes stay MOUNTED (inactive ones get the `hidden` attribute) — the
- *  modal's dirty tracking (issue #730) lives in child component state, so
- *  unmounting a pane on tab-switch would destroy half-typed credentials
- *  while the modal still reports itself dirty. */
+/** The Settings sub-panes. Each pane groups settings by concern and owns the
+ *  settings that belong to it: General = app behaviour + appearance + runtime
+ *  defaults; Providers = provider routing defaults + credentials; Harnesses =
+ *  spawn-menu composition + per-harness defaults; Remote Access = network
+ *  reachability. All panes stay MOUNTED (inactive ones get the `hidden`
+ *  attribute) — the modal's dirty tracking (issue #730) lives in child
+ *  component state, so unmounting a pane on tab-switch would destroy
+ *  half-typed credentials while the modal still reports itself dirty. */
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
@@ -52,11 +54,13 @@ const SETTINGS_TABS = [
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
 
 /** Which pane a dirty site belongs to, so its nav item can show the
- *  unsaved-changes dot. Site keys: `autopilot-pool` + `harness-defaults`
- *  (General), `harness-*` (Harnesses, prefixed where the modal wires
- *  HarnessConfigList), and `account-*` / `add-custom-form` (Providers). */
+ *  unsaved-changes dot. Site keys: `autopilot-pool` + `worktree-dir`
+ *  (General), `harness-defaults` and the prefixed `harness-*` sites wired by
+ *  HarnessConfigList (Harnesses), and `account-*` / `add-custom-form`
+ *  (Providers). The default-provider / reviewer / auto-naming selects save
+ *  immediately and are never dirty. */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool' || site === 'harness-defaults' || site === 'worktree-dir') return 'general';
+  if (site === 'autopilot-pool' || site === 'worktree-dir') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -1619,7 +1623,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     <Modal
       onClose={onClose}
       labelledBy="app-settings-title"
-      maxWidth="max-w-4xl"
+      maxWidth="max-w-5xl"
       className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
       dirty={dirtySites.size > 0}
       dirtyMessage="Discard unsaved changes to your settings?"
@@ -1679,16 +1683,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           role="tabpanel"
           aria-label="General"
           hidden={activeTab !== 'general'}
-          className="space-y-8"
+          className="space-y-2"
         >
-        {/* Issue #1534 (review round 5) — the General pane now
-            surfaces a loading indicator while preferences /
-            providers are still loading on modal open. Without this,
-            the user opens the modal, every control is silently
-            disabled, and there's no signal that the data hasn't
-            arrived yet — looks identical to a frozen crash. The
-            indicator is `role="status"` (polite) so screen readers
-            announce the transition without interrupting. */}
+        {/* Issue #1534 (review round 5) — surface a loading indicator while
+            preferences / providers are still loading on modal open. Without
+            this, the user opens the modal, every control is silently disabled,
+            and there's no signal that the data hasn't arrived yet — looks
+            identical to a frozen crash. `role="status"` (polite) so screen
+            readers announce the transition without interrupting. */}
         {(resources.preferences.status === 'loading' ||
           resources.providers.status === 'loading') && (
           <p
@@ -1700,12 +1702,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             Loading settings…
           </p>
         )}
-        {/* Issue #1534 — preferences-backed controls (default provider,
-            naming backend, pool size, worktree directory, confirm-quit,
-            harness defaults) all stay disabled while preferences are
-            loading or have failed. The error banner above them makes
-            the failure visible at the top of the pane so the user
-            doesn't have to discover the disabled inputs by trial. */}
+        {/* Issue #1534 — preference-backed controls in this pane (pool size,
+            worktree directory, confirm-quit) stay disabled while preferences
+            load or have failed; the banner makes that visible at the top of the
+            pane instead of leaving the user to discover the disabled inputs by
+            trial. */}
         {resources.preferences.status === 'failed' && (
           <ResourceLoadStatus
             resource="preferences"
@@ -1713,278 +1714,165 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             onRetry={() => retryResource('preferences')}
           />
         )}
-        {/* Issue #1534 (review round 2) — the General pane also
-            surfaces a providers failure. Without this banner, a
-            `listProviders` rejection silently disables the default
-            provider + auto-naming controls and the user is left
-            wondering why. The Providers tab also gets a banner for
-            the same resource, but the General pane is the one most
-            users see first. */}
-        {resources.providers.status === 'failed' && (
-          <ResourceLoadStatus
-            resource="providers"
-            state={resources.providers}
-            onRetry={() => retryResource('providers')}
-          />
-        )}
-        <div className="space-y-4">
-          <label className="block text-lg font-medium text-text-secondary">
-            Default provider
-          </label>
-          <p className="text-base text-text-muted">
-            Used when a mesh has no `default_provider` of its own.
-          </p>
-          <select
-            aria-label="Default provider"
-            value={selected}
-            disabled={!prefsLoaded || !providersLoaded || saving}
-            onChange={e => handleSave(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-          >
-            <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
-            {providers.map(p => (
-              <option key={p.id} value={p.id}>{p.label}</option>
-            ))}
-          </select>
-        </div>
 
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label className="block text-lg font-medium text-text-secondary">
-            Reviewer provider
-          </label>
-          <p className="text-base text-text-muted">
-            Used by the built-in review circuit for adversarial review. Leave it
-            on the source-agent fallback to use the reviewed agent's provider.
-            Authored Circuits can still override this in their reviewer node.
-          </p>
-          <select
-            aria-label="Reviewer provider"
-            value={reviewerProvider}
-            disabled={!prefsLoaded || !providersLoaded || reviewerSaving}
-            onChange={e => handleSaveReviewer(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+        {/* Appearance — per-machine colour theme. */}
+        <SettingsSection title="Appearance">
+          <SettingsRow
+            label="Theme"
+            htmlFor="theme-radio-group"
+            summary="Colour theme for the app and terminals."
+            layout="stacked"
+            details={
+              <>
+                Dark is the default; light inverts the surface and text tokens while
+                keeping the accent palette intact. The choice is saved per machine —
+                xterm.js terminals flip with the rest of the app.
+              </>
+            }
           >
-            <option value={NO_OVERRIDE}>Source agent provider</option>
-            {providers
-              .filter((p) => p.id !== 'terminal')
-              .map(p => (
-                <option key={p.id} value={p.id}>{p.label}</option>
+            <fieldset
+              id="theme-radio-group"
+              aria-label="Theme"
+              className="flex flex-wrap gap-2"
+            >
+              {(['dark', 'light'] as const).map((name) => (
+                <label
+                  key={name}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-md text-base cursor-pointer border transition-colors ${
+                    themeDraft === name
+                      ? 'bg-bg-card border-accent-cyan text-text-primary'
+                      : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="theme"
+                    value={name}
+                    checked={themeDraft === name}
+                    // Controlled radio: the picker is always in step with the
+                    // active theme (setTheme is synchronous). Each click commits
+                    // immediately — no "Save" button, no dirty site, no rollback.
+                    onChange={() => handleSaveTheme(name)}
+                    className="accent-accent-cyan"
+                    data-testid={`theme-radio-${name}`}
+                  />
+                  <span className="capitalize">{name}</span>
+                </label>
               ))}
-          </select>
-        </div>
-
-        {/* Issue #824: Auto-naming. Distinct from default-provider above.
-            Auto-naming runs frequently on trivial content, so the user
-            explicitly opts in via this picker. The helper pins a cheap
-            haiku tier when "anthropic" is picked so the user's main
-            subscription default is never silently inherited. Empty /
-            "Disabled" leaves nodes with their random adj-adj-noun
-            slugs. */}
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label className="block text-lg font-medium text-text-secondary">
-            Auto-naming
-          </label>
-          <p className="text-base text-text-muted">
-            When a node finishes a turn, Buildmesh can ask a small LLM to summarise
-            the work into a slug (e.g. <code>fix-auth-flow</code>) instead of the
-            default <code>bold-keen-brook</code>. Auto-naming runs frequently on
-            trivial content — pick a cheap backend so an Opus-class node doesn't
-            burn tokens on every rename.
-          </p>
-          <select
-            value={namingProvider ?? ''}
-            disabled={!prefsLoaded || !providersLoaded || namingSaving}
-            onChange={e => handleSaveNaming(e.target.value || null)}
-            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-          >
-            <option value="">Disabled (auto-naming off)</option>
-            {providers
-              .filter((p) => p.id !== 'terminal')
-              .map((p) => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-          </select>
-          {namingProvider === 'anthropic' && (
-            <p className="text-sm text-text-muted">
-              Built-in Anthropic is pinned to a haiku tier so the rename doesn't
-              inherit your main subscription default.
-            </p>
-          )}
-          {namingProvider === null && (
-            <p className="text-sm text-text-muted">
-              Auto-naming is off. New nodes keep random adjective-adjective-noun
-              slugs. You can always rename manually from the sidebar.
-            </p>
-          )}
-        </div>
-
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label
-            htmlFor="autopilot-pool-size"
-            className="block text-lg font-medium text-text-secondary"
-          >
-            Autopilot pool size
-          </label>
-          <p className="text-base text-text-muted">
-            The most autopilot nodes allowed to run at once across{' '}
-            <span className="font-medium">all</span> meshes. Each mesh still
-            respects its own concurrency limit (set in Project Settings) — this
-            caps the total, so ten meshes with two slots each can't put twenty
-            agents on your machine. Leave empty for no global cap; 0 pauses new
-            autopilot spawns. Running nodes are never stopped — lowering the cap
-            just holds new spawns until slots free up.
-          </p>
-          <input
-            id="autopilot-pool-size"
-            type="number"
-            min={0}
-            step={1}
-            inputMode="numeric"
-            aria-label="Autopilot pool size"
-            placeholder="No global cap"
-            value={poolDraft}
-            disabled={!prefsLoaded || poolSaving}
-            onChange={e => {
-              setPoolDraft(e.target.value);
-              siteDirtyChange('autopilot-pool', e.target.value.trim() !== poolSavedRef.current);
-            }}
-            onBlur={commitPoolSize}
-            onKeyDown={e => {
-              if (e.key === 'Enter') commitPoolSize();
-            }}
-            className="w-48 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-          />
-        </div>
-
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label
-            htmlFor="worktree-directory"
-            className="block text-lg font-medium text-text-secondary"
-          >
-            Worktree directory
-          </label>
-          <p className="text-base text-text-muted">
-            Default folder for new Worktree Nodes across{' '}
-            <span className="font-medium">all</span> meshes. Relative paths
-            resolve from each mesh root (e.g. <code>worktrees</code>); absolute
-            paths are not allowed here because one default spans both native
-            and WSL meshes — set an absolute path as a per-mesh override in
-            Project Settings instead. Leave empty for{' '}
-            <code>.claude/worktrees</code>. A per-mesh override
-            in Project Settings takes precedence. Changing this affects future
-            nodes and pre-spawn pool entries only — live nodes keep their
-            existing directories.
-          </p>
-          <input
-            id="worktree-directory"
-            type="text"
-            aria-label="Worktree directory"
-            placeholder=".claude/worktrees"
-            value={worktreeDirDraft}
-            disabled={!prefsLoaded || worktreeDirSaving}
-            onChange={e => {
-              setWorktreeDirDraft(e.target.value);
-              siteDirtyChange('worktree-dir', e.target.value.trim() !== worktreeDirSavedRef.current);
-            }}
-            onBlur={commitWorktreeDir}
-            onKeyDown={e => {
-              if (e.key === 'Enter') commitWorktreeDir();
-            }}
-            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-          />
-        </div>
+            </fieldset>
+          </SettingsRow>
+        </SettingsSection>
 
         {/* Issue #1501: exit confirmation. On by default — closing the
-            window with active sessions prompts instead of terminating. */}
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label className="block text-lg font-medium text-text-secondary">
-            Exiting
-          </label>
-          <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
+            window with active sessions prompts instead of terminating. The
+            checkbox keeps its full label text because that string is the
+            control's accessible name (used by tests and screen readers). */}
+        <SettingsSection title="Behaviour">
+          <SettingsRow
+            label="Exiting"
+            summary="Warn before closing the window with active agent sessions."
+            controlClassName="w-80 shrink-0"
+          >
+            <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={confirmBeforeQuit}
+                disabled={!prefsLoaded || confirmQuitBusy}
+                onChange={e => handleToggleConfirmQuit(e.target.checked)}
+                className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+              />
+              <span>Confirm before quitting when agent sessions are active</span>
+            </label>
+          </SettingsRow>
+        </SettingsSection>
+
+        {/* Agent runtime — host-wide execution caps and paths. */}
+        <SettingsSection
+          title="Agent runtime"
+          description={
+            <>
+              Host-wide execution defaults. Each mesh still respects its own
+              concurrency limit and worktree override in Project Settings.
+            </>
+          }
+        >
+          <SettingsRow
+            label="Autopilot pool size"
+            htmlFor="autopilot-pool-size"
+            summary="Global cap on concurrent autopilot nodes across all meshes."
+            controlClassName="w-48 shrink-0"
+            details={
+              <>
+                The most autopilot nodes allowed to run at once across{' '}
+                <span className="font-medium">all</span> meshes. Each mesh still
+                respects its own concurrency limit (set in Project Settings) — this
+                caps the total, so ten meshes with two slots each can't put twenty
+                agents on your machine. Leave empty for no global cap; 0 pauses new
+                autopilot spawns. Running nodes are never stopped — lowering the cap
+                just holds new spawns until slots free up.
+              </>
+            }
+          >
             <input
-              type="checkbox"
-              checked={confirmBeforeQuit}
-              disabled={!prefsLoaded || confirmQuitBusy}
-              onChange={e => handleToggleConfirmQuit(e.target.checked)}
-              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+              id="autopilot-pool-size"
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              aria-label="Autopilot pool size"
+              placeholder="No global cap"
+              value={poolDraft}
+              disabled={!prefsLoaded || poolSaving}
+              onChange={e => {
+                setPoolDraft(e.target.value);
+                siteDirtyChange('autopilot-pool', e.target.value.trim() !== poolSavedRef.current);
+              }}
+              onBlur={commitPoolSize}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitPoolSize();
+              }}
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
             />
-            <span>Confirm before quitting when agent sessions are active</span>
-          </label>
-          <p className="text-base text-text-muted">
-            When on, closing the window while agents are running asks for
-            confirmation and warns about sessions that can&apos;t resume.
-          </p>
-        </div>
+          </SettingsRow>
 
-        {/* Issue #1150 / #1148: Application-level Agent Harness defaults.
-            One card per native Agent Harness, capability-gated (model
-            only where `supports_model_override`, effort with the
-            harness's declared vocabulary otherwise). On-dirty mirrors
-            into the modal's discard-confirm via `harness-defaults`. */}
-        <div className="pt-6 border-t border-border-subtle">
-          <HarnessDefaultsSection
-            providers={providers}
-            defaults={harnessDefaults}
-            onChange={handleSetHarnessDefault}
-            onReset={handleClearHarnessDefault}
-            onDirtyChange={(d) => siteDirtyChange('harness-defaults', d)}
-            disabled={!prefsLoaded}
-          />
-        </div>
-
-        <div className="pt-6 border-t border-border-subtle space-y-4">
-          <label
-            htmlFor="theme-radio-group"
-            className="block text-lg font-medium text-text-secondary"
+          <SettingsRow
+            label="Worktree directory"
+            htmlFor="worktree-directory"
+            summary="Default folder for new worktree nodes, relative to each mesh root."
+            controlClassName="w-72 shrink-0"
+            details={
+              <>
+                Default folder for new Worktree Nodes across{' '}
+                <span className="font-medium">all</span> meshes. Relative paths
+                resolve from each mesh root (e.g. <code>worktrees</code>); absolute
+                paths are not allowed here because one default spans both native and
+                WSL meshes — set an absolute path as a per-mesh override in Project
+                Settings instead. Leave empty for <code>.claude/worktrees</code>. A
+                per-mesh override in Project Settings takes precedence. Changing this
+                affects future nodes and pre-spawn pool entries only — live nodes
+                keep their existing directories.
+              </>
+            }
           >
-            Appearance
-          </label>
-          <p className="text-base text-text-muted">
-            Pick the colour theme. Dark is the default; light inverts the
-            surface and text tokens while keeping the accent palette intact.
-            The choice is saved per machine — xterm.js terminals flip with
-            the rest of the app.
-          </p>
-          <fieldset
-            id="theme-radio-group"
-            aria-label="Theme"
-            className="flex flex-wrap gap-2"
-          >
-            {(['dark', 'light'] as const).map((name) => (
-              <label
-                key={name}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md text-base cursor-pointer border transition-colors ${
-                  themeDraft === name
-                    ? 'bg-bg-card border-accent-cyan text-text-primary'
-                    : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="theme"
-                  value={name}
-                  checked={themeDraft === name}
-                  // Controlled radio: the picker is always in step with the
-                  // active theme (setTheme is synchronous). Each click
-                  // commits immediately — no "Save" button, no dirty site,
-                  // no rollback. The visual transition is the persistence.
-                  onChange={() => handleSaveTheme(name)}
-                  className="accent-accent-cyan"
-                  data-testid={`theme-radio-${name}`}
-                />
-                <span className="capitalize">{name}</span>
-              </label>
-            ))}
-          </fieldset>
-        </div>
-
-        <div className="pt-6 border-t border-border-subtle">
-          <p className="text-base text-text-muted">
-            Provider defaults are stored in your app data directory at{' '}
-            <span className="font-mono">preferences.json</span>; coordinator settings and
-            authorized devices live in the app database.
-          </p>
-        </div>
+            <input
+              id="worktree-directory"
+              type="text"
+              aria-label="Worktree directory"
+              placeholder=".claude/worktrees"
+              value={worktreeDirDraft}
+              disabled={!prefsLoaded || worktreeDirSaving}
+              onChange={e => {
+                setWorktreeDirDraft(e.target.value);
+                siteDirtyChange('worktree-dir', e.target.value.trim() !== worktreeDirSavedRef.current);
+              }}
+              onBlur={commitWorktreeDir}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitWorktreeDir();
+              }}
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            />
+          </SettingsRow>
+        </SettingsSection>
 
         {/* Issue #1526 — manual update surface. The auto-launch prompt
             (UpdatePrompt) handles nag-style flow; Settings exposes
@@ -1997,26 +1885,38 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           role="tabpanel"
           aria-label="Harnesses"
           hidden={activeTab !== 'harnesses'}
-          className="space-y-8"
+          className="space-y-2"
         >
+        {/* Issue #1534 — the Agent Harness defaults section below is
+            preferences-backed, so a failed preferences load must be visible
+            here rather than silently disabling the per-harness inputs. */}
+        {resources.preferences.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="preferences"
+            state={resources.preferences}
+            onRetry={() => retryResource('preferences')}
+          />
+        )}
         {providers.filter(p => p.id !== 'terminal').length >= 2 && (
-          <div className="pt-6 border-t border-border-subtle first:pt-0 first:border-t-0">
-            <h3 className="text-xl font-semibold text-text-primary mb-2">Spawn menu order</h3>
-            <p className="text-base text-text-muted mb-4">
+          <SettingsSection title="Spawn menu order">
+            <p className="pb-2 text-sm text-text-muted">
               Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
             </p>
             <HarnessOrderList providers={providers} onReorder={handleReorderHarnesses} />
-          </div>
+          </SettingsSection>
         )}
 
-        <div className="pt-6 border-t border-border-subtle first:pt-0 first:border-t-0">
-          <h3 className="text-xl font-semibold text-text-primary mb-2">Harnesses & proxied providers</h3>
-          <p className="text-base text-text-muted mb-4">
-            Proxy a model provider through a harness over a compatible API surface
-            (e.g. MiniMax via Claude Code over Anthropic, or via Codex over OpenAI).
-            Set the provider&apos;s API key on the Providers page; set base URL and
-            Claude model names here when attaching.
-          </p>
+        <SettingsSection
+          title="Harnesses & proxied providers"
+          description={
+            <>
+              Proxy a model provider through a harness over a compatible API surface
+              (e.g. MiniMax via Claude Code over Anthropic, or via Codex over OpenAI).
+              Set the provider&apos;s API key on the Providers page; set base URL and
+              model names here when attaching.
+            </>
+          }
+        >
           {/* Issue #1534 (review round 2) — `idle` is now an explicit
               branch. Without it, an in-flight tab switch to the
               Harnesses pane (while `pairings` was still waiting on
@@ -2066,23 +1966,162 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
             />
           )}
-        </div>
+        </SettingsSection>
+
+        {/* Issue #1150 / #1148: application-level Agent Harness defaults.
+            On-dirty mirrors into the modal's discard-confirm via
+            `harness-defaults`, which maps to this pane. */}
+        <HarnessDefaultsSection
+          providers={providers}
+          defaults={harnessDefaults}
+          onChange={handleSetHarnessDefault}
+          onReset={handleClearHarnessDefault}
+          onDirtyChange={(d) => siteDirtyChange('harness-defaults', d)}
+          disabled={!prefsLoaded}
+        />
         </section>
 
         <section
           role="tabpanel"
           aria-label="Providers"
           hidden={activeTab !== 'providers'}
+          className="space-y-2"
         >
-        <div>
-          <h3 className="text-xl font-semibold text-text-primary mb-2">Providers</h3>
-          <p className="text-base text-text-muted mb-4">
-            Self-auth brands always appear (enable + billing). Add keyed first-class
-            or generic providers for API keys. Base URL and model names are configured
-            when you attach a provider under Harnesses. Usage Meters live on the{' '}
-            <span className="font-medium">Usage</span> tab in the side panel.
-          </p>
+        {/* Routing controls below are preferences + providers backed; surface a
+            failure for either before the controls that depend on them. */}
+        {resources.preferences.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="preferences"
+            state={resources.preferences}
+            onRetry={() => retryResource('preferences')}
+          />
+        )}
+        {resources.providers.status === 'failed' && (
+          <ResourceLoadStatus
+            resource="providers"
+            state={resources.providers}
+            onRetry={() => retryResource('providers')}
+          />
+        )}
 
+        <SettingsSection
+          title="Provider defaults"
+          description={
+            <>
+              Provider defaults are stored in your app data directory at{' '}
+              <span className="font-mono">preferences.json</span>; coordinator
+              settings and authorized devices live in the app database.
+            </>
+          }
+        >
+          <SettingsRow
+            label="Default provider"
+            htmlFor="default-provider"
+            summary="Provider used when a mesh has no default of its own."
+          >
+            <select
+              id="default-provider"
+              aria-label="Default provider"
+              value={selected}
+              disabled={!prefsLoaded || !providersLoaded || saving}
+              onChange={e => handleSave(e.target.value)}
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            >
+              <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
+              {providers.map(p => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+          </SettingsRow>
+
+          <SettingsRow
+            label="Reviewer provider"
+            htmlFor="reviewer-provider"
+            summary="Provider for the built-in adversarial review circuit."
+            details={
+              <>
+                Used by the built-in review circuit for adversarial review. Leave it on
+                the source-agent fallback to use the reviewed agent&apos;s provider.
+                Authored Circuits can still override this in their reviewer node.
+              </>
+            }
+          >
+            <select
+              id="reviewer-provider"
+              aria-label="Reviewer provider"
+              value={reviewerProvider}
+              disabled={!prefsLoaded || !providersLoaded || reviewerSaving}
+              onChange={e => handleSaveReviewer(e.target.value)}
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            >
+              <option value={NO_OVERRIDE}>Source agent provider</option>
+              {providers
+                .filter((p) => p.id !== 'terminal')
+                .map(p => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+            </select>
+          </SettingsRow>
+
+          {/* Issue #824: Auto-naming. Distinct from the default provider above.
+              Runs frequently on trivial content, so the user explicitly opts in
+              via this picker; empty / "Disabled" leaves nodes with their random
+              adj-adj-noun slugs. */}
+          <SettingsRow
+            label="Auto-naming"
+            htmlFor="auto-naming"
+            summary="Small LLM that renames nodes from their work."
+            details={
+              <>
+                When a node finishes a turn, Buildmesh can ask a small LLM to summarise
+                the work into a slug (e.g. <code>fix-auth-flow</code>) instead of the
+                default <code>bold-keen-brook</code>. Auto-naming runs frequently on
+                trivial content — pick a cheap backend so an Opus-class node doesn&apos;t
+                burn tokens on every rename.
+              </>
+            }
+          >
+            <select
+              id="auto-naming"
+              aria-label="Auto-naming"
+              value={namingProvider ?? ''}
+              disabled={!prefsLoaded || !providersLoaded || namingSaving}
+              onChange={e => handleSaveNaming(e.target.value || null)}
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            >
+              <option value="">Disabled (auto-naming off)</option>
+              {providers
+                .filter((p) => p.id !== 'terminal')
+                .map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+            </select>
+          </SettingsRow>
+          {namingProvider === 'anthropic' && (
+            <p className="pb-2 text-sm text-text-muted">
+              Built-in Anthropic is pinned to a haiku tier so the rename doesn&apos;t
+              inherit your main subscription default.
+            </p>
+          )}
+          {namingProvider === null && (
+            <p className="pb-2 text-sm text-text-muted">
+              Auto-naming is off. New nodes keep random adjective-adjective-noun slugs.
+              You can always rename manually from the sidebar.
+            </p>
+          )}
+        </SettingsSection>
+
+        <SettingsSection
+          title="Accounts"
+          description={
+            <>
+              Self-auth brands always appear (enable + billing). Add keyed first-class
+              or generic providers for API keys. Base URL and model names are
+              configured when you attach a provider under Harnesses. Usage Meters live
+              on the <span className="font-medium">Usage</span> tab in the side panel.
+            </>
+          }
+        >
           {/* Issue #1534 — replace the empty-cards state with an
               explicit error when the accounts fetch failed. Without
               this the pane would silently show "no providers" and the
@@ -2133,25 +2172,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               + Add provider
             </button>
           )}
-        </div>
+        </SettingsSection>
         </section>
 
         <section
           role="tabpanel"
           aria-label="Remote Access"
           hidden={activeTab !== 'remote'}
-          className="space-y-8"
+          className="space-y-2"
         >
-        <div>
-          <h3 className="text-xl font-semibold text-text-primary mb-2">LAN / VPN Exposure</h3>
-          <p className="text-base text-text-muted mb-4">
-            Off by default — the server is reachable only from this machine
-            (loopback). Enable to let a phone on your LAN or VPN connect. Exposed
-            interfaces are served over HTTPS/WSS with a <span className="font-medium">self-signed
-            certificate</span>, so your browser will warn the first time you connect;
-            loopback stays plain HTTP. The change applies immediately — any
-            currently-connected LAN device must reconnect over HTTPS.
-          </p>
+        <SettingsSection
+          title="LAN / VPN Exposure"
+          description={
+            <>
+              Off by default — the server is reachable only from this machine
+              (loopback). Enable to let a phone on your LAN or VPN connect. Exposed
+              interfaces are served over HTTPS/WSS with a{' '}
+              <span className="font-medium">self-signed certificate</span>, so your
+              browser will warn the first time you connect; loopback stays plain
+              HTTP. The change applies immediately — any currently-connected LAN
+              device must reconnect over HTTPS.
+            </>
+          }
+        >
 
           {/* Issue #1534 — surface network-status failures at the top of
               the LAN section. Without this, the toggle below would be
@@ -2169,16 +2212,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             </div>
           )}
 
-          <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={lanEnabled}
-              disabled={!networkLoaded || lanBusy}
-              onChange={e => handleToggleLanExposure(e.target.checked)}
-              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
-            />
-            <span>Expose to LAN / VPN over self-signed TLS</span>
-          </label>
+          <SettingsRow
+            label="Enable exposure"
+            summary="Self-signed TLS; loopback stays plain HTTP."
+            controlClassName="w-80 shrink-0"
+          >
+            <label className="flex items-center gap-3 text-base text-text-primary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={lanEnabled}
+                disabled={!networkLoaded || lanBusy}
+                onChange={e => handleToggleLanExposure(e.target.checked)}
+                className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+              />
+              <span>Expose to LAN / VPN over self-signed TLS</span>
+            </label>
+          </SettingsRow>
 
           {/* Realized exposure (issue #586). When the toggle is on but the
               server is still loopback-only (TLS init failed, no interface,
@@ -2232,15 +2281,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               )}
             </div>
           )}
-        </div>
+        </SettingsSection>
 
-        <div className="pt-6 border-t border-border-subtle">
-          <h3 className="text-xl font-semibold text-text-primary mb-2">Coordinator Read API</h3>
-          <p className="text-base text-text-muted mb-4">
-            A read-only HTTP view of every node's status for an external coordinator.
-            Off by default. It binds to loopback and your LAN only — reaching it from
-            anywhere else is your own tunnel (Tailscale, Cloudflare, WireGuard).
-          </p>
+        <SettingsSection
+          title="Coordinator Read API"
+          description={
+            <>
+              A read-only HTTP view of every node&apos;s status for an external
+              coordinator. Off by default. It binds to loopback and your LAN only —
+              reaching it from anywhere else is your own tunnel (Tailscale,
+              Cloudflare, WireGuard).
+            </>
+          }
+        >
 
           {/* Issue #1534 — mirror the LAN section: an unknown coordinator
               status must not look like "off" to the user. The toggle is
@@ -2256,16 +2309,20 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             </div>
           )}
 
-          <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
+          <SettingsRow
+            label="Enable coordinator read API"
+            htmlFor="coordinator-read-api"
+            summary="Read-only HTTP view of node status for an external coordinator."
+          >
             <input
+              id="coordinator-read-api"
               type="checkbox"
               checked={coordEnabled}
               disabled={!coordinatorLoaded || coordBusy}
               onChange={e => handleToggleCoordinator(e.target.checked)}
               className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
             />
-            <span>Enable coordinator read API</span>
-          </label>
+          </SettingsRow>
 
           {coordEnabled && (
             <div className="mt-4 border border-border-subtle rounded-lg p-5">
@@ -2303,16 +2360,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               </div>
             </div>
           )}
-        </div>
+        </SettingsSection>
 
-        <div className="pt-6 border-t border-border-subtle">
-          <h3 className="text-xl font-semibold text-text-primary mb-2">Authorized Devices</h3>
-          <p className="text-base text-text-muted mb-4">
-            Phones you've paired keep their own session token, so they stay
-            connected as their network (and IP) changes. Revoke any device to cut
-            it off immediately — its open connections drop and it must pair again
-            with a fresh QR code.
-          </p>
+        <SettingsSection
+          title="Authorized Devices"
+          description={
+            <>
+              Phones you&apos;ve paired keep their own session token, so they stay
+              connected as their network (and IP) changes. Revoke any device to cut
+              it off immediately — its open connections drop and it must pair again
+              with a fresh QR code.
+            </>
+          }
+        >
 
           {!devicesLoaded ? (
             <ResourceLoadStatus
@@ -2367,7 +2427,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               ))}
             </ul>
           )}
-        </div>
+        </SettingsSection>
         </section>
         </div>
       </div>

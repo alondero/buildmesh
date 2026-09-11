@@ -3,6 +3,7 @@ import type { ProviderInfo } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import type { EffortControlKind } from '../../types/generated/EffortControlKind';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { SettingsSection } from './SettingsRow';
 
 /** A single harness's draft state. `committed` is the last value the
  *  backend confirmed saved; `draft` is the in-flight edit. `dirty` is the
@@ -182,27 +183,31 @@ export function HarnessDefaultsSection({
   );
 
   return (
-    <div className="space-y-4" data-testid="harness-defaults-section">
-      <div>
-        <h3 className="text-xl font-semibold text-text-primary mb-2">Agent Harness defaults</h3>
-        <p className="text-base text-text-muted mb-4">
-          Buildmesh-wide defaults for each Agent Harness. New Agent Nodes inherit these unless a
-          Mesh or per-launch override wins the cascade. Resetting a harness removes its default —
-          the harness then runs with its native configuration.
-        </p>
+    <SettingsSection
+      title="Agent Harness defaults"
+      testId="harness-defaults-section"
+      description={
+        <>
+          Buildmesh-wide defaults for each Agent Harness. New Agent Nodes inherit
+          these unless a Mesh or per-launch override wins the cascade. Resetting a
+          harness removes its default — it then runs with its native configuration.
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {harnesses.map((h) => (
+          <HarnessDefaultCard
+            key={h.harness_id}
+            provider={h}
+            draft={drafts[h.harness_id] ?? { committed: EMPTY_DEFAULT, draft: EMPTY_DEFAULT, dirty: false }}
+            onUpdate={(patch) => updateDraft(h.harness_id, patch)}
+            onCommit={() => commit(h.harness_id)}
+            onReset={() => reset(h.harness_id)}
+            disabled={disabled}
+          />
+        ))}
       </div>
-      {harnesses.map((h) => (
-        <HarnessDefaultCard
-          key={h.harness_id}
-          provider={h}
-          draft={drafts[h.harness_id] ?? { committed: EMPTY_DEFAULT, draft: EMPTY_DEFAULT, dirty: false }}
-          onUpdate={(patch) => updateDraft(h.harness_id, patch)}
-          onCommit={() => commit(h.harness_id)}
-          onReset={() => reset(h.harness_id)}
-          disabled={disabled}
-        />
-      ))}
-    </div>
+    </SettingsSection>
   );
 }
 
@@ -230,88 +235,77 @@ function HarnessDefaultCard({
 
   return (
     <div
-      className="border border-border-subtle rounded-lg p-5"
+      className="flex items-center gap-3 border border-border-subtle rounded-lg px-4 py-2.5"
       data-testid={`harness-default-${provider.harness_id}`}
       data-has-stored-default={stored ? 'true' : 'false'}
     >
-      <div className="flex items-center gap-3 mb-3">
-        <ProviderIcon providerId={provider.harness_id} className="h-6 w-6" />
-        <span className="text-lg font-medium text-text-primary">{provider.label}</span>
-        {stored && (
-          <button
-            type="button"
-            onClick={() => void onReset()}
-            disabled={disabled}
-            className="ml-auto px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
-            aria-label={`Reset ${provider.label} defaults`}
-            data-testid={`harness-default-reset-${provider.harness_id}`}
-          >
-            Reset
-          </button>
-        )}
-      </div>
+      <ProviderIcon providerId={provider.harness_id} className="h-5 w-5 shrink-0" />
+      <span className="shrink-0 text-base font-medium text-text-primary">{provider.label}</span>
 
       {!hasAnyControl ? (
-        <p className="text-base text-text-muted italic" data-testid={`harness-default-empty-${provider.harness_id}`}>
-          {provider.label} does not accept model or effort overrides from Buildmesh — it uses its own native configuration.
-        </p>
+        <span
+          className="min-w-0 truncate text-sm italic text-text-muted"
+          data-testid={`harness-default-empty-${provider.harness_id}`}
+        >
+          {provider.label} does not accept model or effort overrides from Buildmesh — it uses its own
+          native configuration.
+        </span>
       ) : (
-        <div className="space-y-3">
+        <div className="ml-auto flex items-center gap-2">
           {showModel && (
-            <div>
-              <label
-                htmlFor={`harness-default-model-${provider.harness_id}`}
-                className="block text-sm text-text-muted mb-1"
-              >
-                Default model
-              </label>
-              <input
-                id={`harness-default-model-${provider.harness_id}`}
-                type="text"
-                value={draft.draft.model ?? ''}
-                placeholder={provider.harness_id === 'codex' ? 'model id' : 'model id'}
-                onChange={(e) => onUpdate({ model: e.target.value || null })}
-                onBlur={() => void onCommit()}
-                disabled={disabled}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${provider.label} default model`}
-                data-testid={`harness-default-model-input-${provider.harness_id}`}
-              />
-            </div>
+            <input
+              id={`harness-default-model-${provider.harness_id}`}
+              type="text"
+              value={draft.draft.model ?? ''}
+              placeholder="model id"
+              onChange={(e) => onUpdate({ model: e.target.value || null })}
+              onBlur={() => void onCommit()}
+              disabled={disabled}
+              className="w-44 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              aria-label={`${provider.label} default model`}
+              data-testid={`harness-default-model-input-${provider.harness_id}`}
+            />
           )}
           {showEffort && allowed && (
-            <div>
-              <label
-                htmlFor={`harness-default-effort-${provider.harness_id}`}
-                className="block text-sm text-text-muted mb-1"
-              >
-                {effortKey(caps.effort_control) === 'model_reasoning_effort'
-                  ? 'Reasoning effort'
-                  : 'Effort'}
-              </label>
-              <select
-                id={`harness-default-effort-${provider.harness_id}`}
-                value={draft.draft.effort ?? ''}
-                onChange={(e) => onUpdate({ effort: e.target.value || null })}
-                onBlur={() => void onCommit()}
-                disabled={disabled}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${provider.label} effort`}
-                data-testid={`harness-default-effort-select-${provider.harness_id}`}
-              >
-                <option value="">— none —</option>
-                {allowed.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <select
+              id={`harness-default-effort-${provider.harness_id}`}
+              value={draft.draft.effort ?? ''}
+              onChange={(e) => onUpdate({ effort: e.target.value || null })}
+              onBlur={() => void onCommit()}
+              disabled={disabled}
+              className="w-32 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              aria-label={`${provider.label} ${
+                effortKey(caps.effort_control) === 'model_reasoning_effort' ? 'reasoning effort' : 'effort'
+              }`}
+              data-testid={`harness-default-effort-select-${provider.harness_id}`}
+            >
+              <option value="">— none —</option>
+              {allowed.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
           )}
           {draft.dirty && (
-            <p className="text-sm text-status-warning" data-testid={`harness-default-dirty-${provider.harness_id}`}>
-              Unsaved changes — will save on blur.
-            </p>
+            <span
+              className="whitespace-nowrap text-sm text-status-warning"
+              data-testid={`harness-default-dirty-${provider.harness_id}`}
+            >
+              Saves on blur
+            </span>
+          )}
+          {stored && (
+            <button
+              type="button"
+              onClick={() => void onReset()}
+              disabled={disabled}
+              className="shrink-0 px-3 py-1.5 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
+              aria-label={`Reset ${provider.label} defaults`}
+              data-testid={`harness-default-reset-${provider.harness_id}`}
+            >
+              Reset
+            </button>
           )}
         </div>
       )}
