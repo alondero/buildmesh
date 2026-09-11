@@ -144,12 +144,40 @@ describe('attachAgentNodeListeners', () => {
     capturedHandler!({ payload: { run_id: 9, state: 'unknown' } });
     await Promise.resolve();
 
-    expect(surface.__calls).toEqual(
-      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(state => ({
-        method: 'patchCircuitOwnershipState',
-        args: [9, state],
-      })),
-    );
+    expect(surface.__calls).toEqual([
+      { method: 'patchCircuitOwnershipState', args: [9, 'pending'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'running'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'paused'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'completed'] },
+      // Terminal transitions also resync the node list — a terminal run has
+      // already deleted its `CloseAgentNode` agents (ghost-tab fix).
+      { method: 'fetchAgentNodes', args: [] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'failed'] },
+      { method: 'fetchAgentNodes', args: [] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'cancelled'] },
+      { method: 'fetchAgentNodes', args: [] },
+    ]);
+  });
+
+  it('terminal circuit-run-updated refetches nodes so retired agents leave the grid', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'circuit-run-updated') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({ payload: { run_id: 4, state: 'completed' } });
+    await Promise.resolve();
+
+    expect(surface.fetchAgentNodes).toHaveBeenCalledTimes(1);
+    expect(surface.__calls).toEqual([
+      { method: 'patchCircuitOwnershipState', args: [4, 'completed'] },
+      { method: 'fetchAgentNodes', args: [] },
+    ]);
   });
 
   // The narrow surface contract: every handler must dispatch to the

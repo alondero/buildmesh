@@ -96,6 +96,13 @@ export interface AgentNodeActionSurface {
 // `node_id` alias for vocabulary consistency inside the store.
 const SESSION_ID_KEY = 'session_id';
 
+/// Circuit run states after which the run has retired its attached agents.
+/// A `CloseAgentNode` step deletes those rows directly in the DB and emits no
+/// per-node event, so the node list must be refetched when a run reaches one
+/// of these states. Without the refetch the deleted agent lingers in the grid
+/// as a ghost tab, and closing it later fails with "Query returned no rows".
+const TERMINAL_CIRCUIT_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
+
 /**
  * Subscribe every agent-node Tauri event the store cares about.
  * Returns a single async-aggregated unlisten handle (issue #547-style
@@ -116,6 +123,12 @@ export async function attachAgentNodeListeners(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
       if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
         surface.patchCircuitOwnershipState(payload.run_id, payload.state);
+      }
+      // Terminal runs have already deleted their attached `CloseAgentNode`
+      // agents (the approved/blocked/feedback verdicts, plus failed-run
+      // cleanup), so resync to drop the now-stale cards/tabs.
+      if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
+        void surface.fetchAgentNodes();
       }
     }),
   );
