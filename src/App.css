@@ -153,6 +153,8 @@
    that still reads as the same brand hue while clearing 3:1 for non-text
    UI (WCAG 1.4.11). */
 [data-theme="light"] {
+  color-scheme: light;
+
   /* Backgrounds — layered light surfaces */
   --color-bg-base: #fafafa;
   --color-bg-surface: #ffffff;
@@ -269,6 +271,16 @@
       transition-duration: 0.01ms !important;
     }
   }
+}
+
+/* color-scheme lives on the root ONLY. Native form controls — most visibly
+   the <select> popup — are drawn by the OS/browser, not by author
+   background-color, and follow the nearest specified color-scheme. Setting it
+   on body too would pin an explicit value that the [data-theme="light"]
+   override (which targets the root) cannot reach, leaving light theme with
+   dark native controls. Dark is the default; the light block re-points it. */
+html {
+  color-scheme: dark;
 }
 
 html, body {

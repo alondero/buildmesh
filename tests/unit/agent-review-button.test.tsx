@@ -81,6 +81,27 @@ describe('agent workflow title-bar control', () => {
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
+  it('themes its dropdowns with a defined surface token (regression: bg-surface-raised)', () => {
+    // bg-surface-raised was never declared in @theme, so Tailwind v4 emitted
+    // no CSS for it: the native controls fell back to the OS white field while
+    // inheriting the app's light text — light-on-white in the dark theme.
+    // Hold the circuit load pending so its resolved-state update can't land
+    // outside act() — this test only inspects the rendered class names.
+    list.mockImplementation(() => new Promise(() => {}));
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const controls = [
+      screen.getByLabelText('Workflow'),
+      screen.getByLabelText('Reviewer provider'),
+      screen.getByLabelText('Maximum review rounds'),
+    ];
+    for (const control of controls) {
+      expect(control.className).not.toContain('bg-surface-raised');
+      expect(control.className).toContain('bg-bg-overlay');
+      expect(control.className).toContain('text-text-primary');
+    }
+  });
+
   it('groups providers by harness and nests proxied rows', async () => {
     renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
