@@ -69,6 +69,9 @@ describe('brandFor', () => {
       chipHex: '#0866FF',
       chipClass: 'bg-blue-600',
     });
+    // The official Meta infinity-loop mark ships inline (monochrome via
+    // currentColor), not as an image asset or the old placeholder glyph.
+    expect(muse?.icon.kind).toBe('inline');
   });
 
   it('registers Freebuff with its official brand treatment', () => {

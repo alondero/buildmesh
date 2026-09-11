@@ -26,6 +26,22 @@ describe('ProviderIcon', () => {
     }
   });
 
+  it('renders the Meta infinity-loop mark for the Muse harness and provider ids', () => {
+    // The Muse harness (`muse`) and its First-class Model Provider
+    // (`muse-code`) share one brand record. Both must take the inline-SVG
+    // path (the official Meta mark), never the gray-dot fallback or the
+    // old placeholder "M" glyph.
+    for (const id of ['muse', 'muse-code']) {
+      const { container } = render(<ProviderIcon providerId={id} />);
+      expect(container.querySelector('svg')).toBeTruthy();
+      expect(container.querySelector('span.bg-text-muted')).toBeNull();
+      // The rendered mark must be the Meta infinity loop, not the old
+      // placeholder "M" glyph — pin on the path-data fingerprint.
+      const d = container.querySelector('svg path')?.getAttribute('d') ?? '';
+      expect(d).toContain('M6.915 4.03');
+    }
+  });
+
   it('renders the Claude Code mark for the detected "claude" profile id (#534)', () => {
     // Startup auto-detection (detection.rs) registers Claude Code with id
     // "claude", but the icon map historically only keyed the Claude mark under
