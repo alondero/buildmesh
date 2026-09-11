@@ -102,4 +102,32 @@ describe('FontSizeManager', () => {
       expect(manager.size).toBe(0);
     });
   });
+
+  // The build/run registry keys terminals by a composite
+  // `sessionId|mode|useWorktree` string rather than a numeric node id, so the
+  // manager has to accept string keys too.
+  describe('string keys (build/run composite keys)', () => {
+    it('propagates the global size to a string-keyed entry and unregisters it', () => {
+      const stringManager = new FontSizeManager<string>();
+      try {
+        const terminal = { options: { fontSize: 10 } };
+        const fit = vi.fn();
+        stringManager.register('9|build|false', terminal, fit);
+        expect(stringManager.has('9|build|false')).toBe(true);
+
+        // 13 is unused by the numeric-key tests above, so this can't leave the
+        // module-level size on a value that makes a later `setTerminalFontSize`
+        // a no-op.
+        setTerminalFontSize(13);
+
+        expect(terminal.options.fontSize).toBe(13);
+        expect(fit).toHaveBeenCalledOnce();
+
+        stringManager.unregister('9|build|false');
+        expect(stringManager.size).toBe(0);
+      } finally {
+        stringManager.destroy();
+      }
+    });
+  });
 });

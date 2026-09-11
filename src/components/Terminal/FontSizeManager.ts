@@ -11,8 +11,12 @@ interface ManagedEntry {
   measureAndFit: FitFn;
 }
 
-export class FontSizeManager {
-  private entries = new Map<number, ManagedEntry>();
+/** Keyed by whatever identifies a terminal in its owning registry: `number`
+ *  node ids for the agent registry, the composite `sessionId|mode|useWorktree`
+ *  string for build/run panes. Defaults to `number` so existing call sites
+ *  keep their signatures. */
+export class FontSizeManager<K extends string | number = number> {
+  private entries = new Map<K, ManagedEntry>();
   private unlisten: () => void;
 
   constructor() {
@@ -24,16 +28,16 @@ export class FontSizeManager {
     });
   }
 
-  register(nodeId: number, terminal: TerminalLike, measureAndFit: FitFn): void {
-    this.entries.set(nodeId, { terminal, measureAndFit });
+  register(key: K, terminal: TerminalLike, measureAndFit: FitFn): void {
+    this.entries.set(key, { terminal, measureAndFit });
   }
 
-  unregister(nodeId: number): void {
-    this.entries.delete(nodeId);
+  unregister(key: K): void {
+    this.entries.delete(key);
   }
 
-  has(nodeId: number): boolean {
-    return this.entries.has(nodeId);
+  has(key: K): boolean {
+    return this.entries.has(key);
   }
 
   get size(): number {

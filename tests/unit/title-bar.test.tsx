@@ -47,6 +47,11 @@ vi.mock('../../src/components/RemoteAccess/RemoteAccessModal', () => ({
 
 import { TitleBar } from '../../src/components/TitleBar/TitleBar';
 import { useUIStore } from '../../src/stores/uiStore';
+import {
+  TERMINAL_FONT_SIZE_DEFAULT,
+  setTerminalFontSize,
+  terminalFontSize,
+} from '../../src/components/Terminal/terminalConfig';
 
 let resizeHandler: (() => void) | null = null;
 
@@ -73,6 +78,10 @@ beforeEach(() => {
     activeDiffFile: null,
     probeContextPins: {},
   });
+  // The zoom slider is a view over the module-level terminal font size, which
+  // persists to localStorage; reset it so slider assertions start from the
+  // default regardless of test order.
+  setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
 });
 
 describe('TitleBar (bespoke window chrome)', () => {
@@ -290,6 +299,92 @@ describe('TitleBar (bespoke window chrome)', () => {
       });
       expect(screen.queryByTestId('grid-search-input')).toBeNull();
       expect(useUIStore.getState().gridSearchQuery).toBe('alpha');
+    });
+  });
+
+  describe('zoom slider (terminal text size)', () => {
+    it('opens a text-size popover from the Zoom pill immediately left of Usage', async () => {
+      await renderTitleBar();
+      const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+      expect(zoom.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByTestId('zoom-panel')).toBeNull();
+
+      fireEvent.click(zoom);
+      expect(screen.getByTestId('zoom-panel')).toBeTruthy();
+      expect(zoom.getAttribute('aria-expanded')).toBe('true');
+
+      // Ordering contract: the zoom trigger precedes the Usage pill in the
+      // right-hand utility cluster.
+      const cluster = zoom.parentElement!.parentElement!;
+      const labels = Array.from(cluster.querySelectorAll('button')).map(
+        (button) => button.getAttribute('aria-label'),
+      );
+      expect(labels.indexOf('Zoom terminal text size')).toBeLessThan(
+        labels.indexOf('Open Usage'),
+      );
+    });
+
+    it('shows the current size and drives it from the slider', async () => {
+      await renderTitleBar();
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom terminal text size' }));
+
+      const slider = screen.getByTestId('zoom-slider') as HTMLInputElement;
+      expect(Number(slider.value)).toBe(TERMINAL_FONT_SIZE_DEFAULT);
+      expect(screen.getByTestId('zoom-value').textContent).toBe(`${TERMINAL_FONT_SIZE_DEFAULT}px`);
+
+      fireEvent.change(slider, { target: { value: '16' } });
+      expect(terminalFontSize()).toBe(16);
+      expect(screen.getByTestId('zoom-value').textContent).toBe('16px');
+    });
+
+    it('reflects zoom changes made outside the control (keyboard / wheel)', async () => {
+      await renderTitleBar();
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom terminal text size' }));
+
+      act(() => {
+        setTerminalFontSize(14);
+      });
+
+      expect((screen.getByTestId('zoom-slider') as HTMLInputElement).value).toBe('14');
+      expect(screen.getByTestId('zoom-value').textContent).toBe('14px');
+    });
+
+    it('resets to the default size', async () => {
+      await renderTitleBar();
+      act(() => {
+        setTerminalFontSize(18);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom terminal text size' }));
+
+      fireEvent.click(screen.getByTestId('zoom-reset'));
+
+      expect(terminalFontSize()).toBe(TERMINAL_FONT_SIZE_DEFAULT);
+      expect(screen.getByTestId('zoom-value').textContent).toBe(`${TERMINAL_FONT_SIZE_DEFAULT}px`);
+    });
+
+    it('closes on Escape and on outside mousedown', async () => {
+      await renderTitleBar();
+      const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+
+      fireEvent.click(zoom);
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByTestId('zoom-panel')).toBeNull();
+
+      fireEvent.click(zoom);
+      expect(screen.getByTestId('zoom-panel')).toBeTruthy();
+      fireEvent.mouseDown(document.body);
+      expect(screen.queryByTestId('zoom-panel')).toBeNull();
+    });
+
+    it('keeps the trigger, panel and slider free of drag regions', async () => {
+      await renderTitleBar();
+      const zoom = screen.getByRole('button', { name: 'Zoom terminal text size' });
+      expect(zoom.hasAttribute('data-tauri-drag-region')).toBe(false);
+      expect(zoom.querySelector('[data-tauri-drag-region]')).toBeNull();
+
+      fireEvent.click(zoom);
+      expect(screen.getByTestId('zoom-panel').hasAttribute('data-tauri-drag-region')).toBe(false);
+      expect(screen.getByTestId('zoom-slider').hasAttribute('data-tauri-drag-region')).toBe(false);
     });
   });
 });
