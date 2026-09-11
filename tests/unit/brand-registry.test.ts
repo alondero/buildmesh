@@ -89,14 +89,15 @@ describe('brandFor', () => {
     expect(brandFor('mystery')).toBeUndefined();
   });
 
-  // ----- Cross-runtime WSL profile ids (Refs #1713, the structural fix) -----
+  // ----- Cross-runtime profile ids (Refs #1713, the structural fix) -----
   //
   // `brandFor` is currently a stringly-typed lookup that has to
   // reverse-engineer the runtime suffix out of the profile id; this block
-  // papers over the smell for the WSL case so the Meta mark (#1711) shows
-  // on `muse-wsl` rows. The structural fix (carry `adapter_id` on
-  // `ProviderInfo`, reshape `brandFor` to take structured input, retire
-  // this regex) is tracked in #1713.
+  // papers over the smell for the runtime suffixes the Rust side emits
+  // today (`-wsl[-<hex>]` and `-windows`) so the registered brand mark
+  // shows on every cross-runtime row. The structural fix (carry
+  // `adapter_id` on `ProviderInfo`, reshape `brandFor` to take structured
+  // input, retire these regexes) is tracked in #1713.
 
   // The WSL auto-detector
   // (`agent/detection.rs::detect_wsl_profiles`) builds profile ids as
@@ -123,5 +124,24 @@ describe('brandFor', () => {
     // otherwise drop to its fallback glyph too.
     expect(brandFor('codex-wsl')).toBe(brandFor('codex'));
     expect(brandFor(`codex-wsl-${WSL_DISTRO_HASH_UBUNTU}`)).toBe(brandFor('codex'));
+  });
+
+  it('resolves a Windows-runtime profile id to its harness brand (mcode-windows -> minimax)', () => {
+    // The Windows-runtime profile idiom (`detection.rs:300`,
+    // `detection.rs:538`) is `<harness>-windows`. `mcode` is an alias
+    // for `minimax`; the lookup must reach the brand record via the
+    // alias chain, the same way `brandFor('mcode')` does.
+    expect(brandFor('mcode-windows')).toBe(brandFor('mcode'));
+    expect(brandFor('mcode-windows')?.id).toBe('minimax');
+  });
+
+  it('tightens the WSL hash to lowercase hex (muse-wsl-zzzzz fails closed)', () => {
+    // The Rust side emits the distro hash as lowercase hex (`hex()` on
+    // the distro name). The regex restricts the optional `-<hash>` group
+    // to `[0-9a-f]+` so a future format change fails closed (the lookup
+    // returns undefined rather than silently aliasing the wrong harness
+    // prefix). Pin the failure mode here so a regression to `\w+` is
+    // caught immediately.
+    expect(brandFor('muse-wsl-zzzzzzzzz')).toBeUndefined();
   });
 });

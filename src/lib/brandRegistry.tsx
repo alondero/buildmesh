@@ -171,21 +171,34 @@ export function brandFor(id: string): Brand | undefined {
   if (direct) return direct;
   // Runtime-suffix strip (tactical, Refs #1713). The WSL auto-detector
   // (`agent/detection.rs::detect_wsl_profiles`) builds profile ids as
-  // `<harness>-wsl-<distrohash>` and manual config may use `<harness>-wsl`.
+  // `<harness>-wsl-<distrohash>` and the Windows-runtime profile idiom
+  // (`detection.rs:300`, `detection.rs:538`) is `<harness>-windows`.
   // Native Spawn `ProviderInfo` rows carry `id == profile.id` (no `:`),
   // so the brand lookup must recognise the runtime suffix and fall back
-  // to the harness's brand record — otherwise the WSL row renders the
-  // wire `meta.icon` glyph instead of the registered brand mark.
+  // to the harness's brand record — otherwise the cross-runtime row
+  // renders the wire `meta.icon` glyph instead of the registered brand
+  // mark.
   //
-  // This regex is a tactical workaround for the WSL case. The structural
-  // fix (#1713) carries `adapter_id` on `ProviderInfo` (Rust already has
-  // it as `profile.harness` at `provider_menu.rs:40`) and reshapes
-  // `brandFor` to take a structured input — at which point this suffix
-  // strip moves into a backward-compat `brandForProviderId` alias and
-  // the primary lookup is string-surgery-free.
-  const wslSuffix = brandId.match(/^(.+)-wsl(?:-\w+)?$/);
+  // Two patterns cover the runtime conventions the Rust side emits today;
+  // the WSL hash is lower-case hex (the distro name encoded via
+  // `.hex()`), so the optional `-<hash>` group is `[0-9a-f]+` rather than
+  // the looser `\w+`. Tightening is intentional: a future hash format
+  // change should fail closed (lookup returns undefined) rather than
+  // silently aliasing the wrong harness prefix.
+  //
+  // This regex pair is a tactical workaround. The structural fix (#1713)
+  // carries `adapter_id` on `ProviderInfo` (Rust already has it as
+  // `profile.harness` at `provider_menu.rs:40`) and reshapes `brandFor`
+  // to take a structured input — at which point this suffix strip moves
+  // into a backward-compat `brandForProviderId` alias and the primary
+  // lookup is string-surgery-free.
+  const wslSuffix = brandId.match(/^(.+)-wsl(?:-[0-9a-f]+)?$/);
   if (wslSuffix) {
     return BRAND_REGISTRY.get(wslSuffix[1]);
+  }
+  const windowsSuffix = brandId.match(/^(.+)-windows$/);
+  if (windowsSuffix) {
+    return BRAND_REGISTRY.get(windowsSuffix[1]);
   }
   return undefined;
 }
