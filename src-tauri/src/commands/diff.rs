@@ -1029,19 +1029,230 @@ mod tests {
         assert!(result.contains("random text"));
     }
 
-    fn tempdir_via_env() -> std::path::PathBuf {
-        let base = std::env::temp_dir();
-        let unique = format!(
-            "buildmesh-diff-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+    /// Pure parser for the `BUILDMESH_KEEP_DIFF_FIXTURES` opt-in. Accepts
+    /// only the literal string `"1"` — the repository convention for
+    /// boolean env-var toggles (CLAUDE.md, `commands/watchdog.rs:95`).
+    /// Anything else — unset, empty, `"0"`, `"false"`, `"no"`, `"yes"`
+    /// — reads as disabled. Extracted as a free function so the cases
+    /// can be pinned with a table-driven test (no env mutation, no
+    /// mutex, no `unsafe`).
+    fn parse_keep_fixtures(val: Option<&std::ffi::OsStr>) -> bool {
+        val.and_then(|v| v.to_str()) == Some("1")
+    }
+
+    /// Read the process env at the call site and forward to the pure
+    /// parser. This is the only place `std::env::var_os` appears in
+    /// tests' control flow; tests cover `parse_keep_fixtures` directly
+    /// rather than mutating the process environment.
+    fn keep_diff_fixtures() -> bool {
+        parse_keep_fixtures(std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").as_deref())
+    }
+
+    /// Per-test fixture: a unique temp directory under `%TEMP%` for
+    /// hand-built Git repos. `Cleaning` removes the directory via
+    /// `tempfile::TempDir`'s `Drop`; `Kept` (opt-in via
+    /// `BUILDMESH_KEEP_DIFF_FIXTURES=1`, or explicit
+    /// `new_preserved()`) survives the test for post-mortem inspection.
+    ///
+    /// Issue #1544: the previous helper returned a bare `PathBuf` with
+    /// no `Drop` and leaked ~150 MB / 7,000+ `buildmesh-diff-test-*`
+    /// directories on the review machine across contributor/CI runs.
+    ///
+    /// `Deref<Target = Path>` so callers can pass `&fx` to functions
+    /// expecting `&Path` and use `fx.join(...)` / `fx.to_str()` directly,
+    /// mirroring how `tempfile::TempDir` itself is used throughout the
+    /// codebase and avoiding `.path()` boilerplate at every call site.
+    enum DiffFixture {
+        Cleaning(tempfile::TempDir),
+        Kept(std::path::PathBuf),
+    }
+
+    impl DiffFixture {
+        fn new() -> Self {
+            let temp = tempfile::Builder::new()
+                .prefix("buildmesh-diff-test-")
+                .tempdir()
+                .expect("create fixture tempdir");
+            // `TempDir::keep()` disables the cleanup `Drop` and
+            // returns the path - exactly the "preserve this directory"
+            // semantic the opt-in wants. Stays inside `TempDir`'s own
+            // RAII machinery instead of reaching for `mem::forget`.
+            if keep_diff_fixtures() {
+                let path = temp.keep();
+                eprintln!("[buildmesh diff fixture] preserved at {}", path.display());
+                Self::Kept(path)
+            } else {
+                Self::Cleaning(temp)
+            }
+        }
+
+        /// Test-only constructor: produce a preserved fixture without
+        /// reading `BUILDMESH_KEEP_DIFF_FIXTURES`. The opt-in test uses
+        /// this instead of mutating the process environment, so it
+        /// cannot race concurrent tests that read the same env var via
+        /// `DiffFixture::new()`. The caller is responsible for removing
+        /// the directory afterwards (it survives past the test's `Drop`).
+        #[cfg(test)]
+        fn new_preserved() -> Self {
+            let temp = tempfile::Builder::new()
+                .prefix("buildmesh-diff-test-")
+                .tempdir()
+                .expect("create fixture tempdir");
+            let path = temp.keep();
+            eprintln!("[buildmesh diff fixture] preserved at {}", path.display());
+            Self::Kept(path)
+        }
+    }
+
+    impl std::ops::Deref for DiffFixture {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            match self {
+                Self::Cleaning(t) => t.path(),
+                Self::Kept(p) => p,
+            }
+        }
+    }
+
+    impl AsRef<std::path::Path> for DiffFixture {
+        fn as_ref(&self) -> &std::path::Path {
+            match self {
+                Self::Cleaning(t) => t.path(),
+                Self::Kept(p) => p,
+            }
+        }
+    }
+
+    /// Pairs a `git2::Repository` handle with its `DiffFixture` so the
+    /// handle drops BEFORE the temp directory on Windows. Rust struct
+    /// field drop order is top-to-bottom; declaring `repo` above `dir`
+    /// makes the cleanup invariant architectural, not a convention
+    /// callers have to remember (issue #1544 step #4 — pass the temp
+    /// path to Git helpers and keep the guard until all repositories
+    /// are dropped).
+    struct GitFixture {
+        repo: git2::Repository,
+        dir: DiffFixture,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let dir = DiffFixture::new();
+            let repo = init_repo_with_base(&dir);
+            Self { repo, dir }
+        }
+    }
+
+    // ----- fixture cleanup contract (issue #1544) -----------------------
+
+    /// Pins the cleanup contract from issue #1544 end-to-end: creating
+    /// a `GitFixture`, writing tracked content, and dropping it must
+    /// remove both the `.git` directory and the temp directory root —
+    /// proving the leak is gone for the production scenario (open git
+    /// handles + tracked files), not just for an empty tempdir.
+    ///
+    /// This test never reads or writes the env var; it always exercises
+    /// the cleanup path (CLAUDE.md "no paper-tiger tests" rule). The
+    /// preserved path is covered by `diff_fixture_keep_opt_in_preserves_dir`
+    /// below via `new_preserved()`, which bypasses env mutation entirely.
+    #[test]
+    fn diff_fixture_cleans_up_tempdir_and_git_repo_on_drop() {
+        let captured_root;
+        let captured_git_dir;
+        {
+            let fx = GitFixture::new();
+            // Commit a real file so `.git/` has objects + refs to remove.
+            commit_all(&fx.repo, "fixture cleanup probe");
+            assert!(
+                fx.dir.join("base.txt").exists(),
+                "tracked file must exist while fixture is in scope"
+            );
+            assert!(
+                fx.dir.join(".git").exists(),
+                ".git directory must exist while fixture is in scope"
+            );
+            captured_root = fx.dir.as_ref().to_path_buf();
+            captured_git_dir = captured_root.join(".git");
+            // `fx` drops here — Rust drops struct fields top-to-bottom,
+            // so `fx.repo` releases its libgit2 handles first, then
+            // `fx.dir` removes the tempdir (issue #1544 step #4
+            // guarantee, now architectural instead of a convention).
+        }
+        assert!(
+            !captured_root.exists(),
+            "fixture root must be removed after drop (issue #1544 leak at {})",
+            captured_root.display()
         );
-        let dir = base.join(unique);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        assert!(
+            !captured_git_dir.exists(),
+            "fixture .git directory must be removed after drop (residue at {})",
+            captured_git_dir.display()
+        );
+    }
+
+    /// The opt-in flag preserves the directory so a failing test can be
+    /// inspected on disk. We do NOT short-circuit the cleanup test on
+    /// this flag (that would be a paper-tiger test); instead this
+    /// dedicated test verifies the preservation contract directly via
+    /// `DiffFixture::new_preserved()`, which never touches the process
+    /// environment and therefore cannot race concurrent tests that
+    /// read `BUILDMESH_KEEP_DIFF_FIXTURES` via `DiffFixture::new()`.
+    ///
+    /// The directory survives the test by design; the test cleans up
+    /// after itself so it does not itself leak in CI.
+    #[test]
+    fn diff_fixture_keep_opt_in_preserves_dir() {
+        let preserved = DiffFixture::new_preserved();
+        let preserved_path = preserved.as_ref().to_path_buf();
+        assert!(
+            preserved_path.exists(),
+            "kept fixture must exist while in scope"
+        );
+
+        // Sibling uses the env-var-driven path; it cleans up on drop
+        // unless the contributor has set `BUILDMESH_KEEP_DIFF_FIXTURES=1`
+        // (in which case `Cleaning` vs `Kept` doesn't matter for this
+        // assertion — both produce distinct directories).
+        let sibling = DiffFixture::new();
+        assert_ne!(
+            sibling.as_ref(),
+            preserved_path,
+            "two DiffFixture calls in one test must produce distinct dirs"
+        );
+
+        // `Kept` has no Drop cleanup by design (that's the whole point);
+        // `Cleaning` cleans up its sibling. Remove the preserved path
+        // manually so the test does not itself leak in CI.
+        drop(sibling);
+        drop(preserved);
+        let _ = std::fs::remove_dir_all(&preserved_path);
+    }
+
+    /// Pins `parse_keep_fixtures` end-to-end so the repository
+    /// convention for boolean env-var toggles (`== "1"`) cannot drift.
+    /// No env mutation, no mutex, no `unsafe` — every cell is a
+    /// pure-function input → output pair.
+    #[test]
+    fn parse_keep_fixtures_accepts_only_one() {
+        let cases: &[(Option<&str>, bool)] = &[
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("no"), false),
+            (Some("off"), false),
+            (Some("yes"), false),
+            (Some("1"), true),
+        ];
+        for (input, expected) in cases {
+            let os_input = input.map(std::ffi::OsStr::new);
+            let got = parse_keep_fixtures(os_input);
+            assert_eq!(
+                got, *expected,
+                "parse_keep_fixtures({:?}) = {}, expected {}",
+                input, got, expected
+            );
+        }
     }
 
     #[test]
@@ -1165,7 +1376,7 @@ mod tests {
         // `diff_file_against_head`. We assert a budget that the unfixed
         // implementation violates (~102 lines) and the fixed implementation
         // satisfies (under 30 lines).
-        let tmp = tempdir_via_env();
+        let tmp = DiffFixture::new();
         let old = tmp.join("old.txt");
         let new = tmp.join("new.txt");
         std::fs::write(&old, &old_content).unwrap();
@@ -1231,12 +1442,17 @@ mod tests {
 
     #[test]
     fn diff_against_base_shows_committed_and_uncommitted_work() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        // `GitFixture` keeps the git handle alive until the temp dir is
+        // cleaned up — Rust struct field drop order (top-to-bottom) gives
+        // the handle an architectural drop-before-tempdir guarantee,
+        // which is what makes Windows sharing violations a non-event.
+        let fx = GitFixture::new();
+        let tmp = &fx.dir;
+        let repo = &fx.repo;
 
         // The agent commits a new file after branching...
         std::fs::write(tmp.join("committed.txt"), "a\nb\n").unwrap();
-        commit_all(&repo, "agent work");
+        commit_all(repo, "agent work");
         // ...and leaves an uncommitted edit to an existing file.
         std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
@@ -1253,8 +1469,13 @@ mod tests {
 
     #[test]
     fn diff_against_base_detects_rename() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        // `GitFixture` keeps the git handle alive until the temp dir is
+        // cleaned up — Rust struct field drop order (top-to-bottom) gives
+        // the handle an architectural drop-before-tempdir guarantee,
+        // which is what makes Windows sharing violations a non-event.
+        let fx = GitFixture::new();
+        let tmp = &fx.dir;
+        let repo = &fx.repo;
 
         std::fs::remove_file(tmp.join("base.txt")).unwrap();
         std::fs::write(tmp.join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
@@ -1264,7 +1485,7 @@ mod tests {
             index.add_path(std::path::Path::new("renamed.txt")).unwrap();
             index.write().unwrap();
         }
-        commit_all(&repo, "rename base.txt");
+        commit_all(repo, "rename base.txt");
 
         let result = diff_against_base(tmp.to_str().unwrap(), "base", None, None).unwrap();
         let renamed = result
@@ -1279,8 +1500,13 @@ mod tests {
 
     #[test]
     fn diff_against_base_falls_back_to_head_when_base_unresolvable() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test, which the
+        // Round 3 reviewer flagged as a Windows file-locking hazard.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
@@ -1295,8 +1521,12 @@ mod tests {
 
     #[test]
     fn diff_against_base_flags_binary_without_hunks() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
 
@@ -1330,12 +1560,16 @@ mod tests {
 
     #[test]
     fn diff_against_base_only_restricts_to_one_path() {
-        let tmp = tempdir_via_env();
-        let repo = init_repo_with_base(&tmp);
+        // `GitFixture` keeps the git handle alive until the temp dir is
+        // cleaned up — Rust struct field drop order (top-to-bottom) gives
+        // the handle an architectural drop-before-tempdir guarantee.
+        let fx = GitFixture::new();
+        let tmp = &fx.dir;
+        let repo = &fx.repo;
 
         std::fs::write(tmp.join("a.txt"), "x\n").unwrap();
         std::fs::write(tmp.join("b.txt"), "y\n").unwrap();
-        commit_all(&repo, "two files");
+        commit_all(repo, "two files");
 
         let result = diff_against_base(tmp.to_str().unwrap(), "base", Some("a.txt"), None).unwrap();
         let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
@@ -1367,8 +1601,11 @@ mod tests {
     #[test]
     fn diff_node_inspects_worktree_not_project_root() {
         // Project root: a clean repo with a `base` branch, nothing pending.
-        let root = tempdir_via_env();
-        let _root_repo = init_repo_with_base(&root);
+        // The test only needs the on-disk repo structure; drop the handle
+        // immediately so it doesn't keep FDs (or Windows file locks) alive
+        // for the rest of the test (Round 3 review Finding #6).
+        let root = DiffFixture::new();
+        init_repo_with_base(&root);
 
         let node = make_node(root.to_str().unwrap(), true, Some("wt"));
         let wt_path = crate::env::node_working_path(&node).host_path;
@@ -1378,9 +1615,10 @@ mod tests {
         );
 
         // Materialise the worktree as its own repo with an uncommitted edit.
+        // Same rationale as the root above — drop the handle immediately.
         std::fs::create_dir_all(&wt_path).unwrap();
         let wt_dir = std::path::Path::new(&wt_path);
-        let _wt_repo = init_repo_with_base(wt_dir);
+        init_repo_with_base(wt_dir);
         std::fs::write(wt_dir.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
         // Following the resolved worktree path surfaces the agent's edit...
@@ -1471,8 +1709,12 @@ mod tests {
     /// proof that the polling seam works.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_pre_set() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
 
@@ -1496,8 +1738,12 @@ mod tests {
     /// the test still flips within 1s the poll is in the right place.
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
-        let tmp = tempdir_via_env();
-        let _repo = init_repo_with_base(&tmp);
+        let tmp = DiffFixture::new();
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         // Enough files × lines that the highlight pass dominates the
         // cost and the 1ms flipper delay fires unambiguously mid-walk.
