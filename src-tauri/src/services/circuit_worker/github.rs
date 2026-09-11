@@ -272,8 +272,20 @@ pub(super) fn call_github_effect(
                 |head, title| {
                     let base =
                         crate::commands::git::get_default_branch_blocking(mesh.path.clone())?;
+                    // Idempotent create (issue #771): a slow POST that
+                    // timed out client-side may have created the PR
+                    // server-side, so a replay would 422. The idempotent
+                    // helper recovers via find_open_pr_for_branch.
+                    let req = crate::services::github::CreatePrRequest {
+                        owner: &owner,
+                        repo: &repo,
+                        title,
+                        body: &body,
+                        head,
+                        base: &base,
+                    };
                     client
-                        .create_pull_request_details(&owner, &repo, title, &body, head, &base)
+                        .create_pull_request_idempotent(req)
                         .map_err(|e| e.to_string())
                 },
             )

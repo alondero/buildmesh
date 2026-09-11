@@ -622,26 +622,19 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// call is a resource leak — see the overnight-freeze investigation.
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Per-request timeout for **mutating** GitHub calls
-/// ([`GitHubClient::create_pull_request`], [`GitHubClient::merge_pull_request`]).
+/// ([`GitHubClient::create_pull_request_idempotent`], [`GitHubClient::merge_pull_request`]).
 ///
-/// Read-side calls (issues/PRs listings, repo queries) use the client-level
-/// `HTTP_REQUEST_TIMEOUT` (30s) because they're cheap and bounded by GitHub's
-/// pagination guarantees. Write-side calls can take *much* longer on a
-/// congested network — a `create_pr` that triggers GitHub's CI hook
-/// initialisation can take 60–90s on the project's main repo, and `merge_pr`
-/// has to wait for any required status checks to clear. A 30s cap there
-/// aborts slow-but-progressing writes and forces the user to retry, risking
-/// a **duplicate PR** (issue #762). 180s is generous headroom while still
-/// bounding "stuck forever" — the underlying TLS read/write half still has
-/// the connect-timeout backstop at 10s, so a hard network failure aborts
-/// promptly and only legitimate progress extends the window.
+/// Read-side calls use `HTTP_REQUEST_TIMEOUT` (30s, bounded by GitHub's
+/// pagination). Write-side calls can run 60–90s on a congested network
+/// (CI hook initialisation, status checks); a 30s cap would abort
+/// slow-but-progressing writes and force a retry, risking a duplicate PR
+/// (issue #762). 180s is generous headroom while the 10s connect-timeout
+/// keeps a hard network failure prompt.
 ///
-/// **Idempotency.** Slow-but-progressing writes that time out client-side
-/// may have already succeeded server-side. `create_pull_request_idempotent`
-/// (issue #771) handles the duplicate-create case by recognising GitHub's
-/// 422 ("a pull request already exists") and recovering via
-/// `find_open_pr_for_branch` so a retry returns the existing PR's URL
-/// rather than a confusing error.
+/// **Idempotency (issue #771).** Slow-but-progressing writes that time out
+/// client-side may have already succeeded server-side. The
+/// `create_pull_request_idempotent` helper recovers a duplicate-create
+/// 422 by re-querying `find_open_pr_for_branch`.
 const HTTP_WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
@@ -674,11 +667,11 @@ pub struct GitHubClient {
     base_url: String,
 }
 
-/// Parameters for [`GitHubClient::create_pull_request_idempotent`]. A typed
-/// struct rather than positional `&str`s so the six string fields can't be
-/// silently transposed (a real bug class for `&str`-heavy APIs).
-///
-/// `'a` lifetime so callers can pass borrowed `&str`s without an allocation.
+/// Parameters for [`GitHubClient::create_pull_request_idempotent`] (and the
+/// low-level [`GitHubClient::create_pull_request_details`]). A typed struct
+/// rather than positional `&str`s so the six string fields can't be silently
+/// transposed. `'a` lifetime so callers pass borrowed `&str`s without an
+/// allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct CreatePrRequest<'a> {
     pub owner: &'a str,
@@ -890,8 +883,6 @@ impl GitHubClient {
         Ok(result.items)
     }
 
-    /// Create a pull request and return GitHub's typed response.
-    ///
     /// Low-level primitive — direct `POST /pulls` with no idempotency
     /// recovery. Callers that need to handle the "retry after slow POST
     /// timed out" duplicate-PR case should use
@@ -901,17 +892,13 @@ impl GitHubClient {
     /// that wants to surface GitHub's raw 422 verbatim).
     pub fn create_pull_request_details(
         &self,
-        owner: &str,
-        repo: &str,
-        title: &str,
-        body: &str,
-        head: &str,
-        base: &str,
+        req: CreatePrRequest<'_>,
     ) -> Result<PullRequest, GitHubError> {
+        let CreatePrRequest { owner, repo, title, body, head, base } = req;
         let url = self.rest_url(&format!("/repos/{}/{}/pulls", owner, repo));
 
         #[derive(Serialize)]
-        struct CreatePr<'a> {
+        struct CreatePrBody<'a> {
             title: &'a str,
             body: &'a str,
             head: &'a str,
@@ -923,7 +910,7 @@ impl GitHubClient {
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&CreatePr { title, body, head, base })
+            .json(&CreatePrBody { title, body, head, base })
             .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
@@ -937,57 +924,35 @@ impl GitHubClient {
     }
 
     /// Create a pull request, recovering from GitHub's
-    /// "a pull request already exists" response on retry (issue #771).
+    /// "a pull request already exists" 422 on retry (issue #771).
     ///
-    /// **Why optimistic, not pessimistic.** A pessimistic "GET first, then
-    /// POST" pre-check would add a 200-800ms round trip to *every* create
-    /// just to protect against a rare retry-after-timeout race. The
-    /// optimistic path keeps the happy case at one POST; only the actual
-    /// duplicate-conflict case pays for the recovery GET. This is also
-    /// simpler: no "fall-through-on-pre-check-error" branch to design and
-    /// test — a pre-check 5xx followed by a POST 422 would surface as a
-    /// confusing 422 instead of the real 5xx. With optimistic, the 422
-    /// is the single signal we need.
-    ///
-    /// **What the recovery does.** On `POST /pulls` returning 422 with a
-    /// body containing "already exists", call `find_open_pr_for_branch`
-    /// to look up the existing PR and return it. Other 422 shapes (e.g.
-    /// "head branch does not exist") propagate as the typed
-    /// `GitHubError::Api` so the caller can distinguish the duplicate case
-    /// from missing-branch / permission errors.
-    ///
-    /// **Caller side.** The command layer converts the returned `PullRequest`
-    /// to its `html_url` for the frontend. When the recovery path fires
-    /// (i.e. we return the existing PR rather than a freshly-created one)
-    /// the user-supplied `title` and `body` are discarded — that's the
-    /// point of the recovery, but the command layer logs a `tracing::warn!`
-    /// so an audit trail exists for "why didn't my title apply".
+    /// On `POST /pulls` returning 422 with a structured `errors[].message`
+    /// of "A pull request already exists …", call `find_open_pr_for_branch`
+    /// to look up the existing PR and return it. Other 422 shapes
+    /// (missing branch, protected-branch rejection, etc.) propagate
+    /// unchanged so the caller can distinguish duplicate from validation.
+    /// The recovery discards the user-supplied `title` and `body` — that
+    /// is the point of the recovery — and logs a `tracing::warn!` so
+    /// "why didn't my title apply" is auditable.
     pub fn create_pull_request_idempotent(
         &self,
         req: CreatePrRequest<'_>,
     ) -> Result<PullRequest, GitHubError> {
-        let CreatePrRequest { owner, repo, title, body, head, base } = req;
-        match self.create_pull_request_details(owner, repo, title, body, head, base) {
+        match self.create_pull_request_details(req) {
             Ok(pr) => Ok(pr),
-            // GitHub's "duplicate PR" 422 has the form
-            //   { "message": "Validation Failed",
-            //     "errors": [{"message": "A pull request already exists for <owner>:<head>."}] }
-            // The body string is the cheapest reliable detector — no schema
-            // version drift to worry about, and the recovery path stays a
-            // single match arm.
             Err(GitHubError::Api(422, ref_body))
-                if ref_body.contains("already exists") =>
+                if is_duplicate_pr_error(&ref_body) =>
             {
+                let CreatePrRequest { owner, repo, head, .. } = req;
                 tracing::warn!(
                     "POST /pulls returned 422 'already exists' for {owner}/{repo} head={head} — recovering via find_open_pr_for_branch; user-supplied title/body discarded"
                 );
                 match self.find_open_pr_for_branch(owner, repo, head)? {
                     Some(existing) => Ok(existing),
-                    // Pathological: 422 said "exists" but the follow-up
-                    // GET returns nothing. Almost certainly a permission
-                    // scope mismatch (the POST scope sees the PR; the GET
-                    // scope doesn't). Surface as 422 with the original body
-                    // so the frontend toasts the real diagnostic.
+                    // 422 said "exists" but the recovery GET returned nothing.
+                    // Almost certainly a permission scope mismatch (the POST
+                    // scope sees the PR; the GET scope doesn't). Surface the
+                    // original 422 so the caller sees the real diagnostic.
                     None => Err(GitHubError::Api(422, ref_body.clone())),
                 }
             }
@@ -995,34 +960,42 @@ impl GitHubClient {
         }
     }
 
-    /// Find the first open pull request whose `head.ref` matches `branch`.
+    /// Find the first open pull request whose `head` matches.
     /// Returns `Ok(None)` when the repository or branch is unknown to GitHub
     /// (treated as "no PR" — common for never-pushed branches). Other
     /// non-success statuses propagate as `GitHubError::Api`.
+    ///
+    /// `head` is the value GitHub's `head=OWNER:BRANCH` filter expects. If
+    /// it already contains a `:` (i.e. the caller has pre-qualified it, e.g.
+    /// `fork_user:branch` for a cross-repo PR from a fork), it is used
+    /// verbatim — otherwise `owner:` is prepended. Branch names without a
+    /// `:` are never pre-qualified by the GitHub API.
     pub fn find_open_pr_for_branch(
         &self,
         owner: &str,
         repo: &str,
-        branch: &str,
+        head: &str,
     ) -> Result<Option<PullRequest>, GitHubError> {
         // GitHub's `head=OWNER:BRANCH` filter matches the head ref of a PR.
         // The `state=open` filter is the only thing we care about; `per_page=1`
         // is the invariant: one branch → at most one open PR.
         //
-        // The `head` value goes in the query string, so `owner:branch` MUST
-        // be percent-encoded — `:` and `/` (in branch names like `feat/foo`)
-        // would otherwise corrupt the URL, and `#` / `?` / `&` (rare but
-        // legal in ref names) would silently break the query parsing. The
-        // encoder is the same `percent_encode_path_component` used for label
-        // paths; per RFC 3986 the unreserved set is identical for both path
-        // components and query values, and "encode everything else" is
-        // correct for both.
-        let head_param = GitHubClient::percent_encode_path_component(&format!("{owner}:{branch}"));
-        let url = self.rest_url(&format!(
-            "/repos/{owner}/{repo}/pulls?head={head_param}&state=open&per_page=1"
-        ));
+        // The `head` value is passed through `RequestBuilder::query`, which
+        // percent-encodes `:` / `/` / `&` / `?` / `#` via `serde_urlencoded`
+        // (the same encoding the prior hand-rolled `percent_encode_path_component`
+        // produced for these characters). That keeps the wire shape
+        // byte-identical for the common case while removing the dual-purpose
+        // path-component encoder that masked the fact that the param lives
+        // in a query string.
+        let head_value = if head.contains(':') {
+            head.to_string()
+        } else {
+            format!("{owner}:{head}")
+        };
+        let url = self.rest_url(&format!("/repos/{owner}/{repo}/pulls"));
         let resp = self.client
             .get(&url)
+            .query(&[("head", head_value.as_str()), ("state", "open"), ("per_page", "1")])
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
@@ -2037,6 +2010,45 @@ fn parse_gh_hosts_yaml(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True iff the body of a GitHub 422 response signals that the requested
+/// pull request already exists. Matches GitHub's structured
+/// `errors[].message` of the form "A pull request already exists for …"
+/// (case-insensitive). The structured match avoids false positives from
+/// unrelated validation failures whose bodies happen to echo user-supplied
+/// fields — e.g. a title that includes the literal phrase "already exists"
+/// would otherwise incorrectly trigger the recovery path on a
+/// protected-branch rejection.
+fn is_duplicate_pr_error(body: &str) -> bool {
+    #[derive(Deserialize)]
+    struct ApiError {
+        #[serde(default)]
+        message: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct ApiErrorEnvelope {
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        errors: Vec<ApiError>,
+    }
+    let parsed: ApiErrorEnvelope = match serde_json::from_str(body) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let needle = "already exists";
+    if parsed.errors.iter().any(|e| {
+        e.message
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_lowercase().contains(needle))
+    }) {
+        return true;
+    }
+    parsed
+        .message
+        .as_deref()
+        .is_some_and(|m| m.to_ascii_lowercase().contains(needle))
 }
 
 /// Parse owner/repo from a GitHub remote URL.
