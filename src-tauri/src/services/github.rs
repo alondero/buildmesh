@@ -622,26 +622,19 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// call is a resource leak — see the overnight-freeze investigation.
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Per-request timeout for **mutating** GitHub calls
-/// ([`GitHubClient::create_pull_request`], [`GitHubClient::merge_pull_request`]).
+/// ([`GitHubClient::create_pull_request_idempotent`], [`GitHubClient::merge_pull_request`]).
 ///
-/// Read-side calls (issues/PRs listings, repo queries) use the client-level
-/// `HTTP_REQUEST_TIMEOUT` (30s) because they're cheap and bounded by GitHub's
-/// pagination guarantees. Write-side calls can take *much* longer on a
-/// congested network — a `create_pr` that triggers GitHub's CI hook
-/// initialisation can take 60–90s on the project's main repo, and `merge_pr`
-/// has to wait for any required status checks to clear. A 30s cap there
-/// aborts slow-but-progressing writes and forces the user to retry, risking
-/// a **duplicate PR** (issue #762). 180s is generous headroom while still
-/// bounding "stuck forever" — the underlying TLS read/write half still has
-/// the connect-timeout backstop at 10s, so a hard network failure aborts
-/// promptly and only legitimate progress extends the window.
+/// Read-side calls use `HTTP_REQUEST_TIMEOUT` (30s, bounded by GitHub's
+/// pagination). Write-side calls can run 60–90s on a congested network
+/// (CI hook initialisation, status checks); a 30s cap would abort
+/// slow-but-progressing writes and force a retry, risking a duplicate PR
+/// (issue #762). 180s is generous headroom while the 10s connect-timeout
+/// keeps a hard network failure prompt.
 ///
-/// **Retry/idempotency caveat:** the caller is responsible for not
-/// re-invoking `create_pr` on a transient failure unless it can confirm
-/// the previous attempt didn't succeed (e.g. by checking `find_open_pr_for_branch`
-/// first). The current caller (`commands::pr::create_pr_for_mesh`) doesn't
-/// pre-check — a 180s timeout keeps the retry window manageable, and the
-/// user-visible "PR was created" success path is preserved.
+/// **Idempotency (issue #771).** Slow-but-progressing writes that time out
+/// client-side may have already succeeded server-side. The
+/// `create_pull_request_idempotent` helper recovers a duplicate-create
+/// 422 by re-querying `find_open_pr_for_branch`.
 const HTTP_WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
@@ -672,6 +665,21 @@ pub struct GitHubClient {
     /// than read from env per-call) so tests can point one client at a fake
     /// server without process-global env races.
     base_url: String,
+}
+
+/// Parameters for [`GitHubClient::create_pull_request_idempotent`] (and the
+/// low-level [`GitHubClient::create_pull_request_details`]). A typed struct
+/// rather than positional `&str`s so the six string fields can't be silently
+/// transposed. `'a` lifetime so callers pass borrowed `&str`s without an
+/// allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct CreatePrRequest<'a> {
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub head: &'a str,
+    pub base: &'a str,
 }
 
 impl GitHubClient {
@@ -875,20 +883,22 @@ impl GitHubClient {
         Ok(result.items)
     }
 
-    /// Create a pull request and return GitHub's typed response.
+    /// Low-level primitive — direct `POST /pulls` with no idempotency
+    /// recovery. Callers that need to handle the "retry after slow POST
+    /// timed out" duplicate-PR case should use
+    /// [`create_pull_request_idempotent`](Self::create_pull_request_idempotent)
+    /// instead. Kept `pub` (not `pub(crate)`) because future callers may
+    /// legitimately want the non-idempotent version (e.g. dry-run tooling
+    /// that wants to surface GitHub's raw 422 verbatim).
     pub fn create_pull_request_details(
         &self,
-        owner: &str,
-        repo: &str,
-        title: &str,
-        body: &str,
-        head: &str,
-        base: &str,
+        req: CreatePrRequest<'_>,
     ) -> Result<PullRequest, GitHubError> {
+        let CreatePrRequest { owner, repo, title, body, head, base } = req;
         let url = self.rest_url(&format!("/repos/{}/{}/pulls", owner, repo));
 
         #[derive(Serialize)]
-        struct CreatePr<'a> {
+        struct CreatePrBody<'a> {
             title: &'a str,
             body: &'a str,
             head: &'a str,
@@ -900,7 +910,7 @@ impl GitHubClient {
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&CreatePr { title, body, head, base })
+            .json(&CreatePrBody { title, body, head, base })
             .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
@@ -913,38 +923,79 @@ impl GitHubClient {
         resp.json().map_err(GitHubError::from)
     }
 
-    /// Create a pull request. Returns the PR URL for existing callers.
-    pub fn create_pull_request(
+    /// Create a pull request, recovering from GitHub's
+    /// "a pull request already exists" 422 on retry (issue #771).
+    ///
+    /// On `POST /pulls` returning 422 with a structured `errors[].message`
+    /// of "A pull request already exists …", call `find_open_pr_for_branch`
+    /// to look up the existing PR and return it. Other 422 shapes
+    /// (missing branch, protected-branch rejection, etc.) propagate
+    /// unchanged so the caller can distinguish duplicate from validation.
+    /// The recovery discards the user-supplied `title` and `body` — that
+    /// is the point of the recovery — and logs a `tracing::warn!` so
+    /// "why didn't my title apply" is auditable.
+    pub fn create_pull_request_idempotent(
         &self,
-        owner: &str,
-        repo: &str,
-        title: &str,
-        body: &str,
-        head: &str,
-        base: &str,
-    ) -> Result<String, GitHubError> {
-        let pr = self.create_pull_request_details(owner, repo, title, body, head, base)?;
-        Ok(pr.html_url)
+        req: CreatePrRequest<'_>,
+    ) -> Result<PullRequest, GitHubError> {
+        match self.create_pull_request_details(req) {
+            Ok(pr) => Ok(pr),
+            Err(GitHubError::Api(422, ref_body))
+                if is_duplicate_pr_error(&ref_body) =>
+            {
+                let CreatePrRequest { owner, repo, head, .. } = req;
+                tracing::warn!(
+                    "POST /pulls returned 422 'already exists' for {owner}/{repo} head={head} — recovering via find_open_pr_for_branch; user-supplied title/body discarded"
+                );
+                match self.find_open_pr_for_branch(owner, repo, head)? {
+                    Some(existing) => Ok(existing),
+                    // 422 said "exists" but the recovery GET returned nothing.
+                    // Almost certainly a permission scope mismatch (the POST
+                    // scope sees the PR; the GET scope doesn't). Surface the
+                    // original 422 so the caller sees the real diagnostic.
+                    None => Err(GitHubError::Api(422, ref_body.clone())),
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Find the first open pull request whose `head.ref` matches `branch`.
+    /// Find the first open pull request whose `head` matches.
     /// Returns `Ok(None)` when the repository or branch is unknown to GitHub
     /// (treated as "no PR" — common for never-pushed branches). Other
     /// non-success statuses propagate as `GitHubError::Api`.
+    ///
+    /// `head` is the value GitHub's `head=OWNER:BRANCH` filter expects. If
+    /// it already contains a `:` (i.e. the caller has pre-qualified it, e.g.
+    /// `fork_user:branch` for a cross-repo PR from a fork), it is used
+    /// verbatim — otherwise `owner:` is prepended. Branch names without a
+    /// `:` are never pre-qualified by the GitHub API.
     pub fn find_open_pr_for_branch(
         &self,
         owner: &str,
         repo: &str,
-        branch: &str,
+        head: &str,
     ) -> Result<Option<PullRequest>, GitHubError> {
         // GitHub's `head=OWNER:BRANCH` filter matches the head ref of a PR.
         // The `state=open` filter is the only thing we care about; `per_page=1`
         // is the invariant: one branch → at most one open PR.
-        let url = self.rest_url(&format!(
-            "/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open&per_page=1"
-        ));
+        //
+        // The `head` value is passed through `RequestBuilder::query`, which
+        // percent-encodes `:` / `/` / `&` / `?` / `#` via `serde_urlencoded`
+        // (the same encoding the prior hand-rolled `percent_encode_path_component`
+        // produced for these characters). That keeps the wire shape
+        // byte-identical for the common case while removing the dual-purpose
+        // path-component encoder that masked the fact that the param lives
+        // in a query string.
+        let head_value = if head.contains(':') {
+            head.to_string()
+        } else {
+            format!("{owner}:{head}")
+        };
+        let url = self.rest_url(&format!("/repos/{owner}/{repo}/pulls"));
         let resp = self.client
             .get(&url)
+            .query(&[("head", head_value.as_str()), ("state", "open"), ("per_page", "1")])
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
@@ -1959,6 +2010,45 @@ fn parse_gh_hosts_yaml(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True iff the body of a GitHub 422 response signals that the requested
+/// pull request already exists. Matches GitHub's structured
+/// `errors[].message` of the form "A pull request already exists for …"
+/// (case-insensitive). The structured match avoids false positives from
+/// unrelated validation failures whose bodies happen to echo user-supplied
+/// fields — e.g. a title that includes the literal phrase "already exists"
+/// would otherwise incorrectly trigger the recovery path on a
+/// protected-branch rejection.
+fn is_duplicate_pr_error(body: &str) -> bool {
+    #[derive(Deserialize)]
+    struct ApiError {
+        #[serde(default)]
+        message: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct ApiErrorEnvelope {
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        errors: Vec<ApiError>,
+    }
+    let parsed: ApiErrorEnvelope = match serde_json::from_str(body) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let needle = "already exists";
+    if parsed.errors.iter().any(|e| {
+        e.message
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_lowercase().contains(needle))
+    }) {
+        return true;
+    }
+    parsed
+        .message
+        .as_deref()
+        .is_some_and(|m| m.to_ascii_lowercase().contains(needle))
 }
 
 /// Parse owner/repo from a GitHub remote URL.
@@ -3421,13 +3511,39 @@ This issue is related to #481 in a narrative sense.
     /// One scripted interaction for the fake server, in the exact order the
     /// client is expected to issue it. `Page` answers `POST /graphql` with
     /// one connection page; `Detail` answers `GET /repos/.../pulls/{n}`
-    /// with a clean/mergeable detail (the per-PR fallback path).
+    /// with a clean/mergeable detail (the per-PR fallback path);
+    /// `ListPulls` / `CreatePrConflict` / `CreatePullRequest` /
+    /// `CreatePrError` drive the create-PR path tests (issue #771 optimistic
+    /// recovery) — same fake, no second server.
     ///
     /// `pub(crate)` so `commands::pr` tests can script the same fake for
     /// the summaries-then-detail fallback without a second server.
     pub(crate) enum Scripted {
         Page(serde_json::Value, bool, Option<String>),
         Detail,
+        /// GET `/repos/{o}/{r}/pulls?head=<encoded>&state=open&per_page=1`
+        /// — 200 OK with the given JSON array body. `expected_head` is the
+        /// EXACT percent-encoded `head` value the request must carry (e.g.
+        /// `acme%3Afeat%2F771`); the fake asserts the request line contains
+        /// it as a substring so a future regression that drops URL encoding
+        /// fails the test rather than corrupting the URL silently.
+        ListPulls {
+            body: serde_json::Value,
+            expected_head: String,
+        },
+        /// POST `/repos/{o}/{r}/pulls` — 422 Unprocessable Entity with the
+        /// given body. Mirrors GitHub's "a pull request already exists"
+        /// response. The body must contain the substring "already exists"
+        /// for `create_pull_request_idempotent`'s recovery arm to match.
+        CreatePrConflict(String),
+        /// POST `/repos/{o}/{r}/pulls` — 201 Created with the given PR JSON
+        /// body (mirrors GitHub's successful `create_pull_request` response
+        /// shape).
+        CreatePullRequest(serde_json::Value),
+        /// POST `/repos/{o}/{r}/pulls` — non-422 error (e.g. 403, 404, 500)
+        /// with the given status + body. Used to verify that the optimistic
+        /// recovery path doesn't swallow non-duplicate errors.
+        CreatePrError(u16, String),
     }
 
     /// Spin a fake GitHub server that counts requests and serves `script` in
@@ -3489,14 +3605,14 @@ This issue is related to #481 in a narrative sense.
                     let mut body = vec![0u8; content_length];
                     reader.read_exact(&mut body).expect("read body");
                 }
-                let resp_body = match step {
+                let (status_line, body_bytes): (String, Vec<u8>) = match step {
                     Scripted::Page(nodes, has_next, cursor) => {
                         assert!(
                             request_line.starts_with("POST "),
                             "scripted a GraphQL page but client sent: {}",
                             request_line.trim()
                         );
-                        serde_json::json!({
+                        let body = serde_json::json!({
                             "data": {
                                 "repository": {
                                     "pullRequests": {
@@ -3508,7 +3624,9 @@ This issue is related to #481 in a narrative sense.
                                     }
                                 }
                             }
-                        })
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
                     }
                     Scripted::Detail => {
                         assert!(
@@ -3516,18 +3634,86 @@ This issue is related to #481 in a narrative sense.
                             "scripted a REST detail but client sent: {}",
                             request_line.trim()
                         );
-                        serde_json::json!({
+                        let body = serde_json::json!({
                             "mergeable": true,
                             "mergeable_state": "clean"
-                        })
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::ListPulls { body, expected_head } => {
+                        // Optimistic-recovery follow-up: GET /repos/{o}/{r}/pulls?head=<encoded>&state=open
+                        // — strict URL assertion via `expected_head` (the percent-encoded
+                        // form the client must produce). A regression that drops URL
+                        // encoding would corrupt the query string and fail this assertion.
+                        assert!(
+                            request_line.starts_with("GET ")
+                                && request_line.contains("/pulls?head=")
+                                && request_line.contains(&format!("head={expected_head}")),
+                            "scripted ListPulls expected `head={expected_head}` but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::CreatePrConflict(body) => {
+                        // Optimistic-recovery trigger: POST /repos/{o}/{r}/pulls
+                        // → 422 with the duplicate-create body. `create_pull_request_idempotent`
+                        // pattern-matches on this status + "already exists" substring.
+                        assert!(
+                            request_line.starts_with("POST ")
+                                && request_line.contains("/pulls"),
+                            "scripted a CreatePrConflict but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = body.into_bytes();
+                        ("HTTP/1.1 422 Unprocessable Entity\r\n".to_string(), bytes)
+                    }
+                    Scripted::CreatePullRequest(body) => {
+                        assert!(
+                            request_line.starts_with("POST ")
+                                && request_line.contains("/pulls"),
+                            "scripted a CreatePullRequest but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 201 Created\r\n".to_string(), bytes)
+                    }
+                    Scripted::CreatePrError(status, body) => {
+                        // Non-422 error path — verifies the optimistic helper
+                        // doesn't fall through to a recovery GET when the
+                        // failure isn't a duplicate-create.
+                        assert!(
+                            request_line.starts_with("POST ")
+                                && request_line.contains("/pulls"),
+                            "scripted a CreatePrError but client sent: {}",
+                            request_line.trim()
+                        );
+                        let bytes = body.into_bytes();
+                        let reason = reqwest::StatusCode::from_u16(status)
+                            .ok()
+                            .and_then(|s| s.canonical_reason().map(str::to_string))
+                            .unwrap_or_else(|| "Error".to_string());
+                        (
+                            format!("HTTP/1.1 {status} {reason}\r\n"),
+                            bytes,
+                        )
                     }
                 };
-                let resp_str = serde_json::to_string(&resp_body).expect("serialise");
-                let http = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_str.len(),
-                    resp_str
-                );
+                let http = if body_bytes.is_empty() {
+                    format!(
+                        "{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+                        status_line
+                    )
+                } else {
+                    let body_str = std::str::from_utf8(&body_bytes).expect("utf8 body");
+                    format!(
+                        "{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status_line,
+                        body_str.len(),
+                        body_str
+                    )
+                };
                 sock.write_all(http.as_bytes()).expect("write");
             }
         });
