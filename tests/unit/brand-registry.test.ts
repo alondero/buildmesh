@@ -88,4 +88,60 @@ describe('brandFor', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();
   });
+
+  // ----- Cross-runtime profile ids (Refs #1713, the structural fix) -----
+  //
+  // `brandFor` is currently a stringly-typed lookup that has to
+  // reverse-engineer the runtime suffix out of the profile id; this block
+  // papers over the smell for the runtime suffixes the Rust side emits
+  // today (`-wsl[-<hex>]` and `-windows`) so the registered brand mark
+  // shows on every cross-runtime row. The structural fix (carry
+  // `adapter_id` on `ProviderInfo`, reshape `brandFor` to take structured
+  // input, retire these regexes) is tracked in #1713.
+
+  // The WSL auto-detector
+  // (`agent/detection.rs::detect_wsl_profiles`) builds profile ids as
+  // `<harness>-wsl-<distrohash>` where the hash is the lowercase hex of
+  // the WSL distribution name (Ubuntu -> `5562756e7475`). Single source
+  // of truth for the hash so the test names don't drift.
+  const WSL_DISTRO_HASH_UBUNTU = '5562756e7475';
+
+  it('resolves a bare WSL profile id to its harness brand (muse-wsl -> muse-code)', () => {
+    expect(brandFor('muse-wsl')).toBe(brandFor('muse'));
+    expect(brandFor('muse-wsl')?.id).toBe('muse-code');
+  });
+
+  it(`resolves a hashed WSL profile id to its harness brand (muse-wsl-${WSL_DISTRO_HASH_UBUNTU} -> muse-code)`, () => {
+    // The brand lookup must ignore the distro hash and resolve to the
+    // same Brand record the bare WSL and native ids do.
+    const hashed = `muse-wsl-${WSL_DISTRO_HASH_UBUNTU}`;
+    expect(brandFor(hashed)).toBe(brandFor('muse'));
+    expect(brandFor(hashed)?.chipHex).toBe('#0866FF');
+  });
+
+  it(`resolves other WSL harnesses (codex-wsl, codex-wsl-${WSL_DISTRO_HASH_UBUNTU}) to their harness brand`, () => {
+    // The fix must generalise across harnesses — Codex in WSL would
+    // otherwise drop to its fallback glyph too.
+    expect(brandFor('codex-wsl')).toBe(brandFor('codex'));
+    expect(brandFor(`codex-wsl-${WSL_DISTRO_HASH_UBUNTU}`)).toBe(brandFor('codex'));
+  });
+
+  it('resolves a Windows-runtime profile id to its harness brand (mcode-windows -> minimax)', () => {
+    // The Windows-runtime profile idiom (`detection.rs:300`,
+    // `detection.rs:538`) is `<harness>-windows`. `mcode` is an alias
+    // for `minimax`; the lookup must reach the brand record via the
+    // alias chain, the same way `brandFor('mcode')` does.
+    expect(brandFor('mcode-windows')).toBe(brandFor('mcode'));
+    expect(brandFor('mcode-windows')?.id).toBe('minimax');
+  });
+
+  it('tightens the WSL hash to lowercase hex (muse-wsl-zzzzz fails closed)', () => {
+    // The Rust side emits the distro hash as lowercase hex (`hex()` on
+    // the distro name). The regex restricts the optional `-<hash>` group
+    // to `[0-9a-f]+` so a future format change fails closed (the lookup
+    // returns undefined rather than silently aliasing the wrong harness
+    // prefix). Pin the failure mode here so a regression to `\w+` is
+    // caught immediately.
+    expect(brandFor('muse-wsl-zzzzzzzzz')).toBeUndefined();
+  });
 });
