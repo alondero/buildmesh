@@ -27,8 +27,6 @@ vi.mock('../../src/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('../../src/lib/tauri')>('../../src/lib/tauri');
   return {
     ...actual,
-    getMuseCodeSubscriptionTier: vi.fn().mockResolvedValue(null),
-    setMuseCodeSubscriptionTier: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -88,21 +86,11 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     expect(screen.getByRole('button', { name: /edit billing/i })).toBeTruthy();
   });
 
-  it('lets a Muse Code account pick Everyday/High/Power without an API key editor', async () => {
-    const { getMuseCodeSubscriptionTier, setMuseCodeSubscriptionTier } = await import('../../src/lib/tauri');
-    vi.mocked(getMuseCodeSubscriptionTier).mockResolvedValue(null);
-    const user = userEvent.setup();
-    render(
-      <AccountCard
-        account={account({ id: 'muse-code', name: 'Meta Muse Code' })}
-        onSave={vi.fn()}
-      />,
-    );
+  it('uses Muse account quota without a manual plan or API key editor', () => {
+    render(<AccountCard account={account({ id: 'muse-code', name: 'Meta Muse Code' })} onSave={vi.fn()} />);
     expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
-    await waitFor(() => expect(getMuseCodeSubscriptionTier).toHaveBeenCalled());
-    const select = await screen.findByRole('combobox', { name: /muse code subscription plan/i });
-    await user.selectOptions(select, 'high');
-    await waitFor(() => expect(setMuseCodeSubscriptionTier).toHaveBeenCalledWith('high'));
+    expect(screen.queryByRole('combobox', { name: /muse code subscription plan/i })).toBeNull();
+    expect(screen.queryByText(/counts requests locally/i)).toBeNull();
   });
 
   it('shows API key (not model tiers) for a Claude-compatible account', async () => {

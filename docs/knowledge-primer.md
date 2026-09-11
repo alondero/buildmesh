@@ -47,11 +47,13 @@ percentage or an explicit unavailable state is labelled "Unavailable". The Codex
 adapter maps ChatGPT `plan_type`, rolling windows, top-level extra rate limits,
 credit balance, and `spend_control.individual_limit` into that contract; a null
 `rate_limit` is a valid Business/Enterprise snapshot rather than a parse error.
-Muse Code (`muse-code`) has no account-level quota API: the adapter counts
-local requests against Meta's published Everyday/High/Power 5-hour limits after
-the user selects a tier, and renders `unavailable` until that selection exists.
-Never derive remaining Muse Code allowance from MSP token/context events, and
-never fold it into a Meta Model API pay-as-you-go wallet.
+Muse Code (`muse-code`) reads the harness OAuth credential and calls Meta's
+`POST /muse-code/key` reconciliation endpoint. Its `subs_usage.window` and
+`subs_usage.weekly` supply percentages and Unix-second reset times; the plan
+label comes from `subs_tier_name`. Windows resolves credentials inside the
+WSL login environment, honoring `MUSE_AUTH_PATH` and `XDG_CONFIG_HOME`.
+Never derive remaining allowance from local requests or MSP token/context
+events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
 **Observed Session Telemetry is not a Usage Meter.** Muse MSP
 `session/tokenUsage` and `session/contextUsage` notifications are ingested by

@@ -699,8 +699,6 @@ pub fn run() {
             commands::agent_node_discovery::import_discovered_agent_node,
             // Usage
             commands::usage::get_provider_meters,
-            commands::usage::get_muse_code_subscription_tier,
-            commands::usage::set_muse_code_subscription_tier,
             // Observed Muse session telemetry (issue #1680). Node-scoped MSP
             // counters — not a Usage Meter and never remaining account quota.
             commands::muse::get_muse_session_telemetry,

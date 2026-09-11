@@ -14,36 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
-/// User-selected Muse Code subscription tier. Limits come from Meta's published
-/// static table (Everyday / High / Power). Unconfigured stays `None` so the
-/// meter can render unavailable instead of inventing a quota.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "MuseCodeTier.ts")]
-pub enum MuseCodeTier {
-    Everyday,
-    High,
-    Power,
-}
-
-impl MuseCodeTier {
-    /// Upper bound of Meta's published 5-hour request allowance.
-    pub fn request_limit(self) -> u32 {
-        match self {
-            Self::Everyday => 50,
-            Self::High => 150,
-            Self::Power => 500,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Everyday => "Everyday",
-            Self::High => "High",
-            Self::Power => "Power",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
