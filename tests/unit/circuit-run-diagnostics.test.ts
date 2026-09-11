@@ -419,6 +419,25 @@ describe('run diagnostics', () => {
       expect(workerFailed.detail).toContain('No step recorded a failure');
     });
 
+    it('does not blame the worker when an unapproved review ended the run', () => {
+      // The review graph fails an exhausted (or blocked) run without ever
+      // writing a failed step — the ending is a gate *outcome*, and the
+      // card's review line states it. The generic fallback must stay quiet
+      // rather than claim the worker failed the run for no visible reason.
+      const steps = [st('verdict', 'completed'), st('retry', 'completed')];
+      const unapproved = runActivity({ state: 'failed' }, steps, FREE, { needsAttention: true });
+      expect(unapproved).toMatchObject({ kind: 'terminal', label: 'Failed' });
+      expect(unapproved.detail).toBeNull();
+
+      // Without a review to explain the failure, the fallback still fires.
+      expect(
+        runActivity({ state: 'failed' }, steps, FREE, { needsAttention: false }).detail
+      ).toContain('No step recorded a failure');
+      expect(runActivity({ state: 'failed' }, steps, FREE, null).detail).toContain(
+        'No step recorded a failure'
+      );
+    });
+
     it('labels a cancelled run as terminal rather than waiting to start', () => {
       expect(runActivity({ state: 'cancelled' }, [], FREE)).toEqual({
         kind: 'terminal',
