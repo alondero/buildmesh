@@ -19,6 +19,7 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 import type { CircuitQueueEntry } from '../../src/types/generated/CircuitQueueEntry';
@@ -1009,7 +1010,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(pre?.className).toContain('break-words');
   });
 
-  it('surfaces outcome, attempt and duration per step', async () => {
+  it('surfaces outcome, pass and duration per step', async () => {
     const RUN_RETRIED: CircuitRunDetail = {
       run: { ...RUN_DONE.run, id: 26, state: 'running' },
       steps: [
@@ -1032,10 +1033,201 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(row.getAttribute('data-step-status')).toBe('completed');
     expect(row.textContent).toContain('Done');
     expect(row.textContent).toContain('red');
-    expect(row.textContent).toContain('attempt 3');
+    expect(row.textContent).toContain('pass 3');
     // 90s reads as "1m 30s", not "90.0s".
     expect(row.textContent).toContain('1m 30s');
     expect(screen.getByTestId('run-retries-26').textContent).toContain('retried');
+  });
+
+  it('shows an approved review per step and reveals the reviewer report', async () => {
+    const REVIEW_GRAPH = {
+      version: 3,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        {
+          id: 'reviewer',
+          type: {
+            type: 'spawn_agent_node', prompt: '', name: 'Code reviewer', provider: null,
+            model: null, effort: null, extra_args: null, timeout_seconds: null,
+          },
+        },
+        { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      ],
+      edges: [],
+    };
+    const RUN_REVIEW: CircuitRunDetail = {
+      run: {
+        ...RUN_DONE.run,
+        id: 27,
+        context_json: JSON.stringify({
+          'node.verdict.review_verdict': 'approved',
+          'node.verdict.review_verdict_attempt': '2',
+          'node.verdict.evaluated_output': 'No remaining findings. Approved.',
+        }),
+      },
+      steps: [
+        step({ node_id: 'reviewer', status: 'completed', outcome: 'completed', attempt: 2 }),
+        step({ node_id: 'verdict', status: 'completed', outcome: 'completed', attempt: 2 }),
+      ],
+    };
+    mockBackend({
+      circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(REVIEW_GRAPH) }],
+      runs: [RUN_REVIEW],
+    });
+    const user = userEvent.setup();
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    // The headline answers "did it end well?" without opening the card.
+    expect((await screen.findByTestId('run-state-27')).textContent).toBe('Review approved');
+
+    await user.click(screen.getByTestId('run-toggle-27'));
+    const verdictRow = screen.getByTestId('run-step-27-verdict');
+    expect(verdictRow.textContent).toContain('Review');
+    expect(verdictRow.textContent).toContain('pass 2');
+    expect(screen.getByTestId('run-step-verdict-27-verdict').textContent).toBe('APPROVED');
+    // A spawned agent reads by its configured name, not its circuit node id.
+    expect(screen.getByTestId('run-step-27-reviewer').textContent).toContain('Code reviewer');
+    expect(screen.getByTestId('run-review-report-27-verdict').textContent)
+      .toContain('No remaining findings. Approved.');
+  });
+
+  it('distinguishes an exhausted review from an approved one', async () => {
+    const REVIEW_GRAPH = {
+      version: 3,
+      nodes: [
+        { id: 'trigger', type: { type: 'manual' } },
+        { id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'retry', type: { type: 'retry_limit', max_retries: 1 } },
+      ],
+      edges: [],
+    };
+    const RUN_EXHAUSTED: CircuitRunDetail = {
+      run: {
+        ...RUN_DONE.run,
+        id: 28,
+        state: 'failed',
+        context_json: JSON.stringify({
+          'node.verdict.review_verdict': 'changes_requested',
+          'node.verdict.review_verdict_attempt': '2',
+        }),
+      },
+      steps: [
+        step({ node_id: 'verdict', status: 'completed', outcome: 'working', attempt: 2 }),
+        step({ node_id: 'retry', status: 'failed', outcome: 'failed', attempt: 2 }),
+      ],
+    };
+    mockBackend({
+      circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(REVIEW_GRAPH) }],
+      runs: [RUN_EXHAUSTED],
+    });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+    const card = await screen.findByTestId('run-card-28');
+    expect(screen.getByTestId('run-state-28').textContent).toBe('Review limit reached');
+    expect(card.textContent).toContain('Ran out of review attempts after pass 2.');
+
+    // A failed run opens by default, so the timeline is already visible.
+    expect(screen.getByTestId('run-step-verdict-28-verdict').textContent).toBe('CHANGES REQUESTED');
+    expect(screen.getByTestId('run-step-verdict-28-retry').textContent).toBe('LIMIT REACHED');
+  });
+
+  it('links a run to its Agent Node and focuses it on the canvas', async () => {
+    const agent: AgentNode = {
+      id: 900, mesh_id: 42, name: 'impl-agent', path: '/repo', branch: 'main', env: null,
+      provider: 'claude', status: 'running', use_worktree: false, position: 0,
+      created_at: '2026-08-22 10:00:00', scratchpad: '', sandbox: false, is_pinned: false,
+    };
+    seedAgentNodes([agent]);
+    mockBackend({
+      runs: [{
+        ...RUN_DONE,
+        run: { ...RUN_DONE.run, id: 29, state: 'running', source_agent_node_id: 900 },
+        steps: [],
+      }],
+    });
+    openProbeDestination('circuits');
+
+    const link = await screen.findByTestId('run-agent-29');
+    expect(link.textContent).toContain('impl-agent');
+    fireEvent.click(screen.getByTestId('run-agent-open-29'));
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(900);
+    expect(useMeshStore.getState().selectedMeshId).toBe(42);
+    expect(useUIStore.getState().viewMode).toBe('single');
+  });
+
+  it('reveals a linked run in the right view, expanded and highlighted', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-12');
+
+    act(() => { useUIStore.getState().focusCircuitRun(11); });
+
+    const card = await screen.findByTestId('run-card-11');
+    expect(card.getAttribute('data-run-focused')).toBe('true');
+    expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
+    // The request is consumed so a later refresh cannot re-trigger it.
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
+  });
+
+  it('falls back to a filtered History when the linked run is outside the window', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    openProbeDestination('circuits');
+    await screen.findByTestId('run-card-12');
+
+    act(() => { useUIStore.getState().focusCircuitRun(999); });
+
+    expect(await screen.findByTestId('circuits-focus-notice')).toBeTruthy();
+    expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('999');
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
+  });
+
+  it('resolves a focus request issued before the tab mounts', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    // The production entry point: the kebab sets the focus and opens the tab
+    // in one action, so the request exists before CircuitsProbeTab mounts and
+    // before the first snapshot resolves. It must not be misreported as
+    // out-of-window and consumed while `rows` is still empty.
+    act(() => { useUIStore.getState().focusCircuitRun(11); });
+    render(<ProbePanel />);
+
+    const card = await screen.findByTestId('run-card-11');
+    expect(card.getAttribute('data-run-focused')).toBe('true');
+    expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.queryByTestId('circuits-focus-notice')).toBeNull();
+  });
+
+  it('clears History filters so the linked run is guaranteed to render', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.change(screen.getByTestId('history-search-input'), { target: { value: 'no-match' } });
+    fireEvent.click(screen.getByTestId('history-attention-toggle'));
+    expect(screen.queryByTestId('run-card-11')).toBeNull();
+
+    act(() => { useUIStore.getState().focusCircuitRun(11); });
+
+    expect(await screen.findByTestId('run-card-11')).toBeTruthy();
+    expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('reports an unavailable agent node instead of a dead click', async () => {
+    mockBackend({
+      runs: [{
+        ...RUN_DONE,
+        run: { ...RUN_DONE.run, id: 31, state: 'running', source_agent_node_id: 404 },
+        steps: [],
+      }],
+    });
+    seedAgentNodes([]);
+    openProbeDestination('circuits');
+
+    const link = await screen.findByTestId('run-agent-31');
+    // No node in the store => no Open button to click.
+    expect(link.textContent).toContain('#404');
+    expect(screen.queryByTestId('run-agent-open-31')).toBeNull();
   });
 
   it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {

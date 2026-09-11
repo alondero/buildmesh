@@ -51,6 +51,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     findAgentNode: spy('findAgentNode', (id: number) =>
       nodes.find(n => n.id === id),
     ),
+    removeAgentNode: spy('removeAgentNode', () => {}),
     __calls,
   };
 }
@@ -76,7 +77,7 @@ describe('attachAgentNodeListeners', () => {
 
     await attachAgentNodeListeners(surface);
 
-    // Ten event subscriptions should be live after attach — one per
+    // Thirteen event subscriptions should be live after attach — one per
     // event the store cares about. We read the setup's listener map
     // directly rather than going through `listen`'s mock, because
     // the mock returns Promise<unlistenFn> per call and doesn't
@@ -88,6 +89,7 @@ describe('attachAgentNodeListeners', () => {
       'agent-lifecycle',
       'node-renamed',
       'node-created',
+      'node-deleted',
       'node-activated',
       'node-spawn-completed',
       'node-spawn-failed',
@@ -101,7 +103,7 @@ describe('attachAgentNodeListeners', () => {
     // `agent-lifecycle` on every mark transition (issue #1364), so a
     // second listener would duplicate the state mutations.
     expect(eventNames).not.toContain('attention-needed');
-    expect(eventNames).toHaveLength(12);
+    expect(eventNames).toHaveLength(13);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -120,11 +122,11 @@ describe('attachAgentNodeListeners', () => {
 
     expect(typeof unlisten).toBe('function');
     // One unlisten per registered event, including Circuit ownership changes.
-    expect(mockListen).toHaveBeenCalledTimes(12);
+    expect(mockListen).toHaveBeenCalledTimes(13);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(12);
+    expect(unlistenFns).toHaveLength(13);
   });
 
   it('reconciles Circuit ownership for every live and terminal run transition', async () => {
@@ -144,12 +146,40 @@ describe('attachAgentNodeListeners', () => {
     capturedHandler!({ payload: { run_id: 9, state: 'unknown' } });
     await Promise.resolve();
 
-    expect(surface.__calls).toEqual(
-      ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].map(state => ({
-        method: 'patchCircuitOwnershipState',
-        args: [9, state],
-      })),
-    );
+    expect(surface.__calls).toEqual([
+      { method: 'patchCircuitOwnershipState', args: [9, 'pending'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'running'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'paused'] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'completed'] },
+      // Terminal transitions also resync the node list — for the agents a
+      // failed-run sweep archives (deleted agents ride `node-deleted`).
+      { method: 'fetchAgentNodes', args: [] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'failed'] },
+      { method: 'fetchAgentNodes', args: [] },
+      { method: 'patchCircuitOwnershipState', args: [9, 'cancelled'] },
+      { method: 'fetchAgentNodes', args: [] },
+    ]);
+  });
+
+  it('terminal circuit-run-updated refetches nodes so retired agents leave the grid', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'circuit-run-updated') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({ payload: { run_id: 4, state: 'completed' } });
+    await Promise.resolve();
+
+    expect(surface.fetchAgentNodes).toHaveBeenCalledTimes(1);
+    expect(surface.__calls).toEqual([
+      { method: 'patchCircuitOwnershipState', args: [4, 'completed'] },
+      { method: 'fetchAgentNodes', args: [] },
+    ]);
   });
 
   // The narrow surface contract: every handler must dispatch to the
@@ -436,6 +466,30 @@ describe('attachAgentNodeListeners', () => {
 
     expect(surface.__calls.map(c => c.method)).toEqual(['fetchAgentNodes']);
     expect(surface.fetchAgentNodes).toHaveBeenCalledTimes(1);
+  });
+
+  it('node-deleted drops the retired node (Circuit CloseAgentNode cleanup)', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'node-deleted') {
+        capturedHandler = handler;
+      }
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface([
+      { id: 77, mesh_id: 1, name: 'reviewer', path: '/p/77', branch: 'main', env: 'windows', provider: 'anthropic', status: 'running', created_at: '', use_worktree: true, position: 0, is_pinned: false },
+    ]);
+    await attachAgentNodeListeners(surface);
+
+    capturedHandler!({ payload: { node_id: 77 } });
+
+    // The node is dropped from the store (which disposes its terminal); no
+    // refetch is needed, so an intermediate review close costs no round-trip.
+    expect(surface.__calls).toEqual([
+      { method: 'removeAgentNode', args: [77] },
+    ]);
   });
 
   it('autopilot-node-closed triggers fetchAgentNodes (no dispose)', async () => {

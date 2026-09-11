@@ -3,6 +3,7 @@ import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'rea
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { activityStatus } from '../../lib/nodeActivities';
+import { resolveAutopilotOutcome } from '../../lib/autopilotNodePresentation';
 import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
@@ -82,6 +83,22 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   // for the attention UX work; kept as a per-id subscription so unrelated
   // nodes' semantic-turn state doesn't cascade into this card.
   const semanticTurn = useAgentNodeStore((s) => s.semanticTurns[selectedId]);
+  // Per-member satellite state for the header outcome chip. Selecting the
+  // member ids' entries (not the whole map) keeps unrelated nodes' autopilot
+  // writes from re-rendering this card — same intent as the per-id node
+  // subscription above.
+  const memberAutopilotStates = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.autopilotStates[id])));
+  const memberCircuitOwnerships = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.circuitOwnerships[id])));
+  const memberSemanticTurns = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.semanticTurns[id])));
+  const outcomeSources = useMemo(() => ({
+    autopilotStates: toIdRecord(stableMemberIds, memberAutopilotStates),
+    circuitOwnerships: toIdRecord(stableMemberIds, memberCircuitOwnerships),
+    semanticTurns: toIdRecord(stableMemberIds, memberSemanticTurns),
+  }), [stableMemberIds, memberAutopilotStates, memberCircuitOwnerships, memberSemanticTurns]);
+  const attentionOutcome = useMemo(
+    () => resolveAutopilotOutcome(members, outcomeSources, selectedId),
+    [members, outcomeSources, selectedId],
+  );
   const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);
   const clearAttention = useAgentNodeStore((s) => s.clearAttention);
   // dnd-kit hooks (useDraggable / useDroppable) MUST run unconditionally.
@@ -116,11 +133,12 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     if (focusTerminal) setFocusRequest(request => request + 1);
   };
   const status = activityStatus(root, members);
-  const attention = members.filter(member => member.status === 'awaiting_input' || member.status === 'error');
   const revealAttention = () => {
-    const index = attention.findIndex(member => member.id === selectedId);
-    const target = showingUtility && index >= 0 ? attention[index] : attention[(index + 1) % attention.length];
-    if (target) choose(target.id);
+    if (!attentionOutcome) return;
+    const ids = attentionOutcome.nodeIds;
+    const index = ids.indexOf(selectedId);
+    const target = showingUtility && index >= 0 ? ids[index] : ids[(index + 1) % ids.length];
+    if (target != null) choose(target);
   };
   const closeTab = (id: number) => {
     const member = members.find(candidate => candidate.id === id);
@@ -171,8 +189,8 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
         nodeId={selectedId}
         titleNodeId={nodeId}
         activity={hasTabs ? status : undefined}
-        attentionCount={attention.length}
-        onAttention={revealAttention}
+        attentionOutcome={attentionOutcome}
+        onReveal={revealAttention}
         onBuildRun={(id, mode) => {
           setKeyboardSelection(null);
           onActivate(id, true, mode);
@@ -221,6 +239,18 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
 
 function sameMemberIds(left: readonly number[], right: readonly number[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/// Rebuild `{ id: value }` from the parallel arrays the shallow member
+/// selectors return, dropping absent entries so the resolver sees gaps as
+/// "no satellite state" rather than `undefined` keys.
+function toIdRecord<T>(ids: readonly number[], values: readonly (T | undefined)[]): Record<number, T> {
+  const record: Record<number, T> = {};
+  ids.forEach((id, index) => {
+    const value = values[index];
+    if (value !== undefined) record[id] = value;
+  });
+  return record;
 }
 
 export const NodeCard = memo(NodeCardView, (previous, next) =>

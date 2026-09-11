@@ -5,20 +5,42 @@
  * one highlights its exact traversed path through the DAG (the parent
  * computes the highlight sets) and shows per-step ledger detail:
  * status, outcome, duration, and any error message.
+ *
+ * The step rows read through the same vocabulary the Probe's run cards use
+ * — a human role instead of the raw circuit node id, `pass N` instead
+ * of `attempt N`, and a gate's recorded verdict (APPROVED / CHANGES
+ * REQUESTED / …) rather than only its routing outcome.
  */
 
+import { useMemo } from 'react';
 import type { CircuitRunDetail } from '../../lib/tauri';
+import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { formatDurationMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
 import { runStateLabel, stepStatusLabel } from './runDiagnostics';
+import {
+  indexNodes,
+  nodeRoleLabel,
+  parseRunContext,
+  stepPassLabel,
+  stepVerdict,
+  verdictTextClass,
+} from './runStepPresentation';
 
 interface RunHistoryDrawerProps {
   runs: CircuitRunDetail[];
   selectedRunId: number | null;
   onSelectRun: (runId: number) => void;
+  /** The open blueprint, for node role labels. */
+  graph: Pick<CircuitGraph, 'nodes'>;
 }
 
-export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistoryDrawerProps) {
+export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: RunHistoryDrawerProps) {
   const selected = runs.find((r) => r.run.id === selectedRunId) ?? null;
+  const nodeIndex = useMemo(() => indexNodes(graph.nodes), [graph.nodes]);
+  const context = useMemo(
+    () => parseRunContext(selected?.run.context_json ?? '{}'),
+    [selected?.run.context_json]
+  );
   return (
     <aside
       data-testid="run-history-drawer"
@@ -59,6 +81,9 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistor
           )}
           {selected.steps.map((s) => {
             const duration = stepDurationMs(s);
+            const kind = nodeIndex.get(s.node_id)?.type;
+            const verdict = stepVerdict(s, kind, context);
+            const pass = stepPassLabel(s);
             return (
               <div
                 key={s.node_id}
@@ -67,14 +92,20 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun }: RunHistor
                 className="mb-1 rounded-sm border border-border-subtle bg-bg-card p-1.5 text-2xs"
               >
                 <div className="flex items-center justify-between gap-1">
-                  <span className="font-mono text-text-primary">{s.node_id}</span>
+                  <span className="break-words min-w-0 text-text-primary">
+                    {nodeRoleLabel(s.node_id, kind)}
+                    {pass !== null && <span className="text-text-muted"> · {pass}</span>}
+                  </span>
                   <span
-                    className={`${statusTextClass(s.status)} ${s.status === 'running' ? 'animate-pulse' : ''}`}
+                    className={`${verdict ? verdictTextClass(verdict.tone) : statusTextClass(s.status)} ${
+                      s.status === 'running' ? 'animate-pulse' : ''
+                    } shrink-0`}
                   >
-                    {stepStatusLabel(s.status)}
-                    {s.outcome ? ` · ${s.outcome}` : ''}
+                    {verdict ? verdict.label : stepStatusLabel(s.status)}
+                    {!verdict && s.outcome ? ` · ${s.outcome}` : ''}
                   </span>
                 </div>
+                <div className="text-text-muted mt-0.5 font-mono break-words">{s.node_id}</div>
                 {duration !== null && (
                   <div className="text-text-muted mt-0.5">duration {formatDurationMs(duration)}</div>
                 )}

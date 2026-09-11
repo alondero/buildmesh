@@ -43,6 +43,7 @@ import type { LifecycleChangedPayload } from '../types/generated/LifecycleChange
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
 import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
+import type { NodeDeletedPayload } from '../types/generated/NodeDeletedPayload';
 import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPayload';
 import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
 import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
@@ -87,6 +88,10 @@ export interface AgentNodeActionSurface {
    *  (the caller treats that as a no-op; see `invalidateNodeCaches`
    *  for the structural-staleness reasoning). */
   findAgentNode: (id: number) => AgentNode | undefined;
+  /** Drop a node the backend deleted (Circuit `CloseAgentNode`,
+   *  cancelled-run retirement) and dispose its terminal. No-op when the
+   *  row is already absent. */
+  removeAgentNode: (id: number) => void;
 }
 
 // `attention-needed` / `attention-cleared` are the external
@@ -95,6 +100,13 @@ export interface AgentNodeActionSurface {
 // says this stays as "session" intentionally). Map to the internal
 // `node_id` alias for vocabulary consistency inside the store.
 const SESSION_ID_KEY = 'session_id';
+
+/// Circuit run states after which the run's remaining agents have been swept.
+/// Deleted agents arrive via `node-deleted`, but a failed-run sweep *archives*
+/// the agents still attached to the run — archive must not dispose their
+/// terminals, and it emits no per-node event — so refetch on these states to
+/// drop the archived cards.
+const TERMINAL_CIRCUIT_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
 
 /**
  * Subscribe every agent-node Tauri event the store cares about.
@@ -116,6 +128,12 @@ export async function attachAgentNodeListeners(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
       if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
         surface.patchCircuitOwnershipState(payload.run_id, payload.state);
+      }
+      // A terminal run has swept its remaining agents — a failed-run sweep
+      // *archives* them, and archive emits no per-node event — so resync to
+      // drop those cards. Deleted agents ride `node-deleted` instead.
+      if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
+        void surface.fetchAgentNodes();
       }
     }),
   );
@@ -179,6 +197,17 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<NodeCreatedPayload>('node-created', async () => {
       await surface.fetchAgentNodes();
+    }),
+  );
+
+  // `node-deleted` is emitted by the Agent Node delete seam whenever a row is
+  // removed by a path the frontend did not drive — notably the Circuit
+  // worker's `CloseAgentNode` step, including intermediate review verdicts
+  // whose run has not yet terminated. Drop the node and dispose its terminal;
+  // without this the deleted agent lingered as a ghost tab.
+  unlistens.push(
+    await listen<NodeDeletedPayload>('node-deleted', (event) => {
+      surface.removeAgentNode(event.payload.node_id);
     }),
   );
 

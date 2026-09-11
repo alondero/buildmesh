@@ -331,9 +331,39 @@ fn create_pending_with_source_pr_fork_and_worktree(
     Ok(node)
 }
 
+/// Load a node row for the close path, treating an already-removed row as
+/// `None` rather than an error. Closing is idempotent: a node deleted out from
+/// under the UI — a Circuit step's `CloseAgentNode`, or any other backend-driven
+/// delete — must not fault with "Query returned no rows". Without this, the
+/// frontend's Phase-1 safety check aborts the close and leaves the ghost row on
+/// screen (issue: closing a review node's stale tab).
+fn find_agent_node_for_close(session_id: i64) -> Result<Option<AgentNode>, AgentNodeError> {
+    match db::get_agent_node_by_id(session_id) {
+        Ok(node) => Ok(Some(node)),
+        // Legitimate for an already-retired row, but a bogus/negative id lands
+        // here too — log so a genuinely bad close is diagnosable rather than
+        // silently reported as a clean success.
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            tracing::warn!(
+                "close for agent node {session_id}: row already removed, treating as a no-op"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(AgentNodeError::Db(error)),
+    }
+}
+
 /// Return whether closing the node can remove its worktree without risking work.
 pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety, AgentNodeError> {
-    let node = db::get_agent_node_by_id(session_id)?;
+    let Some(node) = find_agent_node_for_close(session_id)? else {
+        // Already gone — there is no worktree of ours left to protect.
+        return Ok(WorktreeCloseSafety {
+            worktree_path: None,
+            has_uncommitted: false,
+            has_unpushed: false,
+            is_detached: false,
+        });
+    };
     let Some(worktree_path) = env::node_worktree_path(&node).map(|r| r.host_path) else {
         return Ok(WorktreeCloseSafety {
             worktree_path: None,
@@ -359,11 +389,13 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
 /// fast, and it's the one step we must finish before parting with the node so we
 /// never leave a live agent running or fighting the eventual removal (#239).
 pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
-    let node = db::get_agent_node_by_id(session_id)?;
+    let node = find_agent_node_for_close(session_id)?;
 
     let removal_path = if remove_worktree {
         crate::agent::process::PROCESS_REGISTRY.kill_session(session_id);
-        env::node_worktree_path(&node).map(|r| r.host_path)
+        node.as_ref()
+            .and_then(env::node_worktree_path)
+            .map(|r| r.host_path)
     } else {
         None
     };
@@ -386,8 +418,28 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     crate::autopilot::evaluator::unregister(session_id);
     db::delete_autopilot_run(session_id)?;
 
-    let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
-    db::delete_agent_node_enqueueing_removal(session_id, removal)?;
+    // Only the row delete (and its atomic worktree enqueue) is skipped when the
+    // row is already gone — every per-node cleanup above still runs, so a
+    // backend-driven delete that won the race leaves no process, naming, or
+    // telemetry state behind.
+    if let Some(node) = node.as_ref() {
+        let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
+        db::delete_agent_node_enqueueing_removal(session_id, removal)?;
+        // Announce the deletion so a frontend that did not initiate it — the
+        // Circuit worker's `CloseAgentNode`, cancelled-run retirement, abort
+        // compensation — drops the card and disposes its terminal. A
+        // user-initiated close has already removed the row optimistically and
+        // disposes on its own success path, so its listener call is a no-op.
+        if let Some(app) = crate::http::app_handle() {
+            let _ = tauri::Emitter::emit(
+                app,
+                "node-deleted",
+                crate::commands::agent::NodeDeletedPayload {
+                    node_id: session_id,
+                },
+            );
+        }
+    }
     // The raw-output subscription is node-scoped, so process exit/restart
     // deliberately preserves it. Once the row deletion commits, this is the
     // authoritative backend cleanup seam (idempotent with frontend disposal).
@@ -1321,6 +1373,52 @@ mod tests {
         // Idempotent — a no-op write should still succeed.
         db::set_agent_node_provider(node.id, "claude:minimax")
             .expect("idempotent write should succeed");
+    }
+
+    #[test]
+    fn close_phase1_then_phase2_is_idempotent_for_both_worktree_modes() {
+        // Regression: a Circuit step's `CloseAgentNode` (or any backend-driven
+        // delete) can remove a node's row while the frontend still holds it as a
+        // tab. The real close is Phase 1 `get_worktree_close_safety` then Phase 2
+        // `delete`; both used to fault with `QueryReturnedNoRows` on the retry,
+        // aborting the close and leaving the stale card on screen behind an
+        // error toast. Exercise that exact order for both `remove_worktree`
+        // values, then repeat it against the now-missing row.
+        for remove_worktree in [false, true] {
+            let mesh_id = fresh_mesh();
+            let node = create(
+                mesh_id,
+                &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
+                "main",
+                Some("anthropic"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("seed node should succeed");
+
+            // Real close order: Phase 1 (safety) precedes Phase 2 (delete).
+            get_worktree_close_safety(node.id)
+                .expect("Phase 1 safety on a live row must succeed");
+            delete(node.id, remove_worktree).expect("Phase 2 close must succeed");
+            assert!(
+                matches!(
+                    db::get_agent_node_by_id(node.id),
+                    Err(rusqlite::Error::QueryReturnedNoRows),
+                ),
+                "the row must be gone after close (remove_worktree={remove_worktree})",
+            );
+
+            // The ghost retry: both phases must tolerate the missing row.
+            let safety = get_worktree_close_safety(node.id)
+                .expect("Phase 1 must tolerate a missing row");
+            assert_eq!(safety.worktree_path, None);
+            assert!(!safety.has_uncommitted && !safety.has_unpushed && !safety.is_detached);
+            delete(node.id, remove_worktree)
+                .expect("Phase 2 must tolerate a missing row (remove_worktree=true included)");
+        }
     }
 
     // PR #1388 review feedback 2 — the service-layer `regenerate`

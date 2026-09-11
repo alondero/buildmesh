@@ -64,6 +64,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 });
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
+import { resolveAutopilotOutcome } from '../../src/lib/autopilotNodePresentation';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const NODE: AgentNode = {
@@ -98,7 +99,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     seedAgentNodes([NODE], NODE.id);
     useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files' });
+    useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files', pendingCircuitRunFocus: null });
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     telemetryMock.mockReturnValue(null);
@@ -161,6 +162,17 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(pill.getAttribute('title')).toContain('Autopilot is driving');
   });
 
+  it('links circuit ownership to the run in the Circuits Probe', () => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
+      circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByTestId('circuit-run-pill'));
+    expect(useUIStore.getState().probeTab).toBe('circuits');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBe(2);
+  });
+
   it.each([
     ['failed', 'text-status-error'],
     ['cancelled', 'text-accent-amber'],
@@ -207,13 +219,68 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.getByText('-1').className).toContain('text-accent-red');
   });
 
-  it('keeps aggregate attention actionable even when its session tab is offscreen', () => {
-    const onAttention = vi.fn();
+  it('renders the resolver outcome for the focused attention session', () => {
+    const awaiting = { ...NODE, id: 2, status: 'awaiting_input' as const };
+    const attentionOutcome = resolveAutopilotOutcome(
+      [awaiting],
+      {
+        autopilotStates: { 2: 'finishing' },
+        circuitOwnerships: {},
+        semanticTurns: { 2: { node_id: 2, kind: 'permission_request', description: 'approve the deploy' } },
+      },
+      2,
+    );
+    const onReveal = vi.fn();
     render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }}
-      attentionCount={2} onAttention={onAttention} onBuildRun={() => {}} />);
+      attentionOutcome={attentionOutcome} onReveal={onReveal} onBuildRun={() => {}} />);
     expect(screen.getByRole('status', { name: 'Needs input' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /2 sessions need attention/ }));
-    expect(onAttention).toHaveBeenCalledOnce();
+    const chip = screen.getByTestId('autopilot-outcome-chip');
+    expect(chip.dataset.outcome).toBe('needs_input');
+    expect(chip.getAttribute('title')).toBe('Autopilot is waiting for you: approve the deploy.');
+    expect(chip.getAttribute('aria-label'))
+      .toBe('Needs input. Autopilot is waiting for you: approve the deploy. Show this session.');
+    fireEvent.click(chip);
+    expect(onReveal).toHaveBeenCalledOnce();
+  });
+
+  it('renders a failure chip from the resolver', () => {
+    const attentionOutcome = resolveAutopilotOutcome(
+      [{ ...NODE, status: 'error' as const }],
+      { autopilotStates: { 1: 'failed' }, circuitOwnerships: {}, semanticTurns: {} },
+    );
+    render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
+    const chip = screen.getByTestId('autopilot-outcome-chip');
+    expect(chip.dataset.outcome).toBe('failed');
+    expect(chip.textContent).toContain('Autopilot failed');
+    expect(chip.getAttribute('aria-label'))
+      .toBe('Autopilot failed. Autopilot failed and needs a human. Show this session.');
+    expect(chip.className).toContain('ring-1');
+  });
+
+  it('summarizes every attention session and advertises cycling', () => {
+    const awaiting = { ...NODE, id: 2, status: 'awaiting_input' as const };
+    const failed = { ...NODE, id: 3, status: 'error' as const };
+    const attentionOutcome = resolveAutopilotOutcome(
+      [awaiting, failed],
+      {
+        autopilotStates: { 2: 'finishing', 3: 'failed' },
+        circuitOwnerships: {},
+        semanticTurns: { 2: { node_id: 2, kind: 'permission_request', description: 'approve the deploy' } },
+      },
+      2,
+    );
+    render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
+    const chip = screen.getByTestId('autopilot-outcome-chip');
+    // The focused session wins the copy; the count covers every session needing attention.
+    expect(chip.dataset.outcome).toBe('needs_input');
+    expect(chip.textContent).toContain('2');
+    expect(chip.getAttribute('aria-label'))
+      .toBe('Needs input (2 sessions). Autopilot is waiting for you: approve the deploy. Show next session.');
+  });
+
+  it('renders no outcome chip when the card has nothing actionable', () => {
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    expect(screen.queryByTestId('autopilot-outcome-chip')).toBeNull();
   });
 
   it('reserves the ownership cell without rendering an unpiloted indicator', () => {

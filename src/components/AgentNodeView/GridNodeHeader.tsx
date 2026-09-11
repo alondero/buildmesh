@@ -33,8 +33,8 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
-import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone } from '../../lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone, type AutopilotOutcome } from '../../lib/autopilotNodePresentation';
+import { AutopilotIndicatorGlyph, AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
 import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
@@ -47,8 +47,15 @@ interface GridNodeHeaderProps {
   nodeId: number;
   titleNodeId?: number;
   activity?: ActivityStatus;
-  attentionCount?: number;
-  onAttention?: () => void;
+  /// Card-level attention outcome covering every member that needs a human
+  /// (aggregated by `resolveAutopilotOutcome`, which describes the focused
+  /// session and exposes the rest for cycling). Null/absent renders no chip.
+  /// Replaces the old bare "N needs attention" count, which named neither the
+  /// outcome nor the action required.
+  attentionOutcome?: AutopilotOutcome | null;
+  /// Focus the next attention session; the card owns cycling through every
+  /// member the chip aggregates.
+  onReveal?: () => void;
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
   /// dnd-kit drag listeners/attributes that turn the whole title bar into the
   /// reorder/swap drag handle. Undefined when dragging is disabled (e.g. the
@@ -89,7 +96,7 @@ export const HEADER_TIER_BREAKPOINTS = {
   menuWidth: 240,
 } as const;
 
-export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attentionCount = 0, onAttention, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
+export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attentionOutcome, onReveal, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const titleNode = useAgentNodeStore(s => s.nodesById[titleNodeId]);
   const renameAgentNode = useAgentNodeStore(s => s.renameAgentNode);
@@ -148,7 +155,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   };
   const showDetails = () => { activateNode(node.id); openProbeTab('properties'); };
   const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
-  const attentionTone = activity?.tone === 'error' ? 'text-status-error bg-status-error-bg' : 'text-status-warning bg-status-warning/10';
+  const outcomeCount = attentionOutcome?.nodeIds.length ?? 0;
 
   return (
     <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header" data-node-id={node.id}
@@ -170,12 +177,15 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} />}
       </div>
-        {attentionCount > 0 && <button type="button" onPointerDown={event => event.stopPropagation()}
-        onClick={event => { event.stopPropagation(); onAttention?.(); }}
-        aria-label={`${attentionCount} ${attentionCount === 1 ? 'session needs' : 'sessions need'} attention. Show next session`}
-        title={`${activity?.label ?? 'Needs attention'} · Show next session`}
-         className={`flex h-7 shrink-0 items-center gap-1 rounded-sm px-1.5 text-2xs font-medium ${attentionTone}`}>
-        <span aria-hidden="true">!</span><span>{attentionCount}</span>{width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span>needs attention</span>}
+        {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
+        onClick={event => { event.stopPropagation(); onReveal?.(); }}
+        aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
+        title={attentionOutcome.detail}
+        data-testid="autopilot-outcome-chip" data-outcome={attentionOutcome.kind}
+        className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${AUTOPILOT_PILL_CLASSES[attentionOutcome.tone]}`}>
+        <AutopilotIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
+        {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
+        {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
@@ -188,12 +198,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
           isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}
           onPickRegenerate={regen.pickRegenerateProvider} onDetails={showDetails} onChanges={showChanges}
+          circuitRun={circuitPill && circuitOwnership
+            ? { ...circuitPill, runId: circuitOwnership.run_id }
+            : null}
           details={<>
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {circuitPill && <div data-testid="circuit-run-pill" title={circuitPill.title}
-              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${circuitPill.className}`}>{circuitPill.label}</div>}
             {!circuitOwnership && autopilotPill && <div data-testid="autopilot-pill" title={autopilotPill.title}
               className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${autopilotPill.className}`}>{autopilotPill.label}</div>}
             {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
@@ -260,7 +271,7 @@ interface KebabActionsProps {
   isPinned: boolean;
   onTogglePin: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'provider'>;
+  node: Pick<AgentNode, 'provider' | 'mesh_id'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -268,11 +279,13 @@ interface KebabActionsProps {
   isRegenerateDisabled: boolean;
   hasRegenerateTargets: boolean;
   onPickRegenerate: (providerId: string, providerLabel: string) => void;
+  /** Circuit-owned row: the run to open in the Circuits Probe, or null. */
+  circuitRun: { label: string; title: string; className: string; runId: number } | null;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 
-function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
+function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges, circuitRun }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -490,6 +503,26 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
             className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card-hover">View changes</button>
+          {/* Circuit ownership link: opens the Circuits Probe on this exact
+              run. Rendered as a menu item (not the old static pill)
+              so it is keyboard-reachable and closes the menu on activation. */}
+          {circuitRun !== null && (
+            <button type="button" role="menuitem" data-aria-menu-item
+              data-testid="circuit-run-pill"
+              title={circuitRun.title}
+              onClick={() => {
+                closeAndReturnFocus();
+                // Scope the mesh-scoped Probe to this node's mesh before
+                // focusing, so the run is present in the snapshot the tab
+                // loads (the grid can be showing nodes from several meshes).
+                useMeshStore.getState().selectMesh(node.mesh_id);
+                useUIStore.getState().focusCircuitRun(circuitRun.runId);
+              }}
+              className={`w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs hover:bg-bg-card-hover ${circuitRun.className}`}
+            >
+              {circuitRun.label}
+            </button>
+          )}
           </div>
         </div>,
         document.body,

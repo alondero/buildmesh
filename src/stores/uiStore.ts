@@ -335,6 +335,15 @@ interface UIState extends GridControls {
   openCircuitEditor: (circuitId: number) => void;
   closeCircuitEditor: () => void;
 
+  // Cross-surface link target: a circuit run id the Circuits Probe should
+  // reveal. Set by the agent-node kebab and the review modal,
+  // consumed by `CircuitsProbeTab` once it has selected the right view,
+  // expanded the run, and scrolled it into view. Null when there is no
+  // pending request; the tab clears it via `consumeCircuitRunFocus`.
+  pendingCircuitRunFocus: number | null;
+  focusCircuitRun: (runId: number) => void;
+  consumeCircuitRunFocus: () => void;
+
   // ---- Universal Command Omnibar (map #1371 Decision #2 / issue #1409) ----
   // Same overlay discipline as the circuit editor and diff overlay above:
   // the palette floats over the terminal grid while open. `omnibarMode`
@@ -532,6 +541,18 @@ export const useUIStore = create<UIState>((set, get) => {
     },
     closeCircuitEditor: () => {
       set({ activeCircuitEditorId: null });
+    },
+
+    pendingCircuitRunFocus: null,
+    focusCircuitRun: (runId) => {
+      // Record the target before opening the tab so the tab sees it on its
+      // first render whether it was already mounted or is about to be.
+      set({ pendingCircuitRunFocus: runId });
+      get().openProbeTab('circuits');
+    },
+    consumeCircuitRunFocus: () => {
+      if (get().pendingCircuitRunFocus === null) return;
+      set({ pendingCircuitRunFocus: null });
     },
 
     omnibarOpen: false,

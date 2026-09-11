@@ -682,6 +682,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             runs={runs}
             selectedRunId={selectedRunId}
             onSelectRun={setSelectedRunId}
+            graph={currentGraph}
           />
         )}
       </div>

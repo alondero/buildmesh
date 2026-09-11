@@ -1,34 +1,36 @@
 /**
  * CircuitRunCard — one circuit run rendered as a readable diagnostic
- * (issue #1468).
+ * (issue #1468), reorganised for at-a-glance scanning and review clarity.
  *
- * Replaces the old one-line ledger dump. The tab used to render an entire
- * run as `steps.map(s => `${s.node_id}:${s.status}`).join(' → ')` inside a
- * `truncate`d span, which meant:
- *   - the chain was clipped at the Probe's 240px minimum width, and the
- *     clipped tail is exactly where a stuck run's current step lives;
- *   - `pending_slot` was shown raw, with no hint that it means "every
- *     slot is busy";
- *   - `title` carried the *trigger identity* while the span's text was
- *     the *step chain*, so the tooltip explained the wrong thing.
+ * The card answers three questions, in order:
  *
- * Shape
- * -----
- * A collapsed card answers "what is this run doing, and why?" in two
- * lines — run id, state, trigger identity, the active/queued step, its
- * reason, duration and progress. Expanding reveals the full per-step
- * timeline (status, outcome, attempt, duration, agent node, error text).
+ *   1. **What happened?** Run id, the review verdict or run state, and the
+ *      duration — the headline. For a review circuit this says
+ *      "Review approved" / "Review limit reached" outright, so a user never
+ *      has to infer whether the run ended well or merely stopped.
+ *   2. **Why?** The activity line names the step the run is on and, when it
+ *      is parked, which budget holds it.
+ *   3. **Which agent node?** The linked-agent line names the Agent Node the
+ *      run drives and links straight to it.
+ *
+ * Everything else — the dedupe trigger identity, step progress, per-step
+ * durations and raw circuit node ids — is provenance, and lives behind the
+ * disclosure. The expanded timeline reads as
+ * `Review · pass 2 · CHANGES REQUESTED` rather than
+ * `review_classifier:completed · attempt 2`, and a review step with a
+ * retained report offers it behind its own toggle.
  *
  * Live and failed diagnostics default to expanded; terminal runs are
  * collapsed until the user asks for their detail. Errors remain visible in
  * the card headline even when a terminal card is collapsed.
- * `expanded` is lifted to the parent so a `circuit-run-updated`
- * refetch can't reset a card the user deliberately opened or closed.
+ * `expanded` is lifted to the parent so a `circuit-run-updated` refetch
+ * can't reset a card the user deliberately opened or closed.
  *
  * Every layout choice here is wrap-first, never truncate-first — the card
  * has to stay readable at `PROBE_PANEL_BOUNDS.MIN_WIDTH` (240px).
  */
 
+import { useMemo } from 'react';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
@@ -48,6 +50,16 @@ import {
   type CircuitCapacity,
   type ReviewCircuitMetadata,
 } from '../Circuits/runDiagnostics';
+import {
+  linkedAgentNodeId,
+  nodeRoleLabel,
+  parseRunContext,
+  reviewReport,
+  stepPassLabel,
+  stepVerdict,
+  verdictTextClass,
+  type NodeIndex,
+} from '../Circuits/runStepPresentation';
 
 interface CircuitRunCardProps {
   detail: CircuitRunDetail;
@@ -62,6 +74,14 @@ interface CircuitRunCardProps {
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
   reviewCircuit: ReviewCircuitMetadata | null;
+  /** Circuit `node_id` → blueprint node, for role/verdict labels. */
+  nodeIndex: NodeIndex;
+  /** Resolve an Agent Node's display name, or `null` when it no longer exists. */
+  agentName: (nodeId: number) => string | null;
+  /** Focus (and solo) an Agent Node — the card's link into the canvas. */
+  onFocusAgent: (nodeId: number) => void;
+  /** True for a beat after the user linked here from that agent node. */
+  focused?: boolean;
 }
 
 export function CircuitRunCard({
@@ -76,6 +96,10 @@ export function CircuitRunCard({
   onCancel,
   onApprove,
   reviewCircuit,
+  nodeIndex,
+  agentName,
+  onFocusAgent,
+  focused = false,
 }: CircuitRunCardProps) {
   const { run, steps } = detail;
   const activity = runActivity(run, steps, capacity);
@@ -89,14 +113,23 @@ export function CircuitRunCard({
   // The run row carries no error column; the ledger's first errored step
   // is the run's failure reason.
   const firstError = steps.find((s) => s.error_message !== null && s.error_message !== '') ?? null;
+  // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
+  // memoised: the duration clock re-renders a live card every second and must
+  // not re-parse the blob each tick.
+  const context = useMemo(() => parseRunContext(run.context_json), [run.context_json]);
+  const linkedAgent = linkedAgentNodeId(run, steps);
+  const linkedAgentLabel = linkedAgent === null ? null : agentName(linkedAgent);
 
   const panelId = `run-detail-${run.id}`;
 
   return (
     <li
-      className="rounded-md border border-border-subtle bg-bg-card/40"
+      className={`rounded-md border bg-bg-card/40 ${
+        focused ? 'border-accent-cyan ring-1 ring-accent-cyan/50' : 'border-border-subtle'
+      }`}
       data-testid={`run-card-${run.id}`}
       data-run-state={run.state}
+      data-run-focused={focused ? 'true' : undefined}
     >
       {/* Headline row. The whole row is the disclosure control so the hit
           target stays comfortable at narrow widths; the buttons below sit
@@ -132,14 +165,6 @@ export function CircuitRunCard({
               {formatDurationMs(duration)}
             </span>
           )}
-          {progress.total > 0 && (
-            <span
-              className="text-2xs text-text-muted shrink-0"
-              data-testid={`run-progress-${run.id}`}
-            >
-              {progress.finished}/{progress.total} steps
-            </span>
-          )}
           {stale && staleMs !== null && (
             <span
               className="text-2xs text-status-warning shrink-0"
@@ -149,13 +174,6 @@ export function CircuitRunCard({
               No update in {formatDurationMs(staleMs)}
             </span>
           )}
-        </span>
-        <span
-          className="block text-2xs text-text-secondary break-all mt-0.5"
-          data-testid={`run-trigger-${run.id}`}
-          title={run.trigger_identity}
-        >
-          {run.trigger_identity}
         </span>
         {/* Activity line — the fact the old one-liner buried. Wraps
             rather than clips: a long node id is the whole point. */}
@@ -183,6 +201,32 @@ export function CircuitRunCard({
       </button>
 
       {review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
+
+      {/* The Agent Node this run drives — the answer to "which node is this
+          run about?". Outside the disclosure button (no nested buttons), and
+          always visible because it is the link back to the canvas. */}
+      {linkedAgent !== null && (
+        <div
+          className="px-2 pb-1.5 flex items-baseline gap-1.5 flex-wrap text-2xs"
+          data-testid={`run-agent-${run.id}`}
+        >
+          <span className="text-text-muted">Agent node:</span>
+          <span className="font-mono text-text-secondary break-words min-w-0">
+            {linkedAgentLabel ?? `#${linkedAgent}`}
+          </span>
+          {linkedAgentLabel !== null && (
+            <button
+              type="button"
+              onClick={() => onFocusAgent(linkedAgent)}
+              data-testid={`run-agent-open-${run.id}`}
+              title="Show this Agent Node on the canvas"
+              className="px-1 rounded-md text-accent-cyan hover:bg-accent-cyan/10"
+            >
+              Open
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Controls. Outside the disclosure button — nesting a button inside
           a button is invalid HTML and breaks keyboard semantics. */}
@@ -258,10 +302,31 @@ export function CircuitRunCard({
 
       {expanded && (
         <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
+          {/* Provenance behind the disclosure: trigger identity (dedupe key)
+              and progress. Neither answers "what happened / why", so neither
+              costs a headline line. */}
+          <div className="flex items-baseline gap-1.5 flex-wrap mb-1.5">
+            {progress.total > 0 && (
+              <span
+                className="text-2xs text-text-muted shrink-0"
+                data-testid={`run-progress-${run.id}`}
+              >
+                {progress.finished}/{progress.total} steps
+              </span>
+            )}
+            <span
+              className="text-2xs text-text-muted break-all min-w-0"
+              data-testid={`run-trigger-${run.id}`}
+              title={run.trigger_identity}
+            >
+              {run.trigger_identity}
+            </span>
+          </div>
+
           {retried.length > 0 && (
             <p className="text-2xs text-status-warning mb-1.5" data-testid={`run-retries-${run.id}`}>
               {retried.length === 1
-                ? `1 step was retried (${retried[0].node_id}, attempt ${retried[0].attempt}).`
+                ? `1 step was retried (${retried[0].node_id}, pass ${retried[0].attempt}).`
                 : `${retried.length} steps were retried.`}
             </p>
           )}
@@ -275,6 +340,12 @@ export function CircuitRunCard({
             <ol className="flex flex-col gap-1" data-testid={`run-steps-${run.id}`}>
               {steps.map((s) => {
                 const stepDuration = stepDurationMs(s);
+                const kind = nodeIndex.get(s.node_id)?.type;
+                const verdict = stepVerdict(s, kind, context);
+                const pass = stepPassLabel(s);
+                const report = reviewReport(s, kind, context);
+                const stepAgent = s.agent_node_id;
+                const stepAgentLabel = stepAgent === null ? null : agentName(stepAgent);
                 return (
                   <li
                     key={s.node_id}
@@ -283,33 +354,72 @@ export function CircuitRunCard({
                     data-step-status={s.status}
                   >
                     <div className="flex items-baseline gap-1.5 flex-wrap">
-                      <span className="font-mono text-text-primary break-words min-w-0">
-                        {s.node_id}
+                      <span className="text-text-primary break-words min-w-0">
+                        {nodeRoleLabel(s.node_id, kind)}
                       </span>
-                      <span
-                        className={`${statusTextClass(s.status)} ${
-                          s.status === 'running' ? 'animate-pulse' : ''
-                        } shrink-0`}
-                      >
-                        {stepStatusLabel(s.status)}
-                      </span>
-                      {/* Gate steps finish `completed` but carry the real
-                          verdict (`green`/`red`/`working`) in `outcome` —
-                          that's the branch the run took. */}
-                      {s.outcome !== null && s.outcome !== s.status && (
-                        <span className="text-text-secondary shrink-0">· {s.outcome}</span>
+                      {pass !== null && <span className="text-text-muted shrink-0">· {pass}</span>}
+                      {verdict !== null ? (
+                        <span
+                          className={`${verdictTextClass(verdict.tone)} font-semibold shrink-0`}
+                          data-testid={`run-step-verdict-${run.id}-${s.node_id}`}
+                        >
+                          {verdict.label}
+                        </span>
+                      ) : (
+                        <>
+                          <span
+                            className={`${statusTextClass(s.status)} ${
+                              s.status === 'running' ? 'animate-pulse' : ''
+                            } shrink-0`}
+                          >
+                            {stepStatusLabel(s.status)}
+                          </span>
+                          {/* Gate steps finish `completed` but carry the real
+                              verdict (`green`/`red`/`working`) in `outcome` —
+                              that's the branch the run took. Kept only when no
+                              dedicated verdict label applies. */}
+                          {s.outcome !== null && s.outcome !== s.status && (
+                            <span className="text-text-secondary shrink-0">· {s.outcome}</span>
+                          )}
+                        </>
                       )}
-                      {s.attempt > 1 && (
-                        <span className="text-status-warning shrink-0">· attempt {s.attempt}</span>
-                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-baseline gap-1.5 flex-wrap text-text-muted">
+                      <span className="font-mono break-words min-w-0">{s.node_id}</span>
                       {stepDuration !== null && (
-                        <span className="text-text-muted shrink-0">
-                          · {formatDurationMs(stepDuration)}
+                        <span className="shrink-0">· {formatDurationMs(stepDuration)}</span>
+                      )}
+                      {stepAgent !== null && (
+                        <span className="shrink-0">
+                          · agent{' '}
+                          <span className="font-mono text-text-secondary">
+                            {stepAgentLabel ?? `#${stepAgent}`}
+                          </span>
+                          {stepAgentLabel !== null && (
+                            <button
+                              type="button"
+                              onClick={() => onFocusAgent(stepAgent)}
+                              data-testid={`run-step-agent-open-${run.id}-${s.node_id}`}
+                              className="ml-1 text-accent-cyan hover:underline"
+                            >
+                              Open
+                            </button>
+                          )}
                         </span>
                       )}
                     </div>
-                    {s.agent_node_id !== null && (
-                      <p className="text-text-muted mt-0.5">agent node #{s.agent_node_id}</p>
+                    {report !== null && (
+                      <details
+                        className="mt-0.5"
+                        data-testid={`run-review-report-${run.id}-${s.node_id}`}
+                      >
+                        <summary className="cursor-pointer text-accent-cyan">
+                          View review report
+                        </summary>
+                        <pre className="mt-0.5 whitespace-pre-wrap break-words text-text-secondary font-mono">
+                          {report}
+                        </pre>
+                      </details>
                     )}
                     {s.error_message !== null && s.error_message !== '' && (
                       // Per-step log surface. #1219 will widen this to
