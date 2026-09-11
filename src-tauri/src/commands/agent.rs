@@ -51,6 +51,21 @@ pub struct NodeCreatedPayload {
     pub id: i64,
 }
 
+/// Payload of the `node-deleted` Tauri event. Emitted by the Agent Node delete
+/// seam ([`crate::services::agent_node::delete`]) once its row is removed, for
+/// every caller - including the Circuit worker's `CloseAgentNode` effect, which
+/// previously deleted the row with no per-node signal and left the frontend
+/// holding a ghost tab. The frontend drops the node and disposes its terminal.
+///
+/// Generated to `src/types/generated/NodeDeletedPayload.ts`; the TS half is
+/// imported by `src/stores/agentNodeListeners.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeDeletedPayload.ts")]
+pub struct NodeDeletedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+}
+
 /// Payload of the `node-spawn-completed` Tauri event. Emitted by
 /// `start_node_background` when stage-2 (slow work, registers the process
 /// with `PROCESS_REGISTRY`) finishes successfully. The frontend flips the

@@ -418,25 +418,41 @@ describe('useAgentNodeStore', () => {
 
       // Circuit events reconcile the ownership ledger in place. The shared
       // indicator observes the same node through each transition; no component
-      // remount or manual reload is involved.
+      // remount or manual reload is involved. Non-terminal transitions patch
+      // ownership only — no refetch.
       const circuitNode = makeNode({ id: 11, status: 'running' });
+      const ownershipFor = (state: string) => ({
+        node_id: 11, run_id: 1, circuit_id: 1, circuit_name: 'Review', state, parent_node_id: null,
+      });
       seedAgentNodes([circuitNode]);
-      useAgentNodeStore.setState({ circuitOwnerships: {
-        11: { node_id: 11, run_id: 1, circuit_id: 1, circuit_name: 'Review', state: 'running', parent_node_id: null },
-      } });
+      useAgentNodeStore.setState({ circuitOwnerships: { 11: ownershipFor('running') } });
       mockInvoke.mockClear();
-      const circuitStates = ['running', 'paused', 'running', 'completed'] as const;
+      const circuitStates = ['running', 'paused', 'running'] as const;
       const phases = [];
       render(createElement(StoreBackedAutopilotIndicator, { nodeId: 11 }));
-      const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active', 'Autopilot done'];
+      const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active'];
       for (const [index, state] of circuitStates.entries()) {
         await mockEmit('circuit-run-updated', { run_id: 1, state });
         await waitFor(() => expect(screen.getByRole('img', { name: visibleLabels[index] })).toBeTruthy());
         const ownership = useAgentNodeStore.getState().circuitOwnerships[11];
         phases.push(getAutopilotNodePresentation(circuitNode, undefined, ownership)?.phase);
       }
-      expect(phases).toEqual(['active', 'waiting', 'active', 'done']);
+      expect(phases).toEqual(['active', 'waiting', 'active']);
       expect(mockInvoke).not.toHaveBeenCalled();
+
+      // A terminal transition also resyncs the node list, so agents archived by
+      // `close_run_agents` leave the grid. The mocked resync preserves node 11
+      // and its completed ownership, so the indicator still reaches its final
+      // phase while the node list is refetched.
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([circuitNode]);
+        if (cmd === 'list_circuit_agent_ownerships') return Promise.resolve([ownershipFor('completed')]);
+        return Promise.resolve(undefined);
+      });
+      await mockEmit('circuit-run-updated', { run_id: 1, state: 'completed' });
+      await waitFor(() => expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy());
+      expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
     });
   });
 
@@ -1071,6 +1087,49 @@ describe('useAgentNodeStore', () => {
       useWorktreeClosePromptStore.getState().choose('cancel');
       await closeB;
       expect(useAgentNodeStore.getState().closingNodeIds.has(51)).toBe(false);
+    });
+  });
+
+  describe('removeAgentNode (backend-driven retirement)', () => {
+    // Regression: the Circuit worker's `CloseAgentNode` deletes a row and
+    // emits `node-deleted`. The row must leave the grid AND its terminal must
+    // be disposed — the deleted-node case the persistence rule allows. Without
+    // disposal the ghost reviewer's xterm/WebGL/PTY subscriptions leaked.
+    it('drops the node, clears it as active, and disposes its terminal', () => {
+      seedAgentNodes([makeNode({ id: 70, name: 'reviewer' }), makeNode({ id: 71, name: 'source', path: '/b' })], 70);
+
+      useAgentNodeStore.getState().removeAgentNode(70);
+
+      const state = useAgentNodeStore.getState();
+      expect(state.nodesById[70]).toBeUndefined();
+      expect(state.nodeIds).toEqual([71]);
+      // Cleared so the grid's focus/watch effect re-anchors.
+      expect(state.activeNodeId).toBeNull();
+      expect(mockDisposeTerminal).toHaveBeenCalledTimes(1);
+      expect(mockDisposeTerminal).toHaveBeenCalledWith(70);
+    });
+
+    it('is a no-op when the row is already gone (the user-initiated close owns disposal)', () => {
+      seedAgentNodes([makeNode({ id: 72 })], 72);
+      // The user-initiated path removed the row optimistically before its
+      // delete IPC resolved; the event must not dispose a second time.
+      useAgentNodeStore.setState({ nodesById: {}, nodeIds: [], activeNodeId: null });
+
+      useAgentNodeStore.getState().removeAgentNode(72);
+
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+    });
+
+    it('leaves sibling nodes and their terminals untouched', () => {
+      seedAgentNodes([makeNode({ id: 73 }), makeNode({ id: 74, path: '/b' })], 73);
+
+      useAgentNodeStore.getState().removeAgentNode(73);
+
+      const state = useAgentNodeStore.getState();
+      expect(Object.keys(state.nodesById).map(Number)).toEqual([74]);
+      expect(state.activeNodeId).toBeNull();
+      expect(mockDisposeTerminal).toHaveBeenCalledTimes(1);
+      expect(mockDisposeTerminal).toHaveBeenCalledWith(73);
     });
   });
 

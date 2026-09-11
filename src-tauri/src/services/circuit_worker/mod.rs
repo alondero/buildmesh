@@ -857,6 +857,18 @@ fn drive_run(
         // checkpoints. Ordinary completed graphs opt out via cleanup intent.
         if view.state.is_terminal() {
             close_run_agents(app, &view);
+            // `close_run_agents` archives the run's remaining agents, but the
+            // terminal emit above ran *before* this sweep. A frontend refetch
+            // driven by that earlier emit could observe the still-active rows
+            // and keep their cards. Re-emit now that cleanup has settled so the
+            // resync sees the retired rows.
+            let _ = app.emit(
+                "circuit-run-updated",
+                CircuitRunUpdatedPayload {
+                    run_id: active.run.id,
+                    state: view.state.as_db_str().to_string(),
+                },
+            );
             break;
         }
     }

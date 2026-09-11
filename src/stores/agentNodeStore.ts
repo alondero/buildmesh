@@ -272,6 +272,14 @@ interface AgentNodeState {
   /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
   selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
+  /// Backend-driven retirement. The Circuit worker's `CloseAgentNode` effect
+  /// and cancelled-run cleanup delete the row directly and emit `node-deleted`;
+  /// this drops it from the grid and disposes its terminal. Unlike archive, a
+  /// backend delete is a real deletion, so the terminal-persistence rule
+  /// permits disposal. A no-op when the row is already absent — a
+  /// user-initiated close removed it optimistically and disposes on its own
+  /// success path.
+  removeAgentNode: (id: number) => void;
   renameAgentNode: (id: number, name: string) => Promise<void>;
   /// Pin a node explicitly (wayfinder #982 / ticket #984). Used by the
   /// UI affordance when the user wants a known-good state (e.g. "Pin"
@@ -565,6 +573,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           patchCircuitOwnershipState: get().patchCircuitOwnershipState,
           setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
+          removeAgentNode: get().removeAgentNode,
         });
       },
     };
@@ -757,6 +766,30 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // Issue #647: only now — after the delete IPC committed — is the
     // terminal-persistence rule's "never dispose unless deleted" invariant
     // satisfied. See the Phase-2 NOTE above for the failure-path reasoning.
+    disposeTerminal(id);
+  },
+
+  removeAgentNode: (id) => {
+    // A user-initiated close already dropped the row optimistically and owns
+    // its terminal disposal; only act when the store still holds the row.
+    if (!(id in get().nodesById)) return;
+    get().cancelSchedule(id);
+    set((state) => {
+      if (!(id in state.nodesById)) return state;
+      const nodesById = { ...state.nodesById };
+      delete nodesById[id];
+      const semanticTurns = { ...state.semanticTurns };
+      delete semanticTurns[id];
+      return {
+        nodesById,
+        nodeIds: state.nodeIds.filter(nodeId => nodeId !== id),
+        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
+        semanticTurns,
+      };
+    });
+    // The backend row is gone — the only case the terminal-persistence rule
+    // allows disposal. This is the circuit-driven counterpart of
+    // `deleteAgentNode`'s success-path dispose.
     disposeTerminal(id);
   },
 
