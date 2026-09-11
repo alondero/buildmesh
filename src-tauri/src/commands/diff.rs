@@ -1066,6 +1066,23 @@ mod tests {
                 Self::Cleaning(temp)
             }
         }
+
+        /// Test-only constructor: produce a preserved fixture without
+        /// reading `BUILDMESH_KEEP_DIFF_FIXTURES`. The opt-in test uses
+        /// this instead of mutating the process environment, so it
+        /// cannot race concurrent tests that read the same env var via
+        /// `DiffFixture::new()`. The caller is responsible for removing
+        /// the directory afterwards (it survives past the test's `Drop`).
+        #[cfg(test)]
+        fn new_preserved() -> Self {
+            let temp = tempfile::Builder::new()
+                .prefix("buildmesh-diff-test-")
+                .tempdir()
+                .expect("create fixture tempdir");
+            let path = temp.keep();
+            eprintln!("[buildmesh diff fixture] preserved at {}", path.display());
+            Self::Kept(path)
+        }
     }
 
     impl std::ops::Deref for DiffFixture {
@@ -1080,58 +1097,84 @@ mod tests {
 
     impl AsRef<std::path::Path> for DiffFixture {
         fn as_ref(&self) -> &std::path::Path {
-            self
+            match self {
+                Self::Cleaning(t) => t.path(),
+                Self::Kept(p) => p,
+            }
         }
     }
 
-    /// `BUILDMESH_KEEP_DIFF_FIXTURES` opt-in. Enabled only when the
-    /// variable is set to a value that the contributor actually intends
-    /// as "yes". `is_some()` alone treats `=` (empty) and `=0` as enabled,
-    /// which is almost never what they meant - `=0` is the obvious shell
-    /// idiom for "no". Accept any non-empty, non-`"0"` value; everything
-    /// else (unset, empty, explicit `0`) disables.
+    /// Pairs a `git2::Repository` handle with its `DiffFixture` so the
+    /// handle drops BEFORE the temp directory on Windows. Rust struct
+    /// field drop order is top-to-bottom; declaring `repo` above `dir`
+    /// makes the cleanup invariant architectural, not a convention
+    /// callers have to remember (issue #1544 step #4 — pass the temp
+    /// path to Git helpers and keep the guard until all repositories
+    /// are dropped).
+    struct GitFixture {
+        repo: git2::Repository,
+        dir: DiffFixture,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let dir = DiffFixture::new();
+            let repo = init_repo_with_base(&dir);
+            Self { repo, dir }
+        }
+    }
+
+    /// Pure parser for the `BUILDMESH_KEEP_DIFF_FIXTURES` opt-in. Accepts
+    /// only the literal string `"1"` — the repository convention for
+    /// boolean env-var toggles (CLAUDE.md, `commands/watchdog.rs:95`).
+    /// Anything else — unset, empty, `"0"`, `"false"`, `"no"`, `"yes"`
+    /// — reads as disabled. Extracted as a free function so the cases
+    /// can be pinned with a table-driven test (no env mutation, no
+    /// mutex, no `unsafe`).
+    fn parse_keep_fixtures(val: Option<&std::ffi::OsStr>) -> bool {
+        val.and_then(|v| v.to_str()) == Some("1")
+    }
+
+    /// Read the process env at the call site and forward to the pure
+    /// parser. This is the only place `std::env::var_os` appears in
+    /// tests' control flow; tests cover `parse_keep_fixtures` directly
+    /// rather than mutating the process environment.
     fn keep_diff_fixtures() -> bool {
-        std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES")
-            .is_some_and(|v| !v.is_empty() && v != "0")
+        parse_keep_fixtures(std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES").as_deref())
     }
 
     /// Pins the cleanup contract from issue #1544 end-to-end: creating
-    /// a `DiffFixture`, building a real `git2::Repository` inside it,
-    /// writing tracked content, and dropping the fixture must remove
-    /// both the `.git` directory and the temp directory root - proving
-    /// the leak is gone for the production scenario (open git handles
-    /// + tracked files), not just for an empty tempdir.
+    /// a `GitFixture`, writing tracked content, and dropping it must
+    /// remove both the `.git` directory and the temp directory root —
+    /// proving the leak is gone for the production scenario (open git
+    /// handles + tracked files), not just for an empty tempdir.
     ///
-    /// This test never short-circuits on environment state (CLAUDE.md
-    /// "no paper-tiger tests" rule). The opt-in path is covered by
-    /// `diff_fixture_keep_opt_in_preserves_dir` below. Holds `ENV_LOCK`
-    /// so it cannot run concurrently with the opt-in test (which
-    /// mutates `BUILDMESH_KEEP_DIFF_FIXTURES` while this test reads it
-    /// via `keep_diff_fixtures()` inside `DiffFixture::new`).
+    /// This test never reads or writes the env var; it always exercises
+    /// the cleanup path (CLAUDE.md "no paper-tiger tests" rule). The
+    /// preserved path is covered by `diff_fixture_keep_opt_in_preserves_dir`
+    /// below via `new_preserved()`, which bypasses env mutation entirely.
     #[test]
     fn diff_fixture_cleans_up_tempdir_and_git_repo_on_drop() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let captured_root;
         let captured_git_dir;
         {
-            let fx = DiffFixture::new();
-            let repo = init_repo_with_base(&fx);
+            let fx = GitFixture::new();
             // Commit a real file so `.git/` has objects + refs to remove.
-            commit_all(&repo, "fixture cleanup probe");
+            commit_all(&fx.repo, "fixture cleanup probe");
             assert!(
-                fx.join("base.txt").exists(),
+                fx.dir.join("base.txt").exists(),
                 "tracked file must exist while fixture is in scope"
             );
             assert!(
-                fx.join(".git").exists(),
+                fx.dir.join(".git").exists(),
                 ".git directory must exist while fixture is in scope"
             );
-            captured_root = fx.as_ref().to_path_buf();
+            captured_root = fx.dir.as_ref().to_path_buf();
             captured_git_dir = captured_root.join(".git");
-            // `repo` drops here, before `fx` (Rust reverses declaration
-            // order). Releasing the git handle before the TempDir drops
-            // is what makes the cleanup race-free on Windows (issue #1544
-            // step #4).
+            // `fx` drops here — Rust drops struct fields top-to-bottom,
+            // so `fx.repo` releases its libgit2 handles first, then
+            // `fx.dir` removes the tempdir (issue #1544 step #4
+            // guarantee, now architectural instead of a convention).
         }
         assert!(
             !captured_root.exists(),
@@ -1145,89 +1188,68 @@ mod tests {
         );
     }
 
-    /// Process-wide lock for tests that mutate `BUILDMESH_KEEP_DIFF_FIXTURES`.
-    /// Without serialisation, the cleanup test would race against the opt-in
-    /// test (one mutates the env var while the other reads it) and the
-    /// cleanup assertion would intermittently see `DiffFixture::Kept` and
-    /// fail because `Kept` has no `Drop` cleanup. Matches the
-    /// `PROFILE_WRITE_LOCK` / `PR_TEST_LOCK` / `DRAIN_LOCK` pattern used
-    /// elsewhere (PR #1603, memory entry `#1278`).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// The opt-in flag (set to a non-empty value) preserves the
-    /// directory so a failing test can be inspected on disk. We do NOT
-    /// short-circuit the cleanup test on this flag (that would be a
-    /// paper-tiger test); instead this dedicated test verifies the
-    /// preservation contract directly. Holds `ENV_LOCK` so concurrent
-    /// tests cannot observe the mutated env var mid-test.
+    /// The opt-in flag preserves the directory so a failing test can be
+    /// inspected on disk. We do NOT short-circuit the cleanup test on
+    /// this flag (that would be a paper-tiger test); instead this
+    /// dedicated test verifies the preservation contract directly via
+    /// `DiffFixture::new_preserved()`, which never touches the process
+    /// environment and therefore cannot race concurrent tests that
+    /// read `BUILDMESH_KEEP_DIFF_FIXTURES` via `DiffFixture::new()`.
     ///
     /// The directory survives the test by design; the test cleans up
     /// after itself so it does not itself leak in CI.
     #[test]
     fn diff_fixture_keep_opt_in_preserves_dir() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let saved = std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES");
-        // SAFETY: `set_var` / `remove_var` are `unsafe` from Rust 2024
-        // onwards because of multi-threaded races; this test holds
-        // `ENV_LOCK` for its full duration and the cleanup test also
-        // takes the lock when reading via `keep_diff_fixtures()` (see
-        // `diff_fixture_cleans_up_tempdir_and_git_repo_on_drop`).
-        // SAFETY: rationale matches `commands/agent_tests.rs:761` and
-        // `services/freebuff_usage.rs:703` which use the same pattern.
-        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "1") };
-        let preserved = DiffFixture::new();
+        let preserved = DiffFixture::new_preserved();
         let preserved_path = preserved.as_ref().to_path_buf();
         assert!(
             preserved_path.exists(),
             "kept fixture must exist while in scope"
         );
-        // Restore before the fixtures drop so the `Cleaning` sibling
-        // confirms distinct paths under default behaviour.
-        unsafe { std::env::remove_var("BUILDMESH_KEEP_DIFF_FIXTURES") };
+
+        // Sibling uses the env-var-driven path; it cleans up on drop
+        // unless the contributor has set `BUILDMESH_KEEP_DIFF_FIXTURES=1`
+        // (in which case `Cleaning` vs `Kept` doesn't matter for this
+        // assertion — both produce distinct directories).
         let sibling = DiffFixture::new();
         assert_ne!(
             sibling.as_ref(),
             preserved_path,
-            "two DiffFixture::new calls in one test must produce distinct dirs"
+            "two DiffFixture calls in one test must produce distinct dirs"
         );
+
         // `Kept` has no Drop cleanup by design (that's the whole point);
         // `Cleaning` cleans up its sibling. Remove the preserved path
         // manually so the test does not itself leak in CI.
         drop(sibling);
         drop(preserved);
         let _ = std::fs::remove_dir_all(&preserved_path);
-        // Restore original env state so subsequent tests start clean.
-        // SAFETY: see the env-mutation SAFETY block above.
-        if let Some(v) = saved {
-            unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", v) };
-        }
     }
 
-    /// Empty-string and `0` values must NOT enable the opt-in (the
-    /// reviewer flagged `.is_some()` as treating them as enabled).
-    /// Each case holds `ENV_LOCK` so the env var doesn't race with
-    /// `diff_fixture_keep_opt_in_preserves_dir` above.
+    /// Pins `parse_keep_fixtures` end-to-end so the repository
+    /// convention for boolean env-var toggles (`== "1"`) cannot drift.
+    /// No env mutation, no mutex, no `unsafe` — every cell is a
+    /// pure-function input → output pair.
     #[test]
-    fn keep_diff_fixtures_treats_empty_and_zero_as_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let saved = std::env::var_os("BUILDMESH_KEEP_DIFF_FIXTURES");
-        // SAFETY: see the SAFETY block above; lock is held for the whole test.
-        unsafe { std::env::remove_var("BUILDMESH_KEEP_DIFF_FIXTURES") };
-        assert!(!keep_diff_fixtures(), "unset must be false");
-        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "") };
-        assert!(!keep_diff_fixtures(), "empty value must be treated as unset");
-        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "0") };
-        assert!(
-            !keep_diff_fixtures(),
-            "'0' value must be treated as unset (a contributor setting this is opting out, not in)"
-        );
-        unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", "1") };
-        assert!(
-            keep_diff_fixtures(),
-            "non-empty value must enable the opt-in"
-        );
-        if let Some(v) = saved {
-            unsafe { std::env::set_var("BUILDMESH_KEEP_DIFF_FIXTURES", v) };
+    fn parse_keep_fixtures_accepts_only_one() {
+        let cases: &[(Option<&str>, bool)] = &[
+            (None, false),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("no"), false),
+            (Some("off"), false),
+            (Some("yes"), false),
+            (Some("1"), true),
+        ];
+        for (input, expected) in cases {
+            let os_input = input.map(std::ffi::OsStr::new);
+            let got = parse_keep_fixtures(os_input);
+            assert_eq!(
+                got, *expected,
+                "parse_keep_fixtures({:?}) = {}, expected {}",
+                input, got, expected
+            );
         }
     }
 
@@ -1467,7 +1489,12 @@ mod tests {
     #[test]
     fn diff_against_base_falls_back_to_head_when_base_unresolvable() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(&tmp);
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test, which the
+        // Round 3 reviewer flagged as a Windows file-locking hazard.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
@@ -1488,7 +1515,11 @@ mod tests {
     #[test]
     fn diff_against_base_flags_binary_without_hunks() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(&tmp);
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
 
@@ -1565,8 +1596,11 @@ mod tests {
     #[test]
     fn diff_node_inspects_worktree_not_project_root() {
         // Project root: a clean repo with a `base` branch, nothing pending.
+        // The test only needs the on-disk repo structure; drop the handle
+        // immediately so it doesn't keep FDs (or Windows file locks) alive
+        // for the rest of the test (Round 3 review Finding #6).
         let root = DiffFixture::new();
-        let _root_repo = init_repo_with_base(&root);
+        init_repo_with_base(&root);
 
         let node = make_node(root.to_str().unwrap(), true, Some("wt"));
         let wt_path = crate::env::node_working_path(&node).host_path;
@@ -1576,9 +1610,10 @@ mod tests {
         );
 
         // Materialise the worktree as its own repo with an uncommitted edit.
+        // Same rationale as the root above — drop the handle immediately.
         std::fs::create_dir_all(&wt_path).unwrap();
         let wt_dir = std::path::Path::new(&wt_path);
-        let _wt_repo = init_repo_with_base(wt_dir);
+        init_repo_with_base(wt_dir);
         std::fs::write(wt_dir.join("base.txt"), "one\nTWO\nthree\n").unwrap();
 
         // Following the resolved worktree path surfaces the agent's edit...
@@ -1670,7 +1705,11 @@ mod tests {
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_pre_set() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(&tmp);
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         std::fs::write(tmp.join("edit.rs"), "fn main() {}\n").unwrap();
 
@@ -1695,7 +1734,11 @@ mod tests {
     #[test]
     fn diff_against_base_returns_cancelled_when_flag_flipped_mid_walk() {
         let tmp = DiffFixture::new();
-        let _repo = init_repo_with_base(&tmp);
+        // Drop the repo handle immediately — this test only needs the
+        // on-disk repo structure, and `diff_against_base` opens its own
+        // handle internally. Holding `_repo` would just keep the FDs
+        // (and any Windows file locks) for the entire test.
+        init_repo_with_base(&tmp);
 
         // Enough files × lines that the highlight pass dominates the
         // cost and the 1ms flipper delay fires unambiguously mid-walk.
