@@ -448,7 +448,7 @@ export function MeshItem({
             role="menuitem"
             tabIndex={activeIndex === 0 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenPropertiesProbe(mesh.id); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
@@ -460,7 +460,7 @@ export function MeshItem({
             role="menuitem"
             tabIndex={activeIndex === 1 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenFilesProbe(); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -472,7 +472,7 @@ export function MeshItem({
             tabIndex={activeIndex === 2 ? 0 : -1}
             onClick={() => { closeContextMenu(); handleSync(); }}
             disabled={syncing}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? 'animate-spin' : ''}>
               <polyline points="23 4 23 10 17 10"/>
@@ -487,7 +487,7 @@ export function MeshItem({
             tabIndex={activeIndex === 3 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenSessionHistoryProbe(mesh.id); }}
             title="Archived Nodes"
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/>
@@ -499,7 +499,7 @@ export function MeshItem({
             role="menuitem"
             tabIndex={activeIndex === 4 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenIssuesProbe(mesh.id); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/>
@@ -525,7 +525,7 @@ export function MeshItem({
                 closeContextMenu();
                 openUrl(githubUrl).catch(console.error);
               }}
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>

@@ -126,7 +126,11 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));
             }
           }}
-          className="flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs text-text-secondary hover:bg-bg-card focus:bg-bg-card">
+          className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs focus:outline-none focus:bg-bg-selection ${
+            index === selectedIndex
+              ? 'bg-bg-selection text-text-primary'
+              : 'text-text-secondary hover:bg-bg-card-hover'
+          }`}>
           <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
           <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.member.name}</span></span>
           {!tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}

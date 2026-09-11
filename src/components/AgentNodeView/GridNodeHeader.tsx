@@ -434,7 +434,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
                     : 'Pick a Model Provider for this node (including current to kick-start)'
               }
               data-testid="grid-regenerate-trigger"
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
@@ -467,7 +467,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           <button
             role="menuitem" data-aria-menu-item
             onClick={(e) => { closeAndReturnFocus(); onOpenInExplorer(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <FolderOpenIcon className="w-3 h-3" />
             Open in file explorer
@@ -476,7 +476,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
             role="menuitem" data-aria-menu-item
             aria-pressed={isPinned}
             onClick={(e) => { closeAndReturnFocus(); onTogglePin(e); }}
-            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 17v5" fill="none" />
@@ -486,10 +486,10 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           </button>
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onDetails(); }}
-            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">Agent node details</button>
+            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card-hover">Agent node details</button>
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
-            className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">View changes</button>
+            className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card-hover">View changes</button>
           </div>
         </div>,
         document.body,

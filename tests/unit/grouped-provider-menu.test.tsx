@@ -246,3 +246,35 @@ describe('GroupedProviderMenu — WAI-ARIA menu semantics (issue #814)', () => {
     expect(items[2].tabIndex).toBe(-1);
   });
 });
+
+describe('GroupedProviderMenu — selected-row contrast', () => {
+  // The menu paints on `bg-bg-overlay`; the old row highlight used
+  // `bg-bg-card`, which is ~1/255 brighter than that surface and so was
+  // invisible — the user could not tell which row was active. Rows must
+  // use the semantic `bg-bg-selection` surface for the active row and
+  // `bg-bg-card-hover` for idle hover (the CommandOmnibar contract).
+  const ROWS = [native('claude'), proxied('claude', 'minimax'), native('codex')];
+
+  it('paints the active row with bg-bg-selection and idle rows with hover:bg-bg-card-hover', () => {
+    render(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
+    const items = screen.getAllByRole('menuitem');
+    for (const item of items) {
+      const classes = item.className.split(/\s+/);
+      expect(classes).not.toContain('bg-bg-card');
+      expect(classes).not.toContain('hover:bg-bg-card');
+      expect(classes).not.toContain('focus:bg-bg-card');
+    }
+    // The auto-focused first row is the active one.
+    expect(items[0].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(items[1].className.split(/\s+/)).toContain('hover:bg-bg-card-hover');
+    expect(items[2].className.split(/\s+/)).toContain('hover:bg-bg-card-hover');
+  });
+
+  it('moves the selection surface to the next row on ArrowDown', () => {
+    render(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
+    const items = screen.getAllByRole('menuitem');
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
+    expect(items[0].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
+  });
+});

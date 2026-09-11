@@ -103,7 +103,11 @@ export function RegenerateProviderMenu({
             data-testid={`${submenuTestId}-current`}
             onClick={() => onPick(current.id, current.label)}
             title="Regenerate in place on the current provider (kick-start a wonky harness)"
-            className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card flex items-center gap-2"
+            // The current provider is the row the user is regenerating
+            // from, so it carries the semantic selection surface at rest
+            // — clearly distinguishable from the alternates. (This menu
+            // sits on `bg-bg-overlay`, where `bg-bg-card` is invisible.)
+            className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium bg-bg-selection focus:outline-none flex items-center gap-2"
           >
             <ProviderIcon providerId={current.id} className="h-3.5 w-3.5 shrink-0" />
             <span className="flex-1 truncate">{`Current (${current.label})`}</span>
@@ -141,7 +145,7 @@ export function RegenerateProviderMenu({
                   data-spawn-id={native.id}
                   data-spawn-harness={native.harness_id}
                   onClick={() => onPick(native.id, native.label)}
-                  className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card flex items-center gap-2"
+                  className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card-hover focus:bg-bg-selection focus:outline-none flex items-center gap-2"
                 >
                   <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{native.label}</span>
@@ -157,7 +161,7 @@ export function RegenerateProviderMenu({
                   data-spawn-id={child.id}
                   data-spawn-harness={child.harness_id}
                   onClick={() => onPick(child.id, child.label)}
-                  className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+                  className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card-hover focus:bg-bg-selection focus:outline-none flex items-center gap-2"
                 >
                   <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{child.label}</span>
