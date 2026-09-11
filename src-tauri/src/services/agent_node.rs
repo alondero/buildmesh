@@ -369,6 +369,7 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     };
 
     crate::session_naming::cleanup(session_id);
+    crate::agent::provider::muse::telemetry::forget(session_id);
     // Drop the auto-clear guard too: an awaiting-input node being deleted
     // without first being disarmed would otherwise leak its ARMED entry
     // forever (issue #1263). `disarm` is a no-op on an unarmed node, so

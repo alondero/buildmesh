@@ -238,6 +238,15 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     expect(await screen.findByText(/no usage meters available/i)).toBeTruthy();
   });
 
+  it('does not fetch or render observed Muse session telemetry as a usage meter', async () => {
+    const calls = mockBackend();
+    render(<UsageTab />);
+    await screen.findByText('Anthropic / Claude');
+    expect(calls['get_muse_session_telemetry']).toBeUndefined();
+    expect(screen.queryByText('Observed Session Telemetry')).toBeNull();
+    expect(screen.queryByText('Session observations — not account quota')).toBeNull();
+  });
+
   // Issue #601 review: cross-surface invalidation. When the user enables,
   // disables, or removes a provider in App Settings, the Rust backend emits
   // `provider-list-changed`. UsageTab must re-fetch so a toggled provider's

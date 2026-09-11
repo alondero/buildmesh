@@ -42,6 +42,7 @@ pub mod git;
 pub mod git_tests;
 pub mod mesh;
 pub mod mesh_properties;
+pub mod muse;
 pub mod network;
 pub mod opencode_oauth;
 pub mod preferences;

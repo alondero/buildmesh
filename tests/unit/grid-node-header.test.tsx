@@ -1,5 +1,5 @@
 // Header identity, selected-session actions, recovery, and PR interactions.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -24,6 +24,11 @@ const invalidateOpenPrForNodeMock = vi.fn();
 vi.mock('../../src/hooks/useOpenPr', () => ({
   useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
   invalidateOpenPrForNode: (...args: unknown[]) => invalidateOpenPrForNodeMock(...args),
+}));
+
+const telemetryMock = vi.fn(() => null);
+vi.mock('../../src/hooks/useMuseSessionTelemetry', () => ({
+  useMuseSessionTelemetry: (...args: unknown[]) => telemetryMock(...args),
 }));
 
 // Stub the opener plugin so the chip's onClick doesn't try to launch a real browser.
@@ -96,6 +101,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files' });
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
+    telemetryMock.mockReturnValue(null);
     openInFileManagerMock.mockClear();
   });
 
@@ -594,5 +600,59 @@ describe('GridNodeHeader resume affordance', () => {
       ).toBeNull();
       unmount();
     }
+  });
+});
+
+describe('GridNodeHeader observed Muse session telemetry (issue #1680)', () => {
+  beforeEach(() => {
+    seedAgentNodes([{ ...NODE, provider: 'muse' }], NODE.id);
+    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+    telemetryMock.mockReturnValue({
+      kind: 'observed_session_telemetry',
+      node_id: NODE.id,
+      session_id: 'sess-aaaa-1111',
+      model_id: 'muse-spark-1.3-contributor',
+      last_turn: {
+        turn_id: 'turn-2',
+        prompt_tokens: 25,
+        output_tokens: 15,
+        total_tokens: 40,
+        input_tokens: 40,
+        reasoning_tokens: 6,
+        cached_tokens: 15,
+        cache_read_tokens: 15,
+        cache_write_tokens: 10,
+      },
+      cumulative: { prompt_tokens: 45, output_tokens: 25, total_tokens: 70 },
+      context: {
+        used_tokens: 96000,
+        window_tokens: 128000,
+        pressure: 0.75,
+        pressure_level: 'warning',
+      },
+    });
+  });
+
+  afterEach(() => {
+    telemetryMock.mockReturnValue(null);
+  });
+
+  it('surfaces observed session telemetry in node details, not as quota', () => {
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    const panel = screen.getByTestId('observed-session-telemetry');
+    expect(panel.textContent).toContain('Observed Session Telemetry');
+    expect(panel.textContent).toContain('Session observations — not account quota');
+    expect(panel.textContent).toContain('Last turn');
+    expect(panel.textContent).toContain('Prompt (counted once) 25');
+    expect(panel.textContent).toContain('Session total');
+    expect(panel.textContent).toContain('Total 70');
+    expect(panel.textContent).toContain('96,000 / 128,000 (75%)');
+    expect(panel.textContent).not.toContain('remaining');
+    expect(panel.textContent).not.toContain('allowance');
+    expect(panel.textContent).not.toContain('$');
   });
 });

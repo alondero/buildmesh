@@ -310,6 +310,8 @@ pub fn run() {
             // single config overlay flips binary, data dir, and ports together.
             let port_offset = http::port_offset(&app.config().identifier);
 
+            crate::agent::provider::muse::telemetry::bind_app(app.handle().clone());
+
             // Start HTTP test server (1991, or 2991 for the dev profile) for Playwright E2E tests
             commands::test::start_test_server(app.handle().clone(), port_offset);
 
@@ -699,6 +701,9 @@ pub fn run() {
             commands::usage::get_provider_meters,
             commands::usage::get_muse_code_subscription_tier,
             commands::usage::set_muse_code_subscription_tier,
+            // Observed Muse session telemetry (issue #1680). Node-scoped MSP
+            // counters — not a Usage Meter and never remaining account quota.
+            commands::muse::get_muse_session_telemetry,
             commands::usage::set_minimax_api_key,
             // OpenCode OAuth (issue #956 + #969). Device Flow + workspace
             // enumeration + token persistence seams the React Settings UI

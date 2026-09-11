@@ -39,6 +39,10 @@ _Avoid_: Custom provider (acceptable synonym), unsupported provider.
 One distinct usage reading of a **Model Provider** billing identity: a rolling quota, wallet, capped budget, uncapped spend, unlimited entitlement, externally managed account, or genuinely unavailable reading. A provider may have more than one, and any plan or billing-source label is provider-reported rather than inferred by Buildmesh.
 _Avoid_: Balance (wallet-only sense), billing identity, quota (plan-only sense).
 
+**Observed Session Telemetry**:
+Local token and context-window counters captured from a Muse Session Protocol session (`session/tokenUsage`, `session/contextUsage`) and attributed to one Agent Node. Counted-once prompt totals stay distinct from raw input and from cache read/write. This is never remaining subscription quota, account allowance, reset time, or dollar spend, and it must not appear on account-level Usage Meter surfaces.
+_Avoid_: Usage Meter, quota, remaining, spend.
+
 **Usage Identity**:
 The account and authentication source a harness-native **Usage Meter** represents — the credential the harness will actually use, not an inactive credential that happens to exist. Changing either denotes a different cached reading even when the **Model Provider** is unchanged.
 _Avoid_: Provider identity (too broad), cache key (implementation detail).
@@ -167,7 +171,7 @@ Pending Circuit Runs have a persisted, per-Mesh queue position and are admitted 
 _Avoid_: workflow graph, pipeline (when meaning a Circuit), flow (when meaning the blueprint)
 
 **Node Digest**:
-A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for harnesses with a wired transcript reader (currently Claude Code/Claude-compatible profiles, Codex, Cursor, AGY, Grok, and Command Code), with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). The rendered terminal/TUI is deliberately **not** a digest source.
+A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for harnesses with a wired transcript reader (currently Claude Code/Claude-compatible profiles, Codex, Cursor, AGY, Grok, and Command Code), with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). Muse nodes may additionally carry **Observed Session Telemetry** when MSP token/context events have been ingested; that layer is omitted when there are no observations and is never a Usage Meter. The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot
 
 **Blocked by**:

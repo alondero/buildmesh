@@ -6,6 +6,7 @@
 
 pub mod adapters;
 pub mod compatibility;
+pub mod muse;
 pub mod provider_conf;
 
 use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
