@@ -36,6 +36,7 @@ export function ObservedSessionTelemetry({
         <div className="mt-1">
           <div className="text-text-secondary">Last turn</div>
           <div>Prompt (counted once) {formatTokens(turn.prompt_tokens)}</div>
+          <div>Raw input {formatTokens(turn.input_tokens)}</div>
           <div>Output {formatTokens(turn.output_tokens)}</div>
           {turn.reasoning_tokens > 0 && (
             <div>Reasoning {formatTokens(turn.reasoning_tokens)}</div>
@@ -45,6 +46,9 @@ export function ObservedSessionTelemetry({
           )}
           {turn.cache_write_tokens != null && (
             <div>Cache write {formatTokens(turn.cache_write_tokens)}</div>
+          )}
+          {turn.cache_read_tokens == null && turn.cache_write_tokens == null && turn.cached_tokens > 0 && (
+            <div>Cached {formatTokens(turn.cached_tokens)}</div>
           )}
         </div>
       )}
@@ -72,7 +76,5 @@ export function ObservedSessionTelemetry({
 }
 
 function formatTokens(n: number): string {
-  return Math.trunc(n)
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return Math.trunc(n).toLocaleString('en-US');
 }

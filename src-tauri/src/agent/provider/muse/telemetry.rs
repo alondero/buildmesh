@@ -190,7 +190,7 @@ impl MuseTelemetryStore {
                 latest = Some(snapshot);
             }
         }
-        latest.or_else(|| self.snapshot(node_id))
+        latest
     }
 
     pub fn snapshot(&self, node_id: i64) -> Option<ObservedMuseSessionTelemetry> {
@@ -277,7 +277,10 @@ impl MuseTelemetryStore {
             used_tokens: params.used_tokens,
             window_tokens: params.window_tokens,
             pressure: pressure_ratio(params.used_tokens, params.window_tokens),
-            pressure_level: params.pressure.into(),
+            pressure_level: params
+                .pressure
+                .map(ContextPressureLevel::from)
+                .unwrap_or(ContextPressureLevel::Unknown),
         });
         Some(entry.to_public(node_id))
     }
@@ -356,7 +359,9 @@ struct SessionTokenUsageParams {
 struct TokenUsage {
     input_tokens: i64,
     output_tokens: i64,
+    #[serde(default)]
     reasoning_tokens: i64,
+    #[serde(default)]
     cached_tokens: i64,
     #[serde(default)]
     cache_read_tokens: Option<i64>,
@@ -380,7 +385,8 @@ struct SessionContextUsageParams {
     used_tokens: i64,
     #[serde(default)]
     window_tokens: Option<i64>,
-    pressure: WirePressure,
+    #[serde(default)]
+    pressure: Option<WirePressure>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +444,15 @@ pub fn ingest_line(
 pub fn snapshot(node_id: i64) -> Option<ObservedMuseSessionTelemetry> {
     let store = global_store().lock().unwrap_or_else(|e| e.into_inner());
     store.snapshot(node_id)
+}
+
+/// Skip the process-wide store unless this is a Muse node. Coordinator
+/// digest assembly must not take the telemetry mutex for every harness.
+pub fn snapshot_if_muse(provider: &str, node_id: i64) -> Option<ObservedMuseSessionTelemetry> {
+    if provider != "muse" {
+        return None;
+    }
+    snapshot(node_id)
 }
 
 pub fn forget(node_id: i64) {
@@ -603,6 +618,59 @@ mod tests {
         let json = serde_json::to_value(&snapshot).unwrap();
         assert_not_quota_shaped(&json);
         assert!(crate::services::usage::catalog::dispatch("muse").is_none());
+    }
+
+    #[test]
+    fn omitted_or_null_pressure_does_not_drop_context_usage() {
+        let omitted = r#"{"jsonrpc":"2.0","method":"session/contextUsage","params":{"sessionId":"sess-aaaa-1111","viewCursor":"c-omit","sourceRange":{"first":1,"last":1,"stream":"s"},"usedTokens":12,"windowTokens":100}}"#;
+        let null_pressure = r#"{"jsonrpc":"2.0","method":"session/contextUsage","params":{"sessionId":"sess-aaaa-1111","viewCursor":"c-null","sourceRange":{"first":1,"last":1,"stream":"s"},"usedTokens":12,"windowTokens":100,"pressure":null}}"#;
+        for (line, node_id) in [(omitted, 16811), (null_pressure, 16812)] {
+            let mut store = MuseTelemetryStore::default();
+            let snapshot = store
+                .ingest_line(node_id, "sess-aaaa-1111", line)
+                .expect("open-wire context usage must ingest without pressure");
+            let context = snapshot.context.expect("context");
+            assert_eq!(context.used_tokens, 12);
+            assert_eq!(context.window_tokens, Some(100));
+            assert_eq!(context.pressure_level, ContextPressureLevel::Unknown);
+        }
+    }
+
+    #[test]
+    fn omitted_reasoning_and_cached_tokens_do_not_drop_token_usage() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/tokenUsage","params":{"sessionId":"sess-aaaa-1111","turnId":"turn-open","viewCursor":"c-open","sourceRange":{"first":1,"last":1,"stream":"s"},"promptTokens":5,"totalTokens":7,"usage":{"inputTokens":5,"outputTokens":2},"cumulative":{"promptTokens":5,"outputTokens":2,"totalTokens":7}}}"#;
+        let mut store = MuseTelemetryStore::default();
+        let snapshot = store
+            .ingest_line(16813, "sess-aaaa-1111", line)
+            .expect("token usage without optional cache/reasoning fields");
+        let turn = snapshot.last_turn.expect("last turn");
+        assert_eq!(turn.prompt_tokens, 5);
+        assert_eq!(turn.output_tokens, 2);
+        assert_eq!(turn.reasoning_tokens, 0);
+        assert_eq!(turn.cached_tokens, 0);
+        assert_eq!(turn.cache_read_tokens, None);
+        assert_eq!(turn.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn snapshot_if_muse_skips_non_muse_providers() {
+        assert!(snapshot_if_muse("anthropic", 16814).is_none());
+        assert!(snapshot_if_muse("codex", 16814).is_none());
+        assert!(snapshot_if_muse("muse", 16814).is_none());
+    }
+
+    #[test]
+    fn ingest_ndjson_does_not_echo_a_prior_snapshot_when_every_line_is_ignored() {
+        let mut store = MuseTelemetryStore::default();
+        store.ingest_ndjson(16815, "sess-node-a", NODE_A);
+        assert!(store.snapshot(16815).is_some());
+        assert!(
+            store
+                .ingest_ndjson(16815, "sess-node-a", "not-json\n{\"jsonrpc\":\"2.0\",\"method\":\"turn/started\"}\n")
+                .is_none(),
+            "an unparseable batch must not masquerade as a new observation"
+        );
+        assert_eq!(store.snapshot(16815).unwrap().cumulative.total_tokens, 16);
     }
 
     #[test]

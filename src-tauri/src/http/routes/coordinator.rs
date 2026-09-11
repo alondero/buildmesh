@@ -32,7 +32,7 @@ pub fn list_nodes_json() -> String {
                     let tail = enrichment::digest_enrichment(node);
                     let mut digest = node_digest::layered(node, mesh, *changed, tail.as_ref());
                     digest.observed_session_telemetry =
-                        crate::agent::provider::muse::telemetry::snapshot(node.id);
+                        enrichment::observed_session_telemetry(node);
                     digest
                 })
                 .collect();

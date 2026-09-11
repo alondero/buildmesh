@@ -33,10 +33,27 @@ describe('ObservedSessionTelemetry (issue #1680)', () => {
     render(<ObservedSessionTelemetry telemetry={SAMPLE} />);
     const panel = screen.getByRole('region', { name: 'Observed Session Telemetry' });
     expect(panel.textContent).toContain('Prompt (counted once) 20');
+    expect(panel.textContent).toContain('Raw input 120');
     expect(panel.textContent).toContain('Cache read 90');
     expect(panel.textContent).toContain('Cache write 10');
     expect(panel.textContent).not.toContain('Prompt (counted once) 120');
     expect(panel.textContent).not.toContain('Prompt (counted once) 220');
+  });
+
+  it('falls back to cached tokens when read and write are absent', () => {
+    const telemetry: ObservedMuseSessionTelemetry = {
+      ...SAMPLE,
+      last_turn: {
+        ...SAMPLE.last_turn!,
+        cache_read_tokens: null,
+        cache_write_tokens: null,
+      },
+    };
+    render(<ObservedSessionTelemetry telemetry={telemetry} />);
+    const text = screen.getByTestId('observed-session-telemetry').textContent ?? '';
+    expect(text).toContain('Cached 100');
+    expect(text).not.toContain('Cache read');
+    expect(text).not.toContain('Cache write');
   });
 
   it('omits a window limit rather than inventing one', () => {
