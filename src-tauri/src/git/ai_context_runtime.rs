@@ -652,10 +652,10 @@ mod windows {
             // Remove only the exact link this transaction installed. An
             // unexpected replacement remains in place and keeps the backup
             // recoverable for a later, explicit repair attempt.
-            if link_matches(&candidate.path, candidate.spec) {
-                if remove_link(&candidate.path, candidate.spec).is_err() {
-                    continue;
-                }
+            if link_matches(&candidate.path, candidate.spec)
+                && remove_link(&candidate.path, candidate.spec).is_err()
+            {
+                continue;
             }
             if placeholder_matches(&candidate.backup, candidate.spec) {
                 let _ = move_no_replace(&candidate.backup, &candidate.path);

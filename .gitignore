@@ -73,6 +73,7 @@ docs/superpowers/
 # Muse context repair transaction residue (lock/manifest files live under .git;
 # candidate and backup files can live beside the repaired aliases).
 .buildmesh-muse-context-*
+*.buildmesh-muse-context-*.backup
 .commandcode/
 .codex/
 CODEX.local.md
