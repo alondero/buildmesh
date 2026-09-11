@@ -19,10 +19,7 @@ impl UsageAdapter for MuseCodeAdapter {
         UsageIdentityFingerprint::new("muse-oauth", identity.as_bytes())
     }
     fn fetch(&self, _: &[ProviderAccount]) -> ProviderUsage {
-        match credential() {
-            Ok(token) => fetch_usage(&token, ENDPOINT),
-            Err(error) => missing(error),
-        }
+        fetch_from_credential(credential(), ENDPOINT)
     }
 }
 
@@ -30,6 +27,13 @@ fn missing(error: String) -> ProviderUsage {
     let mut usage = unavailable("muse-code", error);
     usage.meters = vec![UsageMeter::Unavailable];
     usage
+}
+
+fn fetch_from_credential(credential: Result<String, String>, endpoint: &str) -> ProviderUsage {
+    match credential {
+        Ok(token) => fetch_usage(&token, endpoint),
+        Err(error) => missing(error),
+    }
 }
 
 fn credential() -> Result<String, String> {
@@ -205,6 +209,21 @@ mod tests {
             let error = parse_credential(body).unwrap_err();
             assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn missing_credential_is_an_unavailable_meter_without_network_access() {
+        let usage = fetch_from_credential(
+            Err("Muse login missing. Run muse login again.".into()),
+            "http://127.0.0.1:1/muse-code/key",
+        );
+        assert!(usage.logged_in);
+        assert!(usage.windows.is_empty());
+        assert_eq!(usage.meters, vec![UsageMeter::Unavailable]);
+        assert_eq!(
+            usage.error.as_deref(),
+            Some("Muse login missing. Run muse login again.")
+        );
     }
 
     #[test]

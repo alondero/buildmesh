@@ -68,7 +68,9 @@ Base: `9895cde6345468fc6c18a81b014e61f1bd772610`.
   agent checks, and bundle budgets.
 - After the final path checks and rendering regression were added:
   focused account-card/usage-tab tests passed 46 tests; `cargo test --lib muse
-  -- --test-threads=1` passed 33 with three explicit live-test ignores.
+  -- --test-threads=1` passed 34 with three explicit live-test ignores. The
+  adapter's missing-credential branch is covered without network access, and
+  the WSL credential path probe is cached like the other WSL environment probes.
 - The explicitly invoked `live_muse_subscription` test passed against the
   user's WSL OAuth account from the Windows Rust adapter, returning 94%/35%.
 - A debug build with `tauri.dev.conf.json` was exercised through real WebView2

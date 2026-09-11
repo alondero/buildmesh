@@ -242,18 +242,21 @@ pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
 /// Resolve Muse credentials in the same login environment used for spawning.
 pub(crate) fn muse_auth_path() -> Option<PathBuf> {
     if cfg!(windows) {
-        let mut command = command_no_window("wsl.exe");
-        command.args([
-            "-d", &get_default_wsl_distro()?, "--cd", "~", "--exec",
-            "sh", "-lc",
-            "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
-        ]);
-        let output = crate::process_util::run_command_with_timeout(
-            command, "WSL Muse credential location", std::time::Duration::from_secs(10),
-        ).ok()?;
-        if !output.status.success() { return None; }
-        let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
-        Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+        static MUSE_AUTH_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
+            let mut command = command_no_window("wsl.exe");
+            command.args([
+                "-d", &get_default_wsl_distro()?, "--cd", "~", "--exec",
+                "sh", "-lc",
+                "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
+            ]);
+            let output = crate::process_util::run_command_with_timeout(
+                command, "WSL Muse credential location", std::time::Duration::from_secs(10),
+            ).ok()?;
+            if !output.status.success() { return None; }
+            let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
+            Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+        });
+        MUSE_AUTH_PATH.clone()
     } else {
         muse_auth_path_from_vars(|name| env::var_os(name))
     }
