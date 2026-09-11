@@ -91,13 +91,16 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// Most existing call sites still return [`SqlResult<T>`] (`Result<T,
 /// rusqlite::Error>`), so we provide a blanket `From<DbError> for
-/// rusqlite::Error` that preserves the underlying sqlite error verbatim and
-/// maps pool exhaustion to a `SQLITE_BUSY` `SqliteFailure`. The conversion
-/// path emits a structured `tracing::warn!` with the full diagnostic
-/// payload so the rich fields aren't silently dropped at the boundary
-/// (issue #1533 review). Callers that want to react to specific variants
-/// (e.g. surface a 503) should switch their return type to
-/// [`DbResult<T>`] and pattern-match on the typed variant.
+/// rusqlite::Error` that preserves the underlying sqlite error verbatim,
+/// maps pool exhaustion to a `SQLITE_BUSY` `SqliteFailure` stamped with
+/// [`RETRYABLE_BUSY_MARKER`], and maps the lifecycle violation
+/// [`Self::NotInitialized`] to `SQLITE_MISUSE` (which is *not* retryable —
+/// issue #1533 review item 5). The exhaustion `warn!` is emitted once, at
+/// the point of failure in [`ReaderPool::checkout`]; this conversion logs at
+/// `debug!` so a `?` through the boundary doesn't double-log the same
+/// timeout. Callers that want to react to specific variants (e.g. surface a
+/// 503) should switch their return type to [`DbResult<T>`] and pattern-match
+/// on the typed variant.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     /// Underlying SQLite error from a checked-out reader or the writer.
@@ -149,6 +152,36 @@ pub enum DbError {
 /// story.
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Marker stamped into the `rusqlite::Error` message of every **retryable**
+/// database failure — today only [`DbError::ReaderPoolExhausted`].
+///
+/// Why a marker rather than a type: the command layer flattens its errors to
+/// `String` before an HTTP route ever sees them (`run_blocking(.., || ..
+/// .map_err(|e| e.to_string()))`), and several routes then wrap that again
+/// (`format!("Failed to reload node: {e}")`). By the time a handler picks a
+/// status line the typed error is long gone, and re-typing that boundary
+/// means touching every command function — far outside this fix. One
+/// canonical token in the message lets [`is_retryable_busy_message`] recover
+/// the signal at the HTTP edge so an authenticated caller gets a retryable
+/// `503` instead of a generic `500` (issue #1533 review item 4). Substring
+/// matching is what makes it survive the re-wrapping above.
+///
+/// Do not reword without updating [`is_retryable_busy_message`] — the
+/// `exhaustion_survives_the_sql_boundary_as_a_retryable_message` test pins
+/// the round trip.
+pub const RETRYABLE_BUSY_MARKER: &str = "[retryable:db-busy]";
+
+/// `true` when `message` is the flattened form of a retryable database
+/// failure (see [`RETRYABLE_BUSY_MARKER`]).
+///
+/// Deliberately narrow: it matches only failures *this* module stamped, not
+/// every message containing the word "busy". A caller that is not retryable
+/// (e.g. [`DbError::NotInitialized`], which no amount of retrying can clear)
+/// must never match here.
+pub fn is_retryable_busy_message(message: &str) -> bool {
+    message.contains(RETRYABLE_BUSY_MARKER)
+}
+
 impl DbError {
     /// `true` iff this error is the underlying SQLite "no rows returned"
     /// code (i.e. the [`Self::Sqlite`] variant wraps
@@ -168,20 +201,23 @@ impl From<DbError> for rusqlite::Error {
             // callers that match on `Error::QueryReturnedNoRows` / etc.
             // keep working unchanged.
             DbError::Sqlite(err) => err,
-            // `NotInitialized` is structurally distinct from a SQL-level
-            // BUSY — but at the `SqlResult` boundary we still want a
-            // structured signal. Map to `SQLITE_BUSY` with the variant
-            // name in the message so operators can grep for it.
+            // `NotInitialized` is an application-lifecycle invariant
+            // violation — something read the database before `init()` ran —
+            // NOT lock contention on the database file. The v3 mapping to
+            // `SQLITE_BUSY` conflated the two, which tells every upstream
+            // lock-retry loop to keep retrying a condition retrying can
+            // never clear (issue #1533 review item 5). `SQLITE_MISUSE` is
+            // sqlite's own code for "the API was used incorrectly", which
+            // is exactly this. It carries no [`RETRYABLE_BUSY_MARKER`], so
+            // the HTTP edge answers `500` rather than a misleading `503`.
             DbError::NotInitialized => rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
                 Some("database not initialized".to_string()),
             ),
-            // Pool exhaustion: log the full diagnostic payload before
-            // collapsing to a generic `SQLITE_BUSY` so the rich fields
-            // remain observable in the log stream (issue #1533 review).
-            // Callers that want to react to specific variants should
-            // switch to `DbResult<T>` and match on
-            // `DbError::ReaderPoolExhausted`.
+            // Pool exhaustion IS retryable — the leases clear on their own.
+            // Collapse to `SQLITE_BUSY` and stamp [`RETRYABLE_BUSY_MARKER`]
+            // so the HTTP edge can recover the signal after the command
+            // layer flattens this to a `String`.
             DbError::ReaderPoolExhausted {
                 waited_ms,
                 in_use,
@@ -189,7 +225,14 @@ impl From<DbError> for rusqlite::Error {
                 current_longest_lease_ms,
                 historical_longest_lease_ms,
             } => {
-                tracing::warn!(
+                // `debug!`, not `warn!`: `ReaderPool::checkout` already
+                // emitted the full-fidelity `warn!` at the point of
+                // failure, and every `?` through this boundary duplicated
+                // it line-for-line — two identical WARNs per timeout under
+                // saturation (issue #1533 review item 6). What remains here
+                // is only *where* the typed error was flattened, which is a
+                // debugging detail rather than an operational event.
+                tracing::debug!(
                     waited_ms,
                     in_use,
                     pool_size,
@@ -202,7 +245,7 @@ impl From<DbError> for rusqlite::Error {
                     Some(format!(
                         "reader pool exhausted after {waited_ms}ms ({in_use}/{pool_size} in use; \
                          longest current lease {current_longest_lease_ms}ms; \
-                         longest ever {historical_longest_lease_ms}ms)"
+                         longest ever {historical_longest_lease_ms}ms) {RETRYABLE_BUSY_MARKER}"
                     )),
                 )
             }
@@ -426,6 +469,18 @@ impl Deref for ReadConnection<'_> {
         self.conn
             .as_ref()
             .expect("checked-out reader connection must be present")
+    }
+}
+
+impl ReadConnection<'_> {
+    /// Test-only accessor for the `#[track_caller]`-captured origin of this
+    /// lease. The slow-lease `warn!` in `Drop` is the only production
+    /// consumer, and a `Drop`-emitted log is awkward to assert on, so the
+    /// attribution test reads the captured `Location` directly instead of
+    /// scraping the tracing output (issue #1533 review item 2).
+    #[cfg(test)]
+    pub(crate) fn checked_out_from_for_test(&self) -> &'static std::panic::Location<'static> {
+        self.checked_out_from
     }
 }
 
@@ -2054,6 +2109,16 @@ fn try_get() -> DbResult<&'static Database> {
 /// assert the typed error path; `try_read_conn().expect(...)` is
 /// acceptable in `#[cfg(test)]` code where pool exhaustion is structurally
 /// impossible.
+///
+/// `#[track_caller]` is **load-bearing and must stay**. `Location::caller()`
+/// walks up only as far as the first frame *without* the attribute, so an
+/// un-annotated wrapper here would make every production lease report this
+/// function's own line — the slow-lease warning would name `db/mod.rs` for
+/// all 67 call sites instead of the `services::` / `commands::` / `http::`
+/// frame actually holding the connection (issue #1533 review item 2). The
+/// `slow_lease_warning_attributes_the_production_caller` test pins the
+/// attribution through this entrypoint.
+#[track_caller]
 pub fn try_read_conn() -> DbResult<ReadConnection<'static>> {
     try_get()?.readers.checkout()
 }
@@ -2094,18 +2159,17 @@ pub fn write_conn() -> std::sync::MutexGuard<'static, Connection> {
     }
 }
 
-/// Whether the global database has been initialised. Tests across the lib
-/// binary share the same `DB` OnceCell, so the first one to call
-/// `init` wins; later ones can use this to skip their own init and
-/// share the existing connection. Production callers should still
-/// `init` exactly once at startup and treat the error from a
-/// double-init as a bug — this is purely a test-orchestration
-/// affordance, not a permission to call `init` from production more
-/// than once.
-#[allow(dead_code)] // Test-only consumer (`commands::agent::tests`); clippy's
-                    // lib-build dead-code check doesn't see across the test
-                    // boundary, so we have to opt out. Same pattern as
-                    // `set_lan_exposure_enabled` above.
+/// Whether the global database has been initialised. Production callers use
+/// this to skip DB work on paths that can legitimately run before (or
+/// without) `init` — `commands::git::git_sync`'s warm-pool notification,
+/// `git::worktree::provision`'s bookkeeping, and
+/// `services::warm_pool`'s reconciler all gate on it. Tests across the lib
+/// binary additionally share one `DB` OnceCell, so the first one to call
+/// `init` wins and later ones use this to avoid trampling a peer's setup.
+///
+/// Production should still `init` exactly once at startup and treat a
+/// double-init as a bug — this is a "may I touch the DB at all" probe, not
+/// permission to re-initialise.
 pub fn is_initialized() -> bool {
     DB.get().is_some()
 }
@@ -4189,11 +4253,29 @@ fn classify_warm_row(row: WarmReconcileRow) -> Option<WarmReconcileEntry> {
     } = row;
     let in_flight = status == WarmWorktreeStatus::Filling.as_str()
         || status == WarmWorktreeStatus::Refreshing.as_str();
-    let dir_present = std::path::Path::new(&path).exists();
     // In-flight rows are reconciled only when old enough to be a
     // crash-orphan (never a row a worker is filling right now); a settled
     // `available` row is reconciled when its directory has vanished.
-    let qualifies = if in_flight { age_stale } else { !dir_present };
+    //
+    // The disk `exists()` stat is computed lazily rather than up front: a
+    // fresh in-flight row (a worker is populating it *right now*) is
+    // disqualified by memory state alone, and the reconciler walks every
+    // non-claimed row on each pass. Stat'ing those rows was a blocking
+    // filesystem syscall whose answer was then thrown away (issue #1533
+    // review item 7).
+    let (qualifies, dir_present) = if in_flight {
+        if age_stale {
+            (true, std::path::Path::new(&path).exists())
+        } else {
+            // Disqualified without touching the disk. `dir_present` is
+            // never read on this branch — `qualifies == false` discards
+            // the row below.
+            (false, false)
+        }
+    } else {
+        let present = std::path::Path::new(&path).exists();
+        (!present, present)
+    };
     if qualifies {
         Some(WarmReconcileEntry {
             id,

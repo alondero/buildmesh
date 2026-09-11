@@ -176,7 +176,7 @@ pub async fn prompt(
             }
         }
         Err(drive::DriveError::WriteFailed(e)) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
         // The ledger couldn't be consulted, so we refused to risk a double-send.
         // 503 tells the Coordinator this is transient and safe to retry.

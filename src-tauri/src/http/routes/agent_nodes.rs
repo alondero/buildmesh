@@ -53,7 +53,7 @@ pub async fn discover(
             request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }
@@ -196,7 +196,7 @@ pub async fn import_and_resume(
             return;
         }
         Err(msg) => {
-            request::send_json_error(lines, "500 Internal Server Error", &msg).await;
+            request::send_error_with_db_backoff(lines, &msg).await;
             return;
         }
     };

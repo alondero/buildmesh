@@ -88,7 +88,7 @@ pub async fn create(
         Ok(n) => n,
         Err(e) => {
             let msg = format!("Failed to create node: {}", e);
-            request::send_json_error(lines, "500 Internal Server Error", &msg).await;
+            request::send_error_with_db_backoff(lines, &msg).await;
             return;
         }
     };
@@ -114,7 +114,7 @@ pub async fn create(
     .await
     {
         let msg = format!("Failed to spawn agent: {}", e);
-        request::send_json_error(lines, "500 Internal Server Error", &msg).await;
+        request::send_error_with_db_backoff(lines, &msg).await;
         return;
     }
 
@@ -125,9 +125,8 @@ pub async fn create(
     {
         Ok(node) => node,
         Err(e) => {
-            request::send_json_error(
+            request::send_error_with_db_backoff(
                 lines,
-                "500 Internal Server Error",
                 &format!("Failed to reload node: {}", e),
             )
             .await;

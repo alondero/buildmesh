@@ -26,8 +26,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
-use crate::db;
-
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
@@ -1687,14 +1685,20 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         }
         // No credential → no rate-limit key. We let `auth::guard` produce the
         // 401 from the same uniform-body shape — a no-credential probe is the
-        // cheapest possible request (DB-free fast path in `resolve_role`), so
-        // it doesn't need its own throttle.
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-            .await
-            .is_none()
-        {
+        // cheapest possible request (DB-free fast path in `resolve_identity`),
+        // so it doesn't need its own throttle.
+        //
+        // The guard's single reader lease also resolves the device this
+        // request authenticates as (issue #502), so the ticket binding below
+        // costs no additional checkout. Before #1533's review this endpoint
+        // took two reader leases — one for the role, one for the device — and
+        // ran the same device-token query twice before locking the writer:
+        // an active starvation generator inside the very fix meant to stop
+        // reader-pool exhaustion (review item 3).
+        let Some(identity) = auth::guard(&mut lines, &headers, auth::RequiredScope::Admin).await
+        else {
             return;
-        }
+        };
         // The ticket is bound to the target the caller will open (issue #551):
         // its `{ surface, node_id }` arrives in the request body. A missing or
         // malformed target is a 400 — we never mint a ticket that could never
@@ -1715,27 +1719,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         // it opens can be force-closed on revocation; `None` for the root token.
         // Opening a terminal is also a natural "last active" signal, so refresh
         // the device here too (cheaper than touching on every poll).
-        //
-        // Issue #1533 review: surface reader-pool exhaustion as a retryable
-        // 503 rather than minting a ticket for an unverified device (which
-        // would silently log the request in under a `None` device id and
-        // skip the `last_active` touch).
-        let device_id = match auth::resolve_device_session(&headers) {
-            Ok(id) => id,
-            Err(db::DbError::ReaderPoolExhausted { .. }) => {
-                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
-                return;
-            }
-            Err(db::DbError::NotInitialized) => {
-                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
-                return;
-            }
-            Err(db::DbError::Sqlite(error)) => {
-                tracing::warn!(%error, "ws ticket mint failed to resolve device session");
-                let _ = request::write_service_unavailable_with_retry(&mut lines).await;
-                return;
-            }
-        };
+        let device_id = identity.device_session_id;
         if let Some(id) = device_id {
             let peer_ip = addr.ip().to_string();
             let _ = crate::db::touch_device_session(id, Some(&peer_ip));

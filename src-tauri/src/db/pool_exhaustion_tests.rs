@@ -192,13 +192,16 @@ mod tests {
             "expected ReaderPoolExhausted under spurious wakes, got {err:?}"
         );
         // Lower bound: the checkout must actually have waited the full
-        // deadline. Without this assertion, an early-return bug (e.g.
-        // returning Err on the first spurious wake) would still satisfy the
-        // upper-bound check below — review finding #6.
+        // deadline. `started` here is captured *before* `checkout()` takes
+        // the pool lock and stamps its own `started`, so the test's elapsed
+        // is always >= the loop's — which only breaks once
+        // `now >= started + READER_CHECKOUT_TIMEOUT`. Any earlier return
+        // (e.g. bailing out on the first spurious wake) is a bug, so the
+        // bound is exact rather than slack (issue #1533 review item 8).
         assert!(
-            elapsed >= READER_CHECKOUT_TIMEOUT.saturating_sub(Duration::from_millis(100)),
-            "elapsed {elapsed:?} finished before the deadline elapsed — \
-             checkout returned early under sustained spurious wakes"
+            elapsed >= READER_CHECKOUT_TIMEOUT,
+            "elapsed {elapsed:?} finished before the deadline ({READER_CHECKOUT_TIMEOUT:?}) \
+             elapsed — checkout returned early under sustained spurious wakes"
         );
         // Upper bound: the absolute-deadline loop must not let spurious
         // wakes re-arm the timer past the nominal timeout (the bug this
@@ -242,21 +245,29 @@ mod tests {
                 assert!(in_use <= READER_POOL_SIZE);
                 assert_eq!(pool_size, READER_POOL_SIZE);
                 assert!(waited_ms >= READER_CHECKOUT_TIMEOUT.as_millis() as u64);
-                // `historical_longest_lease_ms` is 0 here because every
-                // lease was held for less than the slow-lease warning
-                // threshold at the moment of checkout; the pool only
-                // updates the longest-lease counter in `Drop`. If this
-                // test ever holds a lease long enough to bump the counter,
-                // that's a diagnostic regression we want to see.
-                assert!(
-                    historical_longest_lease_ms < READER_CHECKOUT_TIMEOUT.as_millis() as u64,
-                    "historical_longest_lease_ms {historical_longest_lease_ms} looks suspiciously like a query payload"
+                // Exactly 0: this pool is freshly built, and
+                // `historical_longest_lease_ms` is only ever written by
+                // `Drop for ReadConnection`. Not one lease has been
+                // returned at this point, so any non-zero value means the
+                // counter picked something up that isn't a completed lease
+                // (issue #1533 review item 8 — the previous `< 1000ms`
+                // bound was satisfied by almost any garbage).
+                assert_eq!(
+                    historical_longest_lease_ms, 0,
+                    "no lease has been returned yet, so the lifetime high-water mark must be 0"
                 );
                 // `current_longest_lease_ms` IS populated here — that's the
                 // whole point of the new field (it was missing in the
                 // previous high-water-mark design, which reported 0ms for
-                // currently-hung leases).
-                let _ = current_longest_lease_ms;
+                // currently-hung leases). All 8 leases were held across the
+                // whole wait, so the longest of them is at least as old as
+                // the wait itself (50ms of slack for the clock reads that
+                // bracket the loop).
+                assert!(
+                    current_longest_lease_ms >= waited_ms.saturating_sub(50),
+                    "current_longest_lease_ms ({current_longest_lease_ms}ms) must reflect a lease \
+                     held across the {waited_ms}ms wait"
+                );
             }
             other => panic!("expected DbError::ReaderPoolExhausted, got {other:?}"),
         }
@@ -385,5 +396,118 @@ mod tests {
             other => panic!("expected DbError::ReaderPoolExhausted, got {other:?}"),
         }
         drop(leases);
+    }
+
+    /// Issue #1533 review item 2: `#[track_caller]` must be on the **public**
+    /// [`crate::db::try_read_conn`] entrypoint, not only on the private
+    /// `ReaderPool::checkout`.
+    ///
+    /// `Location::caller()` walks up only as far as the first frame lacking
+    /// the attribute. With `checkout` annotated but `try_read_conn` bare,
+    /// every production lease recorded `try_read_conn`'s own line in
+    /// `db/mod.rs`, so the slow-lease warning named the accessor instead of
+    /// the `services::` / `commands::` / `http::` frame actually holding the
+    /// connection — the diagnostic was 100% anonymous in production even
+    /// though the pool's own unit tests (which call `pool.checkout()`
+    /// directly) passed.
+    ///
+    /// This test goes through the public accessor, which is the only way to
+    /// observe the broken frame, and therefore needs the process-global `DB`.
+    #[test]
+    fn try_read_conn_attributes_the_production_caller() {
+        // First-init-wins: a no-op if another test in this binary already
+        // initialised the global DB. Either way a reader lease is available
+        // afterwards. Same temp-file shape as `db::tests` and
+        // `db::warm_pool_tests`.
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path =
+            std::env::temp_dir().join(format!("buildmesh_issue_1533_track_caller_{test_id}.db"));
+        crate::db::init(&db_path).expect("test setup: db::init must succeed");
+
+        // `line!()` is evaluated where it is written, so the checkout on the
+        // very next line is the caller we expect to be attributed. Keep the
+        // two statements adjacent — a blank line or comment between them
+        // breaks the offset.
+        let expected_line = line!() + 1;
+        let conn = crate::db::try_read_conn().expect("reader lease from the global pool");
+
+        let location = conn.checked_out_from_for_test();
+        assert!(
+            location.file().replace('\\', "/").ends_with("db/pool_exhaustion_tests.rs"),
+            "caller.file was {:?} — attribution stopped inside the db module instead of \
+             reaching this test, so `#[track_caller]` is missing on `try_read_conn`",
+            location.file()
+        );
+        assert_eq!(
+            location.line(),
+            expected_line,
+            "caller.line was {} but this test called `try_read_conn()` on line {expected_line}",
+            location.line()
+        );
+    }
+
+    /// Issue #1533 review item 4: pool exhaustion has to stay recognisable
+    /// after it is flattened through the `SqlResult` boundary and then to a
+    /// `String` by the command layer, because that flattened string is all
+    /// an HTTP route handler ever sees. Round-trips the real conversion and
+    /// asserts the HTTP-edge classifier accepts it — including through the
+    /// `format!("Failed to X: {e}")` re-wrapping several routes apply.
+    #[test]
+    fn exhaustion_survives_the_sql_boundary_as_a_retryable_message() {
+        let (_dir, pool) = fresh_pool();
+        let leases: Vec<_> = (0..READER_POOL_SIZE)
+            .map(|_| pool.checkout().expect("initial lease"))
+            .collect();
+        let err = match pool.checkout() {
+            Ok(_) => panic!("9th checkout must fail"),
+            Err(e) => e,
+        };
+
+        let sql_err: rusqlite::Error = err.into();
+        assert!(
+            matches!(
+                sql_err,
+                rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseBusy
+            ),
+            "exhaustion must reach the SqlResult boundary as SQLITE_BUSY, got {sql_err:?}"
+        );
+
+        let flattened = sql_err.to_string();
+        assert!(
+            crate::db::is_retryable_busy_message(&flattened),
+            "flattened exhaustion message {flattened:?} must classify as retryable"
+        );
+        assert!(
+            crate::db::is_retryable_busy_message(&format!("Failed to reload node: {flattened}")),
+            "the classifier must survive the re-wrapping route handlers apply"
+        );
+
+        drop(leases);
+    }
+
+    /// Issue #1533 review item 5: `NotInitialized` is an application
+    /// lifecycle violation (something read the DB before `init()`), not lock
+    /// contention on the database file. Mapping it to `SQLITE_BUSY` told
+    /// every upstream retry loop to keep retrying a condition retrying can
+    /// never clear. It must map to `SQLITE_MISUSE` and must **not** carry
+    /// the retryable marker, so the HTTP edge answers 500 rather than a
+    /// misleading 503 + `Retry-After`.
+    #[test]
+    fn not_initialized_is_api_misuse_and_not_retryable() {
+        let sql_err: rusqlite::Error = DbError::NotInitialized.into();
+        assert!(
+            matches!(
+                sql_err,
+                rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::ApiMisuse
+            ),
+            "NotInitialized must map to SQLITE_MISUSE, got {sql_err:?}"
+        );
+        assert!(
+            !crate::db::is_retryable_busy_message(&sql_err.to_string()),
+            "NotInitialized must not be classified as retryable — retrying never clears it"
+        );
     }
 }

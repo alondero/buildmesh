@@ -109,7 +109,7 @@ pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
             request::send_json_error(lines, "404 Not Found", "Unknown device").await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }

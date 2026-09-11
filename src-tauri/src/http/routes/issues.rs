@@ -18,7 +18,7 @@ pub async fn list(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }
@@ -80,7 +80,7 @@ pub async fn spawn(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }

@@ -30,7 +30,7 @@ pub async fn list_pulls(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }
@@ -51,7 +51,7 @@ pub async fn get_mergeability(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }
@@ -107,7 +107,7 @@ pub async fn merge(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }
@@ -163,7 +163,7 @@ pub async fn create(
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            request::send_error_with_db_backoff(lines, &e).await;
         }
     }
 }

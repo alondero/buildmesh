@@ -42,12 +42,32 @@ pub enum RequiredScope {
     CoordinatorWrite,
 }
 
+/// Everything a request's credentials prove, resolved in a **single**
+/// reader-pool lease.
+///
+/// Before issue #1533's review, the ws-ticket mint path resolved the role
+/// (one `try_read_conn()`), dropped that lease, then resolved the device
+/// session (a second `try_read_conn()`, re-running the same
+/// `validate_device_token_inner` query), and only then locked the writer —
+/// three separate acquisitions for one endpoint, in a fix whose whole point
+/// was to stop starving the reader pool. Bundling the two answers means one
+/// lease and one device-token lookup per request (review item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// The surface this credential proves.
+    pub role: Role,
+    /// The `device_sessions` row id this request authenticates as, if any
+    /// (issue #502). `None` for the root token (no device row, unrevocable)
+    /// and for every coordinator credential.
+    pub device_session_id: Option<i64>,
+}
+
 /// The result of an authorization check, carrying the HTTP status the dispatcher
 /// must return on the failure paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthOutcome {
-    /// Authorized — proceed, carrying the resolved role.
-    Ok(Role),
+    /// Authorized — proceed, carrying the resolved [`Identity`].
+    Ok(Identity),
     /// No valid credential presented → `401 Unauthorized`.
     Unauthorized,
     /// A valid credential of the wrong role → `403 Forbidden`.
@@ -61,37 +81,58 @@ pub enum AuthOutcome {
     ServiceUnavailable,
 }
 
-/// Resolve the role proven by a request's headers. A request carrying no cookie
-/// and no bearer token returns `Ok(None)` *without* touching the DB — so an
-/// unauthenticated probe never reaches a lookup (and the inline dispatcher
-/// tests, which run without an initialized global DB, stay DB-free). Otherwise it
-/// locks the DB once and delegates to [`resolve_role_inner`], the single
-/// resolution implementation the unit tests also drive against a seeded
-/// connection — so there is no production/test logic to keep in lockstep.
+/// Resolve everything a request's headers prove, in one reader-pool lease.
+/// A request carrying no cookie and no bearer token returns `Ok(None)`
+/// *without* touching the DB — so an unauthenticated probe never reaches a
+/// lookup (and the inline dispatcher tests, which run without an initialized
+/// global DB, stay DB-free). Otherwise it checks out **one** connection and
+/// delegates to [`resolve_identity_inner`], the single resolution
+/// implementation the unit tests also drive against a seeded connection — so
+/// there is no production/test logic to keep in lockstep.
 ///
-/// Returns [`db::DbResult<Option<Role>>`] (issue #1533 review) so the caller
-/// can distinguish "no credentials" (`Ok(None)` → `401`) from "DB busy"
-/// (`Err(DbError::ReaderPoolExhausted { .. })` → `503`). The pre-#1533
-/// `Option<Role>` collapsed these two into `401`, logging valid clients
-/// out under load.
-pub fn resolve_role(headers: &str) -> db::DbResult<Option<Role>> {
+/// Returns [`db::DbResult<Option<Identity>>`] (issue #1533 review) so the
+/// caller can distinguish "no credentials" (`Ok(None)` → `401`) from "DB
+/// busy" (`Err(DbError::ReaderPoolExhausted { .. })` → `503`). The pre-#1533
+/// `Option<Role>` collapsed these two into `401`, logging valid clients out
+/// under load.
+pub fn resolve_identity(headers: &str) -> db::DbResult<Option<Identity>> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
     {
         return Ok(None);
     }
     let conn = db::try_read_conn()?;
-    Ok(resolve_role_inner(&conn, headers))
+    Ok(resolve_identity_inner(&conn, headers))
 }
 
-/// The credential → [`Role`] resolution, checked in priority order against a
-/// single connection: root first (cookie or bearer → Admin), then the bearer
-/// token against the drive- then read-scoped coordinator tokens. Lock-free so
-/// the unit tests can drive it against a seeded in-memory connection (the test
-/// binary has no initialized global DB).
-fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
+/// The credential → [`Identity`] resolution against a single connection.
+/// Lock-free so the unit tests can drive it against a seeded in-memory
+/// connection (the test binary has no initialized global DB).
+///
+/// Each credential's device-session lookup runs **at most once** and its
+/// result feeds both the role decision and the device-session id. The
+/// pre-review shape ran that query twice — once in the role resolver, once
+/// in a separate device resolver on a second lease (review item 3).
+///
+/// Precedence is unchanged from that shape, deliberately:
+/// - Role: cookie (root, then device) → bearer (root, then device, then
+///   coordinator drive, then coordinator read). Drive is checked before read
+///   so the more-capable scope wins when both match.
+/// - Device id: cookie's device row first, then the bearer's. This is
+///   independent of *which* credential proved the role, so a request
+///   presenting a root cookie alongside a device bearer still resolves the
+///   device — the behaviour the separate resolver had.
+fn resolve_identity_inner(conn: &Connection, headers: &str) -> Option<Identity> {
     let cookie = request::extract_token_from_cookies(headers);
     let bearer = request::bearer_token(headers);
+
+    let cookie_device = cookie
+        .as_deref()
+        .and_then(|t| db::validate_device_token_inner(conn, t).unwrap_or(None));
+    let bearer_device = bearer
+        .as_deref()
+        .and_then(|t| db::validate_device_token_inner(conn, t).unwrap_or(None));
+    let device_session_id = cookie_device.or(bearer_device);
 
     // Admin: the root token, presented as either the bm_session cookie or a
     // bearer header (the latter is how POST /api/session mints the cookie); OR a
@@ -99,67 +140,38 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
     // credential. Device tokens are what a paired phone holds after pairing —
     // distinct per device, so revoking one (deleting its row) drops *its* Admin
     // access without touching the root token or other devices.
-    if let Some(t) = cookie.as_deref() {
-        if db::validate_root_token_inner(conn, t).unwrap_or(false)
-            || db::validate_device_token_inner(conn, t)
-                .unwrap_or(None)
-                .is_some()
-        {
-            return Some(Role::Admin);
-        }
-    }
-    if let Some(t) = bearer.as_deref() {
-        if db::validate_root_token_inner(conn, t).unwrap_or(false)
-            || db::validate_device_token_inner(conn, t)
-                .unwrap_or(None)
-                .is_some()
-        {
-            return Some(Role::Admin);
-        }
-        // Coordinator surface: bearer only. Check drive before read so the
-        // more-capable scope wins when both happen to match (they don't in
-        // practice — distinct tokens — but the order makes the intent clear).
-        if db::validate_coordinator_drive_token_inner(conn, t).unwrap_or(false) {
-            return Some(Role::CoordinatorWrite);
-        }
-        if db::validate_coordinator_read_token_inner(conn, t).unwrap_or(false) {
-            return Some(Role::CoordinatorRead);
-        }
-    }
-    None
-}
-
-/// Recover the device-session id a request authenticates as, if any (issue
-/// #502). Returns `None` for the root token (which has no device row and is
-/// unrevocable) and for every coordinator credential. The dispatcher uses this
-/// to stamp `last_active` and to bind a minted WS ticket to the device, so a
-/// later revocation can find and kick that device's live socket. Mirrors
-/// [`resolve_role`]'s DB-free fast path for unauthenticated probes.
-///
-/// Returns [`db::DbResult<Option<i64>>`] so callers can distinguish "no
-/// credentials" (`Ok(None)`) from "DB busy" (`Err(DbError::ReaderPoolExhausted { .. })`).
-pub fn resolve_device_session(headers: &str) -> db::DbResult<Option<i64>> {
-    if request::extract_token_from_cookies(headers).is_none()
-        && request::bearer_token(headers).is_none()
+    let role = if cookie
+        .as_deref()
+        .is_some_and(|t| db::validate_root_token_inner(conn, t).unwrap_or(false))
+        || cookie_device.is_some()
     {
-        return Ok(None);
-    }
-    let conn = db::try_read_conn()?;
-    Ok(resolve_device_session_inner(&conn, headers))
+        Some(Role::Admin)
+    } else if let Some(t) = bearer.as_deref() {
+        if db::validate_root_token_inner(conn, t).unwrap_or(false) || bearer_device.is_some() {
+            Some(Role::Admin)
+        } else if db::validate_coordinator_drive_token_inner(conn, t).unwrap_or(false) {
+            Some(Role::CoordinatorWrite)
+        } else if db::validate_coordinator_read_token_inner(conn, t).unwrap_or(false) {
+            Some(Role::CoordinatorRead)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    role.map(|role| Identity {
+        role,
+        device_session_id,
+    })
 }
 
-fn resolve_device_session_inner(conn: &Connection, headers: &str) -> Option<i64> {
-    if let Some(t) = request::extract_token_from_cookies(headers) {
-        if let Some(id) = db::validate_device_token_inner(conn, &t).unwrap_or(None) {
-            return Some(id);
-        }
-    }
-    if let Some(t) = request::bearer_token(headers) {
-        if let Some(id) = db::validate_device_token_inner(conn, &t).unwrap_or(None) {
-            return Some(id);
-        }
-    }
-    None
+/// Test-only projection of [`resolve_identity_inner`] down to the role. Keeps
+/// the role-resolution tests reading as role assertions without giving
+/// production a second entry point that could drift from the real resolver.
+#[cfg(test)]
+fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
+    resolve_identity_inner(conn, headers).map(|i| i.role)
 }
 
 /// Does `role` satisfy `required`? Disjoint surfaces: Admin never satisfies a
@@ -179,10 +191,15 @@ fn satisfies(role: Role, required: RequiredScope) -> bool {
 /// Authorize a request for a required scope. `None` resolved → `Unauthorized`
 /// (401); a role that doesn't satisfy the scope → `Forbidden` (403);
 /// pool exhaustion → `ServiceUnavailable` (503).
+///
+/// On success the outcome carries the whole [`Identity`], so a caller that
+/// also needs the device-session id (the ws-ticket mint) gets it from the
+/// lease this call already took rather than checking out a second one
+/// (issue #1533 review item 3).
 pub fn authorize(headers: &str, required: RequiredScope) -> AuthOutcome {
-    match resolve_role(headers) {
+    match resolve_identity(headers) {
         Ok(None) => AuthOutcome::Unauthorized,
-        Ok(Some(role)) if satisfies(role, required) => AuthOutcome::Ok(role),
+        Ok(Some(identity)) if satisfies(identity.role, required) => AuthOutcome::Ok(identity),
         Ok(Some(_)) => AuthOutcome::Forbidden,
         Err(db::DbError::ReaderPoolExhausted { .. }) => AuthOutcome::ServiceUnavailable,
         // `NotInitialized` is a transient startup condition, not a
@@ -204,21 +221,27 @@ pub fn authorize(headers: &str, required: RequiredScope) -> AuthOutcome {
 fn outcome(role: Option<Role>, required: RequiredScope) -> AuthOutcome {
     match role {
         None => AuthOutcome::Unauthorized,
-        Some(role) if satisfies(role, required) => AuthOutcome::Ok(role),
+        Some(role) if satisfies(role, required) => AuthOutcome::Ok(Identity {
+            role,
+            device_session_id: None,
+        }),
         Some(_) => AuthOutcome::Forbidden,
     }
 }
 
 /// Dispatcher convenience: authorize and, on failure, write the matching status
 /// line and return `None` so the caller can `return` immediately. On success
-/// returns `Some(role)` and writes nothing.
+/// returns `Some(identity)` and writes nothing. Callers that only care about
+/// pass/fail use `.is_none()`; the ws-ticket mint reads
+/// [`Identity::device_session_id`] off the returned value instead of taking a
+/// second reader lease.
 pub async fn guard(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     headers: &str,
     required: RequiredScope,
-) -> Option<Role> {
+) -> Option<Identity> {
     match authorize(headers, required) {
-        AuthOutcome::Ok(role) => Some(role),
+        AuthOutcome::Ok(identity) => Some(identity),
         AuthOutcome::Unauthorized => {
             let _ = request::write_status_only(lines, "401 Unauthorized").await;
             None
@@ -318,14 +341,56 @@ mod tests {
     }
 
     #[test]
-    fn resolve_device_session_recovers_the_id_for_a_device_but_not_the_root_token() {
+    fn resolve_identity_recovers_the_device_id_for_a_device_but_not_the_root_token() {
         let conn = seeded_db();
         let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
-        assert_eq!(resolve_device_session_inner(&conn, &bearer(&token)), Some(id));
-        assert_eq!(resolve_device_session_inner(&conn, &cookie(&token)), Some(id));
+        let device_id = |headers: &str| {
+            resolve_identity_inner(&conn, headers).and_then(|i| i.device_session_id)
+        };
+        assert_eq!(device_id(&bearer(&token)), Some(id));
+        assert_eq!(device_id(&cookie(&token)), Some(id));
         // The root token authenticates as Admin but owns no device row.
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
-        assert_eq!(resolve_device_session_inner(&conn, &bearer(&root)), None);
+        assert_eq!(device_id(&bearer(&root)), None);
+    }
+
+    /// A root cookie presented alongside a device bearer must still resolve
+    /// the device id. The pre-review code got this from a *separate*
+    /// device-session resolver that ignored which credential proved the role;
+    /// folding both answers into one lease must not quietly drop the device
+    /// (issue #1533 review item 3).
+    #[test]
+    fn root_cookie_with_device_bearer_still_resolves_the_device_id() {
+        let conn = seeded_db();
+        let root = db::get_or_create_root_token_inner(&conn).unwrap();
+        let (id, device) = db::pair_device_session_inner(&conn, None, None).unwrap();
+        let headers = format!(
+            "Host: localhost\r\nCookie: bm_session={}\r\nAuthorization: Bearer {}\r\n",
+            root, device
+        );
+        assert_eq!(
+            resolve_identity_inner(&conn, &headers),
+            Some(Identity {
+                role: Role::Admin,
+                device_session_id: Some(id),
+            })
+        );
+    }
+
+    /// A device credential resolves its own id in the same pass that proves
+    /// the role — the ws-ticket mint reads it straight off this value instead
+    /// of taking a second reader lease.
+    #[test]
+    fn device_credential_resolves_role_and_id_together() {
+        let conn = seeded_db();
+        let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
+        assert_eq!(
+            resolve_identity_inner(&conn, &bearer(&token)),
+            Some(Identity {
+                role: Role::Admin,
+                device_session_id: Some(id),
+            })
+        );
     }
 
     #[test]
@@ -350,7 +415,10 @@ mod tests {
         // Drive satisfies a read-scoped route.
         assert_eq!(
             outcome(role, RequiredScope::CoordinatorRead),
-            AuthOutcome::Ok(Role::CoordinatorWrite)
+            AuthOutcome::Ok(Identity {
+                role: Role::CoordinatorWrite,
+                device_session_id: None,
+            })
         );
     }
 

@@ -297,6 +297,52 @@ pub async fn send_json_error(lines: &mut tokio::io::BufStream<MaybeTls>, status:
     let _ = write_json(lines, status, &body).await;
 }
 
+/// The status line and `Retry-After` a failed route operation deserves,
+/// decided from the (already flattened) failure message.
+///
+/// Split out from [`send_error_with_db_backoff`] purely so the decision is
+/// unit-testable: the writer needs a live `BufStream<MaybeTls>`, which a unit
+/// test has no way to build, and the thing worth pinning here is the
+/// classification, not the byte formatting (which [`write_json_with_retry_after`]
+/// and [`send_json_error`] already own).
+fn classify_route_failure(msg: &str) -> (&'static str, Option<u32>) {
+    if crate::db::is_retryable_busy_message(msg) {
+        // `Retry-After: 1` matches the reader-pool checkout deadline — a
+        // client that waits one second waits exactly as long as the lease
+        // that failed us would have taken to time out.
+        ("503 Service Unavailable", Some(1))
+    } else {
+        ("500 Internal Server Error", None)
+    }
+}
+
+/// Report a failed route operation with the status the failure actually
+/// deserves: `500 Internal Server Error` normally, but
+/// `503 Service Unavailable` + `Retry-After: 1` when `msg` carries
+/// [`crate::db::RETRYABLE_BUSY_MARKER`] — i.e. the operation failed only
+/// because the reader pool was saturated.
+///
+/// Issue #1533 review item 4: `auth::guard` already answered 503 for an
+/// *unauthenticated* probe that hit a saturated pool, but every
+/// authenticated route reported the same condition as a generic 500. Under
+/// load that meant unauthenticated callers were told "retry shortly" while
+/// real client traffic was told "the server is broken" — the opposite of the
+/// intended signal. Route handlers should prefer this over calling
+/// [`send_json_error`] with a hard-coded `"500 Internal Server Error"`.
+///
+/// The body shape is identical on both paths (`{"error":"..."}`), so only the
+/// status line and the `Retry-After` header change; a client that ignores
+/// both still renders the same message it did before.
+pub async fn send_error_with_db_backoff(lines: &mut tokio::io::BufStream<MaybeTls>, msg: &str) {
+    match classify_route_failure(msg) {
+        (status, Some(retry_after)) => {
+            let body = format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\""));
+            let _ = write_json_with_retry_after(lines, status, &body, retry_after).await;
+        }
+        (status, None) => send_json_error(lines, status, msg).await,
+    }
+}
+
 /// Parse and canonicalise a string as the `cli_session_id` column value
 /// (issue #1237).
 ///
@@ -407,6 +453,79 @@ pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- classify_route_failure (issue #1533 review item 4) ------------
+    //
+    // Authenticated routes used to answer a flat 500 for a saturated
+    // reader pool while unauthenticated probes got a retryable 503 from
+    // `auth::guard`. These pin the classification that closes that gap.
+
+    /// A reader-pool exhaustion that reached the route as a flattened
+    /// string must become a retryable 503, not a 500.
+    #[test]
+    fn pool_exhaustion_message_is_classified_retryable() {
+        // Build the message the real conversion produces rather than
+        // hand-writing one, so a reworded `From<DbError>` breaks this test
+        // instead of silently decoupling the two ends.
+        let flattened = rusqlite::Error::from(crate::db::DbError::ReaderPoolExhausted {
+            waited_ms: 1000,
+            in_use: 8,
+            pool_size: 8,
+            current_longest_lease_ms: 1200,
+            historical_longest_lease_ms: 1200,
+        })
+        .to_string();
+        assert_eq!(
+            classify_route_failure(&flattened),
+            ("503 Service Unavailable", Some(1))
+        );
+    }
+
+    /// Route handlers re-wrap the error (`format!("Failed to reload node:
+    /// {e}")`) before reporting it. The classification must survive that.
+    #[test]
+    fn rewrapped_pool_exhaustion_is_still_classified_retryable() {
+        let flattened = rusqlite::Error::from(crate::db::DbError::ReaderPoolExhausted {
+            waited_ms: 1000,
+            in_use: 8,
+            pool_size: 8,
+            current_longest_lease_ms: 1000,
+            historical_longest_lease_ms: 0,
+        })
+        .to_string();
+        let wrapped = format!("Failed to reload node: {flattened}");
+        assert_eq!(
+            classify_route_failure(&wrapped),
+            ("503 Service Unavailable", Some(1))
+        );
+    }
+
+    /// An ordinary failure keeps the 500 it always had — the 503 path must
+    /// be narrow, or every backend error would tell clients to retry.
+    #[test]
+    fn ordinary_failure_is_still_internal_error() {
+        assert_eq!(
+            classify_route_failure("Failed to reach GitHub: connection refused"),
+            ("500 Internal Server Error", None)
+        );
+        // Near-miss wording must not trip the marker.
+        assert_eq!(
+            classify_route_failure("the database is busy right now"),
+            ("500 Internal Server Error", None)
+        );
+    }
+
+    /// `NotInitialized` is a lifecycle violation, not contention — retrying
+    /// can never clear it, so it must NOT get a `Retry-After` (issue #1533
+    /// review item 5).
+    #[test]
+    fn not_initialized_is_not_classified_retryable() {
+        let flattened = rusqlite::Error::from(crate::db::DbError::NotInitialized).to_string();
+        assert_eq!(
+            classify_route_failure(&flattened),
+            ("500 Internal Server Error", None)
+        );
+    }
 
     #[test]
     fn bearer_token_extracts_and_trims() {

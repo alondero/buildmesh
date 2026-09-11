@@ -40,16 +40,6 @@ impl From<rusqlite::Error> for AgentNodeError {
     }
 }
 
-impl From<crate::db::DbError> for AgentNodeError {
-    fn from(e: crate::db::DbError) -> Self {
-        // Pool exhaustion / not-initialised errors collapse to the
-        // existing `Db(rusqlite::Error)` arm — the structured info is
-        // logged at the `From<DbError> for rusqlite::Error` boundary
-        // (issue #1533 review).
-        AgentNodeError::Db(e.into())
-    }
-}
-
 /// Create a new agent node with auto-generated name, environment detection,
 /// and provider resolution.
 ///
