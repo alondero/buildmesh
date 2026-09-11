@@ -12,6 +12,7 @@ export default async function ({ page }) {
   await expect(page.getByTestId('circuits-view-activity')).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('circuit-name-input')).toHaveCount(0);
   await expect(page.getByTestId('queue-run-1002')).toHaveCount(0);
+  await page.getByTestId('circuits-view-history').click();
   await expect(page.getByTestId('run-toggle-1001')).toHaveAttribute('aria-expanded', 'true');
   await expect(page.getByTestId('run-error-1001')).toBeVisible();
   await expect(page.getByTestId('run-step-1001-reviewer').locator('pre')).toBeVisible();

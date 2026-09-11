@@ -41,7 +41,7 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
     }
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
-        Some(transcript_path(ctx.session_id, ctx.node_path))
+        transcript_path(ctx.session_id, ctx.node_path)
     }
 
     fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
@@ -101,11 +101,11 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
 
 /// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
-pub(crate) fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
-    env::claude_dir()
+pub(crate) fn transcript_path(session_id: &str, node_path: &str) -> Option<PathBuf> {
+    Some(env::cli_dir_for_spawn(env::claude_dir(), ".claude", node_path)?
         .join("projects")
         .join(encode_path(node_path))
-        .join(format!("{session_id}.jsonl"))
+        .join(format!("{session_id}.jsonl")))
 }
 
 /// Pull `tool_use` blocks out of a message `content` array into

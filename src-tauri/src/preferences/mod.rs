@@ -63,7 +63,7 @@ pub use resolver::{
     merge_detected_profiles, minimax_api_key_resolved, pairing_compatibility, pairing_for,
     provider_accounts, provider_pairings, provider_surfaces, proxied_order_for,
     proxied_provider_order, remove_provider_account, remove_provider_pairing,
-    resolve_default_provider, resolve_harness_provider, resolve_stored_pairing_and_account,
+    resolve_default_provider, resolve_harness_provider, harness_runtime, resolved_harness_profile, resolve_stored_pairing_and_account,
     set_account_key_if_absent, set_harness_order, set_proxied_provider_order, surface_for_executor,
     upsert_provider_account, upsert_provider_pairing,
 };

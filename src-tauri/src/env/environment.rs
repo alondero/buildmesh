@@ -209,6 +209,90 @@ pub fn current_env() -> Environment {
     *CURRENT_ENV
 }
 
+/// Guest home is a property of the installed distribution, never the Windows
+/// account name or the repository's directory (which can be a mounted drive).
+pub(crate) fn wsl_home() -> Option<PathBuf> {
+    if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
+    static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| {
+        let mut command = command_no_window("wsl.exe");
+        command.args(["-d", &get_default_wsl_distro()?, "--cd", "~", "--exec", "sh", "-lc", "printf '__BUILDMESH_WSL_HOME__%s\\n' \"$HOME\""]);
+        let output = crate::process_util::run_command_with_timeout(command, "WSL home", std::time::Duration::from_secs(10)).ok()?;
+        if !output.status.success() { return None; }
+        parse_wsl_home_output(&output.stdout)
+    });
+    GUEST_HOME.clone()
+}
+
+pub(super) fn parse_wsl_home_output(output: &[u8]) -> Option<PathBuf> {
+    parse_marked_wsl_path(output, "__BUILDMESH_WSL_HOME__")
+}
+
+fn parse_marked_wsl_path(output: &[u8], marker: &str) -> Option<PathBuf> {
+    let output = String::from_utf8(output.to_vec()).ok()?;
+    output.lines().rev().find_map(|line| {
+        let home = line.strip_prefix(marker)?.trim();
+        home.starts_with('/').then(|| PathBuf::from(home))
+    })
+}
+
+pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
+    parse_marked_wsl_path(output, "__BUILDMESH_WSL_CODEX_HOME__")
+}
+
+/// Resolve the Codex state directory from the selected WSL environment. This
+/// keeps a guest-side `CODEX_HOME` override visible to transcript discovery
+/// without forwarding the Windows host's variable into the guest.
+pub(crate) fn wsl_codex_home() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return Some(codex_dir());
+    }
+    static CODEX_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| {
+        let mut command = command_no_window("wsl.exe");
+        command.args([
+            "-d",
+            &get_default_wsl_distro()?,
+            "--cd",
+            "~",
+            "--exec",
+            "sh",
+            "-lc",
+            "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"",
+        ]);
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "WSL Codex home",
+            std::time::Duration::from_secs(10),
+        )
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_wsl_codex_home_output(&output.stdout)
+    });
+    CODEX_HOME.clone()
+}
+
+/// Runtime paths are already translated for the process. A UNC spawn path
+/// belongs to a Windows process; a POSIX spawn path belongs to a guest.
+pub(crate) fn runtime_for_spawn_path(path: &str) -> EnvType {
+    if super::is_wsl_host() && super::is_windows_path(path) { return EnvType::WindowsInterop; }
+    if cfg!(windows) && path.starts_with('/') && !path.starts_with("//") {
+        EnvType::Wsl
+    } else {
+        EnvType::Windows
+    }
+}
+
+pub(crate) fn cli_dir_for_spawn(native: PathBuf, guest_relative: &str, spawn_path: &str) -> Option<PathBuf> {
+    if runtime_for_spawn_path(spawn_path) == EnvType::WindowsInterop { return super::windows_cli_home(guest_relative); }
+    if runtime_for_spawn_path(spawn_path) == EnvType::Wsl {
+        let guest = wsl_home()?.join(guest_relative);
+        Some(PathBuf::from(super::to_host_path(&guest.to_string_lossy())))
+    } else {
+        Some(native)
+    }
+}
+
 // ── Agent CLI home directories (depend on current_env) ─────────────────────
 
 /// Get the .claude directory for session storage in the correct environment
@@ -297,24 +381,18 @@ pub fn codex_dir() -> PathBuf {
 }
 
 /// The Codex CLI home for an agent environment, expressed in that
-/// environment's native path syntax. This deliberately derives the WSL home
-/// from the host username instead of launching a WSL shell.
+/// environment's native path syntax. Guest homes come from the cached WSL
+/// login-shell probe because the guest username can differ from Windows.
 pub(crate) fn codex_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {
+        // CODEX_HOME belongs to the process that owns the environment. A
+        // Linux Buildmesh must not reinterpret its own value as a Windows
+        // harness setting, and a Windows host value must not leak into WSL.
+        EnvType::WindowsInterop => super::windows_codex_home(),
         EnvType::Windows => Some(codex_dir()),
         EnvType::Wsl => {
-            if let Ok(home) = env::var("CODEX_HOME") {
-                if home.starts_with('/') {
-                    return Some(PathBuf::from(home));
-                }
-            }
-            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
-                return Some(PathBuf::from(format!("/home/{user}/.codex")));
-            }
-            let user = env::var("USERNAME")
-                .ok()
-                .or_else(|| env::var("USER").ok())?;
-            Some(PathBuf::from(format!("/home/{user}/.codex")))
+            let _ = spawn_path;
+            wsl_codex_home()
         }
     }
 }
@@ -378,13 +456,12 @@ pub fn agy_brain_dir() -> PathBuf {
 
 /// The Antigravity CLI home for an agent environment, expressed in that
 /// environment's native path syntax. Shaped like [`codex_dir_for_env`] but
-/// without its `USERNAME` fallback: the WSL home is derived solely from the
-/// spawn path's `/home/<user>` prefix (plus absolute-path overrides), since
-/// a Windows account name is not necessarily the distro username (issue
-/// #1499 review — the capture poller needs the brain dir for the node's own
-/// environment, not the host's `current_env()`, and never a guessed one).
+/// using the cached guest login home (or an explicit absolute override).
+/// Windows and guest usernames need not match, and a Windows-backed working
+/// directory cannot identify the guest account.
 pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {
+        EnvType::WindowsInterop => super::windows_cli_home(".gemini/antigravity-cli"),
         EnvType::Windows => Some(agy_dir()),
         EnvType::Wsl => {
             if let Ok(home) = env::var("GEMINI_HOME") {
@@ -397,22 +474,8 @@ pub(crate) fn agy_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<Pat
                     return Some(PathBuf::from(home));
                 }
             }
-            if let Some(user) = spawn_path
-                .strip_prefix("/home/")
-                .and_then(|path| path.split('/').next())
-            {
-                if !user.is_empty() {
-                    return Some(
-                        PathBuf::from(format!("/home/{user}/.gemini/antigravity-cli")),
-                    );
-                }
-            }
-            // No `USERNAME`/`USER` fallback: on a Windows host `USERNAME` is
-            // the Windows account name (possibly containing spaces), which is
-            // not necessarily the WSL distro username. Guessing produces a
-            // wrong user's brain directory; returning `None` skips capture
-            // cleanly (the `Stop`-hook path still rescues the session).
-            None
+            let _ = spawn_path;
+            wsl_home().map(|home| home.join(".gemini/antigravity-cli"))
         }
     }
 }
@@ -461,15 +524,11 @@ pub fn commandcode_dir() -> PathBuf {
 /// The Command Code CLI home for an agent environment.
 pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {
+        EnvType::WindowsInterop => super::windows_cli_home(".commandcode"),
         EnvType::Windows => Some(commandcode_dir()),
         EnvType::Wsl => {
-            if let Some(user) = spawn_path.strip_prefix("/home/").and_then(|path| path.split('/').next()) {
-                return Some(PathBuf::from(format!("/home/{user}/.commandcode")));
-            }
-            let user = env::var("USERNAME")
-                .ok()
-                .or_else(|| env::var("USER").ok())?;
-            Some(PathBuf::from(format!("/home/{user}/.commandcode")))
+            let _ = spawn_path;
+            wsl_home().map(|home| home.join(".commandcode"))
         }
     }
 }

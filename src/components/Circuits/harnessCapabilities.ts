@@ -54,6 +54,7 @@ export type InspectorHarnessId =
   | 'dsh'
   | 'commandcode'
   | 'freebuff'
+  | 'muse'
   | 'terminal';
 
 const ANTHROPIC_CAPS: HarnessCapabilities = {
@@ -344,6 +345,7 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   dsh: DSH_CAPS,
   commandcode: COMMANDCODE_CAPS,
   freebuff: FREEBUFF_CAPS,
+  muse: { ...FREEBUFF_CAPS, harness_id: 'muse', supports_model_override: true, available_on: ['linux', 'macos'] },
   terminal: TERMINAL_CAPS,
 };
 
@@ -366,6 +368,7 @@ export const HARNESS_LABEL: Record<InspectorHarnessId, string> = {
   dsh: 'DeepSeek Harness',
   commandcode: 'Command Code',
   freebuff: 'Freebuff',
+  muse: 'Meta Muse',
   terminal: 'Terminal',
 };
 

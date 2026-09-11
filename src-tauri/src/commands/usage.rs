@@ -244,6 +244,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             harness: harness.to_string(),
+            runtime: None, wsl_distro: None,
         }
     }
 

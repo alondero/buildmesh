@@ -34,7 +34,7 @@ impl TranscriptAdapter for GrokAdapter {
 
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf> {
         grok_locator_in(
-            &env::grok_dir().join("sessions"),
+            &env::cli_dir_for_spawn(env::grok_dir(), ".grok", ctx.node_path)?.join("sessions"),
             ctx.session_id,
             ctx.node_path,
         )

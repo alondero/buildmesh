@@ -48,16 +48,20 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 /// the platform shell, so this function returns a bare shell command
 /// rather than adding a second `cmd.exe /c` or `sh -c` wrapper.
 fn hook_command(platform: Platform) -> String {
-    match platform {
+    if platform == Platform::Windows {
+        if let Some(command) = crate::env::windows_attention_command(None) { return format!("{command} & echo {{\"decision\":\"allow\"}}"); }
+    }
+    let command = match platform {
         Platform::Windows => {
             "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul & echo {\"decision\":\"allow\"}"
                 .to_string()
         }
         _ => {
-            "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null; printf '%s\\n' '{\"decision\":\"allow\"}'"
+            "$(command -v curl.exe || command -v curl) -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null; printf '%s\\n' '{\"decision\":\"allow\"}'"
                 .to_string()
         }
-    }
+    };
+    if cfg!(windows) { command } else { command.replace("$(command -v curl.exe || command -v curl)", crate::env::unix_attention_curl()) }
 }
 
 /// Ensure `<project>/.agents/hooks.json` carries the Stop attention webhook
@@ -174,7 +178,8 @@ impl AgentProvider for AgyAdapter {
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
         let hooks_path = agents_dir.join("hooks.json");
-        ensure_hooks_json(&hooks_path, &hook_command(Platform::current()))
+        let platform = if resolved.env_type == EnvType::Wsl { Platform::Linux } else if resolved.env_type == EnvType::WindowsInterop { Platform::Windows } else { Platform::current() };
+        ensure_hooks_json(&hooks_path, &hook_command(platform))
     }
 
     fn supports_model_override(&self) -> bool {
@@ -528,15 +533,16 @@ mod tests {
     /// syntax and likewise does not add a nested shell wrapper.
     #[test]
     fn hook_command_uses_platform_env_syntax() {
-        let win = hook_command(Platform::Windows);
-        assert!(win.starts_with("curl.exe "), "win: {win}");
+        let original = hook_command(Platform::Windows);
+        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
+        assert!(win.starts_with(if crate::env::is_wsl_host() { "$OutputEncoding" } else { "curl.exe " }), "win: {win}");
         assert!(!win.contains("cmd.exe /c"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_SESSION_ID%"), "win: {win}");
+        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
+        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_SESSION_ID" } else { "%BUILDMESH_SESSION_ID%" }), "win: {win}");
 
         for platform in [Platform::Macos, Platform::Linux] {
             let unix = hook_command(platform);
-            assert!(unix.starts_with("curl "), "unix: {unix}");
+            assert!(unix.starts_with(crate::env::unix_attention_curl()), "unix: {unix}");
             assert!(!unix.contains("sh -c"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
@@ -550,12 +556,13 @@ mod tests {
     /// even when Buildmesh is not reachable.
     #[test]
     fn hook_command_is_bare_and_fail_open() {
-        let win = hook_command(Platform::Windows);
+        let original = hook_command(Platform::Windows);
+        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
         assert!(!win.starts_with("cmd.exe /c"), "win: {win}");
         assert!(!win.starts_with('"') && !win.ends_with('"'), "win: {win}");
-        assert!(win.contains("curl.exe"), "win: {win}");
-        assert!(win.contains("%BUILDMESH_PORT%"), "win: {win}");
-        assert!(win.contains("echo {\"decision\":\"allow\"}"), "win: {win}");
+        assert!(win.contains(if crate::env::is_wsl_host() { "--exec curl" } else { "curl.exe" }), "win: {win}");
+        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
+        assert!(original.contains("echo {\"decision\":\"allow\"}"), "win: {win}");
 
         let unix = hook_command(Platform::Linux);
         assert!(!unix.starts_with("sh -c"), "unix: {unix}");

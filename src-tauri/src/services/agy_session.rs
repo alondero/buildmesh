@@ -691,25 +691,14 @@ mod tests {
     }
 
     #[test]
-    fn wsl_brain_dir_derives_from_spawn_path_user() {
-        let dir = crate::env::agy_dir_for_env(
-            crate::models::EnvType::Wsl,
-            "/home/alice/src/repo",
-        )
-        .expect("derivable from /home/ prefix");
+    fn wsl_brain_home_does_not_depend_on_workspace_location() {
+        // A Windows checkout and another user's checkout must resolve the
+        // same CLI account. This fails the old /home/<workspace-owner> guess,
+        // whether the runtime-home probe succeeds or is unavailable.
         assert_eq!(
-            dir.join("brain"),
-            std::path::PathBuf::from("/home/alice/.gemini/antigravity-cli/brain")
+            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/home/other-user/src/repo"),
+            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/mnt/c/src/repo"),
         );
     }
 
-    #[test]
-    fn wsl_brain_dir_without_home_prefix_is_none() {
-        // Never guess a username: an underivable home yields no directory
-        // rather than a wrong user's brain.
-        assert!(
-            crate::env::agy_dir_for_env(crate::models::EnvType::Wsl, "/mnt/c/src/repo")
-                .is_none()
-        );
-    }
 }

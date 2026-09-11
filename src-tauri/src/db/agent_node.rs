@@ -161,6 +161,10 @@ pub fn create_agent_node(
     head_repo_clone_url: Option<&str>,
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
+    let env = crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
+        worktree_path.filter(|path| use_worktree && !path.trim().is_empty())
+            .map(|path| crate::env::resolve_raw_path(path).env_type).unwrap_or(env)
+    });
     let db = write_conn();
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
@@ -294,10 +298,18 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
 /// silently drop a real rewrite if the comparison string ever drifted
 /// from the column's storage form.
 pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
+    let runtime = match crate::preferences::harness_runtime(provider) {
+        Some(runtime) => runtime,
+        None => match get_agent_node_by_id(id) {
+            Ok(node) => crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+            Err(error) => return Err(error),
+        },
+    }.to_string();
     let db = write_conn();
     db.execute(
-        "UPDATE agent_nodes SET provider = ?1 WHERE id = ?2",
-        params![provider, id],
+        "UPDATE agent_nodes SET provider = ?1, env = ?3 WHERE id = ?2",
+        params![provider, id, runtime],
     )?;
     Ok(())
 }

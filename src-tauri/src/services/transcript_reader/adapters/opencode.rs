@@ -67,12 +67,10 @@ pub(crate) fn is_opencode_session_id(id: &str) -> bool {
 /// env↔host mapping.
 pub(crate) fn opencode_db_path(env_type: EnvType) -> Option<PathBuf> {
     match env_type {
+        EnvType::WindowsInterop => crate::env::windows_cli_home(".local/share/opencode/opencode.db"),
         EnvType::Wsl => {
-            let user = std::env::var("USERNAME")
-                .ok()
-                .or_else(|| std::env::var("USER").ok())?;
-            let linux = format!("/home/{user}/.local/share/opencode/opencode.db");
-            Some(PathBuf::from(crate::env::to_host_path(&linux)))
+            let linux = crate::env::wsl_home()?.join(".local/share/opencode/opencode.db");
+            Some(PathBuf::from(crate::env::to_host_path(&linux.to_string_lossy())))
         }
         EnvType::Windows => {
             let home = std::env::var("USERPROFILE")
@@ -357,7 +355,7 @@ pub(crate) fn opencode_resolve<'a>(
         // same `is_opencode_session_id` from this adapter.
         return Err(UnavailableReason::NoTranscript);
     }
-    let env_type = EnvType::from(env::env_for_path(Path::new(node_path)));
+    let env_type = env::runtime_for_spawn_path(node_path);
     let db_path = opencode_db_path(env_type).ok_or(UnavailableReason::NoTranscript)?;
     if !db_path.exists() {
         return Err(UnavailableReason::NoTranscript);

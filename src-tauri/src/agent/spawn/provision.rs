@@ -446,14 +446,23 @@ pub(super) async fn provision_workspace(
         return Err(e);
     }
 
-    if let Err(e) =
-        crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type)
-    {
-        tracing::warn!(
-            "provision_workspace: failed to sanitize worktree .git file: {}",
-            e
-        );
-    }
+    let git_paths = resolved.clone();
+    crate::blocking::run_blocking("cross_runtime_git", move || -> Result<(), String> {
+        let filesystem_env = crate::env::resolve_raw_path(&git_paths.raw_path).env_type;
+        if filesystem_env != git_paths.env_type
+            || (cfg!(windows) && git_paths.env_type == crate::models::EnvType::Wsl)
+        {
+            crate::git::worktree::prepare_cross_runtime_worktree(&git_paths.host_path)?;
+        } else if let Err(e) =
+            crate::git::worktree::sanitize_git_worktree(&git_paths.host_path, git_paths.env_type)
+        {
+            tracing::warn!(
+                "provision_workspace: failed to sanitize worktree .git file: {}",
+                e
+            );
+        }
+        Ok(())
+    }).await?;
 
     timer.checkpoint("before_provider_preflight");
     let routing_harness_id = node.provider.clone();

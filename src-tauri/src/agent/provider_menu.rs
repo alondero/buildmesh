@@ -36,8 +36,10 @@ use tauri::command;
 /// grouping key the frontend uses to bucket rows under their harness header
 /// (issue #575 / ADR-0016).
 pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
+    if !profile_runtime_supported(profile, host) { return None; }
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
-    if !adapter.available_on().contains(&host) {
+    let target = profile_platform(profile, host);
+    if !adapter.available_on().contains(&target) {
         return None;
     }
     let ui = adapter.ui();
@@ -93,7 +95,12 @@ pub(super) fn provider_info_for_pairing(
         .map(|p| crate::models::Provider::from_db_str(&p.harness))
         .unwrap_or_else(|| crate::models::Provider::from_db_str(&pairing.harness_id));
     let adapter = executor.adapter();
-    if !adapter.available_on().contains(&host) {
+    if profiles.iter().any(|p| p.id == pairing.harness_id && !profile_runtime_supported(p, host)) {
+        return None;
+    }
+    let target = profiles.iter().find(|p| p.id == pairing.harness_id)
+        .map(|p| profile_platform(p, host)).unwrap_or(host);
+    if !adapter.available_on().contains(&target) {
         return None;
     }
     let ui = adapter.ui();
@@ -109,6 +116,39 @@ pub(super) fn provider_info_for_pairing(
         group_key: pairing.harness_id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
     })
+}
+
+fn profile_runtime_supported(profile: &crate::preferences::HarnessProfile, host: Platform) -> bool {
+    match profile.runtime {
+        None => true,
+        Some(crate::models::EnvType::WindowsInterop) => host == Platform::Linux,
+        Some(_) => host == Platform::Windows,
+    }
+}
+
+fn profile_platform(profile: &crate::preferences::HarnessProfile, host: Platform) -> Platform {
+    match profile.runtime {
+        Some(crate::models::EnvType::Wsl) => Platform::Linux,
+        Some(crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop) => Platform::Windows,
+        None => host,
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    #[test]
+    fn unix_only_harness_is_visible_on_windows_only_with_wsl_runtime() {
+        let mut profile = crate::preferences::HarnessProfile {
+            id: "muse-wsl".into(), name: "Meta Muse (WSL)".into(), harness: "muse".into(),
+            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: None,
+        };
+        let info = provider_info_for(&profile, Platform::Windows).unwrap();
+        assert_eq!(info.id, "muse-wsl");
+        assert_eq!(info.label, "Meta Muse (WSL)");
+        profile.runtime = None;
+        assert!(provider_info_for(&profile, Platform::Windows).is_none());
+    }
 }
 
 /// Build the spawn menu from the configuration lists. Pure (no disk/globals) so
@@ -135,6 +175,7 @@ pub(super) fn compose_provider_menu(
     order: &[String],
     proxied_order: &[crate::preferences::ProxiedProviderOrder],
 ) -> Vec<ProviderInfo> {
+    let profiles = crate::agent::detection::preferred_profiles(&profiles, host, None);
     let mut rows: Vec<ProviderInfo> = profiles
         .iter()
         .filter_map(|profile| provider_info_for(profile, host))
@@ -176,10 +217,11 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             )
         })
         .and_then(Result::ok);
+    let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
     let wsl_codex = needs_codex
         .then(|| {
             crate::agent::provider::adapters::codex::discover_supported_install(
-                crate::models::EnvType::Wsl,
+                foreign_runtime,
             )
         })
         .and_then(Result::ok);
@@ -199,14 +241,17 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
                         || crate::services::provider_verification::launchable_on_runtime(
                             pairing,
                             account,
-                            crate::models::EnvType::Wsl,
+                            foreign_runtime,
                             wsl_codex.as_ref(),
                         )
                 })
         })
         .collect();
+    let profiles = crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles());
+    let profiles = crate::agent::detection::preferred_profiles(&profiles, Platform::current(),
+        if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
     compose_provider_menu(
-        crate::preferences::harness_profiles(),
+        profiles,
         accounts,
         pairings,
         Platform::current(),
@@ -532,6 +577,7 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&claude, Platform::Windows)
             .expect("claude profile is available on Windows");
@@ -552,6 +598,7 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
+            runtime: None, wsl_distro: None,
         }];
         let mm = crate::preferences::ProviderAccount {
             id: "minimax".to_string(),
@@ -590,11 +637,13 @@ mod tests {
                 id: "claude".to_string(),
                 name: "Claude Code".to_string(),
                 harness: "anthropic".to_string(),
+                runtime: None, wsl_distro: None,
             },
             crate::preferences::HarnessProfile {
                 id: "codex".to_string(),
                 name: "OpenAI Codex".to_string(),
                 harness: "codex".to_string(),
+                runtime: None, wsl_distro: None,
             },
         ];
         let mm = crate::preferences::ProviderAccount {
@@ -980,6 +1029,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             harness: harness.to_string(),
+            runtime: None, wsl_distro: None,
         }
     }
 
@@ -1129,6 +1179,7 @@ mod tests {
             id: "deepseek-via-claude".to_string(),
             name: "DeepSeek (via Claude)".to_string(),
             harness: "anthropic".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&deepseek, Platform::Windows)
             .expect("anthropic-backed profile is available on Windows");
@@ -1145,6 +1196,7 @@ mod tests {
             id: "cursor".to_string(),
             name: "Cursor Agent".to_string(),
             harness: "cursor".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&cursor, Platform::Windows)
             .expect("Cursor is available on Windows");
@@ -1174,6 +1226,7 @@ mod tests {
             id: "custom-opencode-flavor".to_string(),
             name: "Custom OpenCode".to_string(),
             harness: "opencode".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&custom_opencode, Platform::Windows)
             .expect("OpenCode-backed profile is available on Windows");
@@ -1200,6 +1253,7 @@ mod tests {
             id: "terminal".to_string(),
             name: "Terminal".to_string(),
             harness: "terminal".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&terminal, Platform::Windows)
             .expect("Terminal is available on Windows");
@@ -1230,6 +1284,7 @@ mod tests {
             id: "minimax".to_string(),
             name: "Minimax".to_string(),
             harness: "minimax".to_string(),
+            runtime: None, wsl_distro: None,
         };
         let info = provider_info_for(&profile, Platform::Windows)
             .expect("minimax resolves to Anthropic and must be available on Windows");

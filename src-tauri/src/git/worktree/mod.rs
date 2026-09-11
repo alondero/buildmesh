@@ -622,7 +622,7 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
 fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
     match env_type {
         EnvType::Wsl => windows_to_wsl(path),
-        EnvType::Windows => to_host_path(path),
+        EnvType::Windows | EnvType::WindowsInterop => to_host_path(path),
     }
 }
 
@@ -687,6 +687,35 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
     }
 
     Ok(())
+}
+
+/// A cross-runtime worktree keeps administration on the host. Older Git
+/// accepts relative forward links, but treats relative backpointers as missing
+/// worktrees. Lock the administrative entry so guest pruning cannot delete it.
+/// Buildmesh's removal path already explicitly prunes locked entries.
+pub(crate) fn prepare_cross_runtime_worktree(worktree_host_path: &str) -> Result<(), String> {
+    if !std::path::Path::new(worktree_host_path).join(".git").is_file() { return Ok(()); }
+    sanitize_git_worktree(worktree_host_path, EnvType::Windows)?;
+    let repo = Repository::open(worktree_host_path).map_err(|e| e.to_string())?;
+    if !repo.is_worktree() { return Ok(()); }
+    let root = std::fs::canonicalize(worktree_host_path).map_err(|e| e.to_string())?;
+    let admin = std::fs::canonicalize(repo.path()).map_err(|e| e.to_string())?;
+    let root_parts = root.components().collect::<Vec<_>>();
+    let admin_parts = admin.components().collect::<Vec<_>>();
+    let shared = root_parts.iter().zip(&admin_parts).take_while(|(a, b)| a == b).count();
+    if shared == 0 {
+        return Err("Cross-runtime worktrees must share a filesystem with their repository".into());
+    }
+    let mut relative = std::path::PathBuf::new();
+    for _ in shared..root_parts.len() { relative.push(".."); }
+    for part in &admin_parts[shared..] { relative.push(part.as_os_str()); }
+    let worktree = git2::Worktree::open_from_repository(&repo).map_err(|e| e.to_string())?;
+    if matches!(worktree.is_locked(), Ok(git2::WorktreeLockStatus::Unlocked)) {
+        worktree.lock(Some("Buildmesh cross-runtime worktree; manage through Buildmesh"))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::write(root.join(".git"), format!("gitdir: {}\n", relative.to_string_lossy().replace('\\', "/")))
+        .map_err(|e| e.to_string())
 }
 
 // ── Inspect (close-safety) ──────────────────────────────────────────────────
@@ -1330,6 +1359,83 @@ mod tests {
         )
         .expect("detached worktree creation must succeed");
         wt
+    }
+
+    #[test]
+    fn cross_runtime_root_without_git_remains_usable() {
+        let td = TestDir::new("cross_runtime_root");
+        prepare_cross_runtime_worktree(td.path().to_str().unwrap()).unwrap();
+        assert!(!td.path().join(".git").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires default WSL with Git and Windows Git"]
+    fn live_wsl_cross_runtime_git_on_both_filesystems() {
+        let host_root = tempfile::tempdir().unwrap();
+        let guest_home = crate::env::wsl_home().expect("WSL home");
+        let guest_root = tempfile::Builder::new().prefix("buildmesh-interop-")
+            .tempdir_in(crate::env::to_host_path(&guest_home.to_string_lossy())).unwrap();
+        // Trust only this fixture in an isolated libgit2 global config.
+        // WSL ownership differs from the Windows account; never alter the
+        // user's Git config or disable repository ownership checks globally.
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut config = git2::Config::open(&config_dir.path().join(".gitconfig")).unwrap();
+        for path in [guest_root.path().to_path_buf(), guest_root.path().join(".claude/worktrees/guest")] {
+            config.set_multivar("safe.directory", "^$", &path.to_string_lossy().replace('\\', "/")).unwrap();
+        }
+        drop(config);
+        struct RestoreConfig(std::ffi::CString);
+        impl Drop for RestoreConfig {
+            fn drop(&mut self) {
+                unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap(); }
+            }
+        }
+        let _restore = RestoreConfig(unsafe { git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap() });
+        unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap(); }
+        for root in [host_root.path(), guest_root.path()] {
+            init_repo_with_commit(root, &[("file.txt", "initial\n")]);
+            let wt = make_detached_worktree(root, "guest");
+            prepare_cross_runtime_worktree(wt.to_str().unwrap()).unwrap();
+            let guest_path = crate::env::windows_to_wsl(&crate::env::normalize_unc_to_wsl(wt.to_str().unwrap()));
+            for guest in [false, true] {
+                let mut command = if guest {
+                    let mut command = crate::process_util::command_no_window("wsl.exe");
+                    command.args(["-d", &crate::env::get_default_wsl_distro().unwrap(), "--exec", "git", "-C", &guest_path]);
+                    command
+                } else {
+                    let mut command = crate::process_util::git_command();
+                    command.arg("-C").arg(&wt);
+                    command
+                };
+                command.args(["status", "--porcelain"]);
+                let output = crate::process_util::run_command_with_timeout(command, "cross-runtime Git", std::time::Duration::from_secs(10)).unwrap();
+                assert!(output.status.success(), "guest={guest}: {}", String::from_utf8_lossy(&output.stderr));
+                assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+            }
+            remove_one_worktree(wt.to_str().unwrap()).unwrap();
+            assert!(!wt.exists());
+        }
+    }
+
+    #[test]
+    fn cross_runtime_worktree_keeps_host_git_access_and_can_be_removed() {
+        let td = TestDir::new("cross_runtime");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_detached_worktree(td.path(), "guest");
+        let admin = Repository::open(&wt).unwrap().path().to_path_buf();
+        let backpointer = fs::read(admin.join("gitdir")).unwrap();
+        prepare_cross_runtime_worktree(wt.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), "gitdir: ../../../.git/worktrees/guest\n");
+        assert_eq!(fs::read(admin.join("gitdir")).unwrap(), backpointer);
+        let repo = Repository::open(&wt).unwrap();
+        assert!(repo.statuses(None).unwrap().is_empty());
+        assert!(admin.join("locked").exists());
+        prepare_cross_runtime_worktree(wt.to_str().unwrap()).unwrap();
+        drop(repo);
+        remove_one_worktree(wt.to_str().unwrap()).unwrap();
+        assert!(!wt.exists());
+        assert!(!admin.exists());
     }
 
     #[test]

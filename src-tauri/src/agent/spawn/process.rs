@@ -124,9 +124,10 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
     // transcript_path, …}) as the POST body (issue #878). The backend uses it
     // to tell "turn ended, user needed" from "turn ended, waiting on
     // background tasks"; an empty body degrades to always-mark.
+    let curl = crate::env::unix_attention_curl();
     let hook_command = serde_json::json!({
         "type": "command",
-        "command": "curl -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true",
+        "command": format!("{curl} -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"),
     });
     ensure_hooks_json(&settings_path, &hook_command)
 }

@@ -54,12 +54,12 @@ fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
     serde_json::json!({
         "type": "command",
-        "command": format!(
-            "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}"
-        ),
-        "commandWindows": format!(
+        "command": if cfg!(windows) { format!(
+            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}; fi"
+        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}") },
+        "commandWindows": crate::env::windows_attention_command(Some(&url)).unwrap_or_else(|| format!(
             "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
-        ),
+        )),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -86,6 +86,7 @@ static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
 pub fn runtime_identity(env_type: EnvType) -> &'static str {
     match env_type {
         EnvType::Wsl => "wsl",
+        EnvType::WindowsInterop => "windows-interop",
         EnvType::Windows if cfg!(target_os = "windows") => "native-windows",
         EnvType::Windows if cfg!(target_os = "macos") => "native-macos",
         EnvType::Windows => "native-linux",
@@ -249,7 +250,7 @@ for legacy in "$d"/bm*.config.toml; do
       exit !ok
     }' "$legacy"; then rm -f "$legacy"; fi
 done"#;
-const WSL_CODEX_HOME_SCRIPT: &str = "printf %s \"${CODEX_HOME:-$HOME/.codex}\"";
+const WSL_CODEX_HOME_SCRIPT: &str = "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"";
 
 fn materialize_wsl_profile(
     distro: &str,
@@ -463,6 +464,12 @@ fn runtime_codex_home(
     env_type: EnvType,
     runtime: &LaunchRuntime,
 ) -> Result<(PathBuf, Option<String>), String> {
+    if env_type == EnvType::WindowsInterop {
+        let home = runtime.harness_home.as_deref().map(|home| PathBuf::from(crate::env::to_host_path(home)))
+            .or_else(|| crate::env::codex_dir_for_env(env_type, ""))
+            .ok_or_else(|| "Windows Codex home is unavailable".to_string())?;
+        return Ok((home, None));
+    }
     if env_type == EnvType::Windows {
         return Ok((
             runtime
@@ -493,29 +500,26 @@ fn runtime_codex_home(
         &distro,
         "--exec",
         "sh",
-        "-c",
+        "-lc",
         WSL_CODEX_HOME_SCRIPT,
     ]);
-    if std::env::var_os("CODEX_HOME").is_some() {
-        let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-        crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-        command.env("WSLENV", wslenv);
-    }
     let output = command
         .output()
         .map_err(|e| format!("failed to resolve WSL Codex home for trust: {e}"))?;
-    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() || home.is_empty() {
+    let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
+        return Err("WSL Codex home identity is unavailable for trust".to_string());
+    };
+    if !output.status.success() {
         return Err("WSL Codex home identity is unavailable for trust".to_string());
     }
-    Ok((PathBuf::from(home), Some(distro)))
+    Ok((home, Some(distro)))
 }
 
 fn runtime_wsl_distro(
     env_type: EnvType,
     runtime: &LaunchRuntime,
 ) -> Result<Option<String>, String> {
-    if env_type == EnvType::Windows {
+    if matches!(env_type, EnvType::Windows | EnvType::WindowsInterop) {
         return Ok(None);
     }
     runtime
@@ -535,7 +539,7 @@ fn codex_trust_config_path(
 }
 
 fn trust_project_path(resolved: &ResolvedPath) -> String {
-    let path = if resolved.env_type == EnvType::Wsl {
+    let path = if matches!(resolved.env_type, EnvType::Wsl | EnvType::WindowsInterop) {
         &resolved.spawn_path
     } else {
         &resolved.host_path
@@ -627,7 +631,7 @@ fn ensure_project_trust_content(
 }
 
 fn project_keys_match(existing: &str, candidate: &str, env_type: EnvType) -> bool {
-    if env_type == EnvType::Windows {
+    if matches!(env_type, EnvType::Windows | EnvType::WindowsInterop) {
         let normalize = |path: &str| path.replace('/', "\\");
         let existing = normalize(existing);
         let candidate = normalize(candidate);
@@ -658,8 +662,8 @@ pub fn materialize_proxy_profile(
                 .ok_or_else(|| "verified WSL distribution identity is missing".to_string())?;
             materialize_wsl_profile(distro, &install.codex_home, profile_name, &content)
         }
-        EnvType::Windows => {
-            materialize_native_profile_at(Path::new(&install.codex_home), profile_name, &content)
+        EnvType::Windows | EnvType::WindowsInterop => {
+            materialize_native_profile_at(Path::new(&crate::env::to_host_path(&install.codex_home)), profile_name, &content)
         }
     }
 }
@@ -697,7 +701,11 @@ fn codex_output(
     wsl_distro: Option<&str>,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
-    let mut command = if env_type == EnvType::Wsl {
+    let mut command = if env_type == EnvType::WindowsInterop {
+        let args = args.iter().map(|arg| crate::env::powershell_literal(arg)).collect::<Vec<_>>().join(" ");
+        let command = crate::env::powershell_command(&format!("& codex {args}; exit $LASTEXITCODE"));
+        return crate::process_util::run_command_with_timeout(command, "Windows Codex probe", std::time::Duration::from_secs(20));
+    } else if env_type == EnvType::Wsl {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
             "-d",
@@ -705,11 +713,6 @@ fn codex_output(
             "--exec",
             "codex",
         ]);
-        if std::env::var_os("CODEX_HOME").is_some() {
-            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-            command.env("WSLENV", wslenv);
-        }
         command
     } else if cfg!(target_os = "windows") {
         // npm installs Codex as a `.cmd` shim. `std::process::Command` cannot
@@ -765,19 +768,30 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
             "proxied Codex requires codex-cli >= 0.144.0; found {version}"
         ));
     }
-    let executable = if env_type == EnvType::Wsl {
+    let executable = if env_type == EnvType::WindowsInterop {
+        let command = crate::env::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -ErrorAction Stop).Source");
+        let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", std::time::Duration::from_secs(10))?;
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else if env_type == EnvType::Wsl {
         let out = crate::process_util::command_no_window("wsl.exe")
             .args([
                 "-d",
                 wsl_distro.as_deref().expect("WSL distribution was resolved"),
                 "--exec",
                 "sh",
-                "-c",
-                "command -v codex",
+                "-lc",
+                "printf '__BUILDMESH_WSL_CODEX_EXECUTABLE__%s\\n' \"$(command -v codex)\"",
             ])
             .output()
             .map_err(|e| format!("failed to locate WSL Codex executable: {e}"))?;
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("__BUILDMESH_WSL_CODEX_EXECUTABLE__"))
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .unwrap_or_default()
+            .to_string()
     } else {
         let locator = if cfg!(target_os = "windows") {
             "where.exe"
@@ -807,29 +821,29 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
     if executable.is_empty() {
         return Err("Codex executable identity is unavailable".into());
     }
-    let codex_home = if let Some(distro) = wsl_distro.as_deref() {
+    let codex_home = if env_type == EnvType::WindowsInterop {
+        let home = crate::env::codex_dir_for_env(env_type, "").ok_or_else(|| "Windows Codex home unavailable".to_string())?;
+        crate::env::windows_path_from_wsl(&home.to_string_lossy())
+    } else if let Some(distro) = wsl_distro.as_deref() {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
             "-d",
             distro,
             "--exec",
             "sh",
-            "-c",
+            "-lc",
             WSL_CODEX_HOME_SCRIPT,
         ]);
-        if std::env::var_os("CODEX_HOME").is_some() {
-            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            crate::agent::spawn_environment::append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
-            command.env("WSLENV", wslenv);
-        }
         let output = command
             .output()
             .map_err(|e| format!("failed to resolve WSL Codex home: {e}"))?;
-        let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() || home.is_empty() {
+        let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
+            return Err("WSL Codex home identity is unavailable".into());
+        };
+        if !output.status.success() {
             return Err("WSL Codex home identity is unavailable".into());
         }
-        home
+        home.to_string_lossy().into_owned()
     } else {
         native_codex_home()?.to_string_lossy().into_owned()
     };
@@ -1141,7 +1155,9 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn wsl_passthrough_env(&self) -> &'static [&'static str] {
-        &["CODEX_HOME"]
+        // The guest resolves its own CODEX_HOME. Forwarding the host process
+        // value through WSLENV would make Windows state override guest state.
+        &[]
     }
 
     /// Codex writes rollout transcripts under `~/.codex/sessions/` that
@@ -1292,25 +1308,9 @@ mod tests {
     }
 
     #[test]
-    fn wsl_codex_home_uses_default_and_propagates_explicit_override_once() {
+    fn wsl_codex_home_uses_guest_default_without_host_override() {
         assert!(WSL_CODEX_HOME_SCRIPT.contains("${CODEX_HOME:-$HOME/.codex}"));
-        let mut empty = String::new();
-        crate::agent::spawn_environment::append_to_wslenv(&mut empty, "CODEX_HOME", "/u");
-        assert_eq!(empty, "CODEX_HOME/u");
-        let mut existing = "SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut existing,
-            "CODEX_HOME",
-            "/u",
-        );
-        assert_eq!(existing, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
-        let mut already_present = "CODEX_HOME/u:SSH_AUTH_SOCK/up".to_string();
-        crate::agent::spawn_environment::append_to_wslenv(
-            &mut already_present,
-            "CODEX_HOME",
-            "/u",
-        );
-        assert_eq!(already_present, "CODEX_HOME/u:SSH_AUTH_SOCK/up");
+        assert!(!CODEX.wsl_passthrough_env().contains(&"CODEX_HOME"));
         assert_ne!(
             wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
             wsl_runtime_identity("Debian", "/home/user/.codex")
@@ -1327,12 +1327,15 @@ mod tests {
     fn wsl_profile_materializes_in_default_and_explicit_codex_home() {
         let distro = crate::env::detect_default_wsl_distro().expect("WSL distribution");
         let default_home = crate::process_util::command_no_window("wsl.exe")
-            .args(["-d", &distro, "--exec", "sh", "-c", WSL_CODEX_HOME_SCRIPT])
+            .args(["-d", &distro, "--exec", "sh", "-lc", WSL_CODEX_HOME_SCRIPT])
             .env_remove("CODEX_HOME")
             .output()
             .unwrap();
         assert!(default_home.status.success());
-        let default_home = String::from_utf8_lossy(&default_home.stdout).trim().to_string();
+        let default_home = crate::env::parse_wsl_codex_home_output(&default_home.stdout)
+            .expect("WSL Codex home marker")
+            .to_string_lossy()
+            .into_owned();
         assert!(!default_home.is_empty());
         let explicit_home = format!("/tmp/buildmesh-codex-profile-test-{}", std::process::id());
 
@@ -2001,6 +2004,8 @@ web_search = true
             let windows = handler["commandWindows"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
+            let decoded_windows = crate::env::decode_powershell_command(windows);
+            let windows = decoded_windows.as_deref().unwrap_or(windows);
             assert!(
                 !command.contains("cmd.exe") && !command.contains("sh -c"),
                 "{event} unix command must not nest a shell Codex already launches: {command}"
@@ -2025,7 +2030,7 @@ web_search = true
                 "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
             );
             assert!(
-                command.contains("-o /dev/null") && windows.contains("-o NUL"),
+                command.contains("-o /dev/null") && windows.contains(if crate::env::is_wsl_host() { "-o /dev/null" } else { "-o NUL" }),
                 "{event} must discard HTTP body; Codex Stop treats non-JSON stdout as failure: {command} / {windows}"
             );
         }

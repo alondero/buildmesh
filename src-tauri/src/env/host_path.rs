@@ -31,6 +31,36 @@ use crate::models::{AgentNode, EnvType, SessionStatus};
 
 use super::{current_env, Environment};
 
+pub(crate) fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'))
+        || path.starts_with("\\\\") || path.starts_with("//wsl")
+}
+
+/// Cached startup mappings keep node resolution free of subprocesses.
+pub(crate) fn windows_path_from_wsl(path: &str) -> String {
+    if is_windows_path(path) { return path.to_string(); }
+    let default_mounts: Vec<_> = ('a'..='z').map(|drive| (drive, format!("/mnt/{drive}"))).collect();
+    let mounts = WSL_DRIVE_MOUNTS.get().unwrap_or(&default_mounts);
+    for (drive, mount) in mounts {
+        if let Some(tail) = path.strip_prefix(mount.trim_end_matches('/')) {
+            if tail.is_empty() || tail.starts_with('/') {
+                return format!("{}:\\{}", drive.to_ascii_uppercase(), tail.trim_start_matches('/').replace('/', "\\"));
+            }
+        }
+    }
+    let distro = std::env::var("WSL_DISTRO_NAME").unwrap_or_default();
+    format!("\\\\wsl.localhost\\{}\\{}", distro, path.trim_start_matches('/').replace('/', "\\"))
+}
+
+static WSL_DRIVE_MOUNTS: std::sync::OnceLock<Vec<(char, String)>> = std::sync::OnceLock::new();
+
+/// Installed by the startup guest probe. Path resolution itself remains free
+/// of subprocesses and filesystem access, including callers holding a DB row.
+pub(crate) fn set_wsl_drive_mounts(mounts: Vec<(char, String)>) {
+    let _ = WSL_DRIVE_MOUNTS.set(mounts);
+}
+
 // ── Path-conversion primitives ─────────────────────────────────────────────
 
 /// Convert a Windows-style path to its WSL `/mnt/<drive>/...` form (issue
@@ -95,6 +125,9 @@ pub(crate) fn windows_to_wsl(path: &str) -> String {
 /// sequences in the path body are preserved byte-for-byte (a byte-iter
 /// `push(b as char)` would split them and produce invalid UTF-8).
 fn rewrite_with_drive(body: &str, drive_lc: char) -> String {
+    if let Some(mount) = WSL_DRIVE_MOUNTS.get().and_then(|mounts| mounts.iter().find(|(drive, _)| *drive == drive_lc)) {
+        return format!("{}{}", mount.1.trim_end_matches('/'), body.replace('\\', "/"));
+    }
     // Exact size: "/mnt/" (5) + drive char + body bytes (backslashes stay
     // single-byte when replaced with forward slashes — same UTF-8 width).
     let mut out = String::with_capacity(5 + drive_lc.len_utf8() + body.len());
@@ -188,7 +221,27 @@ pub fn to_host_path(path: &str) -> String {
     // `/home/...` path would be rewritten to a `\\wsl$\...` UNC path that no
     // git2/file op on that host can open.
     if !cfg!(target_os = "windows") {
+        if super::is_wsl_host() && is_windows_path(path) {
+            let normalized = normalize_unc_to_wsl(path);
+            if normalized != path {
+                let parts: Vec<_> = path.split(['\\', '/']).filter(|part| !part.is_empty()).collect();
+                if !parts.get(1).is_some_and(|distro| std::env::var("WSL_DISTRO_NAME").is_ok_and(|current| distro.eq_ignore_ascii_case(&current))) {
+                    return path.to_string();
+                }
+            }
+            return windows_to_wsl(&normalized);
+        }
         return path.to_string();
+    }
+
+    if let Some(mounts) = WSL_DRIVE_MOUNTS.get() {
+        for (drive, mount) in mounts {
+            if let Some(tail) = path.strip_prefix(mount.trim_end_matches('/')) {
+                if tail.is_empty() || tail.starts_with('/') {
+                    return format!("{}:{}", drive.to_ascii_uppercase(), tail.replace('/', "\\"));
+                }
+            }
+        }
     }
 
     if path.starts_with('/') {
@@ -237,13 +290,35 @@ pub fn to_host_path(path: &str) -> String {
             let drive = (path.as_bytes()[1] as char).to_ascii_uppercase();
             let tail = &path[2..];
             format!("{}:{}", drive, tail.replace('/', "\\"))
+        } else if path == "/root" || path.starts_with("/root/") {
+            let distro = super::environment::get_default_wsl_distro()
+                .unwrap_or_else(|| "Ubuntu".to_string());
+            format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
         } else {
-            // Other Unix-style absolute path on Windows (e.g. /Users/...)
-            // Return as-is, caller will handle if needed.
             path.to_string()
         }
     } else {
         path.to_string()
+    }
+}
+
+/// Convert a path using the selected harness runtime's native syntax into a
+/// path the current Buildmesh process can read. A WSL Codex home may be
+/// relocated outside `/home` or `/root` (for example `/var/lib/codex`), so the
+/// runtime-aware form extends the general conversion with the distro UNC
+/// fallback for arbitrary absolute guest paths.
+pub(crate) fn to_host_path_for_runtime(path: &str, env_type: EnvType) -> String {
+    let host = to_host_path(path);
+    if cfg!(target_os = "windows")
+        && env_type == EnvType::Wsl
+        && path.starts_with('/')
+        && host == path
+    {
+        let distro = super::environment::get_default_wsl_distro()
+            .unwrap_or_else(|| "Ubuntu".to_string());
+        format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
+    } else {
+        host
     }
 }
 
@@ -254,8 +329,8 @@ pub(crate) fn codex_sessions_dir(env_type: EnvType, spawn_path: &str) -> Option<
     let home = super::environment::codex_dir_for_env(env_type, spawn_path)?;
     match env_type {
         EnvType::Windows => Some(home.join("sessions")),
-        EnvType::Wsl => Some(
-            PathBuf::from(to_host_path(&home.to_string_lossy())).join("sessions"),
+        EnvType::Wsl | EnvType::WindowsInterop => Some(
+            PathBuf::from(to_host_path_for_runtime(&home.to_string_lossy(), env_type)).join("sessions"),
         ),
     }
 }
@@ -269,7 +344,7 @@ pub(crate) fn commandcode_projects_dir(env_type: EnvType, spawn_path: &str) -> O
     let home = super::environment::commandcode_dir_for_env(env_type, spawn_path)?;
     match env_type {
         EnvType::Windows => Some(home.join("projects")),
-        EnvType::Wsl => Some(
+        EnvType::Wsl | EnvType::WindowsInterop => Some(
             PathBuf::from(to_host_path(&home.to_string_lossy())).join("projects"),
         ),
     }
@@ -283,7 +358,7 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
     let home = super::environment::agy_dir_for_env(env_type, spawn_path)?;
     match env_type {
         EnvType::Windows => Some(home.join("brain")),
-        EnvType::Wsl => Some(
+        EnvType::Wsl | EnvType::WindowsInterop => Some(
             PathBuf::from(to_host_path(&home.to_string_lossy())).join("brain"),
         ),
     }
@@ -757,6 +832,42 @@ pub(crate) fn worktree_segment(node: &AgentNode) -> Option<&str> {
 /// (Root Nodes + pre-#1519 rows) falls back to the legacy
 /// `<mesh>/.claude/worktrees/<name>` layout byte-for-byte.
 pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
+    let mut resolved = node_filesystem_path(node);
+    apply_harness_runtime(&mut resolved, node.env);
+    resolved
+}
+
+/// Change only the execution view. Git and host filesystem operations keep
+/// the original host/raw paths even when the CLI runs across the WSL boundary.
+pub(crate) fn apply_harness_runtime(resolved: &mut ResolvedPath, runtime: EnvType) {
+    resolved.env_type = runtime;
+    resolved.spawn_path = match runtime {
+        EnvType::Wsl => windows_to_wsl(&normalize_unc_to_wsl(&resolved.host_path)),
+        EnvType::Windows => resolved.host_path.clone(),
+        EnvType::WindowsInterop => windows_path_from_wsl(&resolved.host_path),
+    };
+}
+
+#[cfg(test)]
+mod harness_runtime_tests {
+    use super::*;
+    #[test]
+    fn runtime_changes_execution_paths_without_moving_the_mesh() {
+        let mut path = ResolvedPath {
+            host_path: "F:/Code/My Repo".into(), raw_path: "F:/Code/My Repo".into(),
+            spawn_path: "F:/Code/My Repo".into(), env_type: EnvType::Windows,
+        };
+        apply_harness_runtime(&mut path, EnvType::Wsl);
+        assert_eq!(path.spawn_path, "/mnt/f/Code/My Repo");
+        assert_eq!(path.env_type, EnvType::Wsl);
+        assert_eq!(path.host_path, "F:/Code/My Repo");
+        assert_eq!(path.raw_path, "F:/Code/My Repo");
+        apply_harness_runtime(&mut path, EnvType::Windows);
+        assert_eq!(path.spawn_path, "F:/Code/My Repo");
+    }
+}
+
+fn node_filesystem_path(node: &AgentNode) -> ResolvedPath {
     if worktree_segment(node).is_some() {
         if let Some(stored) = node
             .worktree_path
@@ -1162,6 +1273,7 @@ mod tests {
     /// uppercased, slashes flipped, drive-only handled as `C:`. Pinned so
     /// the guards above don't accidentally swallow these.
     #[test]
+    #[cfg(windows)]
     fn to_host_path_converts_mnt_to_windows_drive() {
         assert_eq!(to_host_path("/mnt/c/Users"), "C:\\Users");
         assert_eq!(to_host_path("/mnt/d/Code/MyRepo"), "D:\\Code\\MyRepo");
@@ -1171,6 +1283,17 @@ mod tests {
             to_host_path("/mnt/c/Users/Adam/Proj"),
             "C:\\Users\\Adam\\Proj"
         );
+    }
+
+    #[test]
+    fn runtime_host_path_converts_relocated_wsl_home() {
+        let converted = to_host_path_for_runtime("/var/lib/codex", EnvType::Wsl);
+        if cfg!(target_os = "windows") {
+            assert!(converted.starts_with("\\\\wsl$\\"));
+            assert!(converted.ends_with("\\var\\lib\\codex"));
+        } else {
+            assert_eq!(converted, "/var/lib/codex");
+        }
     }
 
     /// `to_spawn_path`'s WSL arm is a one-line delegate to `windows_to_wsl`

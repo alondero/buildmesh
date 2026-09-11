@@ -8,11 +8,8 @@
 //! composition (dropping `--session-id`, mis-ordering args, applying an override
 //! to a provider that doesn't support it, forgetting the cwd/env) fails the suite.
 //!
-//! `env_type = Wsl` is used throughout because `spawn_environment::wrap`'s WSL
-//! branch is host-independent (`wsl.exe --cd <path> -- <binary> <args...>`),
-//! keeping these assertions deterministic regardless of where `cargo test` runs.
-//! The only host-dependent input is the provider *recipe* (binary + base flag),
-//! which differs on macOS — handled via [`anthropic_recipe`].
+//! WSL runtime assertions cover a Windows `wsl.exe --exec` wrapper and direct
+//! execution when the Buildmesh host is already Linux.
 //!
 //! Run with: cd src-tauri && cargo test
 
@@ -187,9 +184,14 @@ mod tests {
             "wsl.exe".to_string(),
             "--cd".to_string(),
             SPAWN_PATH.to_string(),
-            "--".to_string(),
-            binary.to_string(),
+            "--exec".to_string(),
+            "sh".to_string(), "-lc".to_string(),
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"".to_string(),
+            "buildmesh".to_string(), binary.to_string(),
         ];
+        if cfg!(windows) {
+            if let Some(distro) = crate::env::get_default_wsl_distro() { v.splice(1..1, ["-d".into(), distro]); }
+        } else { v = vec![binary.to_string()]; }
         v.extend(inner.iter().map(|s| s.to_string()));
         v
     }
@@ -392,18 +394,12 @@ mod tests {
                 false,
             );
             let args = argv(&cmd);
-            assert_eq!(
-                &args[..7],
-                [
-                    "wsl.exe",
-                    "-d",
-                    "Ubuntu",
-                    "--cd",
-                    SPAWN_PATH,
-                    "--",
-                    "/usr/bin/codex",
-                ]
-            );
+            let mut expected = expected_wsl("/usr/bin/codex", &[]);
+            if cfg!(windows) {
+                if expected.get(1).is_some_and(|arg| arg == "-d") { expected[2] = "Ubuntu".into(); }
+                else { expected.splice(1..1, ["-d".into(), "Ubuntu".into()]); }
+            }
+            assert_eq!(&args[..expected.len()], expected.as_slice());
             assert!(args.windows(2).any(|pair| pair == ["--profile", "buildmesh_1234"]));
             assert!(args.windows(2).any(|pair| pair == ["--model", "MiniMax-M3"]));
             assert_eq!(
@@ -1065,7 +1061,7 @@ mod tests {
 
         assert_eq!(
             cmd.get_cwd().map(|c| c.to_string_lossy().into_owned()),
-            Some(SPAWN_PATH.to_string())
+            Some(if cfg!(windows) { crate::env::to_host_path(SPAWN_PATH) } else { SPAWN_PATH.to_string() })
         );
         assert_eq!(
             cmd.get_env("BUILDMESH_SESSION_ID")

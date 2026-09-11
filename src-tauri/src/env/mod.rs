@@ -20,8 +20,10 @@
 mod environment;
 mod host_path;
 mod mesh_row;
+mod windows_interop;
 
 pub use environment::*;
+pub(crate) use windows_interop::*;
 pub use host_path::*;
 pub use mesh_row::mesh_row;
 
@@ -158,6 +160,29 @@ mod tests {
         assert_eq!(
             environment::parse_wsl_distro_list(listing).as_deref(),
             Some("Ubuntu")
+        );
+    }
+
+    #[test]
+    fn parses_wsl_home_marker_after_login_banner() {
+        let output = b"Welcome to Ubuntu\r\nlast login: today\n__BUILDMESH_WSL_HOME__/home/alond\r\n";
+        assert_eq!(
+            environment::parse_wsl_home_output(output).as_deref(),
+            Some(std::path::Path::new("/home/alond"))
+        );
+    }
+
+    #[test]
+    fn rejects_unmarked_wsl_home_output() {
+        assert!(environment::parse_wsl_home_output(b"/home/alond\n").is_none());
+    }
+
+    #[test]
+    fn parses_guest_codex_home_override_after_probe_marker() {
+        let output = b"__BUILDMESH_WSL_CODEX_HOME__/var/lib/codex\r\n";
+        assert_eq!(
+            environment::parse_wsl_codex_home_output(output).as_deref(),
+            Some(std::path::Path::new("/var/lib/codex"))
         );
     }
 

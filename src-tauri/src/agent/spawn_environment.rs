@@ -1,7 +1,8 @@
 //! OS-axis seam — wraps a provider's `SpawnRecipe` in the right shell for the
 //! runtime environment.
 //!
-//! - WSL (regardless of host): `wsl.exe --cd <path> -- <binary> <args...>`
+//! - WSL on Windows: `wsl.exe -d <distro> --cd <path> --exec sh -lc ...`
+//! - WSL on Linux: direct invocation
 //! - macOS, `sandbox` on: `sandbox-exec -f <profile.sb> <binary> <args...>`
 //!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
 //! - macOS, `sandbox` off: direct invocation
@@ -24,14 +25,7 @@ use portable_pty::CommandBuilder;
 /// Always pair this with [`format_powershell_command`] to keep prefill text
 /// inside a single-quoted string literal.
 fn encode_for_powershell(cmd: &str) -> String {
-    // PowerShell -EncodedCommand expects Base64 of raw UTF-16LE bytes, no BOM.
-    // A BOM gets decoded as a leading U+FEFF/U+FFFE code unit and breaks parsing.
-    let mut le_bytes = Vec::with_capacity(cmd.len() * 2);
-    for c in cmd.encode_utf16() {
-        le_bytes.extend_from_slice(&c.to_le_bytes());
-    }
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(&le_bytes)
+    crate::env::encode_powershell(cmd)
 }
 
 /// Quote a single PowerShell argument as a single-quoted string literal.
@@ -39,7 +33,7 @@ fn encode_for_powershell(cmd: &str) -> String {
 /// (newlines, backticks, brackets, `$`, etc.) is preserved verbatim because
 /// single-quoted PowerShell strings perform no interpolation or escapes.
 fn ps_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    crate::env::powershell_literal(s)
 }
 
 /// Build a PowerShell script that invokes `binary` with `args`, with every
@@ -68,13 +62,33 @@ pub fn wrap(
 ) -> CommandBuilder {
     recipe.base_args.extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
-    let mut cmd = if env_type == EnvType::Wsl {
+    let mut cmd = if env_type == EnvType::WindowsInterop {
+        let script = if recipe.windows_shell == WindowsShell::Cmd {
+            let mut args = vec!["/d".into(), "/c".into(), "pushd".into(), spawn_path.into(), "&&".into(), executable.into()];
+            args.extend(recipe.base_args.clone());
+            format_powershell_command("cmd.exe", &args)
+        } else {
+            format!("Set-Location -LiteralPath {}; {}", ps_single_quote(spawn_path), format_powershell_command(executable, &recipe.base_args))
+        };
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encode_for_powershell(&format!("{script}; exit $LASTEXITCODE"))]);
+        if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") { command.env("BUILDMESH_WSL_HOST", distro); }
+        command
+    } else if env_type == EnvType::Wsl && !cfg!(windows) {
+        let mut c = CommandBuilder::new(executable);
+        c.args(recipe.base_args);
+        c
+    } else if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
-        if let Some(distro) = wsl_distro {
+        let default_distro = crate::env::get_default_wsl_distro();
+        if let Some(distro) = wsl_distro.or(default_distro.as_deref()) {
             c.args(["-d", distro]);
         }
-        c.args(["--cd", spawn_path, "--", executable]);
+        // Use the same login environment as discovery. Positional parameters
+        // preserve arbitrary prompts without evaluating them as shell code.
+        c.args(["--cd", spawn_path, "--exec", "sh", "-lc",
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"", "buildmesh", executable]);
         c.args(recipe.base_args);
         c
     } else if cfg!(target_os = "macos") {
@@ -149,7 +163,13 @@ pub fn wrap(
                     executable
                 );
                 let mut c = CommandBuilder::new("cmd.exe");
-                c.args(["/c", executable]);
+                if spawn_path.starts_with("\\\\") || spawn_path.starts_with("//") {
+                    // cmd cannot use a UNC current directory. Its own pushd
+                    // maps the share for the lifetime of this shell.
+                    c.args(["/d", "/c", "pushd", spawn_path, "&&", executable]);
+                } else {
+                    c.args(["/c", executable]);
+                }
                 c.args(recipe.base_args);
                 c
             }
@@ -162,7 +182,14 @@ pub fn wrap(
         }
     };
 
-    cmd.cwd(spawn_path);
+    if (cfg!(windows) && env_type == EnvType::Wsl) || env_type == EnvType::WindowsInterop {
+        cmd.cwd(crate::env::to_host_path(spawn_path));
+    } else {
+        cmd.cwd(spawn_path);
+    }
+    if crate::env::is_wsl_host() && env_type != EnvType::WindowsInterop {
+        if let Some(path) = crate::agent::detection::native_wsl_path() { cmd.env("PATH", path); }
+    }
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::current_http_port().to_string());
     // Issue #1366 round-2 fix: the runtime hook token is minted
@@ -193,37 +220,41 @@ pub(crate) fn apply_wsl_env(
     command_variables: &[&str],
     inherited_variables: &[&str],
 ) {
-    if env_type != EnvType::Wsl {
+    if !matches!(env_type, EnvType::Wsl | EnvType::WindowsInterop) {
         return;
     }
+    let direction = if env_type == EnvType::WindowsInterop { "/w" } else { "/u" };
     let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
     // `wrap` installs these callback values on the outer `wsl.exe` command.
     // They must also be listed in WSLENV or the guest hook process cannot see
     // the port/session that identifies its attention callback (issue #1366).
     //
-    // Note: BUILDMESH_HOOK_TOKEN is intentionally NOT bridged here.
-    // The Grok adapter hooks live in `~/.grok/hooks/` under
-    // USERPROFILE (Windows host path) — WSL Grok looks under
-    // /home/<user>/.grok/hooks/, which the host cannot reach. So the
-    // token plumbing into WSL would be misleading: a WSL-resident
-    // agent cannot reach the file it would gate, and a
-    // Windows-resident agent doesn't need a guest-bridged token.
-    // Current scope: native Windows Grok only; project-trust path
-    // (interactive `/hooks-trust`) is the AFK-friendly follow-up.
     for key in ["BUILDMESH_PORT", "BUILDMESH_SESSION_ID"] {
-        append_to_wslenv(&mut wslenv, key, "/u");
+        set_wslenv_direction(&mut wslenv, key, direction);
+    }
+    if cmd.get_env("BUILDMESH_HOOK_TOKEN").is_some() {
+        set_wslenv_direction(&mut wslenv, "BUILDMESH_HOOK_TOKEN", direction);
     }
     for key in command_variables {
-        append_to_wslenv(&mut wslenv, key, "/u");
+        set_wslenv_direction(&mut wslenv, key, direction);
     }
     for key in inherited_variables {
         if std::env::var_os(key).is_some() {
-            append_to_wslenv(&mut wslenv, key, "/u");
+            set_wslenv_direction(&mut wslenv, key, direction);
         }
     }
+    if env_type == EnvType::WindowsInterop { set_wslenv_direction(&mut wslenv, "BUILDMESH_WSL_HOST", direction); }
     if !wslenv.is_empty() {
         cmd.env("WSLENV", wslenv);
     }
+}
+
+fn set_wslenv_direction(wslenv: &mut String, key: &str, direction: &str) {
+    let flags = wslenv.split(':').find(|part| part.split('/').next() == Some(key))
+        .and_then(|entry| entry.split_once('/')).map(|(_, flags)| flags.replace(['u', 'w'], "")).unwrap_or_default();
+    let mut entries: Vec<_> = wslenv.split(':').filter(|entry| !entry.is_empty() && entry.split('/').next() != Some(key)).map(str::to_string).collect();
+    entries.push(format!("{key}/{flags}{}", direction.trim_start_matches('/')));
+    *wslenv = entries.join(":");
 }
 
 /// Append a WSLENV entry by base name, preserving any existing suffix flags.
@@ -251,6 +282,113 @@ mod tests {
     use base64::Engine;
 
     #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires WSL with Windows interop enabled"]
+    fn live_wsl_host_launches_windows_harnesses() {
+        use crate::agent::provider::{SpawnRecipe, WindowsShell};
+        use crate::models::EnvType;
+        assert!(crate::env::is_wsl_host());
+        let windows_temp = crate::env::windows_cli_home("AppData/Local/Temp").unwrap();
+        let script_dir = tempfile::tempdir_in(&windows_temp).unwrap();
+        let script = script_dir.path().join("probe script.cmd");
+        std::fs::write(&script, "@echo off\r\necho %BUILDMESH_SESSION_ID%> probe.txt\r\n").unwrap();
+        for root in [std::path::Path::new("/tmp"), windows_temp.as_path()] {
+            let directory = tempfile::Builder::new().prefix("buildmesh reverse ").tempdir_in(root).unwrap();
+            let spawn_path = crate::env::windows_path_from_wsl(directory.path().to_str().unwrap());
+            for shell in [WindowsShell::PowerShell, WindowsShell::Cmd] {
+                let (binary, args) = if shell == WindowsShell::Cmd {
+                    (crate::env::windows_path_from_wsl(script.to_str().unwrap()), vec![])
+                } else {
+                    ("powershell.exe".to_string(), vec!["-NoProfile".into(), "-EncodedCommand".into(),
+                        encode_for_powershell("[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)")])
+                };
+                let recipe = SpawnRecipe { binary: "probe", base_args: args, trailing_args: vec![], windows_shell: shell };
+                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false);
+                apply_wsl_env(&mut command, EnvType::WindowsInterop, &[], &[]);
+                let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+                let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+                use std::io::{Read, Write};
+                let mut reader = pair.master.try_clone_reader().unwrap();
+                let mut writer = pair.master.take_writer().unwrap();
+                drop(pair.slave);
+                let drain = std::thread::spawn(move || {
+                    let mut buffer = [0; 4096];
+                    let mut output = Vec::new();
+                    while let Ok(count) = reader.read(&mut buffer) {
+                        if count == 0 { break; }
+                        output.extend_from_slice(&buffer[..count]);
+                        if output.ends_with(b"\x1b[6n") { writer.write_all(b"\x1b[1;1R").unwrap(); }
+                    }
+                    output
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let status = loop {
+                    if let Some(status) = child.try_wait().unwrap() { break status; }
+                    if std::time::Instant::now() >= deadline { child.kill().unwrap(); panic!("Windows PTY timed out: {shell:?} {spawn_path}"); }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                assert!(status.success(), "{shell:?}: {spawn_path}: {}", String::from_utf8_lossy(&drain.join().unwrap()));
+                let result = directory.path().join("probe.txt");
+                assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "8125");
+                std::fs::remove_file(result).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn wslenv_reverses_direction_preserving_path_flags() {
+        let mut value = "TOKEN/u:CODEX_HOME/pu:OTHER/l".to_string();
+        super::set_wslenv_direction(&mut value, "TOKEN", "w");
+        super::set_wslenv_direction(&mut value, "CODEX_HOME", "w");
+        assert_eq!(value, "OTHER/l:TOKEN/w:CODEX_HOME/pw");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires an installed default WSL distribution"]
+    fn live_wsl_pty_preserves_cwd_environment_and_literal_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
+        crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Wsl);
+        let payload = "spaces 'quotes' \"double\" $HOME `literal`\nsecond line";
+        let recipe = crate::agent::provider::SpawnRecipe {
+            binary: "sh",
+            base_args: vec!["-c".into(), "printf '%s\\n' \"$PWD\" \"$BUILDMESH_SESSION_ID\" \"$1\" > probe.txt".into(), "probe".into(), payload.into()],
+            trailing_args: vec![], windows_shell: crate::agent::provider::WindowsShell::Direct,
+        };
+        let mut command = super::wrap(recipe, resolved.env_type, None, None, &resolved.spawn_path, 8123, false);
+        apply_wsl_env(&mut command, resolved.env_type, &[], &[]);
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(directory.path().join("probe.txt")).unwrap(),
+            format!("{}\n8123\n{payload}\n", resolved.spawn_path));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires an installed default WSL distribution"]
+    fn live_wsl_directory_runs_windows_cmd_harness() {
+        let home = crate::env::wsl_home().unwrap();
+        let directory = tempfile::Builder::new().prefix("buildmesh-native-")
+            .tempdir_in(crate::env::to_host_path(&home.to_string_lossy())).unwrap();
+        let script_dir = tempfile::tempdir().unwrap();
+        let script = script_dir.path().join("native probe.cmd");
+        std::fs::write(&script, "@echo off\r\necho native-in-guest> probe.txt\r\n").unwrap();
+        let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
+        crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Windows);
+        let recipe = crate::agent::provider::SpawnRecipe {
+            binary: "probe", base_args: vec![], trailing_args: vec![],
+            windows_shell: crate::agent::provider::WindowsShell::Cmd,
+        };
+        let command = super::wrap(recipe, resolved.env_type, None, script.to_str(), &resolved.spawn_path, 8124, false);
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(directory.path().join("probe.txt")).unwrap().trim(), "native-in-guest");
+    }
+
+    #[test]
     fn apply_wsl_env_carries_attention_callback_variables() {
         let mut command = portable_pty::CommandBuilder::new("wsl.exe");
         apply_wsl_env(&mut command, crate::models::EnvType::Wsl, &[], &[]);
@@ -265,17 +403,10 @@ mod tests {
         assert!(wslenv
             .split(':')
             .any(|entry| entry.split('/').next() == Some("BUILDMESH_SESSION_ID")));
-        // Issue #1366 (review fix 2.4): BUILDMESH_HOOK_TOKEN is
-        // NOT bridged. WSL Grok can't reach the host's USERPROFILE
-        // hook dir, so token plumbing into WSL was misleading.
-        // Native-Windows Grok is the only supported integration.
-        assert!(
-            !wslenv
-                .split(':')
-                .any(|entry| entry.split('/').next() == Some("BUILDMESH_HOOK_TOKEN")),
-            "BUILDMESH_HOOK_TOKEN must NOT be in WSLENV — host-\
-             side hook file isn't reachable from a WSL guest"
-        );
+        command.env("BUILDMESH_HOOK_TOKEN", "test-token");
+        apply_wsl_env(&mut command, crate::models::EnvType::Wsl, &[], &[]);
+        assert!(command.get_env("WSLENV").unwrap().to_string_lossy().split(':')
+            .any(|entry| entry.split('/').next() == Some("BUILDMESH_HOOK_TOKEN")));
     }
 
     #[test]

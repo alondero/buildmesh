@@ -30,6 +30,7 @@ fn harness_profiles_round_trips_a_stored_user_profile() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -45,6 +46,7 @@ fn harness_profiles_user_overrides_default_by_id() {
             id: "terminal".to_string(),
             name: "Shell".to_string(),
             harness: "terminal".to_string(),
+            runtime: None, wsl_distro: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -61,6 +63,7 @@ fn harness_profiles_new_id_appends() {
             id: "custom".to_string(),
             name: "Custom".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -85,6 +88,7 @@ fn resolve_harness_provider_uses_profile_harness_field() {
             id: "deepseek-via-claude".to_string(),
             name: "DeepSeek (via Claude)".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         });
         super::super::storage::save(prefs).unwrap();
         assert!(matches!(
@@ -110,6 +114,7 @@ fn merge_detected_profiles_appends_new_and_reports_count() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         }])
         .unwrap();
         assert_eq!(added, 1);
@@ -125,12 +130,14 @@ fn merge_detected_profiles_is_idempotent() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         }])
         .unwrap();
         let added = merge_detected_profiles(vec![HarnessProfile {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         }])
         .unwrap();
         assert_eq!(added, 0);
@@ -146,6 +153,7 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
             id: "claude".to_string(),
             name: "Renamed".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         });
         super::super::storage::save(prefs).unwrap();
         // Detection sees the default name.
@@ -153,6 +161,7 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
+            runtime: None, wsl_distro: None,
         }])
         .unwrap();
         let profiles = harness_profiles();
@@ -236,4 +245,24 @@ fn is_known_harness_id_rejects_unknown() {
     assert!(!is_known_harness_id("not-a-harness"));
     assert!(!is_known_harness_id(""));
     assert!(!is_known_harness_id("   "));
+}
+
+#[test]
+fn runtime_profile_round_trips_and_resolves_composite_and_canonical_ids() {
+    with_temp_dir(|_| {
+        let mut prefs = AppPreferences::default();
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "muse-wsl-test".into(), name: "Muse (WSL: Ubuntu)".into(),
+            harness: "muse".into(), runtime: Some(crate::models::EnvType::Wsl),
+            wsl_distro: Some("Ubuntu".into()),
+        });
+        super::super::storage::save(prefs).unwrap();
+        for id in ["muse-wsl-test", "muse-wsl-test:account"] {
+            let profile = crate::preferences::resolved_harness_profile(id).unwrap();
+            assert_eq!(profile.runtime, Some(crate::models::EnvType::Wsl));
+            assert_eq!(profile.wsl_distro.as_deref(), Some("Ubuntu"));
+        }
+        assert_eq!(crate::preferences::harness_runtime("muse"), if cfg!(windows) { Some(crate::models::EnvType::Wsl) } else { None });
+        assert_eq!(crate::preferences::harness_runtime("terminal"), None);
+    });
 }

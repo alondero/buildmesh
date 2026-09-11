@@ -107,6 +107,9 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 /// (cross-compile safe — the `cfg!` is the *target* triple) so a
 /// macOS or Linux build never emits cmd syntax.
 fn hook_command(env_type: EnvType) -> String {
+    if env_type == EnvType::WindowsInterop {
+        if let Some(command) = crate::env::windows_attention_command(None) { return command; }
+    }
     if cfg!(target_os = "windows") && env_type == EnvType::Windows {
         "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
             .to_string()
@@ -162,6 +165,8 @@ fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
         .get("command")
         .and_then(|v| v.as_str())
         .is_some_and(|command| {
+            let decoded = crate::env::decode_powershell_command(command);
+            let command = decoded.as_deref().unwrap_or(command);
             command.contains(BUILDMESH_HOOK_MARKER)
                 && command.contains("BUILDMESH_PORT")
                 && command.contains("BUILDMESH_SESSION_ID")
@@ -706,6 +711,20 @@ mod tests {
     /// existing entry with the marker substring is updated rather
     /// than duplicated.
     #[test]
+    fn encoded_windows_callback_is_replaced_on_repeat_provision() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        let callback = |value| format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+            crate::env::encode_powershell(&format!("echo '/api/attention/' $env:BUILDMESH_PORT $env:BUILDMESH_SESSION_ID '{value}'")));
+        ensure_hooks_json(&path, &callback("old")).unwrap();
+        ensure_hooks_json(&path, &callback("new")).unwrap();
+        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let stop = hooks["hooks"]["stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0]["command"], callback("new"));
+    }
+
+    #[test]
     fn inject_dedupes_existing_buildmesh_stop_entry() {
         let temp = TempDir::new().unwrap();
         let cursor_dir = temp.path().join(".cursor");
@@ -744,7 +763,7 @@ mod tests {
             "stale body must be replaced, not preserved: {cmd}"
         );
         assert!(
-            cmd.contains("%BUILDMESH_PORT%"),
+            cmd.contains(if cfg!(windows) { "%BUILDMESH_PORT%" } else { "$BUILDMESH_PORT" }),
             "replaced body must use the live Windows env-var syntax: {cmd}"
         );
     }

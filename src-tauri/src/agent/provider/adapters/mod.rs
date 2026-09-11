@@ -27,6 +27,7 @@ pub mod freebuff;
 pub mod grok;
 pub mod kimi;
 pub mod mcode;
+pub mod muse;
 pub mod opencode;
 pub mod terminal;
 
@@ -40,6 +41,7 @@ pub use freebuff::FREEBUFF;
 pub use grok::GROK;
 pub use kimi::KIMI;
 pub use mcode::MCODE;
+pub use muse::MUSE;
 pub use opencode::OPENCODE;
 pub use terminal::TERMINAL;
 
