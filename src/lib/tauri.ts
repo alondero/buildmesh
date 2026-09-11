@@ -55,6 +55,7 @@ import type { SpawnAgentRequest } from '../types/generated/SpawnAgentRequest';
 import type { UsageWindow } from '../types/generated/UsageWindow';
 import type { UsageAmount } from '../types/generated/UsageAmount';
 import type { UsageMeter } from '../types/generated/UsageMeter';
+import type { ObservedMuseSessionTelemetry } from '../types/generated/ObservedMuseSessionTelemetry';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
 import {
@@ -1290,6 +1291,14 @@ export const getMuseCodeSubscriptionTier = () =>
 
 export const setMuseCodeSubscriptionTier = (tier: MuseCodeTier | null) =>
   _invoke('set_muse_code_subscription_tier', { tier });
+
+/** Observed MSP session telemetry for one Muse Agent Node (issue #1680).
+ *  This is **not** a Usage Meter — token counts are local session facts,
+ *  never remaining account quota. `null` when the node has no observations. */
+export type { ObservedMuseSessionTelemetry };
+export const MUSE_SESSION_TELEMETRY_EVENT = 'muse-session-telemetry';
+export const getMuseSessionTelemetry = (nodeId: number) =>
+  _invoke<ObservedMuseSessionTelemetry | null>('get_muse_session_telemetry', { nodeId });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //

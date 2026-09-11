@@ -35,6 +35,8 @@ import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
 import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone } from '../../lib/autopilotNodePresentation';
 import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
+import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
 interface GridNodeHeaderProps {
   /// Issue #1384 — pass the id only; the header subscribes to
@@ -109,6 +111,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const gitPath = node ? getNodeGitPath(node) : null;
   const { summary } = useGitSummary(gitPath);
   const { pr: openPr } = useOpenPr(nodeId, gitPath);
+  const museTelemetry = useMuseSessionTelemetry(nodeId, node?.provider ?? '');
   if (!node || !titleNode) return null;
 
   const mesh = meshesById.get(titleNode.mesh_id);
@@ -199,6 +202,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
               <span className={summary.modified ? 'text-accent-amber' : 'text-text-muted'}>~{summary.modified}</span>{' '}
               <span className={summary.deleted ? 'text-accent-red' : 'text-text-muted'}>-{summary.deleted}</span>
             </div>}
+            {museTelemetry && <ObservedSessionTelemetry telemetry={museTelemetry} />}
           </>} />
         <button type="button" onClick={handleToggleSolo} aria-label={isSingleMode ? 'Restore grid layout' : 'Maximize agent node'}
           title={`${isSingleMode ? 'Restore grid' : 'Maximize'} (${toggleShortcutHint})`}

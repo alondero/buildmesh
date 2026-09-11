@@ -119,6 +119,13 @@ The `enrichment` field is **always present and always tagged** —
 degrade-and-flag, never a silent omission (ADR-0008 §3). A Coordinator can
 therefore always tell *"the node is quiet"* from *"the rich layer is down"*.
 
+Muse nodes may also include `observed_session_telemetry` when the supervisor
+has ingested MSP `session/tokenUsage` / `session/contextUsage` events. The
+object is labelled `kind: "observed_session_telemetry"` and is omitted when
+there are no observations. It is local session telemetry — not remaining
+account quota, reset time, or spend — and must not be rendered as a Usage
+Meter.
+
 ### `GET /nodes/{id}/log?tail=N` — drill into one node
 
 Returns the last `N` raw transcript turns for one node (assistant text + tool

@@ -21,6 +21,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::agent::provider::muse::telemetry::ObservedMuseSessionTelemetry;
 use crate::models::{AgentNode, SessionStatus};
 use crate::services::transcript_reader::{TranscriptTail, UnavailableReason};
 
@@ -53,6 +54,11 @@ pub struct NodeDigest {
     /// or an explicit `unavailable` reason. Never silently absent — a busy node
     /// must never read as quiet.
     pub enrichment: Enrichment,
+    /// Observed MSP session telemetry for Muse nodes (issue #1680). Absent
+    /// when this node has no observations. This is **not** a Usage Meter:
+    /// token counts are local session facts, never remaining account quota.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_session_telemetry: Option<ObservedMuseSessionTelemetry>,
 }
 
 /// The transcript-derived rich layer of a digest. Serializes to a
@@ -160,6 +166,7 @@ pub fn spine(
         enrichment: Enrichment::Unavailable {
             reason: EnrichmentUnavailable::Unsupported,
         },
+        observed_session_telemetry: None,
     }
 }
 
@@ -252,6 +259,10 @@ mod tests {
         }
         assert_eq!(json["needs_feedback"], serde_json::json!(true));
         assert_eq!(json["waiting_since"], serde_json::json!("2026-06-14T10:00:00Z"));
+        assert!(
+            json.get("observed_session_telemetry").is_none(),
+            "absent Muse observations must not serialize a telemetry object"
+        );
     }
 
     // --- Enrichment layering (issue #317): the four degrade-and-flag paths ---
@@ -375,5 +386,46 @@ mod tests {
         .unwrap();
         assert_eq!(degraded["status"], "unavailable");
         assert_eq!(degraded["reason"], "unsupported");
+    }
+
+    #[test]
+    fn muse_observed_telemetry_is_a_digest_layer_not_quota() {
+        use crate::agent::provider::muse::telemetry::{
+            ObservedCumulativeUsage, ObservedMuseSessionTelemetry, ObservedTelemetryKind,
+        };
+
+        let mut digest = layered(
+            &node(SessionStatus::Running, Provider::Muse),
+            "core",
+            Utc::now(),
+            None,
+        );
+        assert!(digest.observed_session_telemetry.is_none());
+
+        digest.observed_session_telemetry = Some(ObservedMuseSessionTelemetry {
+            kind: ObservedTelemetryKind::ObservedSessionTelemetry,
+            node_id: 7,
+            session_id: "sess-aaaa-1111".into(),
+            model_id: Some("muse-spark-1.3-contributor".into()),
+            last_turn: None,
+            cumulative: ObservedCumulativeUsage {
+                prompt_tokens: 45,
+                output_tokens: 25,
+                total_tokens: 70,
+            },
+            context: None,
+        });
+
+        let json: serde_json::Value = serde_json::to_value(&digest).unwrap();
+        assert_eq!(
+            json["observed_session_telemetry"]["kind"],
+            "observed_session_telemetry"
+        );
+        assert_eq!(json["observed_session_telemetry"]["cumulative"]["total_tokens"], 70);
+        assert!(json["observed_session_telemetry"].get("remaining").is_none());
+        assert!(json["observed_session_telemetry"].get("resets_at").is_none());
+        assert!(json["windows"].is_null() || json.get("windows").is_none());
+        assert_eq!(json["enrichment"]["status"], "unavailable");
+        assert_eq!(json["enrichment"]["reason"], "unsupported");
     }
 }

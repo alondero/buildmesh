@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"session/contextUsage","emittedAtMs":1000,"params":{"sessionId":"sess-nolimit-0001","viewCursor":"c0200","sourceRange":{"first":1,"last":1,"stream":"s"},"usedTokens":4096,"pressure":"normal"}}

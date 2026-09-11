@@ -30,7 +30,10 @@ pub fn list_nodes_json() -> String {
                 .iter()
                 .map(|(node, mesh, changed)| {
                     let tail = enrichment::digest_enrichment(node);
-                    node_digest::layered(node, mesh, *changed, tail.as_ref())
+                    let mut digest = node_digest::layered(node, mesh, *changed, tail.as_ref());
+                    digest.observed_session_telemetry =
+                        enrichment::observed_session_telemetry(node);
+                    digest
                 })
                 .collect();
             serde_json::to_string(&digests).unwrap_or_else(|_| "[]".to_string())

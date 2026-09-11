@@ -9,6 +9,7 @@
 //! (it used to be encoded two ways in the route — `Option<TranscriptTail>` for
 //! the digest, a `TranscriptTail::Unavailable{Unsupported}` for the log).
 
+use crate::agent::provider::muse::telemetry::{self, ObservedMuseSessionTelemetry};
 use crate::env;
 use crate::models::AgentNode;
 use crate::secret_scrubber::SecretScrubber;
@@ -86,6 +87,12 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
         }
         other => other,
     }
+}
+
+/// Observed Muse MSP session telemetry for a Node Digest. Non-Muse
+/// harnesses return `None` without touching the telemetry store.
+pub fn observed_session_telemetry(node: &AgentNode) -> Option<ObservedMuseSessionTelemetry> {
+    telemetry::snapshot_if_muse(&node.provider, node.id)
 }
 
 /// The enrichment a Node Digest layers on, in the shape `node_digest::layered`
@@ -203,6 +210,12 @@ mod tests {
     /// digest flags it distinctly. Uses `Provider::Freebuff` for the same
     /// reason as the `unsupported_provider_degrades_without_disk` test:
     /// OpenCode flipped to true in #1296.
+    #[test]
+    fn observed_session_telemetry_is_none_for_non_muse_nodes() {
+        assert!(observed_session_telemetry(&node(Provider::Anthropic, None, true)).is_none());
+        assert!(observed_session_telemetry(&node(Provider::Muse, None, true)).is_none());
+    }
+
     #[test]
     fn digest_enrichment_maps_unsupported_to_none_but_keeps_no_session() {
         assert!(digest_enrichment(&node(Provider::Freebuff, None, true)).is_none());
