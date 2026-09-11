@@ -82,6 +82,12 @@ describe('nodeRoleLabel', () => {
   it('passes through an unknown node id rather than inventing a label', () => {
     expect(nodeRoleLabel('mystery_step', undefined)).toBe('mystery_step');
   });
+
+  it('falls back to the raw discriminator for a kind it does not know', () => {
+    // Wire drift / an extension kind must not throw out of the render tree.
+    expect(nodeRoleLabel('future', { type: 'future_kind' } as unknown as CircuitNodeKind))
+      .toBe('future_kind');
+  });
 });
 
 describe('stepVerdict', () => {
@@ -154,20 +160,35 @@ describe('stepPassLabel', () => {
 
 describe('reviewReport', () => {
   const verdictKind: CircuitNodeKind = { type: 'review_verdict', target_node_id: 'reviewer' };
+  const ctx = (over: Record<string, string> = {}) => ({
+    'node.verdict.review_verdict': 'approved',
+    'node.verdict.review_verdict_attempt': '1',
+    'node.verdict.evaluated_output': 'Two findings remain.',
+    ...over,
+  });
 
-  it('returns the reviewed output for a review gate', () => {
-    const context = { 'node.verdict.evaluated_output': 'Two findings remain.' };
-    expect(reviewReport({ node_id: 'verdict' }, verdictKind, context)).toBe('Two findings remain.');
+  it('returns the reviewed output for the current attempt', () => {
+    expect(reviewReport({ node_id: 'verdict', attempt: 1 }, verdictKind, ctx()))
+      .toBe('Two findings remain.');
+  });
+
+  it('never leaks a previous pass report into the current pass', () => {
+    // Pass 2 has started but not evaluated output yet; the context still holds
+    // pass 1's report. Attribution must follow the attempt, not the key.
+    expect(reviewReport({ node_id: 'verdict', attempt: 2 }, verdictKind, ctx())).toBeNull();
+    expect(reviewReport({ node_id: 'verdict', attempt: 1 }, verdictKind, ctx({
+      'node.verdict.review_verdict_attempt': '2',
+    }))).toBeNull();
   });
 
   it('returns null for a non-review step or an empty/pruned report', () => {
-    expect(reviewReport({ node_id: 'verdict' }, spawn('impl'), {
-      'node.verdict.evaluated_output': 'x',
-    })).toBeNull();
-    expect(reviewReport({ node_id: 'verdict' }, verdictKind, {})).toBeNull();
-    expect(reviewReport({ node_id: 'verdict' }, verdictKind, {
-      'node.verdict.evaluated_output': '   ',
-    })).toBeNull();
+    expect(reviewReport({ node_id: 'verdict', attempt: 1 }, spawn('impl'), ctx())).toBeNull();
+    expect(reviewReport({ node_id: 'verdict', attempt: 1 }, verdictKind, {})).toBeNull();
+    expect(reviewReport(
+      { node_id: 'verdict', attempt: 1 },
+      verdictKind,
+      ctx({ 'node.verdict.evaluated_output': '   ' })
+    )).toBeNull();
   });
 });
 
@@ -204,11 +225,11 @@ describe('linkedAgentNodeId', () => {
     )).toBe(901);
   });
 
-  it('points at the last agent a finished run drove', () => {
+  it('points at the last agent a finished run drove, not the first', () => {
     expect(linkedAgentNodeId(
       { source_agent_node_id: null },
-      [s(900, 'completed'), s(null, 'completed')]
-    )).toBe(900);
+      [s(900, 'completed'), s(901, 'completed'), s(null, 'completed')]
+    )).toBe(901);
   });
 
   it('returns null when no step bound an agent', () => {

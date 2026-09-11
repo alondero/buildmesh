@@ -85,7 +85,9 @@ export function nodeRoleLabel(nodeId: string, kind: CircuitNodeKind | undefined)
   }
   // `specFor` owns the palette label for every kind; the table above just
   // overrides the few whose catalogue name is not the clearest at a glance.
-  return ROLE_LABELS[kind.type] ?? specFor(kind.type).label;
+  // Guarded: a kind the frontend does not know (wire drift / extension) must
+  // read as its raw discriminator, never crash the Probe render tree.
+  return ROLE_LABELS[kind.type] ?? specFor(kind.type)?.label ?? kind.type;
 }
 
 export type VerdictTone = 'success' | 'warning' | 'error';
@@ -177,16 +179,22 @@ export function stepPassLabel(
 
 /**
  * The reviewer's report for a `review_verdict` step, when the run context
- * still carries it. `null` when the step is not a review gate, the key is
- * absent, or retention has emptied the context — the card then offers no
- * report rather than an empty disclosure.
+ * still carries it AND it belongs to this step's current attempt.
+ *
+ * Retries reuse the node id, so a report that has not been attempt-matched
+ * would leak the previous pass's findings under the new pass. `null` when the
+ * step is not a review gate, the context was pruned, or the recorded attempt
+ * is not the step's — the card then offers no report rather than a stale one.
  */
 export function reviewReport(
-  step: Pick<AutopilotCircuitRunStep, 'node_id'>,
+  step: Pick<AutopilotCircuitRunStep, 'node_id' | 'attempt'>,
   kind: CircuitNodeKind | undefined,
   context: Record<string, string>
 ): string | null {
   if (kind?.type !== 'review_verdict') return null;
+  // `evaluated_output` and `review_verdict_attempt` are written together by
+  // the stepper, so the attempt key is the receipt for the report.
+  if (context[`node.${step.node_id}.review_verdict_attempt`] !== String(step.attempt)) return null;
   const report = context[`node.${step.node_id}.evaluated_output`];
   if (report === undefined || report.trim() === '') return null;
   return report;
@@ -230,8 +238,9 @@ export function stepSummary(
  *     borrowed, which is the relationship the user actually clicked from.
  *  2. the agent behind the run's current (running / blocked / queued) step —
  *     for issue-driven runs with no borrowed source, "who is working now".
- *  3. the first step that ever spawned an agent, so a finished run still
- *     points at the last node it drove.
+ *  3. the **last** step that bound an agent, so a finished run still points at
+ *     the node it drove most recently (the reviewer, not the original
+ *     implementer).
  *
  * `null` when the run never bound an agent (a pure notify/trigger circuit).
  */
@@ -246,5 +255,9 @@ export function linkedAgentNodeId(
       (step.status === 'running' || step.status === 'blocked' || isQueuedStepStatus(step.status))
   );
   if (active?.agent_node_id != null) return active.agent_node_id;
-  return steps.find((step) => step.agent_node_id !== null)?.agent_node_id ?? null;
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const id = steps[i].agent_node_id;
+    if (id !== null) return id;
+  }
+  return null;
 }

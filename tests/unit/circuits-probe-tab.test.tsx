@@ -1183,6 +1183,53 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(useUIStore.getState().pendingCircuitRunFocus).toBeNull();
   });
 
+  it('resolves a focus request issued before the tab mounts', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    // The production entry point: the kebab sets the focus and opens the tab
+    // in one action, so the request exists before CircuitsProbeTab mounts and
+    // before the first snapshot resolves. It must not be misreported as
+    // out-of-window and consumed while `rows` is still empty.
+    act(() => { useUIStore.getState().focusCircuitRun(11); });
+    render(<ProbePanel />);
+
+    const card = await screen.findByTestId('run-card-11');
+    expect(card.getAttribute('data-run-focused')).toBe('true');
+    expect(screen.getByTestId('run-toggle-11').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.queryByTestId('circuits-focus-notice')).toBeNull();
+  });
+
+  it('clears History filters so the linked run is guaranteed to render', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.change(screen.getByTestId('history-search-input'), { target: { value: 'no-match' } });
+    fireEvent.click(screen.getByTestId('history-attention-toggle'));
+    expect(screen.queryByTestId('run-card-11')).toBeNull();
+
+    act(() => { useUIStore.getState().focusCircuitRun(11); });
+
+    expect(await screen.findByTestId('run-card-11')).toBeTruthy();
+    expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('reports an unavailable agent node instead of a dead click', async () => {
+    mockBackend({
+      runs: [{
+        ...RUN_DONE,
+        run: { ...RUN_DONE.run, id: 31, state: 'running', source_agent_node_id: 404 },
+        steps: [],
+      }],
+    });
+    seedAgentNodes([]);
+    openProbeDestination('circuits');
+
+    const link = await screen.findByTestId('run-agent-31');
+    // No node in the store => no Open button to click.
+    expect(link.textContent).toContain('#404');
+    expect(screen.queryByTestId('run-agent-open-31')).toBeNull();
+  });
+
   it('opens live and failed runs, collapses completed runs, and honours a manual toggle', async () => {
     mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
     const user = userEvent.setup();
