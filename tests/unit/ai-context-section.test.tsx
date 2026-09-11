@@ -60,7 +60,7 @@ describe('AiContextSection', () => {
     mockBackend({ status: FULL_CLAUDE });
     render(<AiContextSection meshId={1} meshPath="/repo" isAuthenticated={true} />);
     expect(await screen.findByRole('button', { name: /make ai context portable/i })).toBeTruthy();
-    expect(screen.getByText(/will create, 3 skills/i)).toBeTruthy();
+    expect(screen.getByText(/will create or migrate, 3 skills/i)).toBeTruthy();
   });
 
   it('shows already-portable and no button when both mirrors exist', async () => {

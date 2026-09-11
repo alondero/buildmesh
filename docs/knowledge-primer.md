@@ -224,6 +224,10 @@ Harness installation and mesh filesystem are independent. `EnvType::Windows` ret
 Cross-runtime linked worktrees retain a host administrative backpointer and a relative forward `.git` link. They are locked against guest pruning because older Git treats foreign absolute backpointers as missing, and does not safely support relative backpointers without newer repository extensions. Buildmesh owns removal and already explicitly prunes locked entries. Prepare this metadata on the blocking pool. Windows process sandboxing cannot contain WSL agents; reject that combination. Shell hooks for a Windows host use Windows curl from WSL to reach host loopback even under NAT; Linux-hosted Windows callbacks explicitly invoke curl in the owning WSL distribution, avoiding collisions with Windows Buildmesh on localhost. Native Linux callbacks retain native curl. Grok's native HTTP callbacks require mirrored WSL networking.
 
 
+### AI context portability
+
+Portability PRs are built from committed `CLAUDE.md` and `.claude/skills/` objects into regular `AGENTS.md` and `.agents/skills/` entries. Git symlinks are unsuitable for a shared Windows/WSL checkout: `core.symlinks=false` materializes a directory link as a text file, and native skill scanners fail with `Not a directory`. Detection and PR generation inspect HEAD; exact legacy Buildmesh pointers are migration candidates, while independently authored context is preserved. Skill trees retain committed assets and executable modes; nested links and submodules are rejected. Copies are snapshots, so later canonical edits require updating the mirrors. This repository uses `npm run sync:ai-context` and an agent-test drift gate to enforce that maintenance rule.
+
 ### Agent Spawning on Windows
 Anthropic and Minimax use `cwrap` spawned via `cmd.exe /c` — **not** direct. Antigravity and OpenCode are spawned **directly** (no cwrap). See `src-tauri/src/commands/agent.rs`.
 

@@ -4,15 +4,10 @@
 //! Other agents Buildmesh can spawn — Codex, OpenCode, Antigravity — read the
 //! cross-tool `AGENTS.md` open standard and a shared `.agents/skills/` directory.
 //!
-//! This module detects the Claude context and opens a PR adding `AGENTS.md` and
-//! `.agents/skills` as git **symlinks** pointing back at the Claude files, so a
-//! single source of truth serves every provider.
-//!
-//! The symlinks are written directly into the git object database (a blob whose
-//! content is the link target, with filemode `120000`) and committed onto a fresh
-//! branch off `HEAD`. The working tree and current branch are left untouched, and
-//! no filesystem symlink is created — so this works on Windows regardless of the
-//! Developer-Mode/admin privilege normally required to create symlinks there.
+//! Portability PRs copy committed context into regular files and directories.
+//! Git symlinks become target-path files on Windows with core.symlinks=false.
+//! Existing Buildmesh links are migrated; independently authored mirrors are
+//! preserved. Object-database writes leave HEAD, index and worktree untouched.
 
 use crate::db;
 use crate::env::to_host_path;
@@ -62,7 +57,8 @@ fn gitignore_update_for_portability(
                 Ok(None)
             } else {
                 let existing = blob.content();
-                let mut new_content = Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
+                let mut new_content =
+                    Vec::with_capacity(existing.len() + ai_context_gitignore::BLOCK.len());
                 new_content.extend_from_slice(existing);
                 append_separator(&mut new_content);
                 new_content.extend_from_slice(ai_context_gitignore::BLOCK.as_bytes());
@@ -115,16 +111,16 @@ fn append_separator(buf: &mut Vec<u8>) {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "AiContextStatus.ts")]
 pub struct AiContextStatus {
-    /// `CLAUDE.md` exists at the repo root.
+    /// HEAD contains CLAUDE.md at the repo root.
     pub claude_md_exists: bool,
-    /// `AGENTS.md` already exists at the repo root.
+    /// HEAD has an AGENTS.md entry other than the legacy Claude pointer.
     pub agents_md_exists: bool,
-    /// `.claude/skills/` exists and is a directory.
+    /// HEAD contains the .claude/skills directory.
     pub skills_dir_exists: bool,
-    /// Number of skill directories inside `.claude/skills/`.
+    /// Number of committed skill directories inside .claude/skills/.
     #[ts(as = "i32")]
     pub skill_count: usize,
-    /// `.agents/skills` already exists.
+    /// HEAD has a skills mirror other than the legacy Claude pointer.
     pub agents_skills_exists: bool,
     /// Project's HEAD `.gitignore` already ignores the agent harness
     /// runtime files (issue #1401). When `false`, the portability commit
@@ -160,32 +156,42 @@ pub(crate) fn detect_ai_context_blocking(mesh_path: String) -> Result<AiContextS
     let host = to_host_path(&mesh_path);
     let root = Path::new(&host);
 
-    let skills_dir = root.join(".claude").join("skills");
-    let skill_count = if skills_dir.is_dir() {
-        std::fs::read_dir(&skills_dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .count()
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    // Read the `.gitignore` blob from HEAD's tree so the probe matches
-    // what the commit will operate on (issue #1401 review). Reading from
-    // the working tree would diverge from the commit whenever the user
-    // has uncommitted local `.gitignore` edits, leading to false ✓ in
-    // the UI followed by a merge-conflicting `.gitignore` change on the PR.
+    let repo = Repository::open(root).map_err(|e| e.to_string())?;
+    let tree = repo
+        .head()
+        .and_then(|h| h.peel_to_tree())
+        .map_err(|e| e.to_string())?;
+    let skills = tree
+        .get_path(Path::new(".claude/skills"))
+        .ok()
+        .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
+        .map(|entry| repo.find_tree(entry.id()))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let skill_count = skills
+        .as_ref()
+        .map(|tree| {
+            tree.iter()
+                .filter(|entry| entry.kind() == Some(git2::ObjectType::Tree))
+                .count()
+        })
+        .unwrap_or(0);
+    // Probe the same committed state the portability PR will use.
     let gitignore_has_agent_patterns = head_gitignore_has_agent_block(root);
 
     Ok(AiContextStatus {
-        claude_md_exists: root.join("CLAUDE.md").is_file(),
-        agents_md_exists: root.join("AGENTS.md").exists(),
-        skills_dir_exists: skills_dir.is_dir(),
+        claude_md_exists: tree
+            .get_name("CLAUDE.md")
+            .is_some_and(|entry| entry.kind() == Some(git2::ObjectType::Blob)),
+        agents_md_exists: !context_needs_copy(&repo, &tree, "AGENTS.md", "CLAUDE.md")?,
+        skills_dir_exists: skills.is_some(),
         skill_count,
-        agents_skills_exists: root.join(".agents").join("skills").exists(),
+        agents_skills_exists: !context_needs_copy(
+            &repo,
+            &tree,
+            ".agents/skills",
+            "../.claude/skills",
+        )?,
         gitignore_has_agent_patterns,
     })
 }
@@ -236,8 +242,6 @@ pub async fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, St
 fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let host_path = to_host_path(&mesh.path);
-    let root = Path::new(&host_path);
-
     let repo = Repository::open(&host_path).map_err(|e| format!("git error: {}", e))?;
 
     let ts = SystemTime::now()
@@ -246,7 +250,7 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
         .unwrap_or(0);
     let branch_name = format!("buildmesh/portable-ai-context-{}", ts);
 
-    let added = build_portability_commit(&repo, root, &branch_name)?;
+    let added = build_portability_commit(&repo, &branch_name)?;
     if added.is_empty() {
         return Err(
             "Nothing to port: AGENTS.md and .agents/skills already exist, \
@@ -267,12 +271,9 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
     push_builder
         .args(["push", "origin", &branch_name])
         .current_dir(&host_path);
-    let push_out = crate::process_util::run_command_with_timeout(
-        push_builder,
-        "git push",
-        PUSH_TIMEOUT,
-    )
-    .map_err(|e| format!("Failed to run git push: {}", e))?;
+    let push_out =
+        crate::process_util::run_command_with_timeout(push_builder, "git push", PUSH_TIMEOUT)
+            .map_err(|e| format!("Failed to run git push: {}", e))?;
     if !push_out.status.success() {
         return Err(format!(
             "git push failed: {}",
@@ -311,17 +312,47 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
         .map_err(|e| e.to_string())
 }
 
-/// Build a tree off `HEAD` adding the symlink entries that don't already exist,
-/// then commit it onto `refs/heads/<branch_name>` without touching the working
-/// tree or `HEAD`. Returns the list of paths added (empty if nothing to do).
-///
-/// Source presence is checked on the filesystem (what the user sees); existing
-/// mirrors are checked in the `HEAD` tree (what's committed).
-fn build_portability_commit(
+/// Only missing mirrors and exact legacy Buildmesh pointers may be replaced.
+/// Independently authored files and directories belong to the user.
+fn context_needs_copy(
     repo: &Repository,
-    root: &Path,
-    branch_name: &str,
-) -> Result<Vec<String>, String> {
+    tree: &git2::Tree<'_>,
+    path: &str,
+    legacy_target: &str,
+) -> Result<bool, String> {
+    match tree.get_path(Path::new(path)) {
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(true),
+        Err(e) => Err(e.to_string()),
+        Ok(entry) if entry.kind() == Some(git2::ObjectType::Blob) => {
+            let blob = repo.find_blob(entry.id()).map_err(|e| e.to_string())?;
+            Ok(blob.content() == legacy_target.as_bytes())
+        }
+        Ok(_) => Ok(false),
+    }
+}
+
+/// Reuse committed objects to preserve binary assets and executable bits, but
+/// reject nested links so a copied skills tree stays readable on Windows.
+fn require_regular_context(repo: &Repository, entry: &git2::TreeEntry<'_>) -> Result<(), String> {
+    match entry.filemode() {
+        0o100644 | 0o100755 => Ok(()),
+        0o040000 => {
+            let tree = repo.find_tree(entry.id()).map_err(|e| e.to_string())?;
+            for child in tree.iter() {
+                require_regular_context(repo, &child)?;
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "Cannot copy AI context entry '{}': commit regular files instead of symlinks or submodules",
+            entry.name().unwrap_or("<non-UTF8>")
+        )),
+    }
+}
+
+/// Build mirrors from HEAD's committed context. Return changed paths; leave
+/// the caller's HEAD, index, and working tree untouched.
+fn build_portability_commit(repo: &Repository, branch_name: &str) -> Result<Vec<String>, String> {
     let head_commit = repo
         .head()
         .and_then(|h| h.peel_to_commit())
@@ -331,49 +362,50 @@ fn build_portability_commit(
     let mut root_builder = repo
         .treebuilder(Some(&head_tree))
         .map_err(|e| e.to_string())?;
-    let link_mode: i32 = git2::FileMode::Link.into();
     let tree_mode: i32 = git2::FileMode::Tree.into();
-
-    let mut symlinks_added: Vec<String> = Vec::new();
     let mut files_added: Vec<String> = Vec::new();
 
-    // AGENTS.md -> CLAUDE.md (same directory, so the target is just "CLAUDE.md").
-    let agents_md_present = root_builder.get("AGENTS.md").map_err(|e| e.to_string())?.is_some();
-    if root.join("CLAUDE.md").is_file() && !agents_md_present {
-        let blob = repo.blob(b"CLAUDE.md").map_err(|e| e.to_string())?;
-        root_builder
-            .insert("AGENTS.md", blob, link_mode)
-            .map_err(|e| e.to_string())?;
-        symlinks_added.push("AGENTS.md".to_string());
+    if context_needs_copy(repo, &head_tree, "AGENTS.md", "CLAUDE.md")? {
+        if let Some(source) = head_tree.get_name("CLAUDE.md") {
+            require_regular_context(repo, &source)?;
+            if source.kind() != Some(git2::ObjectType::Blob) {
+                return Err("CLAUDE.md must be a committed regular file".into());
+            }
+            root_builder
+                .insert("AGENTS.md", source.id(), source.filemode())
+                .map_err(|e| e.to_string())?;
+            files_added.push("AGENTS.md".into());
+        }
     }
 
-    // .agents/skills -> .claude/skills. The symlink lives in `.agents/`, so its
-    // target relative to that directory is "../.claude/skills".
-    if root.join(".claude").join("skills").is_dir() {
-        // Re-use an existing `.agents` tree if the repo already has one.
-        let existing_agents_id = match root_builder.get(".agents").map_err(|e| e.to_string())? {
-            Some(e) if e.kind() == Some(git2::ObjectType::Tree) => Some(e.id()),
-            _ => None,
-        };
-        let existing_agents_tree = existing_agents_id
-            .map(|id| repo.find_tree(id))
-            .transpose()
-            .map_err(|e| e.to_string())?;
-
-        let mut agents_builder = repo
-            .treebuilder(existing_agents_tree.as_ref())
-            .map_err(|e| e.to_string())?;
-        let skills_present = agents_builder.get("skills").map_err(|e| e.to_string())?.is_some();
-        if !skills_present {
-            let blob = repo.blob(b"../.claude/skills").map_err(|e| e.to_string())?;
-            agents_builder
-                .insert("skills", blob, link_mode)
+    if context_needs_copy(repo, &head_tree, ".agents/skills", "../.claude/skills")? {
+        if let Ok(source) = head_tree.get_path(Path::new(".claude/skills")) {
+            require_regular_context(repo, &source)?;
+            if source.kind() != Some(git2::ObjectType::Tree) {
+                return Err(".claude/skills must be a committed directory".into());
+            }
+            let existing_agents = match head_tree.get_name(".agents") {
+                Some(entry) if entry.kind() == Some(git2::ObjectType::Tree) => {
+                    Some(repo.find_tree(entry.id()).map_err(|e| e.to_string())?)
+                }
+                Some(_) => {
+                    return Err(
+                        "Cannot replace existing .agents entry: expected a directory".into(),
+                    )
+                }
+                None => None,
+            };
+            let mut agents = repo
+                .treebuilder(existing_agents.as_ref())
                 .map_err(|e| e.to_string())?;
-            let agents_tree_oid = agents_builder.write().map_err(|e| e.to_string())?;
+            agents
+                .insert("skills", source.id(), tree_mode)
+                .map_err(|e| e.to_string())?;
+            let id = agents.write().map_err(|e| e.to_string())?;
             root_builder
-                .insert(".agents", agents_tree_oid, tree_mode)
+                .insert(".agents", id, tree_mode)
                 .map_err(|e| e.to_string())?;
-            symlinks_added.push(".agents/skills".to_string());
+            files_added.push(".agents/skills".into());
         }
     }
 
@@ -395,7 +427,7 @@ fn build_portability_commit(
         files_added.push(".gitignore".to_string());
     }
 
-    if symlinks_added.is_empty() && files_added.is_empty() {
+    if files_added.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -406,7 +438,7 @@ fn build_portability_commit(
         .or_else(|_| git2::Signature::now("buildmesh", "buildmesh@local"))
         .map_err(|e| e.to_string())?;
 
-    let commit_msg = format_commit_message(&symlinks_added, &files_added);
+    let commit_msg = format_commit_message(&files_added);
     let branch_ref = format!("refs/heads/{}", branch_name);
     repo.commit(
         Some(&branch_ref),
@@ -418,67 +450,30 @@ fn build_portability_commit(
     )
     .map_err(|e| format!("failed to create commit: {}", e))?;
 
-    // Combine symlinks + files for the caller — the PR body uses the same
-    // list to decide which bullets to render.
-    let mut added: Vec<String> = Vec::with_capacity(symlinks_added.len() + files_added.len());
-    added.extend(symlinks_added);
-    added.extend(files_added);
-    Ok(added)
+    Ok(files_added)
 }
 
-/// Compose a commit message that doesn't claim `.gitignore` is a git
-/// symlink (issue #1401 review). Symlinks (`AGENTS.md`, `.agents/skills`)
-/// are listed in their own phrase; regular-file updates (`.gitignore`)
-/// get their own. When only one category is present, only that category's
-/// phrase is rendered.
-fn format_commit_message(symlinks: &[String], files: &[String]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !symlinks.is_empty() {
-        parts.push(format!("Adds {} as git symlinks", symlinks.join(" and ")));
-    }
-    if !files.is_empty() {
-        parts.push(format!("updates {}", files.join(" and ")));
-    }
-    let summary = if parts.len() == 1 {
-        parts.remove(0)
-    } else {
-        parts.join(" and ")
-    };
+fn format_commit_message(files: &[String]) -> String {
     format!(
-        "chore: make AI context portable across providers\n\n\
-         {summary} so non-Claude agents read the same context."
+        "chore: make AI context portable across providers\n\nUpdates {} using regular files so Windows and Unix agents can read the context.",
+        files.join(" and ")
     )
 }
 
 fn pr_body(added: &[String]) -> String {
-    let bullets: String = added
+    let bullets = added
         .iter()
-        .map(|a| match a.as_str() {
-            "AGENTS.md" => {
-                "- `AGENTS.md` → `CLAUDE.md` (the cross-tool open standard read by Codex, OpenCode and Antigravity)"
-            }
-            ".agents/skills" => {
-                "- `.agents/skills` → `.claude/skills` (shared Agent Skills directory; Antigravity reads `.agents/skills` natively)"
-            }
-            ".gitignore" => {
-                "- `.gitignore` — append the agent-harness runtime ignore block (`.agents/hooks.json`, `.codex/`, `.cursor/cache/`, …) so ephemeral files written by Codex, Antigravity, OpenCode, Cursor and friends don't pollute `git status`. Tracked entries like `.agents/skills` remain untouched."
-            }
-            _ => "",
-        })
-        .filter(|s| !s.is_empty())
+        .map(|path| format!("- `{path}`"))
         .collect::<Vec<_>>()
         .join("\n");
-
     format!(
-        "Makes this project's AI agent context portable across providers.\n\n\
-         Buildmesh added the following so non-Claude agents (Codex, OpenCode, Antigravity) \
-         read the same context Claude Code uses:\n\n\
-         {bullets}\n\n\
-         ⚠️ `AGENTS.md` and `.agents/skills` are git **symlinks** (filemode `120000`). \
-         On **Windows without Developer Mode**, git materialises them as plain text files \
-         containing the target path rather than working symlinks. On macOS, Linux, or \
-         Windows with Developer Mode they resolve correctly.\n\n\
-         🤖 Generated with [Buildmesh]"
+        "Makes this project's committed AI context portable across Windows, WSL, Linux, and macOS.\n\n\
+         Updates:\n{bullets}\n\n\
+         Missing mirrors and legacy Buildmesh pointers are replaced with regular files and directories. \
+         Independently authored context is preserved. Skill assets and executable file modes are retained. \
+         The agent runtime ignore block is added to `.gitignore` when missing.\n\n\
+         These are snapshots of committed `CLAUDE.md` and `.claude/skills/`. When editing the canonical \
+         context, update and commit the corresponding mirrors too; copies do not follow later source edits automatically."
     )
 }
 
@@ -541,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn adds_both_symlinks_with_link_filemode() {
+    fn adds_regular_context_readable_without_symlink_checkout() {
         let tr = TempRepo::new();
         let repo = init_repo(
             tr.path(),
@@ -553,7 +548,7 @@ mod tests {
 
         let head_before = repo.head().unwrap().peel_to_commit().unwrap().id();
 
-        let mut added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let mut added = build_portability_commit(&repo, "test-branch").unwrap();
         // Order of `.gitignore` (new in #1401) is implementation-defined relative
         // to the symlinks — sort for a stable assertion.
         added.sort();
@@ -569,20 +564,29 @@ mod tests {
         let tree = branch_tree(&repo, "test-branch");
 
         let agents_md = tree.get_name("AGENTS.md").unwrap();
-        assert_eq!(agents_md.filemode(), 0o120000);
-        assert_eq!(repo.find_blob(agents_md.id()).unwrap().content(), b"CLAUDE.md");
+        assert_eq!(agents_md.filemode(), 0o100644);
+        assert_eq!(
+            repo.find_blob(agents_md.id()).unwrap().content(),
+            b"# context"
+        );
 
         let agents_dir = tree.get_name(".agents").unwrap();
         let agents_tree = repo.find_tree(agents_dir.id()).unwrap();
         let skills = agents_tree.get_name("skills").unwrap();
-        assert_eq!(skills.filemode(), 0o120000);
+        assert_eq!(skills.filemode(), 0o040000);
+        let entry = tree
+            .get_path(Path::new(".agents/skills/foo/SKILL.md"))
+            .unwrap();
         assert_eq!(
-            repo.find_blob(skills.id()).unwrap().content(),
-            b"../.claude/skills"
+            repo.find_blob(entry.id()).unwrap().content(),
+            b"---\nname: foo\n---\n"
         );
 
         // HEAD and working tree untouched.
-        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), head_before);
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_before
+        );
         assert!(!tr.path().join("AGENTS.md").exists());
         assert!(!tr.path().join(".agents").exists());
     }
@@ -594,13 +598,13 @@ mod tests {
             tr.path(),
             &[
                 ("CLAUDE.md", "# context"),
-                ("AGENTS.md", "CLAUDE.md"),
+                ("AGENTS.md", "# Independent context"),
                 (".claude/skills/foo/SKILL.md", "x"),
                 (".agents/skills/foo/SKILL.md", "x"),
             ],
         );
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         // The mirrors exist, but the repo has no `.gitignore` — the portability
         // commit still needs to create one (issue #1401). So `.gitignore` IS
         // expected here; just no symlinks.
@@ -616,17 +620,179 @@ mod tests {
             tr.path(),
             &[
                 ("CLAUDE.md", "# context"),
-                ("AGENTS.md", "CLAUDE.md"),
+                ("AGENTS.md", "# Independent context"),
                 (".claude/skills/foo/SKILL.md", "x"),
             ],
         );
 
-        let mut added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let mut added = build_portability_commit(&repo, "test-branch").unwrap();
         added.sort();
         assert_eq!(
             added,
             vec![".agents/skills".to_string(), ".gitignore".to_string()]
         );
+    }
+
+    #[test]
+    fn migrates_legacy_links_and_checks_out_readable_files_with_symlinks_disabled() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "# Full instructions"),
+                ("AGENTS.md", "CLAUDE.md"),
+                (
+                    ".claude/skills/foo/SKILL.md",
+                    "---\nname: foo\n---\nUse assets",
+                ),
+                (".claude/skills/foo/run.sh", "#!/bin/sh\necho fixture"),
+                (".agents/skills", "../.claude/skills"),
+                (".agents/custom.md", "keep me"),
+                (".gitignore", ai_context_gitignore::BLOCK),
+            ],
+        );
+        let mut index = repo.index().unwrap();
+        for (path, mode) in [
+            ("AGENTS.md", 0o120000),
+            (".agents/skills", 0o120000),
+            (".claude/skills/foo/run.sh", 0o100755),
+        ] {
+            let mut entry = index.get_path(Path::new(path), 0).unwrap();
+            entry.mode = mode;
+            index.add(&entry).unwrap();
+        }
+        let binary = repo.blob(&[0, 255, 1]).unwrap();
+        let mut asset = index
+            .get_path(Path::new(".claude/skills/foo/SKILL.md"), 0)
+            .unwrap();
+        asset.path = b".claude/skills/foo/asset.bin".to_vec();
+        asset.id = binary;
+        index.add(&asset).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = repo
+            .signature()
+            .unwrap_or_else(|_| git2::Signature::now("test", "test@example.com").unwrap());
+        let original = repo
+            .commit(Some("HEAD"), &sig, &sig, "legacy links", &tree, &[&parent])
+            .unwrap();
+
+        let status = detect_ai_context_blocking(tr.path().to_string_lossy().into()).unwrap();
+        assert!(!status.agents_md_exists);
+        assert!(!status.agents_skills_exists);
+        let changed = build_portability_commit(&repo, "portable").unwrap();
+        assert_eq!(changed, vec!["AGENTS.md", ".agents/skills"]);
+        assert_eq!(repo.head().unwrap().target(), Some(original));
+        assert_eq!(repo.index().unwrap().write_tree().unwrap(), tree_id);
+        assert_eq!(
+            fs::read(tr.path().join(".agents/skills")).unwrap(),
+            b"../.claude/skills"
+        );
+
+        let portable = branch_tree(&repo, "portable");
+        assert_eq!(
+            portable
+                .get_path(Path::new(".agents/skills/foo/run.sh"))
+                .unwrap()
+                .filemode(),
+            0o100755
+        );
+        let output = TempRepo::new();
+        let checkout = git_command()
+            .args([
+                "-c",
+                "core.symlinks=false",
+                "clone",
+                "--quiet",
+                "--branch",
+                "portable",
+            ])
+            .arg(tr.path())
+            .arg(output.path())
+            .output()
+            .unwrap();
+        assert!(
+            checkout.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checkout.stderr)
+        );
+        assert_eq!(
+            fs::read(output.path().join("AGENTS.md")).unwrap(),
+            b"# Full instructions"
+        );
+        assert_eq!(
+            fs::read(output.path().join(".agents/skills/foo/asset.bin")).unwrap(),
+            [0, 255, 1]
+        );
+        assert!(
+            fs::read_to_string(output.path().join(".agents/skills/foo/SKILL.md"))
+                .unwrap()
+                .contains("name: foo")
+        );
+        assert_eq!(
+            fs::read(output.path().join(".agents/custom.md")).unwrap(),
+            b"keep me"
+        );
+        repo.set_head("refs/heads/portable").unwrap();
+        assert!(build_portability_commit(&repo, "again").unwrap().is_empty());
+        let status = detect_ai_context_blocking(tr.path().to_string_lossy().into()).unwrap();
+        assert!(status.agents_md_exists && status.agents_skills_exists);
+    }
+
+    #[test]
+    fn copies_committed_context_and_migrates_regular_pointer_files() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[
+                ("CLAUDE.md", "committed instructions"),
+                ("AGENTS.md", "CLAUDE.md"),
+                (".claude/skills/foo/SKILL.md", "committed skill"),
+                (".agents/skills", "../.claude/skills"),
+            ],
+        );
+        fs::write(tr.path().join("CLAUDE.md"), "private uncommitted edit").unwrap();
+        fs::write(
+            tr.path().join(".claude/skills/foo/private.txt"),
+            "not for the PR",
+        )
+        .unwrap();
+        build_portability_commit(&repo, "portable").unwrap();
+        let tree = branch_tree(&repo, "portable");
+        assert_eq!(
+            blob_content(&repo, &tree, "AGENTS.md"),
+            b"committed instructions"
+        );
+        assert!(tree
+            .get_path(Path::new(".agents/skills/foo/private.txt"))
+            .is_err());
+    }
+
+    #[test]
+    fn refuses_nested_skill_links_without_creating_a_branch() {
+        let tr = TempRepo::new();
+        let repo = init_repo(
+            tr.path(),
+            &[(".claude/skills/foo/SKILL.md", "../../outside")],
+        );
+        let mut index = repo.index().unwrap();
+        let mut entry = index
+            .get_path(Path::new(".claude/skills/foo/SKILL.md"), 0)
+            .unwrap();
+        entry.mode = 0o120000;
+        index.add(&entry).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "nested link", &tree, &[&parent])
+            .unwrap();
+        assert!(build_portability_commit(&repo, "portable")
+            .unwrap_err()
+            .contains("regular files"));
+        assert!(repo.find_reference("refs/heads/portable").is_err());
     }
 
     #[test]
@@ -653,10 +819,7 @@ mod tests {
 
     fn blob_content(repo: &git2::Repository, tree: &git2::Tree, name: &str) -> Vec<u8> {
         let entry = tree.get_name(name).expect("entry in tree");
-        repo.find_blob(entry.id())
-            .expect("blob")
-            .content()
-            .to_vec()
+        repo.find_blob(entry.id()).expect("blob").content().to_vec()
     }
 
     #[test]
@@ -670,7 +833,7 @@ mod tests {
             ],
         );
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         // AGENTS.md is added too, but the assertion that matters is that
         // .gitignore shows up in the added list and contains both the
         // user's prior rules and the canonical agent block.
@@ -699,12 +862,9 @@ mod tests {
     #[test]
     fn appends_agent_block_to_empty_gitignore_without_prepending_blank_lines() {
         let tr = TempRepo::new();
-        let repo = init_repo(
-            tr.path(),
-            &[("CLAUDE.md", "# context"), (".gitignore", "")],
-        );
+        let repo = init_repo(tr.path(), &[("CLAUDE.md", "# context"), (".gitignore", "")]);
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         assert!(added.iter().any(|p| p == ".gitignore"));
 
         let tree = branch_tree(&repo, "test-branch");
@@ -730,7 +890,7 @@ mod tests {
             ],
         );
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         assert!(added.iter().any(|p| p == ".gitignore"));
 
         let tree = branch_tree(&repo, "test-branch");
@@ -742,11 +902,7 @@ mod tests {
         assert!(gi_str.contains("dist/\r\n"));
         // Separator is a single blank line, in CRLF — no Frankenstein
         // `\r\n\n` between the user's body and the block.
-        assert!(
-            !gi_str.contains("\r\n\n"),
-            "CRLF got mangled: {:?}",
-            gi_str
-        );
+        assert!(!gi_str.contains("\r\n\n"), "CRLF got mangled: {:?}", gi_str);
         // Block content landed.
         assert!(gi_str.contains(ai_context_gitignore::HEADER));
         assert!(gi_str.contains(".agents/hooks.json"));
@@ -764,7 +920,7 @@ mod tests {
             ],
         );
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         assert!(added.iter().any(|p| p == ".gitignore"));
 
         let tree = branch_tree(&repo, "test-branch");
@@ -788,7 +944,7 @@ mod tests {
 
         let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
 
-        let added = build_portability_commit(&repo, tr.path(), "test-branch").unwrap();
+        let added = build_portability_commit(&repo, "test-branch").unwrap();
         // `.gitignore` MUST NOT appear in the added list — the user's HEAD
         // already has the canonical block, so the commit is a no-op for it.
         // We still expect AGENTS.md to be added since CLAUDE.md exists and
@@ -829,8 +985,7 @@ mod tests {
                 (".gitignore", "node_modules/\n"),
             ],
         );
-        let status =
-            detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
+        let status = detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
         assert!(!status.gitignore_has_agent_patterns);
 
         // Repo with the canonical block — flag flips true.
@@ -842,15 +997,13 @@ mod tests {
                 (".gitignore", super::ai_context_gitignore::BLOCK),
             ],
         );
-        let status2 =
-            detect_ai_context_blocking(tr2.path().to_string_lossy().to_string()).unwrap();
+        let status2 = detect_ai_context_blocking(tr2.path().to_string_lossy().to_string()).unwrap();
         assert!(status2.gitignore_has_agent_patterns);
 
         // Repo with no .gitignore at all — flag is false.
         let tr3 = TempRepo::new();
         init_repo(tr3.path(), &[("CLAUDE.md", "# context")]);
-        let status3 =
-            detect_ai_context_blocking(tr3.path().to_string_lossy().to_string()).unwrap();
+        let status3 = detect_ai_context_blocking(tr3.path().to_string_lossy().to_string()).unwrap();
         assert!(!status3.gitignore_has_agent_patterns);
     }
 }

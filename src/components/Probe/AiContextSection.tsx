@@ -14,7 +14,7 @@ interface AiContextSectionProps {
 
 /**
  * Detects a project's Claude AI context (CLAUDE.md / .claude/skills) and offers
- * to open a PR mirroring it as AGENTS.md + .agents/skills symlinks, so Codex,
+ * to open a PR copying it as regular AGENTS.md + .agents/skills files, so Codex,
  * OpenCode and Antigravity read the same context.
  */
 export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContextSectionProps) {
@@ -46,9 +46,9 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   // is the only path that supports it, so the backend will accept it.
   const needsGitignoreUpdate =
     hasClaude && !status.gitignore_has_agent_patterns;
-  const needsSymlinkWork = needsAgentsMd || needsAgentsSkills;
-  const needsWork = needsSymlinkWork || needsGitignoreUpdate;
-  const hasOnlyGitignoreWork = needsGitignoreUpdate && !needsSymlinkWork;
+  const needsContextWork = needsAgentsMd || needsAgentsSkills;
+  const needsWork = needsContextWork || needsGitignoreUpdate;
+  const hasOnlyGitignoreWork = needsGitignoreUpdate && !needsContextWork;
 
   // Nothing Claude-shaped to port — keep the panel quiet.
   if (!hasClaude) return null;
@@ -88,30 +88,30 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
 
       <div className="space-y-0.5 text-xs text-text-secondary">
         {status.claude_md_exists && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-text-primary">CLAUDE.md</span>
             <span>→</span>
             <span className="font-mono text-text-primary">AGENTS.md</span>
             {status.agents_md_exists ? (
               <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-text-muted">(will create)</span>
+              <span className="text-text-muted">(will create or migrate)</span>
             )}
           </div>
         )}
         {status.skills_dir_exists && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-text-primary">.claude/skills</span>
             <span>→</span>
             <span className="font-mono text-text-primary">.agents/skills</span>
             {status.agents_skills_exists ? (
               <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-text-muted">(will create, {status.skill_count} skills)</span>
+              <span className="text-text-muted">(will create or migrate, {status.skill_count} skills)</span>
             )}
           </div>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-text-primary">.gitignore</span>
           <span className="text-text-muted">(agent harness runtime rules)</span>
           {status.gitignore_has_agent_patterns ? (
@@ -129,7 +129,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
           <p className="text-2xs text-text-muted leading-snug">
             {hasOnlyGitignoreWork
               ? 'Opens a PR amending .gitignore so agent-harness runtime files (e.g. .agents/hooks.json) do not pollute git status.'
-              : 'Opens a PR adding the symlinks above (and amending .gitignore so agent-harness runtime files like .agents/hooks.json do not pollute git status). Note: a git symlink checked out on Windows without Developer Mode becomes a plain text file; macOS/Linux and Windows+Dev Mode resolve it correctly.'}
+              : 'Opens a PR copying committed context into regular files that work on Windows, WSL, macOS and Linux, and amending .gitignore. Existing Buildmesh links are migrated. Keep the copies updated when editing the original context.'}
           </p>
           {error && <p className="text-2xs text-status-error">{error}</p>}
           {!isAuthenticated ? (

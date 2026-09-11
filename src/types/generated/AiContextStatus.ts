@@ -9,23 +9,23 @@
  */
 export type AiContextStatus = { 
 /**
- * `CLAUDE.md` exists at the repo root.
+ * HEAD contains CLAUDE.md at the repo root.
  */
 claude_md_exists: boolean, 
 /**
- * `AGENTS.md` already exists at the repo root.
+ * HEAD has an AGENTS.md entry other than the legacy Claude pointer.
  */
 agents_md_exists: boolean, 
 /**
- * `.claude/skills/` exists and is a directory.
+ * HEAD contains the .claude/skills directory.
  */
 skills_dir_exists: boolean, 
 /**
- * Number of skill directories inside `.claude/skills/`.
+ * Number of committed skill directories inside .claude/skills/.
  */
 skill_count: number, 
 /**
- * `.agents/skills` already exists.
+ * HEAD has a skills mirror other than the legacy Claude pointer.
  */
 agents_skills_exists: boolean, 
 /**

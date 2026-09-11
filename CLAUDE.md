@@ -52,6 +52,6 @@ Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell wr
 - DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
 - Verification: `/verify` — see `.claude/skills/verify/SKILL.md`
 - UI changes: `/verify-ui` — drive the real dev-profile window (Playwright over CDP) + before/after PR screenshots; see `.claude/skills/verify-ui/SKILL.md`
-- Shared entrypoints: `AGENTS.md` points here; `.agents/skills` points to `.claude/skills`. If Windows checks out a pointer file instead of a symlink, read its target explicitly. Edit canonical files, preserving the links.
+- Shared entrypoints: `AGENTS.md` and `.agents/skills/` are committed regular-file mirrors of `CLAUDE.md` and `.claude/skills/`. Edit canonical files, then run `npm run sync:ai-context`; `npm run test:agent` checks for drift. Git symlinks become unreadable skill-directory placeholders on Windows with `core.symlinks=false`.
 - Probe dock tabs: `docs/development/probe-ui-checklist.md` — scroll ownership, 240px narrow width, status language, disclosure (umbrella #1464)
 - Issues (`alondero/buildmesh`): `docs/agents/issue-tracker.md`; triage labels: `docs/agents/triage-labels.md`
