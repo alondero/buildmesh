@@ -169,14 +169,20 @@ export function brandFor(id: string): Brand | undefined {
   const brandId = separator === -1 ? id : id.slice(separator + 1);
   const direct = BRAND_REGISTRY.get(brandId);
   if (direct) return direct;
-  // Runtime-suffix strip: the WSL auto-detector
+  // Runtime-suffix strip (tactical, Refs #1713). The WSL auto-detector
   // (`agent/detection.rs::detect_wsl_profiles`) builds profile ids as
   // `<harness>-wsl-<distrohash>` and manual config may use `<harness>-wsl`.
   // Native Spawn `ProviderInfo` rows carry `id == profile.id` (no `:`),
   // so the brand lookup must recognise the runtime suffix and fall back
   // to the harness's brand record — otherwise the WSL row renders the
-  // wire `meta.icon` glyph instead of the registered brand mark (the
-  // official Meta infinity-loop mark for `muse-wsl`, etc.).
+  // wire `meta.icon` glyph instead of the registered brand mark.
+  //
+  // This regex is a tactical workaround for the WSL case. The structural
+  // fix (#1713) carries `adapter_id` on `ProviderInfo` (Rust already has
+  // it as `profile.harness` at `provider_menu.rs:40`) and reshapes
+  // `brandFor` to take a structured input — at which point this suffix
+  // strip moves into a backward-compat `brandForProviderId` alias and
+  // the primary lookup is string-surgery-free.
   const wslSuffix = brandId.match(/^(.+)-wsl(?:-\w+)?$/);
   if (wslSuffix) {
     return BRAND_REGISTRY.get(wslSuffix[1]);
