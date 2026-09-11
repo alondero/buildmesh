@@ -218,26 +218,47 @@ fn metadata_record(record: &serde_json::Value) -> Option<(String, String, i64)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Pick the canonical `EnvType` that pairs with each `Platform` the
+    /// muse adapter advertises on. Keeps the per-platform pin test readable
+    /// as "this is the host that runs the binary" rather than a sloppy
+    /// single `EnvType::Wsl` everywhere (issue #1705 round-1 review —
+    /// `Platform::Macos, EnvType::Wsl` is a platform-impossible pairing).
+    /// Mirrors the pairing OpenCode's `spawn_recipe_direct_on_macos` test
+    /// uses: macOS has no WSL runtime, and `EnvType` has no `Macos`
+    /// variant, so the canonical macOS pairing is `(Macos, Windows)`.
+    fn env_type_for(platform: Platform) -> EnvType {
+        match platform {
+            // Linux runtime covers native Linux + WSL-on-Windows (the
+            // Ubuntu distro at `/home/alond/.local/bin/muse`). The muse
+            // adapter's `spawn_recipe` is platform-agnostic, but the
+            // pairing keeps the test accurate as "the host that runs the
+            // binary" rather than a meaningless one-size-fits-all value.
+            Platform::Linux => EnvType::Wsl,
+            // macOS has no WSL runtime and no `EnvType::Macos` variant; the
+            // canonical macOS pairing is `(Macos, Windows)`, matching
+            // OpenCode's `spawn_recipe_direct_on_macos` test pattern.
+            Platform::Macos => EnvType::Windows,
+            Platform::Windows => EnvType::Windows,
+        }
+    }
+
     #[test]
     fn muse_uses_documented_interactive_arguments() {
         assert_eq!(
             MUSE.spawn_recipe(Platform::Linux, EnvType::Wsl).binary,
             "muse"
         );
-        // Issue #1705: `--disable-approval` is baked into the base recipe.
-        // Pin here so a future edit that drops it (or smuggles a different
-        // approval flag in) trips in CI rather than at runtime when an
-        // unattended PTY blocks on a permission prompt.
-        assert_eq!(
-            MUSE.spawn_recipe(Platform::Linux, EnvType::Wsl).base_args,
-            vec!["--disable-approval".to_string()],
-            "muse base recipe must carry --disable-approval (issue #1705)"
-        );
         assert_eq!(MUSE.resume_args("session-uuid"), ["resume", "session-uuid"]);
         assert_eq!(MUSE.prefill_args("fix the bug"), ["fix the bug"]);
         assert_eq!(MUSE.model_args("model-id"), ["--model", "model-id"]);
         assert!(!MUSE.captures_session_id_from_pty());
         assert!(MUSE.prefill_requires_pty("follow-up"));
+        // The baked `--disable-approval` policy (issue #1705) is pinned
+        // exhaustively by `spawn_recipe_carries_disable_approval_on_supported_platforms`
+        // below — that test iterates every supported host and adds the
+        // `--yolo` negative assertion. Keeping the assertion only there
+        // keeps the named domain of this test (per-adapter `*_args` shape)
+        // focused.
     }
 
     /// Issue #1705 — per-platform pin of the baked approval flag.
@@ -246,10 +267,15 @@ mod tests {
     /// does not run on Windows) and assert the exact base_args vector so
     /// a future flag smuggle (e.g. `--approval-mode never` slipping in
     /// alongside `--disable-approval`) trips here, not at runtime.
+    ///
+    /// Each platform variant is paired with the canonical `EnvType` for
+    /// that host (see [`env_type_for`]) so the test reads as "the host
+    /// that actually runs the binary" — `Platform::Macos, EnvType::Wsl`
+    /// would be a platform-impossible pairing.
     #[test]
     fn spawn_recipe_carries_disable_approval_on_supported_platforms() {
         for platform in MUSE.available_on() {
-            let recipe = MUSE.spawn_recipe(*platform, EnvType::Wsl);
+            let recipe = MUSE.spawn_recipe(*platform, env_type_for(*platform));
             assert_eq!(
                 recipe.binary, "muse",
                 "muse binary name must be exact on {platform:?}"
@@ -279,6 +305,116 @@ mod tests {
                 recipe.base_args
             );
         }
+    }
+
+    // -- Prepared-launch evidence (issue #1705 round-1 review) ------------
+    //
+    // The per-platform pin above proves `spawn_recipe()` itself returns the
+    // baked policy; it does not prove the policy survives `default_prepare`
+    // composition. The two tests below route fresh + resume launches through
+    // the real orchestration seam (`agent::launch::default_prepare`) so the
+    // baked flag is proven to land in the final argv alongside the model
+    // override, the prefill text, and the resume id, in the documented order.
+    // Without these, a future refactor that reorders the layers (e.g.
+    // prepending `--model` before `--disable-approval`) would slip past the
+    // per-platform pin but break a real spawn.
+    //
+    // Mirrors OpenCode's `fresh_recipe_forwards_model_and_prompt_without_session_id`
+    // and `resume_recipe_carries_session_flag` — the engineering contract
+    // (`docs/agents/engineering.md`) requires testing fresh AND resume paths
+    // for changed launch recipes.
+
+    /// Issue #1705 fresh launch: the baked `--disable-approval` must land
+    /// ahead of the model override and the prefill text in the final argv.
+    /// Pin the exact `base_args` vector so a future reorder that pushes
+    /// `--disable-approval` past `--model` (or drops it during layer
+    /// composition) trips here, not in production.
+    #[test]
+    fn default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig {
+            model: Some("claude-sonnet-4-5".to_string()),
+            effort: None,
+            extra_args: None,
+        };
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Wsl,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("fix the auth bug"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(&MUSE, input);
+        // Order is `base_recipe -> model -> prefill`. muse's `prefill_args`
+        // returns a positional element (no `--prefill` flag — see
+        // `muse_uses_documented_interactive_arguments`), so prefill lands
+        // as a bare trailing argv element after the model flag+value.
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec![
+                "--disable-approval".to_string(),
+                "--model".to_string(),
+                "claude-sonnet-4-5".to_string(),
+                "fix the auth bug".to_string(),
+            ],
+            "fresh launch argv must keep --disable-approval ahead of --model \
+             and the prefill text; got {:?}",
+            prepared.recipe.base_args
+        );
+        // Negative guards: no session-assign flag (muse self-assigns), no
+        // `--prefill` flag (the prefill shape is positional), no
+        // approval-policy smuggle (`--yolo` was explicitly rejected).
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--session"
+                || a == "--session-id"
+                || a == "--prefill"
+                || a == "--yolo"),
+            "fresh launch must not emit session-assign / --prefill / --yolo; \
+             got {:?}",
+            prepared.recipe.base_args
+        );
+    }
+
+    /// Issue #1705 resume launch: the baked `--disable-approval` must land
+    /// ahead of the resume subcommand + session id, matching the order the
+    /// OpenCode adapter uses for `--auto --session <id>`. Pin the exact
+    /// vector so a future edit that orders the resume subcommand before
+    /// the baked flag (or that drops the flag during composition) trips
+    /// here.
+    #[test]
+    fn default_prepare_resume_launch_carries_disable_approval_then_resume_uuid() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Linux,
+            runtime: EnvType::Wsl,
+            session: SessionIdModeRef::Resume("12345678-1234-4234-8234-123456789abc"),
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(&MUSE, input);
+        assert_eq!(
+            prepared.recipe.base_args,
+            vec![
+                "--disable-approval".to_string(),
+                "resume".to_string(),
+                "12345678-1234-4234-8234-123456789abc".to_string(),
+            ],
+            "resume launch argv must be exactly \
+             `--disable-approval resume <uuid>`; got {:?}",
+            prepared.recipe.base_args
+        );
+        assert!(
+            !prepared.recipe.base_args.iter().any(|a| a == "--yolo"),
+            "resume launch must never bake --yolo (issue #1705); got {:?}",
+            prepared.recipe.base_args
+        );
     }
 
     #[test]
