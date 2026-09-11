@@ -1,5 +1,31 @@
 //! Muse Code 1.1.1 interactive CLI contract, checked against the installed
 //! Linux CLI. See docs/learning/windows-wsl-harness-interop.md.
+//!
+//! **Approval policy (issue #1705).** Every interactive harness Buildmesh
+//! spawns runs unattended in a PTY, so each adapter bakes its harness's
+//! "don't block on approval prompts" policy into `spawn_recipe`. Muse offers
+//! three CLI knobs for that policy:
+//!
+//! - `--approval-mode <untrusted|on-request|never>` — explicit mode
+//!   (default `on-request`).
+//! - `--disable-approval` — disables tool approval only; outer sandbox stays
+//!   on. Sibling-harness precedent: matches OpenCode `--auto` and
+//!   AGY / Claude `--dangerously-skip-permissions` in spirit (one flag, one
+//!   policy, adapter-owned).
+//! - `--yolo` — disables approval **AND** sandboxing **AND** trusts the
+//!   workspace. Three policies in one. Explicitly rejected by issue #1705 as
+//!   too wide for the quiet default.
+//!
+//! The chosen policy is **`--disable-approval`** (maintainer decision,
+//! issue #1705). `--yolo` is never baked in.
+//!
+//! **Attention launch mode.** With `--disable-approval` the harness never
+//! raises a permission prompt, so the future attention-hook slice (filed
+//! separately) will land with `AttentionLaunchMode::SkipPermissions` — a
+//! `PermissionRequested` lifecycle signal is impossible by construction.
+//! Until that slice ships, `attention_capability` stays `None` (mirrors the
+//! pre-#1705 shape); the launch-mode mapping is documented here so the
+//! follow-up implementer does not have to reverse-engineer it.
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
@@ -18,9 +44,12 @@ impl AgentProvider for MuseAdapter {
         }
     }
     fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #1705: bake `--disable-approval`. See the module docstring
+        // for the rationale (sibling-harness precedent; `--yolo` rejected
+        // as too wide; outer sandbox stays on).
         SpawnRecipe {
             binary: "muse",
-            base_args: vec![],
+            base_args: vec!["--disable-approval".into()],
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
         }
@@ -195,11 +224,61 @@ mod tests {
             MUSE.spawn_recipe(Platform::Linux, EnvType::Wsl).binary,
             "muse"
         );
+        // Issue #1705: `--disable-approval` is baked into the base recipe.
+        // Pin here so a future edit that drops it (or smuggles a different
+        // approval flag in) trips in CI rather than at runtime when an
+        // unattended PTY blocks on a permission prompt.
+        assert_eq!(
+            MUSE.spawn_recipe(Platform::Linux, EnvType::Wsl).base_args,
+            vec!["--disable-approval".to_string()],
+            "muse base recipe must carry --disable-approval (issue #1705)"
+        );
         assert_eq!(MUSE.resume_args("session-uuid"), ["resume", "session-uuid"]);
         assert_eq!(MUSE.prefill_args("fix the bug"), ["fix the bug"]);
         assert_eq!(MUSE.model_args("model-id"), ["--model", "model-id"]);
         assert!(!MUSE.captures_session_id_from_pty());
         assert!(MUSE.prefill_requires_pty("follow-up"));
+    }
+
+    /// Issue #1705 — per-platform pin of the baked approval flag.
+    /// Mirrors OpenCode's `spawn_recipe_carries_auto_flag_on_every_platform`:
+    /// iterate over `available_on()` (not every `Platform` variant — muse
+    /// does not run on Windows) and assert the exact base_args vector so
+    /// a future flag smuggle (e.g. `--approval-mode never` slipping in
+    /// alongside `--disable-approval`) trips here, not at runtime.
+    #[test]
+    fn spawn_recipe_carries_disable_approval_on_supported_platforms() {
+        for platform in MUSE.available_on() {
+            let recipe = MUSE.spawn_recipe(*platform, EnvType::Wsl);
+            assert_eq!(
+                recipe.binary, "muse",
+                "muse binary name must be exact on {platform:?}"
+            );
+            assert_eq!(
+                recipe.base_args,
+                vec!["--disable-approval".to_string()],
+                "muse base recipe must be exactly `[\"--disable-approval\"]` \
+                 on {platform:?}; got {:?}",
+                recipe.base_args
+            );
+            assert!(
+                matches!(recipe.windows_shell, WindowsShell::Direct),
+                "muse is a real ELF binary / macOS Mach-O on its supported \
+                 hosts — must use WindowsShell::Direct on {platform:?}; got {:?}",
+                recipe.windows_shell
+            );
+            // `--yolo` is the explicit no-go for issue #1705: it disables
+            // approval AND sandboxing AND trusts the workspace. A future
+            // "while we're here" edit that adds it would silently widen the
+            // policy beyond the maintainer-approved scope.
+            assert!(
+                !recipe.base_args.iter().any(|a| a == "--yolo"),
+                "muse base recipe must never bake --yolo (issue #1705): \
+                 it disables approval + sandboxing + workspace trust in one \
+                 flag and was explicitly rejected; got {:?}",
+                recipe.base_args
+            );
+        }
     }
 
     #[test]
