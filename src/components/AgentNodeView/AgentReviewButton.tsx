@@ -102,7 +102,13 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
             This agent is already controlled by Circuit #{activeOwnership.run_id} ({activeOwnership.state}).
           </p>
           <button type="button" className="text-xs text-accent-violet mb-3"
-            onClick={() => { setOpen(false); showRun(); }}>
+            onClick={() => {
+              setOpen(false);
+              // The Probe follows mesh selection; scope it to this node's mesh
+              // so the circuit run is in the loaded snapshot.
+              useMeshStore.getState().selectMesh(node.mesh_id);
+              useUIStore.getState().focusCircuitRun(activeOwnership.run_id);
+            }}>
             View circuit run #{activeOwnership.run_id}
           </button>
           <button type="button" disabled={busy} onClick={() => void cancelActive()}

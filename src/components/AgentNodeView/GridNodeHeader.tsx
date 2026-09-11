@@ -188,12 +188,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
           isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}
           onPickRegenerate={regen.pickRegenerateProvider} onDetails={showDetails} onChanges={showChanges}
+          circuitRun={circuitPill && circuitOwnership
+            ? { ...circuitPill, runId: circuitOwnership.run_id }
+            : null}
           details={<>
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {circuitPill && <div data-testid="circuit-run-pill" title={circuitPill.title}
-              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${circuitPill.className}`}>{circuitPill.label}</div>}
             {!circuitOwnership && autopilotPill && <div data-testid="autopilot-pill" title={autopilotPill.title}
               className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${autopilotPill.className}`}>{autopilotPill.label}</div>}
             {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
@@ -260,7 +261,7 @@ interface KebabActionsProps {
   isPinned: boolean;
   onTogglePin: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'provider'>;
+  node: Pick<AgentNode, 'provider' | 'mesh_id'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -268,11 +269,13 @@ interface KebabActionsProps {
   isRegenerateDisabled: boolean;
   hasRegenerateTargets: boolean;
   onPickRegenerate: (providerId: string, providerLabel: string) => void;
+  /** Circuit-owned row: the run to open in the Circuits Probe, or null. */
+  circuitRun: { label: string; title: string; className: string; runId: number } | null;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 
-function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges }: KebabActionsProps) {
+function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges, circuitRun }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -490,6 +493,26 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
           <button type="button" role="menuitem" data-aria-menu-item
             onClick={() => { closeAndReturnFocus(); onChanges(); }}
             className="w-full px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-bg-card">View changes</button>
+          {/* Circuit ownership link: opens the Circuits Probe on this exact
+              run. Rendered as a menu item (not the old static pill)
+              so it is keyboard-reachable and closes the menu on activation. */}
+          {circuitRun !== null && (
+            <button type="button" role="menuitem" data-aria-menu-item
+              data-testid="circuit-run-pill"
+              title={circuitRun.title}
+              onClick={() => {
+                closeAndReturnFocus();
+                // Scope the mesh-scoped Probe to this node's mesh before
+                // focusing, so the run is present in the snapshot the tab
+                // loads (the grid can be showing nodes from several meshes).
+                useMeshStore.getState().selectMesh(node.mesh_id);
+                useUIStore.getState().focusCircuitRun(circuitRun.runId);
+              }}
+              className={`w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs hover:bg-bg-card ${circuitRun.className}`}
+            >
+              {circuitRun.label}
+            </button>
+          )}
           </div>
         </div>,
         document.body,

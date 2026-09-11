@@ -51,7 +51,7 @@ describe('agent workflow title-bar control', () => {
     trigger.mockReset().mockResolvedValue(91);
     list.mockReset().mockResolvedValue([]);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
-    useUIStore.setState({ probeOpen: false });
+    useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
   });
 
   function renderButton(value: AgentNode = node) {
@@ -156,6 +156,8 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View circuit run #91' }));
     expect(trigger).not.toHaveBeenCalled();
     expect(useUIStore.getState().probeTab).toBe('circuits');
+    // The probe opens focused on this exact run.
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBe(91);
   });
 
   it('offers cancellation instead of a competing form for an active run', async () => {

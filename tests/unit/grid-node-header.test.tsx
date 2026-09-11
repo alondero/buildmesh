@@ -98,7 +98,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     seedAgentNodes([NODE], NODE.id);
     useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files' });
+    useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files', pendingCircuitRunFocus: null });
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     telemetryMock.mockReturnValue(null);
@@ -159,6 +159,17 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(pill.textContent).toBe('Review workflow · #2');
     expect(pill.className).toContain('text-accent-violet');
     expect(pill.getAttribute('title')).toContain('Autopilot is driving');
+  });
+
+  it('links circuit ownership to the run in the Circuits Probe', () => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
+      circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
+    fireEvent.click(screen.getByTestId('circuit-run-pill'));
+    expect(useUIStore.getState().probeTab).toBe('circuits');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBe(2);
   });
 
   it.each([

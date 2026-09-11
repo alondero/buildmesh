@@ -17,6 +17,12 @@
 
 import { isTerminalRunState, ledgerTimestampMs, parseGraph } from './circuitGraphModel';
 import type { StepLike } from './circuitGraphModel';
+import {
+  indexNodes,
+  parseRunContext,
+  reviewPassCount,
+  type NodeIndex,
+} from './runStepPresentation';
 import type { CircuitRunDetail } from '../../types/generated/CircuitRunDetail';
 import type { CircuitWithRuns } from '../../types/generated/CircuitWithRuns';
 import {
@@ -40,18 +46,37 @@ export interface ReviewCircuitMetadata {
 export function reviewCircuitMetadata(
   circuit: Pick<CircuitWithRuns['circuit'], 'graph_json'>
 ): ReviewCircuitMetadata | null {
+  return circuitGraphFacts(circuit).reviewCircuit;
+}
+
+export interface CircuitGraphFacts {
+  reviewCircuit: ReviewCircuitMetadata | null;
+  /** Circuit `node_id` → blueprint node, for the run card's role/verdict
+   *  labels. Parsed alongside the review metadata so each graph_json is
+   *  read once per snapshot. */
+  nodeIndex: NodeIndex;
+}
+
+/** Parse one persisted graph into everything the Probe row needs. */
+export function circuitGraphFacts(
+  circuit: Pick<CircuitWithRuns['circuit'], 'graph_json'>
+): CircuitGraphFacts {
   try {
     const graph = parseGraph(circuit.graph_json);
     const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
-    if (!verdict) return null;
     return {
-      verdictNodeId: verdict.id,
-      retryNodeIds: graph.nodes
-        .filter((node) => node.type.type === 'retry_limit')
-        .map((node) => node.id),
+      reviewCircuit: verdict === undefined
+        ? null
+        : {
+            verdictNodeId: verdict.id,
+            retryNodeIds: graph.nodes
+              .filter((node) => node.type.type === 'retry_limit')
+              .map((node) => node.id),
+          },
+      nodeIndex: indexNodes(graph.nodes),
     };
   } catch {
-    return null;
+    return { reviewCircuit: null, nodeIndex: new Map() };
   }
 }
 
@@ -65,10 +90,21 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
   // The persisted ReviewVerdict step already carries the typed routing
   // outcome. Do not reconstruct approval from arbitrary context_json keys.
   const approved = detail.run.state === 'completed' && !exhausted && review.outcome === 'completed';
+  // Which pass the recorded verdict belongs to, when the context still
+  // carries it. Retention empties `context_json` on pruned runs, so this is
+  // a flourish on the run-level summary, never a requirement.
+  const pass = reviewPassCount(parseRunContext(detail.run.context_json), reviewCircuit.verdictNodeId);
   return approved
-    ? { label: 'Review approved', detail: 'Check the current PR head and required checks before merging.', needsAttention: false }
-    : { label: exhausted ? 'Review limit reached' : 'Review needs attention',
-      detail: 'No final approval is recorded. Continue the implementation agent, or resume its saved session from Archive. Address the latest findings, then request a fresh review. If the old session is unavailable, recover from the PR branch.', needsAttention: true };
+    ? {
+        label: 'Review approved',
+        detail: `${pass === null ? '' : `Approved on pass ${pass}. `}Check the current PR head and required checks before merging.`,
+        needsAttention: false,
+      }
+    : {
+        label: exhausted ? 'Review limit reached' : 'Review needs attention',
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. Continue the implementation agent, or resume its saved session from Archive. Address the latest findings, then request a fresh review. If the old session is unavailable, recover from the PR branch.`,
+        needsAttention: true,
+      };
 }
 
 /** A run needs a user's attention before the circuit can make progress. */
@@ -121,17 +157,23 @@ export interface CircuitProbeRow extends CircuitWithRuns {
   hasAttention: boolean;
   runningSteps: number;
   reviewCircuit: ReviewCircuitMetadata | null;
+  /** Circuit `node_id` → blueprint node, for the run card's role labels. */
+  nodeIndex: NodeIndex;
 }
 
 /** Parse each persisted graph once per backend snapshot. */
 export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] {
-  return rows.map((row) => ({
-    ...row,
-    reviewCircuit: reviewCircuitMetadata(row.circuit),
-    visibleRuns: [],
-    hasAttention: false,
-    runningSteps: 0,
-  }));
+  return rows.map((row) => {
+    const { reviewCircuit, nodeIndex } = circuitGraphFacts(row.circuit);
+    return {
+      ...row,
+      reviewCircuit,
+      nodeIndex,
+      visibleRuns: [],
+      hasAttention: false,
+      runningSteps: 0,
+    };
+  });
 }
 
 /** Build the stable, view-specific row model used by the Probe.
@@ -146,9 +188,10 @@ export function buildCircuitProbeRows(
   const needle = (options.search ?? '').trim().toLowerCase();
   return rows
     .map((row) => {
-      const reviewCircuit = 'reviewCircuit' in row
-        ? row.reviewCircuit
-        : reviewCircuitMetadata(row.circuit);
+      const facts = 'reviewCircuit' in row
+        ? { reviewCircuit: row.reviewCircuit, nodeIndex: row.nodeIndex }
+        : circuitGraphFacts(row.circuit);
+      const reviewCircuit = facts.reviewCircuit;
       let visibleRuns = view === 'history'
         ? row.runs.filter(runBelongsToHistory)
         : view === 'activity'
@@ -179,6 +222,7 @@ export function buildCircuitProbeRows(
         hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuit)),
         runningSteps: countRunningSteps(row.runs),
         reviewCircuit,
+        nodeIndex: facts.nodeIndex,
       };
     })
     .sort((a, b) => Number(b.hasAttention) - Number(a.hasAttention) ||

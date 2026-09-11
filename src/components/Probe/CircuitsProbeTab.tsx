@@ -83,11 +83,14 @@ import {
   circuitActivityStats,
   countActiveRuns,
   pendingAdmissionDetail,
+  runBelongsToActivity,
   type CircuitProbeView,
 } from '../Circuits/runDiagnostics';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { focusAgentNode } from '../../lib/focusAgentNode';
 import { EmptyState } from '../shared/Spinner';
 import { CircuitRunCard } from './CircuitRunCard';
 
@@ -432,6 +435,62 @@ export function CircuitsProbeTab() {
    * refetch land without snapping a card the user just opened shut.
    */
   const [runExpandOverrides, setRunExpandOverrides] = useState<Record<number, boolean>>({});
+
+  // ---- Cross-surface focus ----
+  // A node kebab / review modal asks for a specific run; reveal it, open it,
+  // and flash a highlight so the eye lands in the right place. The request is
+  // consumed immediately so a later re-render cannot re-trigger it.
+  const pendingCircuitRunFocus = useUIStore((s) => s.pendingCircuitRunFocus);
+  const consumeCircuitRunFocus = useUIStore((s) => s.consumeCircuitRunFocus);
+  const [highlightRunId, setHighlightRunId] = useState<number | null>(null);
+  const [focusNotice, setFocusNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (pendingCircuitRunFocus === null) return;
+    const runId = pendingCircuitRunFocus;
+    const detail = rows.flatMap(({ runs }) => runs).find((d) => d.run.id === runId) ?? null;
+    if (detail !== null) {
+      setFocusNotice(null);
+      setView(runBelongsToActivity(detail) ? 'activity' : 'history');
+      setRunExpandOverrides((prev) => ({ ...prev, [runId]: true }));
+      setHighlightRunId(runId);
+    } else if (queue.some((entry) => entry.run.id === runId)) {
+      setFocusNotice(null);
+      setView('queue');
+      setHighlightRunId(runId);
+    } else {
+      // The run is outside the fetched window (an older terminal run). Fall
+      // back to a History search rather than silently doing nothing.
+      setView('history');
+      setHistorySearch(String(runId));
+      setFocusNotice(`Run #${runId} is outside the loaded window — filtered History to it.`);
+    }
+    consumeCircuitRunFocus();
+  }, [pendingCircuitRunFocus, rows, queue, consumeCircuitRunFocus]);
+
+  // Scroll after the commit that rendered the run, then clear the flash.
+  useEffect(() => {
+    if (highlightRunId === null) return;
+    const el =
+      document.querySelector(`[data-testid="run-card-${highlightRunId}"]`) ??
+      document.querySelector(`[data-testid="queue-run-${highlightRunId}"]`);
+    el?.scrollIntoView?.({ block: 'center' });
+    const timer = setTimeout(() => setHighlightRunId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [highlightRunId]);
+
+  // Resolve an Agent Node's display name for the run cards. Read through
+  // `getState()` so a name edit does not have to re-render the whole ledger;
+  // the name is only read at render, and node rows change far more often than
+  // the ledger does.
+  const agentName = useCallback(
+    (nodeId: number) => useAgentNodeStore.getState().nodesById[nodeId]?.name ?? null,
+    []
+  );
+  const handleFocusAgent = useCallback((nodeId: number) => {
+    focusAgentNode(nodeId);
+  }, []);
+
   /**
    * Clock the duration labels measure a live run against.
    *
@@ -700,6 +759,15 @@ export function CircuitsProbeTab() {
           {actionError ?? loadError}
         </div>
       )}
+      {focusNotice !== null && (
+        <div
+          className="px-3 py-1 text-xs text-text-secondary shrink-0 break-words"
+          role="status"
+          data-testid="circuits-focus-notice"
+        >
+          {focusNotice}
+        </div>
+      )}
       {view === 'manage' && <CircuitCreateForm
         busy={busy}
         newName={newName}
@@ -870,7 +938,7 @@ export function CircuitsProbeTab() {
         ) : (
           <ul className="flex flex-col gap-1 p-2">
             {view === 'history' && <li className="text-2xs text-text-muted px-1">History · failed and needs-review runs first, then newest finished runs (windowed per circuit)</li>}
-            {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit }) => {
+            {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit, nodeIndex }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {
@@ -987,6 +1055,10 @@ export function CircuitsProbeTab() {
                           key={detail.run.id}
                           detail={detail}
                           reviewCircuit={reviewCircuit}
+                          nodeIndex={nodeIndex}
+                          agentName={agentName}
+                          onFocusAgent={handleFocusAgent}
+                          focused={highlightRunId === detail.run.id}
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
                           onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}
