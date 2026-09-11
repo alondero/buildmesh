@@ -25,7 +25,7 @@ fn default_provider_accounts_are_self_auth_only() {
 fn default_provider_accounts_cover_the_builtin_providers() {
     let accounts = default_provider_accounts();
     let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
-    for required in ["anthropic", "codex", "agy", "grok", "opencode"] {
+    for required in ["anthropic", "codex", "agy", "grok", "opencode", "muse-code"] {
         assert!(ids.contains(&required), "missing default account: {required}");
     }
 }

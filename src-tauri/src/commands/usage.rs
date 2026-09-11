@@ -1,7 +1,7 @@
 //! Tauri commands for provider usage fetching.
 
 use crate::preferences::{self, HarnessProfile, ProviderAccount};
-use crate::services::usage::{self, ProviderMeters, ProviderUsage};
+use crate::services::usage::{self, MuseCodeTier, ProviderMeters, ProviderUsage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::command;
@@ -209,6 +209,24 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
         &usages,
         &configured_keys,
     ))
+}
+
+#[command]
+pub async fn get_muse_code_subscription_tier() -> Result<Option<MuseCodeTier>, String> {
+    crate::commands::run_blocking("get_muse_code_subscription_tier", || {
+        Ok(crate::services::usage::adapters::muse_code::selected_tier())
+    })
+    .await
+}
+
+#[command]
+pub async fn set_muse_code_subscription_tier(
+    tier: Option<MuseCodeTier>,
+) -> Result<(), String> {
+    crate::commands::run_blocking("set_muse_code_subscription_tier", move || {
+        crate::services::usage::adapters::muse_code::set_tier(tier)
+    })
+    .await
 }
 
 #[command]
@@ -543,5 +561,43 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "minimax");
         assert!(rows[0].usage.is_none(), "disabled card carries no usage");
+    }
+
+    #[test]
+    fn muse_code_card_is_gated_on_the_muse_harness() {
+        crate::services::usage::adapters::muse_code::reset_for_tests();
+        let muse = vec![profile("muse", "muse")];
+        assert!(account_visible(&account("muse-code", true), &muse));
+        assert!(!account_visible(&account("muse-code", true), &[]));
+        assert!(usage_tracked("muse-code"));
+        assert_eq!(poll_ids(&[account("muse-code", true)], &muse), vec!["muse-code"]);
+        assert!(poll_ids(&[account("muse-code", true)], &[]).is_empty());
+    }
+
+    #[test]
+    fn muse_code_unconfigured_unavailable_row_stays_on_the_usage_surface() {
+        crate::services::usage::adapters::muse_code::reset_for_tests();
+        let muse = vec![profile("muse", "muse")];
+        let usage = usage::catalog::dispatch("muse-code")
+            .expect("muse-code adapter")
+            .fetch(&[]);
+        assert_eq!(usage.meters, vec![crate::services::usage::types::UsageMeter::Unavailable]);
+        assert!(usage.logged_in);
+        let mut usages = HashMap::new();
+        usages.insert("muse-code".to_string(), usage);
+        let rows = assemble_meters(
+            &[account("muse-code", true)],
+            &muse,
+            &usages,
+            &HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "muse-code");
+        assert!(rows[0].usage_tracked);
+        let meters = &rows[0].usage.as_ref().unwrap().meters;
+        assert_eq!(
+            meters,
+            &vec![crate::services::usage::types::UsageMeter::Unavailable]
+        );
     }
 }

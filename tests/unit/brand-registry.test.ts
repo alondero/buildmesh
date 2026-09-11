@@ -61,6 +61,16 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Muse Code with the Meta brand treatment', () => {
+    const muse = brandFor('muse-code');
+    expect(brandFor('muse')).toBe(muse);
+    expect(muse).toMatchObject({
+      id: 'muse-code',
+      chipHex: '#0866FF',
+      chipClass: 'bg-blue-600',
+    });
+  });
+
   it('registers Freebuff with its official brand treatment', () => {
     const fb = brandFor('freebuff');
     expect(brandFor('claude:freebuff')).toBe(fb);

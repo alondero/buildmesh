@@ -697,6 +697,8 @@ pub fn run() {
             commands::agent_node_discovery::import_discovered_agent_node,
             // Usage
             commands::usage::get_provider_meters,
+            commands::usage::get_muse_code_subscription_tier,
+            commands::usage::set_muse_code_subscription_tier,
             commands::usage::set_minimax_api_key,
             // OpenCode OAuth (issue #956 + #969). Device Flow + workspace
             // enumeration + token persistence seams the React Settings UI

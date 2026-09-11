@@ -62,6 +62,10 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     // inference surface here — the row exists for the Usage Meter only;
     // OpenAI inference goes through the Codex harness.
     BuiltInProviderAccount { id: "openai",    name: "OpenAI Platform",       self_auth: false },
+    // Muse Code subscription identity — distinct from any future Meta Model
+    // API keyed account. Self-auth: Muse owns login; Buildmesh never reads
+    // Muse credential files. Usage is gated on the `muse` harness.
+    BuiltInProviderAccount { id: "muse-code", name: "Meta Muse Code",        self_auth: true  },
 ];
 
 // One row per credential/billing identity. Pairings live in the Spawn Menu

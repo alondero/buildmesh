@@ -23,6 +23,15 @@ import { AccountCard } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
 import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 
+vi.mock('../../src/lib/tauri', async () => {
+  const actual = await vi.importActual<typeof import('../../src/lib/tauri')>('../../src/lib/tauri');
+  return {
+    ...actual,
+    getMuseCodeSubscriptionTier: vi.fn().mockResolvedValue(null),
+    setMuseCodeSubscriptionTier: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   const id = over.id ?? 'anthropic';
   return {
@@ -77,6 +86,22 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     // Billing is still editable ("Edit billing"), but not credentials.
     expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
     expect(screen.getByRole('button', { name: /edit billing/i })).toBeTruthy();
+  });
+
+  it('lets a Muse Code account pick Everyday/High/Power without an API key editor', async () => {
+    const { getMuseCodeSubscriptionTier, setMuseCodeSubscriptionTier } = await import('../../src/lib/tauri');
+    vi.mocked(getMuseCodeSubscriptionTier).mockResolvedValue(null);
+    const user = userEvent.setup();
+    render(
+      <AccountCard
+        account={account({ id: 'muse-code', name: 'Meta Muse Code' })}
+        onSave={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
+    const select = await screen.findByRole('combobox', { name: /muse code subscription plan/i });
+    await user.selectOptions(select, 'high');
+    await waitFor(() => expect(setMuseCodeSubscriptionTier).toHaveBeenCalledWith('high'));
   });
 
   it('shows API key (not model tiers) for a Claude-compatible account', async () => {
