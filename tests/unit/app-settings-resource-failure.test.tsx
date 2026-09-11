@@ -208,10 +208,11 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     const harnessModel = await screen.findByTestId('harness-default-model-input-anthropic');
     expect(harnessModel.hasAttribute('disabled')).toBe(true);
 
-    // The error banner for preferences is visible at the top of the
-    // General pane.
-    const prefsBanner = await screen.findByTestId('resource-load-preferences');
-    expect(prefsBanner.textContent).toContain('preferences.json corrupt');
+    // The preferences error banner is rendered in each pane that has
+    // preference-backed controls (General, Providers, Harnesses), so several
+    // copies exist in the mounted tree — assert on the first.
+    const prefsBanners = await screen.findAllByTestId('resource-load-preferences');
+    expect(prefsBanners[0].textContent).toContain('preferences.json corrupt');
 
     // Switch to the Providers pane — `get_provider_accounts`
     // succeeded independently, so its account list is fully usable.
@@ -317,8 +318,8 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     // The preferences banner lives on the General pane; switch to
     // confirm it stayed in place across retries.
     await openSettingsPane(/^General$/);
-    const prefsBanner = await screen.findByTestId('resource-load-preferences');
-    expect(prefsBanner.textContent).toContain('prefs down');
+    const prefsBanners = await screen.findAllByTestId('resource-load-preferences');
+    expect(prefsBanners[0].textContent).toContain('prefs down');
 
     // Re-arm the network mock and click its retry button.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
@@ -336,25 +337,22 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     // sibling resource was NOT touched by the retry).
     expect(screen.queryByTestId('resource-load-network')).toBeNull();
     await openSettingsPane(/^General$/);
-    expect(screen.getByTestId('resource-load-preferences')).toBeTruthy();
+    expect(screen.getAllByTestId('resource-load-preferences').length).toBeGreaterThan(0);
   });
 
-  it('a list_providers rejection renders a providers banner on the General pane (round-2 review)', async () => {
-    // Issue #1534 review round 2 — without this banner the user
-    // sees the default-provider + auto-naming controls silently
-    // disabled with no explanation. The Providers tab also gets a
-    // banner (tested separately), but the General pane is where most
-    // users land first.
+  it('a list_providers rejection renders a providers banner on the Providers pane (round-2 review)', async () => {
+    // Issue #1534 review round 2 — without this banner the user sees the
+    // default-provider + auto-naming controls silently disabled with no
+    // explanation. Those routing controls now live on the Providers pane, so
+    // the banner must surface there.
     mockWithFailure('list_providers', 'providers endpoint 503');
 
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Providers');
 
-    // The General pane (default tab) must surface the providers
-    // failure — the disabled default-provider select on its own
-    // doesn't tell the user *why* it's disabled. Note that the
-    // providers banner also appears on the hidden Harnesses pane
-    // (mounted but not visible), so we use `getAllByTestId` and
-    // check at least one copy exists with the right text.
+    // The providers banner also appears on the hidden Harnesses pane (mounted
+    // but not visible), so we use `getAllByTestId` and check at least one copy
+    // exists with the right text.
     const banners = await screen.findAllByTestId('resource-load-providers');
     expect(banners.length).toBeGreaterThanOrEqual(1);
     expect(banners[0].textContent).toContain('providers endpoint 503');
@@ -565,7 +563,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
 
     // Meanwhile the preferences banner is on the General pane.
     await openSettingsPane(/^General$/);
-    expect(screen.getByTestId('resource-load-preferences')).toBeTruthy();
+    expect(screen.getAllByTestId('resource-load-preferences').length).toBeGreaterThan(0);
   });
 
   it('a list_accounts rejection is isolated from the keyed catalog (round-4 review)', async () => {

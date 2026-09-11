@@ -1,6 +1,7 @@
 /** Reviewer-provider settings coverage: hydration, filtering, persistence, and rollback. */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { openSettingsPane } from '../utils/settings-panes';
 
 const tauriMocks = vi.hoisted(() => ({
   getAppPreferences: vi.fn(),
@@ -95,6 +96,8 @@ describe('AppSettingsModal reviewer provider', () => {
 
   async function renderModal() {
     render(<AppSettingsModal onClose={() => {}} />);
+    // Reviewer provider now lives on the Providers pane.
+    await openSettingsPane('Providers');
     return screen.findByRole('combobox', { name: 'Reviewer provider' });
   }
 
