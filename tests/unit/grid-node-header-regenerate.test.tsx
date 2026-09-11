@@ -210,6 +210,37 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     expect(current.getAttribute('data-is-current')).toBe('true');
     expect(current.getAttribute('data-spawn-id')).toBe('claude');
   });
+
+  it('marks the current row with bg-bg-selection and alternates with hover:bg-bg-card-hover', () => {
+    // The picker paints on `bg-bg-overlay`; the old `hover:bg-bg-card`
+    // highlight is ~1/255 brighter than that surface and was invisible,
+    // so the user could not tell the selected (current) row from the
+    // alternates. Current carries the semantic selection surface at
+    // rest; alternates highlight on hover only.
+    render(
+      <div role="menu">
+        <RegenerateProviderMenu
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex')]}
+          currentProviderId="claude"
+          onPick={() => {}}
+        />
+      </div>,
+    );
+    const current = screen.getByTestId('regenerate-submenu-current');
+    expect(current.className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(current.className.split(/\s+/)).not.toContain('hover:bg-bg-card');
+
+    const alternates = screen
+      .getAllByRole('menuitem')
+      .filter((row) => row.getAttribute('data-is-current') !== 'true');
+    expect(alternates.length).toBeGreaterThan(0);
+    for (const row of alternates) {
+      const classes = row.className.split(/\s+/);
+      expect(classes).toContain('hover:bg-bg-card-hover');
+      expect(classes).not.toContain('hover:bg-bg-card');
+      expect(classes).not.toContain('bg-bg-card');
+    }
+  });
 });
 
 describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {

@@ -459,6 +459,21 @@ describe('MeshItem', () => {
       expect(items[4].textContent).toMatch(/GitHub Issues/);
     });
 
+    it('paints menu rows with the contrasting hover surface, not bg-bg-card', () => {
+      // The menu sits on `bg-bg-overlay`; `hover:bg-bg-card` is ~1/255
+      // brighter and therefore invisible. Align with the app's menu-row
+      // pattern (CommandOmnibar / QuickConnectMenu).
+      renderMeshItem();
+      openContextMenu();
+      const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) {
+        const classes = item.className.split(/\s+/);
+        expect(classes).not.toContain('hover:bg-bg-card');
+        expect(classes).toContain('hover:bg-bg-card-hover');
+      }
+    });
+
     it('adds a "View on GitHub" item as the 6th menuitem when the mesh has a GitHub origin', async () => {
       // Wire `get_github_url_for_mesh` to resolve a URL so the
       // conditional render in MeshItem shows the new item. The test

@@ -137,6 +137,12 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
         // the harness badge).
         const native = options.find((o) => !o.is_proxied);
         const proxiedChildren = options.filter((o) => o.is_proxied);
+        // The roving-active row (keyboard focus) paints with the semantic
+        // selection surface. `bg-bg-card` is ~1/255 brighter than the
+        // `bg-bg-overlay` menu, so it was invisible — the same reason
+        // CommandOmnibar's listbox rows use `bg-bg-selection` for the
+        // active row and `bg-bg-card-hover` only for idle hover.
+        const activeId = flatItems[activeIndex]?.id;
         return (
           <div key={groupKey} data-spawn-group={groupKey} className="border-b border-border-subtle last:border-b-0">
             {native && (
@@ -150,7 +156,11 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                 data-spawn-id={native.id}
                 data-spawn-harness={native.harness_id}
                 onClick={(e) => { e.stopPropagation(); onSelect(native.id, e.altKey); }}
-                className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card focus:bg-bg-card focus:outline-none flex items-center gap-2"
+                className={`w-full text-left px-3 py-1.5 text-xs font-medium focus:outline-none flex items-center gap-2 ${
+                  native.id === activeId
+                    ? 'bg-bg-selection text-text-primary'
+                    : 'text-text-primary hover:bg-bg-card-hover'
+                }`}
               >
                 <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
                 <span className="flex-1 truncate">{native.label}</span>
@@ -173,7 +183,11 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                     data-spawn-id={child.id}
                     data-spawn-harness={child.harness_id}
                     onClick={(e) => { e.stopPropagation(); onSelect(child.id, e.altKey); }}
-                    className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card focus:bg-bg-card focus:outline-none flex items-center gap-2"
+                    className={`w-full text-left pl-7 pr-3 py-1 text-xs focus:outline-none flex items-center gap-2 ${
+                      child.id === activeId
+                        ? 'bg-bg-selection text-text-primary'
+                        : 'text-text-secondary hover:bg-bg-card-hover'
+                    }`}
                   >
                     <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
                     <span className="flex-1 truncate">{child.label}</span>

@@ -601,6 +601,25 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
     });
 
+    it('paints parent menu rows and the current picker row with contrasting surfaces', async () => {
+      // The context menu and picker sit on `bg-bg-overlay`, where
+      // `hover:bg-bg-card` is ~1/255 brighter and therefore invisible.
+      // Parent rows use the menu hover token; the current picker row
+      // carries the semantic selection surface.
+      const node = makeNode({ provider: 'anthropic', status: 'idle' });
+      await openSubmenu(node, [
+        makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
+        makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+      ]);
+      for (const row of [screen.getByTestId('regenerate-trigger'), screen.getByTestId('pin-toggle')]) {
+        const classes = row.className.split(/\s+/);
+        expect(classes).not.toContain('hover:bg-bg-card');
+        expect(classes).toContain('hover:bg-bg-card-hover');
+      }
+      const current = screen.getByTestId('regenerate-submenu-current');
+      expect(current.className.split(/\s+/)).toContain('bg-bg-selection');
+    });
+
     it('clicking a picker row invokes regenerateAgentNode(nodeId, providerId) and closes the menu', async () => {
       const node = makeNode({ id: 91, provider: 'anthropic', status: 'idle' });
       await openSubmenu(node, [
