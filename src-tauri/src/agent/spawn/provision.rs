@@ -13,7 +13,7 @@ use crate::git::worktree::provision::{
     fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     AppHandleSink, ProvisionHooks, SpawnContext, SpawnSource,
 };
-use crate::models::{AgentNode, Provider};
+use crate::models::{AgentNode, EnvType, Provider};
 use tauri::Emitter;
 
 /// Git/workspace inputs for this phase. Launch knobs (PTY size, prefill,
@@ -39,6 +39,17 @@ pub(super) struct ProvisionedWorkspace {
     pub provider: Provider,
     pub resolved: crate::env::ResolvedPath,
     pub routing: crate::agent::launch_routing::PreparedLaunchRouting,
+}
+
+pub(super) fn should_prepare_muse_context(
+    provider: Provider,
+    filesystem_env: EnvType,
+    runtime_env: EnvType,
+) -> bool {
+    cfg!(target_os = "windows")
+        && provider == Provider::Muse
+        && runtime_env == EnvType::Wsl
+        && filesystem_env != EnvType::Wsl
 }
 
 /// Run the two provider-owned launch prerequisites in order while preserving
@@ -446,9 +457,9 @@ pub(super) async fn provision_workspace(
         return Err(e);
     }
 
+    let filesystem_env = crate::env::resolve_raw_path(&resolved.raw_path).env_type;
     let git_paths = resolved.clone();
     crate::blocking::run_blocking("cross_runtime_git", move || -> Result<(), String> {
-        let filesystem_env = crate::env::resolve_raw_path(&git_paths.raw_path).env_type;
         if filesystem_env != git_paths.env_type
             || (cfg!(windows) && git_paths.env_type == crate::models::EnvType::Wsl)
         {
@@ -468,10 +479,7 @@ pub(super) async fn provision_workspace(
     // usable. Windows Git may have checked the tracked symlinks out as plain
     // pointer files, so repair only the exact committed aliases at this
     // launch boundary. This is shared by fresh, resume, root and warm paths.
-    if provider == Provider::Muse
-        && cfg!(target_os = "windows")
-        && resolved.env_type == crate::models::EnvType::Wsl
-    {
+    if should_prepare_muse_context(provider, filesystem_env, resolved.env_type) {
         let context_path = resolved.host_path.clone();
         crate::blocking::run_blocking("muse_context_links", move || {
             crate::git::ai_context_runtime::prepare_muse_context(&context_path)

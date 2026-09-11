@@ -34,12 +34,45 @@ pub fn prepare_muse_context(host_path: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::*;
+    #[cfg(test)]
+    use std::cell::RefCell;
     use std::ffi::OsStr;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::fs::{symlink_dir, symlink_file, OpenOptionsExt};
+    use std::os::windows::fs::{symlink_dir, symlink_file, MetadataExt, OpenOptionsExt};
     use uuid::Uuid;
+
+    pub(crate) const TEST_FAIL_AFTER_CANDIDATES: u8 = 1;
+    pub(crate) const TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION: u8 = 2;
+
+    #[cfg(test)]
+    thread_local! {
+        static TEST_FAULT: RefCell<Option<u8>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_test_fault(fault: u8) {
+        TEST_FAULT.with(|armed| *armed.borrow_mut() = Some(fault));
+    }
+
+    #[cfg(test)]
+    fn consume_test_fault(fault: u8) -> bool {
+        TEST_FAULT.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            if *armed == Some(fault) {
+                *armed = None;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    #[cfg(not(test))]
+    fn consume_test_fault(_fault: u8) -> bool {
+        false
+    }
 
     #[derive(Clone, Copy)]
     struct Spec {
@@ -113,19 +146,20 @@ mod windows {
         }
 
         let manifest = admin.join(format!("{TRANSACTION_PREFIX}{operation}.txn"));
-        write_manifest(&manifest, &root, &candidates)?;
+        write_manifest(&manifest)?;
         let mut installed = Vec::new();
         let mut backups_clean = true;
         let result = (|| {
             for candidate in &candidates {
                 create_candidate(candidate)?;
             }
+            if consume_test_fault(TEST_FAIL_AFTER_CANDIDATES) {
+                return Err("test fault after candidate creation".into());
+            }
             // Re-read the index after creating candidates. Candidate creation
             // is side-effect free for the tracked paths, and this catches a
             // checkout that changed while the links were being staged.
-            let fresh_index = repo
-                .index()
-                .map_err(|e| format!("Muse context: cannot refresh Git index: {e}"))?;
+            let fresh_index = refreshed_index(&repo)?;
             for candidate in &candidates {
                 if !still_eligible(&repo, &fresh_index, candidate)? {
                     return Err(format!(
@@ -150,6 +184,18 @@ mod windows {
                 installed.push(candidate);
             }
             for candidate in &candidates {
+                if candidate.spec.path == SKILLS_PATH
+                    && consume_test_fault(TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION)
+                {
+                    let target = candidate
+                        .path
+                        .parent()
+                        .expect("skills alias has a parent")
+                        .join("..")
+                        .join(".claude/skills");
+                    fs::remove_dir_all(target)
+                        .map_err(|e| format!("test fault could not remove skills target: {e}"))?;
+                }
                 validate_installed(candidate)?;
             }
             for candidate in &candidates {
@@ -233,7 +279,7 @@ mod windows {
                             )),
                         }
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+                    Err(error) if lock_is_held(&error) => Ok(None),
                     Err(error) => Err(format!(
                         "Muse context: cannot inspect transaction lock: {error}"
                     )),
@@ -286,7 +332,7 @@ mod windows {
                 }
                 if candidate_exists {
                     if link_matches(&candidate, spec) {
-                        fs::remove_file(&candidate).map_err(|e| {
+                        remove_link(&candidate, spec).map_err(|e| {
                             format!(
                                 "Muse context recovery cannot remove candidate {}: {e}",
                                 candidate.display()
@@ -310,7 +356,7 @@ mod windows {
                         ));
                     }
                     move_no_replace(&backup, &path)?;
-                } else if link_matches(&path, spec) {
+                } else if link_matches(&path, spec) && link_traversable(&path, spec) {
                     if !placeholder_matches(&backup, spec) {
                         return Err(format!(
                             "Muse context recovery found an invalid backup: {}",
@@ -366,7 +412,7 @@ mod windows {
         }
         if fs::read(&full).map_err(|e| e.to_string())? != spec.target {
             return Err(format!(
-                "Muse context: preserving modified placeholder at {}",
+                "Muse context: preserving {} because its working-tree content differs from the tracked symlink target",
                 spec.path
             ));
         }
@@ -386,8 +432,22 @@ mod windows {
             ));
         }
         let target = parent.join(std::str::from_utf8(spec.target).unwrap());
-        let target_meta = fs::symlink_metadata(&target)
-            .map_err(|e| format!("Muse context: target for {} is unavailable: {e}", spec.path))?;
+        let target_meta = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && spec.target_is_dir => {
+                // A tracked skills alias can legitimately point at an empty
+                // or not-yet-created skills directory: Git cannot represent
+                // empty directories. Leave the placeholder untouched and let
+                // the launch continue without project skills.
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Muse context: target for {} is unavailable: {error}",
+                    spec.path
+                ));
+            }
+        };
         if is_reparse_point(&target)
             || target_meta.file_type().is_symlink()
             || target_meta.file_type().is_dir() != spec.target_is_dir
@@ -457,6 +517,21 @@ mod windows {
         Ok(blob.content() == spec.target)
     }
 
+    pub(crate) fn refreshed_index(repo: &git2::Repository) -> Result<git2::Index, String> {
+        let mut index = repo
+            .index()
+            .map_err(|e| format!("Muse context: cannot read Git index: {e}"))?;
+        index
+            .read(false)
+            .map_err(|e| format!("Muse context: cannot refresh Git index: {e}"))?;
+        Ok(index)
+    }
+
+    fn lock_is_held(error: &std::io::Error) -> bool {
+        matches!(error.kind(), std::io::ErrorKind::PermissionDenied)
+            || matches!(error.raw_os_error(), Some(32 | 33))
+    }
+
     fn path_exists_any(path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok()
     }
@@ -482,6 +557,25 @@ mod windows {
             .ok()
             .map(|target| target.to_string_lossy().replace('\\', "/"))
             .is_some_and(|target| target == std::str::from_utf8(spec.target).unwrap())
+    }
+
+    fn link_traversable(path: &Path, spec: Spec) -> bool {
+        if !link_matches(path, spec) {
+            return false;
+        }
+        if spec.target_is_dir {
+            fs::read_dir(path).is_ok()
+        } else {
+            fs::read(path).is_ok()
+        }
+    }
+
+    fn remove_link(path: &Path, spec: Spec) -> std::io::Result<()> {
+        if spec.target_is_dir {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
     }
 
     fn create_candidate(candidate: &Candidate) -> Result<(), String> {
@@ -521,15 +615,7 @@ mod windows {
                 candidate.spec.path
             ));
         }
-        if candidate.spec.target_is_dir {
-            if let Err(error) = fs::read_dir(&candidate.path) {
-                return Err(format!(
-                    "Muse context: cannot traverse {} -> {}: {error}",
-                    candidate.spec.path,
-                    candidate.path.display()
-                ));
-            }
-        } else if fs::read(&candidate.path).is_err() {
+        if !link_traversable(&candidate.path, candidate.spec) {
             return Err(format!("Muse context: cannot read {}", candidate.spec.path));
         }
         Ok(())
@@ -555,21 +641,18 @@ mod windows {
             // Candidate names are unique, but preserve an unexpected object
             // if another process occupied one before cleanup.
             if link_matches(&candidate.temp, candidate.spec) {
-                let _ = fs::remove_file(&candidate.temp);
+                let _ = remove_link(&candidate.temp, candidate.spec);
             }
         }
     }
 
-    fn write_manifest(path: &Path, root: &Path, candidates: &[Candidate]) -> Result<(), String> {
+    fn write_manifest(path: &Path) -> Result<(), String> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .map_err(|e| format!("Muse context: cannot create transaction manifest: {e}"))?;
-        writeln!(file, "root={}", root.display()).map_err(|e| e.to_string())?;
-        for candidate in candidates {
-            writeln!(file, "path={}", candidate.path.display()).map_err(|e| e.to_string())?;
-        }
+        writeln!(file, "version=1").map_err(|e| e.to_string())?;
         file.sync_all()
             .map_err(|e| format!("Muse context: cannot flush transaction manifest: {e}"))
     }
@@ -595,17 +678,15 @@ mod windows {
     }
 
     fn is_reparse_point(path: &Path) -> bool {
-        let path = wide(path.as_os_str());
-        let attributes = unsafe { get_file_attributes(path.as_ptr()) };
-        attributes != u32::MAX && attributes & 0x400 != 0
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_attributes() & 0x400 != 0)
+            .unwrap_or(false)
     }
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         #[link_name = "MoveFileExW"]
         fn move_file_ex(existing: *const u16, new: *const u16, flags: u32) -> i32;
-        #[link_name = "GetFileAttributesW"]
-        fn get_file_attributes(path: *const u16) -> u32;
     }
 }
 
@@ -618,8 +699,14 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn arm_windows_fault(fault: u8) {
+        super::windows::arm_test_fault(fault);
+    }
+
+    #[cfg(target_os = "windows")]
     mod windows_tests {
         use super::super::prepare_muse_context;
+        use super::arm_windows_fault;
         use crate::agent::provider::{AgentProvider, Platform};
         use crate::models::EnvType;
         use std::path::Path;
@@ -710,6 +797,24 @@ mod tests {
             temp
         }
 
+        fn transaction_files(
+            root: &Path,
+            directory: &str,
+            suffix: &str,
+        ) -> Vec<std::path::PathBuf> {
+            std::fs::read_dir(root.join(directory))
+                .unwrap()
+                .filter_map(|entry| {
+                    let path = entry.ok()?.path();
+                    let name = path.file_name()?.to_string_lossy();
+                    (name.ends_with(suffix)
+                        && (name.starts_with(super::super::TRANSACTION_PREFIX)
+                            || name.contains(super::super::TRANSACTION_PREFIX)))
+                    .then_some(path)
+                })
+                .collect()
+        }
+
         #[test]
         fn repairs_exact_windows_checkout_and_is_idempotent() {
             let temp = fixture();
@@ -788,6 +893,174 @@ mod tests {
                     .file_type()
                     .is_symlink()
             );
+        }
+
+        #[test]
+        fn missing_skills_target_is_non_fatal_and_preserves_placeholder() {
+            let temp = fixture();
+            let root = temp.path();
+            std::fs::remove_dir_all(root.join(".claude/skills")).unwrap();
+            git(
+                root,
+                &["update-index", "--remove", ".claude/skills/probe/SKILL.md"],
+                None,
+            );
+            git(
+                root,
+                &[
+                    "-c",
+                    "user.name=Buildmesh Test",
+                    "-c",
+                    "user.email=buildmesh-test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "empty skills target",
+                ],
+                None,
+            );
+
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+
+            assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read(root.join(".agents/skills")).unwrap(),
+                super::super::SKILLS_TARGET
+            );
+            assert!(git(root, &["status", "--porcelain"], None).is_empty());
+        }
+
+        #[test]
+        fn cleans_directory_candidate_after_preinstall_failure() {
+            let temp = fixture();
+            let root = temp.path();
+            arm_windows_fault(super::super::windows::TEST_FAIL_AFTER_CANDIDATES);
+
+            assert!(prepare_muse_context(root.to_str().unwrap()).is_err());
+            assert!(!std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(transaction_files(root, ".agents", ".candidate").is_empty());
+        }
+
+        #[test]
+        fn preserves_backup_when_directory_rollback_recovery_is_blocked() {
+            let temp = fixture();
+            let root = temp.path();
+            arm_windows_fault(super::super::windows::TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION);
+
+            assert!(prepare_muse_context(root.to_str().unwrap()).is_err());
+            std::fs::create_dir_all(root.join(".claude/skills")).unwrap();
+            std::fs::remove_dir(root.join(".agents/skills")).unwrap();
+            std::fs::create_dir(root.join(".agents/skills")).unwrap();
+
+            assert!(prepare_muse_context(root.to_str().unwrap()).is_err());
+            assert!(root.join(".agents/skills").is_dir());
+            assert_eq!(
+                transaction_files(root, ".agents", ".backup").len(),
+                1,
+                "failed recovery must preserve the directory alias backup"
+            );
+
+            std::fs::remove_dir(root.join(".agents/skills")).unwrap();
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(transaction_files(root, ".agents", ".backup").is_empty());
+        }
+
+        #[test]
+        fn refreshes_cached_index_from_disk() {
+            let temp = fixture();
+            let root = temp.path();
+            let repo = git2::Repository::discover(root).unwrap();
+            let cached = repo.index().unwrap();
+            assert_eq!(
+                cached
+                    .iter()
+                    .find(|entry| entry.path == b"AGENTS.md")
+                    .unwrap()
+                    .mode,
+                0o120000
+            );
+            drop(cached);
+
+            let oid = git(
+                root,
+                &["hash-object", "-w", "--stdin"],
+                Some(super::super::AGENTS_TARGET),
+            );
+            git(
+                root,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{oid},AGENTS.md"),
+                ],
+                None,
+            );
+
+            let refreshed = super::super::windows::refreshed_index(&repo).unwrap();
+            assert_eq!(
+                refreshed
+                    .iter()
+                    .find(|entry| entry.path == b"AGENTS.md")
+                    .unwrap()
+                    .mode,
+                0o100644
+            );
+        }
+
+        #[test]
+        fn concurrent_launches_are_serialized_and_idempotent() {
+            let temp = fixture();
+            let root = temp.path().to_path_buf();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let workers = (0..4)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    let root = root.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        prepare_muse_context(root.to_str().unwrap())
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let mut successes = 0;
+            for worker in workers {
+                match worker.join().unwrap() {
+                    Ok(()) => successes += 1,
+                    Err(error) => assert!(
+                        error.contains("already running"),
+                        "unexpected concurrent repair error: {error}"
+                    ),
+                }
+            }
+            assert!(successes >= 1);
+            assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(git(&root, &["status", "--porcelain"], None).is_empty());
         }
 
         #[test]
