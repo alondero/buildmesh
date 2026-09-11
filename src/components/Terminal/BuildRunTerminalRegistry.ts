@@ -11,6 +11,7 @@ import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutput
 import type { BuildRunExitedPayload } from '../../types/generated/BuildRunExitedPayload';
 
 export type { BuildRunOutputPayload };
+import { FontSizeManager } from './FontSizeManager';
 import { ThemeManager } from './ThemeManager';
 import { setTheme, type ThemeName } from '../../lib/theme';
 
@@ -151,6 +152,11 @@ export class BuildRunTerminalRegistry {
   // lifecycles (a build-run X-button close should NOT unregister an agent
   // terminal from the agent registry's theme map).
   private themeManager = new ThemeManager();
+  // Live font-size fan-out, mirroring TerminalRegistry. Without this the
+  // build/run panes only read the size at creation, so Ctrl/Cmd+/- and the
+  // title-bar zoom slider left them at their old text size. Keyed by the
+  // composite instance key (strings, unlike the agent registry's node ids).
+  private fontSizeManager = new FontSizeManager();
 
   getInstance(sessionId: number, mode: BuildRunMode, useWorktree: boolean): BuildRunInstance | undefined {
     return this.instances.get(instanceKey(sessionId, mode, useWorktree));
@@ -379,6 +385,7 @@ export class BuildRunTerminalRegistry {
     // Issue #734: symmetric with doCreate's register — same composite key,
     // so a future flip doesn't push a stale palette into a dead xterm.
     this.themeManager.unregister(key);
+    this.fontSizeManager.unregister(key);
     inst.term.dispose(); // allow-dispose — explicit X-button close; the React lifecycle calls `detach`, never this path
     this.instances.delete(key);
     return inst;
@@ -422,6 +429,7 @@ export class BuildRunTerminalRegistry {
     // Issue #734: release the theme-listener so a destroyed build-run
     // registry doesn't keep firing flips into a now-empty entry map.
     this.themeManager.destroy();
+    this.fontSizeManager.destroy();
   }
 
   /**
@@ -516,6 +524,10 @@ export class BuildRunTerminalRegistry {
       // `instances` Map (sessionId + mode + useWorktree), so the
       // unregister path is symmetric.
       this.themeManager.register(instanceKey(sessionId, mode, useWorktree), term);
+      // Same composite key as ThemeManager so the unregister path is
+      // symmetric. `measureAndFit(inst)` re-measures glyph widths and refits
+      // the pane after a zoom change.
+      this.fontSizeManager.register(instanceKey(sessionId, mode, useWorktree), term, () => measureAndFit(inst));
 
       // Wire keystroke + resize handlers for interactive Terminal mode only.
       // Build/Run is one-way output — user input is ignored. Mirrors the

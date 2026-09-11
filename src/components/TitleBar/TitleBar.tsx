@@ -4,6 +4,8 @@ import Wordmark from '../../assets/wordmark.png';
 import { isMac } from '../../lib/platform';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
+import { HeaderPillButton } from './HeaderPillButton';
+import { ZoomControl } from './ZoomControl';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { useUIStore } from '../../stores/uiStore';
@@ -24,14 +26,19 @@ import { UsageIcon } from '../Probe/probeIcons';
  * primary affordance. Usage — a high-frequency, host-global utility —
  * gets its own labelled action instead of living behind icon-only Probe
  * navigation, and sits in the right-hand utility cluster next to the
- * Settings and Remote Access pills. None of them show data in the bar
- * itself; they are entry points, not readouts.
+ * Settings and Remote Access pills. Usage/Settings/Remote Access are
+ * entry points, not readouts — their state lives in the surface they open.
  *
  * Issue #1609 reshaped the clusters: the utility pills dropped their
  * borders and joined the switcher's 1300px label ladder (one toolbar, one
  * degradation curve), and the GridControls "Search nodes" bar moved from
  * the right cluster into the left, mounted only while the Filtered view is
  * active — it is that view's control, not a global fixture.
+ *
+ * The Zoom pill (left of Usage) is the exception to "entry points, not
+ * readouts": it discloses a popover with the terminal text-size slider and
+ * a live px readout, both bound to the terminalConfig pub/sub the zoom
+ * shortcuts already drive.
  */
 
 // `SHORTCUT_CATALOG` is a static module constant; resolving the
@@ -169,50 +176,6 @@ function NavigationControls() {
         )}
       </button>
     </div>
-  );
-}
-
-/** Shared skeleton for the right-hand utility cluster (Usage, Settings,
-    Remote Access). Same style vocabulary as the ViewModeSwitcher segments
-    (issue #1609): borderless, card-hover, active cyan — the pills read as
-    part of the same toolbar instead of a separate bordered group. */
-function HeaderPillButton({ icon, label, onClick, title, ariaLabel, active = false, testId, ariaExpanded }: {
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-  title: string;
-  ariaLabel: string;
-  active?: boolean;
-  testId?: string;
-  ariaExpanded?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-testid={testId}
-      aria-label={ariaLabel}
-      aria-expanded={ariaExpanded}
-      title={title}
-      className={`inline-flex h-9 shrink-0 items-center gap-1.5 px-2 py-1.5 rounded-md text-sm font-sans font-medium transition-colors ${
-        active
-          ? 'bg-bg-card text-accent-cyan'
-          : 'text-text-secondary hover:bg-bg-card hover:text-text-primary'
-      }`}
-    >
-      {icon}
-      {/* Icon-only below 1400px window width — unified with the
-          switcher's ladder (issue #1609; previously the pills dropped at
-          1150px, so between the two tiers the bar mixed labelled
-          segments with icon pills). The threshold moved from 1300px to
-          1400px to avoid a 2px clip on the rightmost ViewModeSwitcher
-          segment ("Filtered") at exactly 1300px — at 1300px the labels
-          become visible but the centre's `w-80` (260px at the 13px root)
-          plus the side clusters' min-content (~565px each) overflows
-          the side tracks (PR #1623 review). The aria-label above keeps
-          the accessible name stable. */}
-      <span className="max-[1399px]:hidden">{label}</span>
-    </button>
   );
 }
 
@@ -474,6 +437,7 @@ export function TitleBar() {
             (inputs/pills/buttons) keep their clicks; empty space drags. */}
         <div data-tauri-drag-region className="flex items-center justify-end">
           <div className="flex items-center gap-2 pr-1">
+            <ZoomControl />
             <UsageButton />
             <HeaderPillButton
               ariaLabel="Open settings"

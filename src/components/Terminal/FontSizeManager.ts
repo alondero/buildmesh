@@ -11,29 +11,42 @@ interface ManagedEntry {
   measureAndFit: FitFn;
 }
 
+/** A registry-key for a Terminal instance — the agent terminal uses
+ *  `nodeId` (number); the build/run terminal uses the composite
+ *  `(sessionId, mode, useWorktree)` tuple serialised to a string. Mirrors
+ *  `ThemeKey` in ThemeManager so the two sibling managers stay aligned. */
+export type FontSizeKey = number | string;
+
 export class FontSizeManager {
-  private entries = new Map<number, ManagedEntry>();
+  private entries = new Map<FontSizeKey, ManagedEntry>();
   private unlisten: () => void;
 
   constructor() {
     this.unlisten = onTerminalFontSizeChange((size) => {
       for (const entry of this.entries.values()) {
         entry.terminal.options.fontSize = size;
-        entry.measureAndFit();
+        // A pane mid-teardown or not yet laid out can throw from inside
+        // xterm's measurement. Isolate each entry so one bad pane can't
+        // strand every other registered terminal at the old size.
+        try {
+          entry.measureAndFit();
+        } catch (error) {
+          console.warn('[FontSizeManager] measureAndFit failed during zoom fan-out:', error);
+        }
       }
     });
   }
 
-  register(nodeId: number, terminal: TerminalLike, measureAndFit: FitFn): void {
-    this.entries.set(nodeId, { terminal, measureAndFit });
+  register(key: FontSizeKey, terminal: TerminalLike, measureAndFit: FitFn): void {
+    this.entries.set(key, { terminal, measureAndFit });
   }
 
-  unregister(nodeId: number): void {
-    this.entries.delete(nodeId);
+  unregister(key: FontSizeKey): void {
+    this.entries.delete(key);
   }
 
-  has(nodeId: number): boolean {
-    return this.entries.has(nodeId);
+  has(key: FontSizeKey): boolean {
+    return this.entries.has(key);
   }
 
   get size(): number {
