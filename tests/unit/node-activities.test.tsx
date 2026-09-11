@@ -33,8 +33,8 @@ vi.mock('../../src/components/Terminal/BuildRunTerminalRegistry', () => ({
   buildRunTerminalManager: { dispose: disposeUtility, getInstance: () => null },
 }));
 vi.mock('../../src/components/AgentNodeView/GridNodeHeader', () => ({
-  GridNodeHeader: ({ nodeId, titleNodeId, activity, onAttention, onBuildRun }: { nodeId: number; titleNodeId: number; activity?: { label: string }; onAttention: () => void; onBuildRun: (id: number, mode: string) => void }) =>
-    <div><span>Title {titleNodeId}</span><span role="status">{activity?.label}</span><span>Controls {nodeId}</span><button onClick={onAttention}>Show attention</button><button onClick={() => onBuildRun(nodeId, 'terminal')}>Open terminal</button></div>,
+  GridNodeHeader: ({ nodeId, titleNodeId, activity, attentionOutcome, onReveal, onBuildRun }: { nodeId: number; titleNodeId: number; activity?: { label: string }; attentionOutcome?: { label: string } | null; onReveal?: () => void; onBuildRun: (id: number, mode: string) => void }) =>
+    <div><span>Title {titleNodeId}</span><span role="status">{activity?.label}</span><span>Controls {nodeId}</span><span>{attentionOutcome?.label}</span><button onClick={onReveal}>Show attention</button><button onClick={() => onBuildRun(nodeId, 'terminal')}>Open terminal</button></div>,
 }));
 
 const node = (id: number, overrides: Partial<AgentNode> = {}): AgentNode => ({
