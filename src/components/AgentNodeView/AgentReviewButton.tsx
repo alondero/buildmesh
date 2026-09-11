@@ -112,7 +112,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
         </> : <>
         <label className="text-xs block mb-4">Workflow
           <select value={circuitId ?? ''} onChange={e => setCircuitId(e.target.value ? Number(e.target.value) : null)}
-            className="block w-full mt-1 bg-surface-raised border border-border-subtle rounded-md px-2 py-1">
+            className="block w-full mt-1 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary">
             <option value="">Automated review loop</option>
             {circuits.map(circuit => <option key={circuit.id} value={circuit.id}>{circuit.name}</option>)}
           </select>
@@ -121,7 +121,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
         <label className="text-xs block mb-4">Reviewer provider
           <select value={reviewerProvider}
             onChange={e => setReviewerProvider(e.target.value)}
-            className="block w-full mt-1 bg-surface-raised border border-border-subtle rounded-md px-2 py-1">
+            className="block w-full mt-1 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary">
             <option value="">Default (app Reviewer provider or this agent)</option>
             {reviewerGroups.map(([groupKey, rows]) => (
               <optgroup key={groupKey} label={rows.find(row => !row.is_proxied)?.label ?? groupKey}>
@@ -144,7 +144,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
           Maximum review rounds
           <input type="number" min={1} max={10} value={rounds}
             onChange={e => setRounds(Number(e.target.value))}
-            className="w-16 bg-surface-raised border border-border-subtle rounded-md px-2 py-1" />
+            className="w-16 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary" />
         </label></> : <p className="text-xs text-text-secondary mb-4">
           Start this Circuit with {node.name} as its triggering agent. Its configured steps control when work starts.
           You can pause or cancel in Circuits.

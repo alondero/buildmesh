@@ -38,6 +38,19 @@ describe('theme accent colour tokens', () => {
     expect(css).toMatch(/--default-transition-timing-function\s*:/);
   });
 
+  it('declares color-scheme so native form controls (select popups) follow the theme', () => {
+    // A native <select> popup is OS/browser-rendered and follows the
+    // document's `color-scheme`, not our background-color utilities. With
+    // no declaration the dark theme still opened a light OS popup — light
+    // text on white. Dark is the default; [data-theme="light"] re-points it.
+    expect(css).toMatch(/html\s*\{[^}]*color-scheme:\s*dark/);
+    expect(css).toMatch(/\[data-theme="light"\][\s\S]{0,200}color-scheme:\s*light/);
+    // Scoped to the root only: an explicit value on body would outrank the
+    // root's [data-theme="light"] override for everything below it, leaving
+    // light theme with dark native controls.
+    expect(css).not.toMatch(/\bbody\s*(?:,[^{]*)?\{[^}]*color-scheme/);
+  });
+
   it('restores pointer cursor on buttons (Tailwind v4 preflight sets cursor: default)', () => {
     // Components rely on this base rule instead of per-button cursor-pointer.
     expect(css).toMatch(/button:not\(:disabled\)[\s\S]{0,200}cursor:\s*pointer/);
