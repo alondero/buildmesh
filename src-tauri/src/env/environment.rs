@@ -239,6 +239,70 @@ pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
     parse_marked_wsl_path(output, "__BUILDMESH_WSL_CODEX_HOME__")
 }
 
+/// Resolve Muse credentials in the same login environment used for spawning.
+pub(crate) fn muse_auth_path() -> Option<PathBuf> {
+    if cfg!(windows) {
+        static MUSE_AUTH_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
+            let mut command = command_no_window("wsl.exe");
+            command.args([
+                "-d", &get_default_wsl_distro()?, "--cd", "~", "--exec",
+                "sh", "-lc",
+                "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
+            ]);
+            let output = crate::process_util::run_command_with_timeout(
+                command, "WSL Muse credential location", std::time::Duration::from_secs(10),
+            ).ok()?;
+            if !output.status.success() { return None; }
+            let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
+            Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+        });
+        MUSE_AUTH_PATH.clone()
+    } else {
+        muse_auth_path_from_vars(|name| env::var_os(name))
+    }
+}
+
+fn muse_auth_path_from_vars(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if get("META_API_KEY").is_some_and(|value| !value.is_empty()) { return None; }
+    get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()).map(PathBuf::from)
+        .or_else(|| get("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+            .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|root| root.join("muse/auth.json")))
+}
+
+#[cfg(test)]
+mod muse_path_tests {
+    use super::*;
+
+    #[test]
+    fn muse_credential_path_precedence() {
+        let resolve = |auth: &str, xdg: &str| muse_auth_path_from_vars(|name| match name {
+            "MUSE_AUTH_PATH" => Some(auth.into()),
+            "XDG_CONFIG_HOME" => Some(xdg.into()),
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(resolve("/var/lib/muse/auth.json", "/opt/config"), PathBuf::from("/var/lib/muse/auth.json"));
+        assert_eq!(resolve("", "/opt/config"), PathBuf::from("/opt/config/muse/auth.json"));
+        assert_eq!(resolve("", ""), PathBuf::from("/home/test/.config/muse/auth.json"));
+        assert_eq!(muse_auth_path_from_vars(|_| None), None);
+        assert_eq!(muse_auth_path_from_vars(|name| match name {
+            "META_API_KEY" => Some("test-api-key".into()),
+            "MUSE_AUTH_PATH" => Some("/home/test/stale-oauth.json".into()),
+            _ => None,
+        }), None);
+    }
+
+    #[test]
+    fn muse_guest_output_requires_marker_and_absolute_path() {
+        let marker = "__BUILDMESH_MUSE_AUTH__";
+        assert_eq!(parse_marked_wsl_path(b"login banner\n__BUILDMESH_MUSE_AUTH__/opt/config/muse/auth.json\n", marker), Some(PathBuf::from("/opt/config/muse/auth.json")));
+        for output in [b"".as_slice(), b"/home/test/.config/muse/auth.json", b"__BUILDMESH_MUSE_AUTH__relative/path", b"__BUILDMESH_MUSE_AUTH__\xff"] {
+            assert_eq!(parse_marked_wsl_path(output, marker), None);
+        }
+    }
+}
+
 /// Resolve the Codex state directory from the selected WSL environment. This
 /// keeps a guest-side `CODEX_HOME` override visible to transcript discovery
 /// without forwarding the Windows host's variable into the guest.

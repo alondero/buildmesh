@@ -63,8 +63,8 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     // OpenAI inference goes through the Codex harness.
     BuiltInProviderAccount { id: "openai",    name: "OpenAI Platform",       self_auth: false },
     // Muse Code subscription identity — distinct from any future Meta Model
-    // API keyed account. Self-auth: Muse owns login; Buildmesh never reads
-    // Muse credential files. Usage is gated on the `muse` harness.
+    // API keyed account. Muse owns login; usage reads its OAuth credential.
+    // Usage is gated on the `muse` harness.
     BuiltInProviderAccount { id: "muse-code", name: "Meta Muse Code",        self_auth: true  },
 ];
 

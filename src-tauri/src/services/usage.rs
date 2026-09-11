@@ -12,7 +12,7 @@ pub(crate) mod catalog;
 // Re-export the wire types so existing `crate::services::usage::{...}`
 // paths keep working while adapters import from `usage::types` directly.
 pub use types::{
-    BillingBalance, MuseCodeTier, ProviderMeters, ProviderUsage, UsageError, UsageWindow,
+    BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow,
 };
 // Cache stays behind the same `usage::` paths callers already use.
 pub use cache::{invalidate_cache, invalidate_provider_cache};

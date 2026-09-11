@@ -90,6 +90,27 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     expect(screen.getByText('Minimax Display')).toBeTruthy();
   });
 
+  it('renders Muse server plan and both subscription windows', async () => {
+    mockBackend({
+      accounts: [{ id: 'muse-code', name: 'Meta Muse Code', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null }],
+      meters: [{ provider: 'muse-code', usageTracked: true, usage: {
+        provider: 'muse-code', loggedIn: true,
+        windows: [
+          { label: 'Current', usedPercent: 94, resetsAt: '2026-09-11T21:15:15+00:00' },
+          { label: 'Weekly', usedPercent: 35, resetsAt: '2026-09-14T00:00:00+00:00' },
+        ],
+        balance: null, meters: [], detail: 'Muse Code Everyday Usage', error: null,
+      } }],
+    });
+    render(<UsageTab />);
+    expect(await screen.findByText('94.0%')).toBeTruthy();
+    expect(screen.getByText('35.0%')).toBeTruthy();
+    expect(screen.getByText('Current')).toBeTruthy();
+    expect(screen.getByText('Weekly')).toBeTruthy();
+    expect(screen.getByText('Muse Code Everyday Usage')).toBeTruthy();
+    expect(screen.queryByText(/requests/i)).toBeNull();
+  });
+
   it('drops meters whose account has been removed (orphan rows)', async () => {
     // A meter for `agy` arrives but no account by that id exists → the
     // tab renders nothing for that row rather than a bare meter.
