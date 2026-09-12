@@ -180,7 +180,20 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
     let pool_paths =
         db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
+    // Mesh deletion cascades its agent rows directly in SQLite, so the
+    // per-node service delete hook is not called. Snapshot the ids before the
+    // cascade and release their process-lifetime attention state after the
+    // database commit; otherwise a deleted mesh leaves one HookState entry per
+    // node in the global map forever.
+    let node_ids = db::list_agent_nodes_by_mesh(mesh_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
+    for node_id in node_ids {
+        crate::agent::hook_state::forget(node_id);
+    }
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
             tracing::warn!(

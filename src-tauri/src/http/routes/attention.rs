@@ -681,6 +681,18 @@ fn classify(
             detail,
         };
     }
+    // Codex emits `PostToolUse` after an approved permission has run. The
+    // catch-all hook is deliberately installed so `accept_hook` can resolve
+    // the matching permission marker, but that correlation must also clear
+    // the UI's AwaitingInput state. `Ignore` would leave the orange prompt
+    // visible until the later terminal `Stop`; this is still an in-flight
+    // turn, so publish `Running` and reserve `Ready` for `Stop`.
+    if provider == "codex" && matches!(event, Some("posttooluse" | "posttoolusefailure")) {
+        return Classified {
+            decision: Decision::Running,
+            detail,
+        };
+    }
     if matches!(
         event,
         Some(
@@ -929,6 +941,15 @@ pub async fn handle_post(
         let _ = request::write_status_only(lines, "503 Service Unavailable").await;
         return;
     };
+    // The path id is untrusted input. Do not create a process-lifetime
+    // HookState entry or attempt a lifecycle publish for a node that has
+    // already been deleted (or never existed); both would turn a typo/flood
+    // of unknown ids into an unbounded global-map leak. Existing nodes proceed
+    // through the normal provider/session fences below.
+    if node.is_none() {
+        let _ = request::write_status_only(lines, "404 Not Found").await;
+        return;
+    }
 
     // Cheap, CPU-only classification happens on the async worker: parse,
     // debug-log, extract the semantic turn, and classify (the transcript
@@ -1314,7 +1335,7 @@ mod tests {
         // observable approval/denial boundary and carries the tool name.
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"PostToolUse", "tool_name":"Bash"
-        })), (true, Decision::Ignore));
+        })), (true, Decision::Running));
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"Stop", "turn_id":"turn-1"
         })), (true, Decision::Ready));

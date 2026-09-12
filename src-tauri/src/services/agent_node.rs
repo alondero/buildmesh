@@ -401,6 +401,11 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     };
 
     crate::session_naming::cleanup(session_id);
+    // HookState is keyed by node id and lives for the process lifetime. A
+    // deleted node must release its entry even when it had no live PTY (the
+    // normal `notify_process_terminated` path is otherwise never reached),
+    // or every create/delete cycle permanently grows the global map.
+    crate::agent::hook_state::forget(session_id);
     crate::agent::provider::muse::telemetry::forget(session_id);
     // Drop the auto-clear guard too: an awaiting-input node being deleted
     // without first being disarmed would otherwise leak its ARMED entry
@@ -1399,10 +1404,19 @@ mod tests {
             )
             .expect("seed node should succeed");
 
+            let state_owner = crate::agent::hook_state::for_node(node.id);
+            state_owner.lock().question("pending", false);
+
             // Real close order: Phase 1 (safety) precedes Phase 2 (delete).
             get_worktree_close_safety(node.id)
                 .expect("Phase 1 safety on a live row must succeed");
             delete(node.id, remove_worktree).expect("Phase 2 close must succeed");
+            let replacement_state = crate::agent::hook_state::for_node(node.id);
+            assert!(
+                !std::sync::Arc::ptr_eq(&state_owner, &replacement_state),
+                "deleting a node must release its process-lifetime HookState entry",
+            );
+            crate::agent::hook_state::forget(node.id);
             assert!(
                 matches!(
                     db::get_agent_node_by_id(node.id),
