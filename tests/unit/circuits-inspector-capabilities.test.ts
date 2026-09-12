@@ -57,7 +57,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     const c = HARNESS_CAPABILITIES.anthropic;
     expect(c.harness_id).toBe('anthropic');
     // Issue #1481 — pin supports_passive_turn_watcher across every harness
-    // (TS vitest is opt-in per field; only commandcode.rs:100 overrides the
+    // (TS vitest is opt-in per field; commandcode.rs and muse.rs override the
     // trait default of `false`, see provider/mod.rs:348).
     expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
@@ -221,6 +221,23 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(true);
+    expect(c.effort_control.kind).toBe('none');
+  });
+
+  // Muse — no native hook exists (issue #1709); the backend session-log
+  // watcher supplies the turn signal, so `requires_attention_hook` stays
+  // false while `supports_passive_turn_watcher` flips true.
+  it('Meta Muse matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.muse;
+    expect(c.harness_id).toBe('muse');
+    expect(c.supports_passive_turn_watcher).toBe(true);
+    expect(c.requires_attention_hook).toBe(false);
+    expect(c.attention_capability).toEqual({ kind: 'none' });
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.produces_readable_transcript).toBe(false);
     expect(c.effort_control.kind).toBe('none');
   });
 

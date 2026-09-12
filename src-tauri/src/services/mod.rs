@@ -9,6 +9,7 @@ pub mod circuit_worker;
 pub mod codex_session;
 pub mod commandcode_watcher;
 pub mod commandcode_session;
+pub mod muse_watcher;
 pub mod coordinator_ledger_maintenance;
 pub mod fetch_freshness;
 pub mod freebuff_usage;
