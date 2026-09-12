@@ -448,6 +448,23 @@ pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
     Ok(())
 }
 
+/// Persist a circuit's step-slot budget — the canvas editor's per-circuit
+/// concurrency control. The IPC boundary clamps to the blueprint's
+/// `[floor, ceiling]` range; this accessor only writes. Errors when the
+/// row doesn't exist so a stale editor can't silently no-op. `updated_at`
+/// stamps so the Probe list shows fresh edit times.
+pub fn set_autopilot_circuit_concurrency_limit(id: i64, concurrency_limit: i64) -> SqlResult<()> {
+    let db = crate::db::write_conn();
+    let changed = db.execute(
+        "UPDATE autopilot_circuits SET concurrency_limit = ?2, updated_at = datetime('now') WHERE id = ?1",
+        params![id, concurrency_limit],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
 /// Persist a new blueprint AST for one circuit — the canvas editor's
 /// save seam (issue #1209). The IPC boundary validates the JSON parses
 /// AND passes semantic checks; this accessor only writes. Errors when

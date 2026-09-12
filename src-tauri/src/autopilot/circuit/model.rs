@@ -115,6 +115,22 @@ impl CircuitBlueprintKind {
         }
     }
 
+    /// Upper bound on a circuit's step-slot budget. The floor is
+    /// blueprint-specific ([`Self::min_concurrency_limit`]); this ceiling
+    /// keeps one circuit from monopolising the app-wide agent pool.
+    pub const MAX_CONCURRENCY_LIMIT: i64 = 16;
+
+    /// Clamp a requested step-slot budget into this blueprint's allowed
+    /// `[min_concurrency_limit, MAX_CONCURRENCY_LIMIT]` range. Shared by
+    /// creation ([`validate_circuit_request`]) and the post-creation
+    /// editor control so both enforce the same floor and ceiling.
+    pub fn clamp_concurrency_limit(self, requested: i64) -> i64 {
+        requested.clamp(
+            self.min_concurrency_limit(),
+            Self::MAX_CONCURRENCY_LIMIT,
+        )
+    }
+
     /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
     /// blueprint. The review blueprint is labelled-issue-driven — a
     /// manual fire would mint a run with no `issue.*` context.
@@ -1286,7 +1302,7 @@ pub fn validate_circuit_request(
         _ => None,
     };
 
-    let concurrency_limit = concurrency_limit.clamp(blueprint.min_concurrency_limit(), 16);
+    let concurrency_limit = blueprint.clamp_concurrency_limit(concurrency_limit);
 
     Ok(ValidatedCircuitRequest {
         trigger_kind: selected_trigger,

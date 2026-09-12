@@ -416,6 +416,30 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
 }
 
 #[test]
+fn set_autopilot_circuit_concurrency_limit_persists_and_errors_on_missing() {
+    // The canvas editor's per-circuit step-slot control. Only
+    // `concurrency_limit` changes; every other column is untouched.
+    let path = init_temp_db("set_concurrency");
+    let mesh = create_mesh("circuit-set-concurrency-mesh", "/tmp/circuit-set-concurrency").unwrap();
+    let created =
+        create_autopilot_circuit(mesh.id, "tunable", "desc", 2, &sample_graph_json()).unwrap();
+
+    set_autopilot_circuit_concurrency_limit(created.id, 5).unwrap();
+    let reloaded = get_autopilot_circuit(created.id).unwrap().unwrap();
+    assert_eq!(reloaded.concurrency_limit, 5);
+    assert_eq!(reloaded.name, "tunable");
+    assert_eq!(reloaded.description, "desc");
+    assert!(!reloaded.enabled, "a budget change must not flip the draft-first flag");
+
+    // A stale editor writing against a deleted circuit must error.
+    let missing = set_autopilot_circuit_concurrency_limit(999_999, 3);
+    assert!(missing.is_err());
+
+    let _ = get();
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     let path = init_temp_db("persist");
     // Every app start runs `db::init` → `evolve_to` against the existing

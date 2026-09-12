@@ -545,6 +545,7 @@ pub fn run() {
             commands::circuit::create_circuit,
             commands::circuit::set_circuit_enabled,
             commands::circuit::update_circuit_graph,
+            commands::circuit::update_circuit_concurrency_limit,
             commands::circuit::delete_circuit,
             commands::circuit::cancel_circuit_run,
             commands::circuit::cancel_circuit_runs,

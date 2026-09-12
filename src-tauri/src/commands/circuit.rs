@@ -304,6 +304,46 @@ pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), S
     Ok(())
 }
 
+/// Update a circuit's step-slot budget from the canvas editor.
+///
+/// The blueprint's floor (a review circuit MUST be ≥2, or its reviewer
+/// deadlocks behind the implementation node's still-live process) and the
+/// shared ceiling are enforced by
+/// [`CircuitBlueprintKind::clamp_concurrency_limit`], so the IPC boundary
+/// stays a dumb router. The persisted row is returned so the caller sees
+/// the clamped value; the worker wakes so a raised budget admits queued
+/// steps on the next tick.
+#[command]
+pub fn update_circuit_concurrency_limit(
+    circuit_id: i64,
+    concurrency_limit: i64,
+) -> Result<AutopilotCircuit, String> {
+    let circuit = crate::db::get_autopilot_circuit(circuit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
+    let blueprint = CircuitGraph::from_json(&circuit.graph_json)
+        .ok()
+        .and_then(|graph| graph.blueprint)
+        .unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
+    let clamped = blueprint.clamp_concurrency_limit(concurrency_limit);
+    crate::db::set_autopilot_circuit_concurrency_limit(circuit_id, clamped).map_err(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            format!("circuit {} does not exist", circuit_id)
+        } else {
+            e.to_string()
+        }
+    })?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!(
+        "circuits: concurrency_limit for circuit {} set to {}",
+        circuit_id,
+        clamped
+    );
+    crate::db::get_autopilot_circuit(circuit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))
+}
+
 fn retire_cancelled_agents_with(
     agent_ids: Vec<i64>,
     mut retire: impl FnMut(i64) -> Result<(), String>,

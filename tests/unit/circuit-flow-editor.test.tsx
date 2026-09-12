@@ -190,6 +190,42 @@ describe('CircuitFlowEditor', () => {
     expect(graph.edges).toHaveLength(2);
   });
 
+  it('saves the step-slot budget through the header control', async () => {
+    renderEditor();
+    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
+    // CIRCUIT's graph carries no blueprint → floor of 1, shared ceiling 16.
+    expect(select.value).toBe('1');
+    expect(Array.from(select.options).map((o) => Number(o.value))).toEqual(
+      Array.from({ length: 16 }, (_, i) => i + 1)
+    );
+
+    fireEvent.change(select, { target: { value: '4' } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_circuit_concurrency_limit', {
+        circuitId: 7,
+        concurrencyLimit: 4,
+      });
+    });
+  });
+
+  it('offers only the review blueprint floor of 2 on a review circuit', async () => {
+    const reviewCircuit: AutopilotCircuit = {
+      ...CIRCUIT,
+      concurrency_limit: 2,
+      graph_json: JSON.stringify({
+        version: 3,
+        blueprint: 'issue_driven_autopilot_review',
+        nodes: [{ id: 'trigger', type: { type: 'github_issue_label', label: 'run' } }],
+        edges: [],
+      }),
+    };
+    render(<CircuitFlowEditor circuit={reviewCircuit} runs={[]} onClose={() => {}} />);
+    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
+    // A 1-slot review circuit would deadlock its reviewer, so 1 is not offered.
+    expect(select.options[0].value).toBe('2');
+    expect(select.value).toBe('2');
+  });
+
   it('exposes named outcome handles on gate nodes', async () => {
     renderEditor();
     await screen.findByTestId('circuit-node-gate');
