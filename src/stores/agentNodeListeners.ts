@@ -168,6 +168,7 @@ export async function attachAgentNodeListeners(
       if (event.payload.semantic_turn) {
         surface.setSemanticTurn(nodeId, event.payload.semantic_turn);
       } else if (
+        event.payload.kind === 'work_resumed' ||
         event.payload.kind === 'turn_completed' ||
         event.payload.kind === 'autopilot_completed' ||
         event.payload.kind === 'input_required' ||

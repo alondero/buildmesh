@@ -382,7 +382,7 @@ mod tests {
         // refactor that drops Kimi from the resume path trips this test.
         assert!(Provider::Kimi.adapter().supports_resume());
         assert!(Provider::Kimi.adapter().supports_model_override());
-        assert!(!Provider::Kimi.adapter().requires_attention_hook());
+        assert!(Provider::Kimi.adapter().requires_attention_hook());
         assert!(Provider::Mcode.adapter().supports_resume());
         // Issue #1179: mcode's interactive TUI rejects `--model`, so the
         // override is no longer advertised.

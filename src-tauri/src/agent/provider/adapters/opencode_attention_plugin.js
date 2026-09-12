@@ -1,15 +1,16 @@
 // Buildmesh attention plugin for OpenCode (issues #1295 + #1294).
 //
 // Loaded by the OpenCode TUI as an ESM module from `.opencode/plugins/`.
-// Forwards three harness events back to Buildmesh's local attention
-// endpoint so the agent node reaches `awaiting_input` like every other
-// harness AND captures the freshly minted `ses_<…>` session id at TUI
+// Forwards lifecycle and human-input events to Buildmesh's attention
+// endpoint and captures the freshly minted `ses_<…>` session id at TUI
 // boot, which is the primary path for `agent_nodes.cli_session_id`
 // (issue #1294):
 //   - `session.created`   — TUI minted a new `ses_<…>` id at boot;
 //                            persistence only, no Node Turn.
-//   - `session.idle`       — turn ended, agent is at its prompt.
+//   - `session.idle`       — turn ended, agent is Ready.
 //   - `permission.asked`   — agent is blocked on a tool approval decision.
+//   - `question.asked`     — agent is waiting for an answer.
+//   - resolution / busy   — clear attention when work resumes.
 //
 // Every callback includes `sessionID` so the route's ordering-token
 // fence (`attention.rs:690-702`) can compare against the stored id and
@@ -48,7 +49,6 @@ const logPath = process.env.BUILDMESH_PLUGIN_LOG;
 // id when present (the upstream plugin is the authority) and fall
 // back to the cache so a future revision that drops the field from
 // `session.idle` / `permission.asked` doesn't lose fencing.
-let cachedSessionId = null;
 
 function buildmeshUrl() {
   const port = process.env.BUILDMESH_PORT;
@@ -237,14 +237,14 @@ async function postAttention(body) {
       await appendLog(`attention ${res.status}\n`);
     }
   } catch (_err) {
-    // Network/loopback failure or timeout — swallow (Buildmesh's
-    // autoclear safety net arms on every mark; a missed callback
-    // self-heals within a few PTY output bursts).
+    // Fail open for the harness. A lost callback is a delivery gap;
+    // PTY autoclear cannot recover a callback that never arrived.
     await appendLog("attention error\n");
   }
 }
 
 export const BuildmeshAttention = async () => {
+  let cachedSessionId = null;
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -268,6 +268,8 @@ export const BuildmeshAttention = async () => {
       // documented shape via `pickSessionId` so a future upstream
       // rename doesn't drop captures.
       if (event.type === "session.created") {
+        // Child sessions share the plugin bus but must not claim the node.
+        if (event.properties?.info?.parentID || event.info?.parentID) return;
         const id = pickSessionId(event);
         if (!isValidSessionId(id)) {
           await appendLog("session.created missing or malformed id\n");
@@ -282,15 +284,44 @@ export const BuildmeshAttention = async () => {
         return;
       }
 
+      const suppliedId = pickSessionId(event);
+      if (cachedSessionId && isValidSessionId(suppliedId) && suppliedId !== cachedSessionId) return;
+
+      if (event.type === "session.status" && event.properties?.status?.type === "busy") {
+        const body = { hook_event_name: "session.busy" };
+        const id = suppliedId ?? cachedSessionId;
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+
+      if (event.type === "question.asked") {
+        const id = suppliedId ?? cachedSessionId;
+        const body = {
+          hook_event_name: "question.asked",
+          message: event.properties?.questions?.[0]?.question ?? "OpenCode is asking a question",
+          request_id: event.properties?.id,
+        };
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+      if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
+        const body = { hook_event_name: event.type, request_id: event.properties?.requestID };
+        const id = suppliedId ?? cachedSessionId;
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+
       // `session.idle` — the agent finished its turn and is sitting at
       // the input prompt waiting. We use a dedicated `hook_event_name`
       // (`session.idle`) that mirrors the upstream OpenCode plugin event
       // type. The classifier has a dedicated rule that maps this event
-      // to `InputRequired`. We deliberately do NOT post a
+      // to `Ready`. We deliberately do NOT post a
       // `transcript_path` because OpenCode has no Claude-style
       // transcript file — the classifier's transcript-scan fallback
-      // would otherwise classify this as `Ready` (turn done, no pending
-      // tasks).
+      // is not the source of truth for this harness.
       //
       // Best-effort fencing (issue #1294 round-3 review): `sessionID`
       // is attached when we can resolve one (event-supplied or cached

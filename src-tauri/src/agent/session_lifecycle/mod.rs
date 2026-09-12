@@ -101,6 +101,16 @@ use ts_rs::TS;
 pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] =
     &[SessionStatus::Error, SessionStatus::Archived];
 
+/// Hook callbacks describe a live process and must not revive a stopped node.
+const FORBIDDEN_HOOK_TRANSITION: &[SessionStatus] = &[
+    SessionStatus::Idle,
+    SessionStatus::Error,
+    SessionStatus::Archived,
+    SessionStatus::Suspended,
+    SessionStatus::Pending,
+    SessionStatus::Completed,
+];
+
 // ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
 // ---------------------------------------------------------------------------
@@ -187,6 +197,8 @@ pub struct AttentionClearedPayload {
 #[serde(rename_all = "snake_case")]
 #[ts(export, rename_all = "snake_case", export_to = "LifecycleKind.ts")]
 pub enum LifecycleKind {
+    /// The harness accepted a prompt or resolved a blocking input request.
+    WorkResumed,
     /// An ordinary turn finished and the agent is at its prompt, ready for
     /// another prompt. The node lands in `Ready` — NOT the Autopilot-only
     /// `Completed` (issue #1364).
@@ -414,6 +426,7 @@ pub trait SessionLifecycleSink {
         self.emit_attention_needed(node_id);
     }
     fn emit_attention_cleared(&self, node_id: i64);
+    fn disarm_attention_autoclear(&self, node_id: i64);
     fn emit_resume_failed(&self, node_id: i64, reason: &str);
     /// Emit the normalized `agent-lifecycle` event (issue #1364). The
     /// `AppSessionLifecycleSink` implementation fans out to BOTH the desktop
@@ -462,6 +475,10 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     }
 
     fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
+        let encoded = semantic_turn
+            .as_ref()
+            .and_then(|turn| serde_json::to_string(turn).ok());
+        let _ = db::persist_semantic_turn(node_id, encoded.as_deref());
         let _ = self
             .app
             .emit("attention-needed", AttentionNeededPayload { session_id: node_id, semantic_turn });
@@ -472,6 +489,10 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
         let _ = self
             .app
             .emit("attention-cleared", AttentionClearedPayload { session_id: node_id });
+    }
+
+    fn disarm_attention_autoclear(&self, node_id: i64) {
+        crate::attention_autoclear::disarm(node_id);
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {
@@ -536,6 +557,9 @@ impl SessionLifecycleSink for DbOnlySink {
 
     fn emit_attention_needed(&self, _node_id: i64) {}
     fn emit_attention_cleared(&self, node_id: i64) { let _ = db::persist_semantic_turn(node_id, None); }
+    fn disarm_attention_autoclear(&self, node_id: i64) {
+        crate::attention_autoclear::disarm(node_id);
+    }
     fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
     fn emit_lifecycle_changed(&self, _payload: LifecycleChangedPayload) {}
 }
@@ -637,6 +661,7 @@ pub fn on_attention_with_detail(
     semantic_turn: Option<SemanticTurnPayload>,
 ) -> Result<(), String> {
     on_attention_with_signal(sink, node_id, semantic_turn, &HookSignalDetail::default())
+        .map(|_| ())
 }
 
 /// [`on_attention_with_detail`] with a full provider envelope (issue #1364).
@@ -649,8 +674,14 @@ pub fn on_attention_with_signal(
     node_id: i64,
     semantic_turn: Option<SemanticTurnPayload>,
     detail: &HookSignalDetail,
-) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::AwaitingInput)?;
+) -> Result<bool, String> {
+    if detail.provider.is_some() || detail.provider_event.is_some() {
+        if !sink.write_status_unless_in(node_id, SessionStatus::AwaitingInput, FORBIDDEN_HOOK_TRANSITION)? {
+            return Ok(false);
+        }
+    } else {
+        sink.write_status(node_id, SessionStatus::AwaitingInput)?;
+    }
     sink.emit_attention_needed_with_payload(node_id, semantic_turn.clone());
     let kind = detail
         .kind
@@ -672,7 +703,7 @@ pub fn on_attention_with_signal(
         "agent is waiting for input",
     ));
     tracing::info!("Node {node_id} awaiting user input (Node Turn)");
-    Ok(())
+    Ok(true)
 }
 
 /// The user typed into the node (or the autoclear safety net, or
@@ -689,6 +720,34 @@ pub fn on_attention_cleared(
     sink.emit_attention_cleared(node_id);
     tracing::info!("Node {node_id} attention cleared");
     Ok(())
+}
+
+/// A harness reports that work resumed. Unlike manual input, a delayed hook
+/// must not revive a stopped node. Returns false when the callback is stale.
+pub fn on_hook_running(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+) -> Result<bool, String> {
+    on_hook_running_with_detail(sink, node_id, &HookSignalDetail::default())
+}
+
+/// Structured variant of [`on_hook_running`] used by the attention webhook so
+/// the normalized resume event retains the provider event/session metadata.
+pub fn on_hook_running_with_detail(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    detail: &HookSignalDetail,
+) -> Result<bool, String> {
+    if !sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_HOOK_TRANSITION)? {
+        return Ok(false);
+    }
+    sink.disarm_attention_autoclear(node_id);
+    sink.emit_attention_cleared(node_id);
+    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+        node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
+        detail, "agent resumed work",
+    ));
+    Ok(true)
 }
 
 /// A node is being marked `Idle`. Two distinct callers share this
@@ -776,41 +835,54 @@ pub fn on_completed(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(),
 /// (Autopilot's PR-opened terminal state) — and emits `agent-lifecycle`
 /// kind `TurnCompleted`. The attention route calls this when a hook
 /// callback shows a clean turn with no pending background work.
+/// Returns false when a stopped node rejects the late callback.
 pub fn on_turn_completed(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
     detail: &HookSignalDetail,
-) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::Ready)?;
+) -> Result<bool, String> {
+    if !sink.write_status_unless_in(node_id, SessionStatus::Ready, FORBIDDEN_HOOK_TRANSITION)? {
+        return Ok(false);
+    }
+    sink.disarm_attention_autoclear(node_id);
+    sink.emit_attention_cleared(node_id);
+    let detail = HookSignalDetail { semantic_turn: None, ..detail.clone() };
     sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::TurnCompleted,
         SessionStatus::Ready,
-        detail,
+        &detail,
         "turn finished — agent is ready for another prompt",
     ));
     tracing::info!("Node {node_id} finished its turn (Ready)");
-    Ok(())
+    Ok(true)
 }
 
 /// A turn ended but background work is still running (false yield, issue
-/// #878). No status write — the node stays `Running` — but the transition
-/// is observable: emit `agent-lifecycle` kind `BackgroundRunning` so both
-/// clients can distinguish "busy on background work" from "waiting for
+/// #878). Writes `Running` so persisted status agrees with the observable
+/// `agent-lifecycle` event of kind `BackgroundRunning`, allowing both
+/// clients to distinguish "busy on background work" from "waiting for
 /// input" without polling.
+/// Returns false when a stopped node rejects the late callback.
 pub fn on_background_running(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
     detail: &HookSignalDetail,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    if !sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_HOOK_TRANSITION)? {
+        return Ok(false);
+    }
+    sink.disarm_attention_autoclear(node_id);
+    sink.emit_attention_cleared(node_id);
+    let detail = HookSignalDetail { semantic_turn: None, ..detail.clone() };
     sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::BackgroundRunning,
         SessionStatus::Running,
-        detail,
+        &detail,
         "agent busy on background work",
     ));
-    Ok(())
+    Ok(true)
 }
 
 /// Initial node creation — mark `Pending`. Used by
@@ -912,13 +984,17 @@ mod tests {
 
     #[test]
     fn on_turn_completed_writes_ready_and_emits_turn_completed() {
-        let sink = RecordingSink::new();
+        let sink = RecordingSink::with_status(SessionStatus::AwaitingInput);
         on_turn_completed(&sink, 7, &HookSignalDetail::default()).unwrap();
         assert_eq!(
-            *sink.writes(),
-            vec![(7, SessionStatus::Ready)],
+            sink.status(),
+            Some(SessionStatus::Ready),
             "a clean turn completion must land in Ready, never Completed (issue #1364)"
         );
+        assert_eq!(sink.attention_cleared(), vec![7]);
+        assert_eq!(sink.effects(), vec![
+            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
+        ]);
         let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::TurnCompleted);
@@ -927,14 +1003,105 @@ mod tests {
     }
 
     #[test]
-    fn on_background_running_emits_without_writing_status() {
-        let sink = RecordingSink::new();
+    fn on_background_running_updates_status_before_emitting() {
+        let sink = RecordingSink::with_status(SessionStatus::Ready);
         on_background_running(&sink, 7, &HookSignalDetail::default()).unwrap();
-        assert!(sink.writes().is_empty(), "background yield must not change status");
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
+        assert_eq!(sink.effects(), vec![
+            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
+        ]);
         let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::BackgroundRunning);
         assert_eq!(events[0].status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn completed_and_background_hooks_cannot_revive_stopped_nodes() {
+        for status in [
+            SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
+            SessionStatus::Suspended, SessionStatus::Pending, SessionStatus::Completed,
+        ] {
+            let sink = RecordingSink::with_status(status);
+            assert!(!on_turn_completed(&sink, 7, &HookSignalDetail::default()).unwrap());
+            assert!(!on_background_running(&sink, 7, &HookSignalDetail::default()).unwrap());
+            assert_eq!(sink.status(), Some(status));
+            assert!(sink.effects().is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_hook_status_write_does_not_clear_attention_or_emit() {
+        let sink = RecordingSink::failing_writes();
+        assert!(on_turn_completed(&sink, 7, &HookSignalDetail::default()).is_err());
+        assert!(on_background_running(&sink, 7, &HookSignalDetail::default()).is_err());
+        assert!(on_hook_running(&sink, 7).is_err());
+        assert!(sink.effects().is_empty());
+    }
+
+    #[test]
+    fn hook_running_clears_attention_only_after_persisting_running() {
+        let sink = RecordingSink::with_status(SessionStatus::AwaitingInput);
+        assert!(on_hook_running(&sink, 7).unwrap());
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
+        assert_eq!(sink.effects(), vec![
+            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
+        ]);
+        assert_eq!(sink.lifecycle_changed()[0].kind, LifecycleKind::WorkResumed);
+    }
+
+    #[test]
+    fn running_and_attention_hooks_cannot_revive_stopped_nodes() {
+        let detail = HookSignalDetail {
+            provider: Some("grok".into()),
+            provider_event: Some("Notification".into()),
+            ..HookSignalDetail::default()
+        };
+        for status in [
+            SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
+            SessionStatus::Suspended, SessionStatus::Pending, SessionStatus::Completed,
+        ] {
+            let sink = RecordingSink::with_status(status);
+            assert!(!on_hook_running(&sink, 7).unwrap());
+            on_attention_with_signal(&sink, 7, None, &detail).unwrap();
+            assert_eq!(sink.status(), Some(status));
+            assert!(sink.attention_needed().is_empty());
+            assert!(sink.effects().is_empty());
+        }
+    }
+
+    #[test]
+    fn hook_attention_can_mark_live_node_and_preserves_signal() {
+        let sink = RecordingSink::with_status(SessionStatus::Running);
+        let detail = HookSignalDetail {
+            provider: Some("grok".into()),
+            provider_event: Some("Notification".into()),
+            kind: Some(LifecycleKind::QuestionRequested),
+            ..HookSignalDetail::default()
+        };
+        on_attention_with_signal(&sink, 7, None, &detail).unwrap();
+        assert_eq!(sink.status(), Some(SessionStatus::AwaitingInput));
+        assert_eq!(sink.attention_needed(), vec![7]);
+        assert_eq!(sink.lifecycle_changed()[0].kind, LifecycleKind::QuestionRequested);
+    }
+
+    #[test]
+    fn completed_and_background_events_do_not_repeat_stale_semantic_attention() {
+        let detail = HookSignalDetail {
+            semantic_turn: Some(SemanticTurnPayload {
+                node_id: 7,
+                kind: SemanticTurnKind::PermissionRequest,
+                description: "old permission prompt".into(),
+            }),
+            ..HookSignalDetail::default()
+        };
+        let sink = RecordingSink::with_status(SessionStatus::AwaitingInput);
+        on_turn_completed(&sink, 7, &detail).unwrap();
+        on_background_running(&sink, 7, &detail).unwrap();
+        assert_eq!(sink.attention_cleared(), vec![7, 7]);
+        for event in sink.lifecycle_changed() {
+            assert_eq!(event.semantic_turn, None);
+        }
     }
 
     #[test]

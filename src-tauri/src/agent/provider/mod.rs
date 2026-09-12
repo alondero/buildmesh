@@ -715,6 +715,7 @@ pub trait AgentProvider: Send + Sync {
 /// do not need to know which provider owns a node or which session-scoped
 /// lifecycle service it installed.
 pub(crate) fn notify_process_terminated(node_id: i64) {
+    crate::agent::hook_state::forget(node_id);
     let Ok(node) = crate::db::get_agent_node_by_id(node_id) else {
         return;
     };

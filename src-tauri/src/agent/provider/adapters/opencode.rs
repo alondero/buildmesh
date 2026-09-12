@@ -213,14 +213,16 @@ impl AgentProvider for OpenCodeAdapter {
         use crate::agent::session_lifecycle::LifecycleKind;
         // Issue #1295: OpenCode's project plugin forwards two lifecycle
         // events back to the attention endpoint:
-        //   - `session.idle` → `InputRequired` (turn ended, user is needed)
+        //   - `session.idle` → `TurnCompleted` (ready for another prompt)
+        //   - `question.asked` → `QuestionRequested` (an answer is needed)
         //   - `permission.asked` → `PermissionRequested` (tool approval)
         // `PermissionAsk` is the honest launch mode: OpenCode's `--auto`
         // auto-approves most permissions, but the rare non-auto case still
         // raises a `permission.asked` signal that the plugin forwards.
         AttentionCapability::Hook {
             events: vec![
-                LifecycleKind::InputRequired,
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::QuestionRequested,
                 LifecycleKind::PermissionRequested,
             ],
             launch_mode: AttentionLaunchMode::PermissionAsk,

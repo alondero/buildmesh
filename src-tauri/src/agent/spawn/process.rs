@@ -127,7 +127,7 @@ pub fn inject_attention_hook(project_path: &Path) -> Result<(), String> {
     let curl = crate::env::unix_attention_curl();
     let hook_command = serde_json::json!({
         "type": "command",
-        "command": format!("{curl} -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"),
+        "command": format!("{curl} -sf --connect-timeout 1 --max-time 2 -o /dev/null -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"),
     });
     ensure_hooks_json(&settings_path, &hook_command)
 }
@@ -264,6 +264,23 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
         .as_array_mut()
         .ok_or_else(|| "settings.local.json event `Stop` must be an array".to_string())?;
     changed = merge_buildmesh_handler(stop_groups_array, new_handler, &[]) || changed;
+
+    for (event, matcher) in [
+        ("PermissionRequest", None),
+        ("Elicitation", None),
+        ("ElicitationResult", None),
+        ("StopFailure", None),
+        ("UserPromptSubmit", None),
+        ("PreToolUse", Some("^(AskUserQuestion|ExitPlanMode)$")),
+        ("PostToolUse", Some("^(AskUserQuestion|ExitPlanMode)$")),
+        ("PostToolUseFailure", Some("^(AskUserQuestion|ExitPlanMode)$")),
+    ] {
+        let groups = hooks_obj.entry(event).or_insert_with(|| serde_json::json!([]))
+            .as_array_mut().ok_or_else(|| format!("settings.local.json event `{event}` must be an array"))?;
+        let matcher = matcher.map(|value| serde_json::Value::String(value.into()));
+        let fields = matcher.as_ref().map(|value| vec![("matcher", value)]).unwrap_or_default();
+        changed = merge_buildmesh_handler(groups, new_handler, &fields) || changed;
+    }
 
     if !changed {
         return Ok(());

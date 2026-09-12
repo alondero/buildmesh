@@ -16,6 +16,11 @@ use toml_edit::{value, DocumentMut, Item, Table};
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
 
+/// Native `request_user_input` hooks were verified against Codex 0.154.0.
+/// Older binaries may accept the config but omit the callbacks Buildmesh uses
+/// to track an outstanding human question.
+const CODEX_MIN_HOOK_VERSION: &str = "0.154.0";
+
 fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,
@@ -962,7 +967,7 @@ fn ensure_hooks_json_content(
     };
 
     let mut changed = false;
-    for event in ["SessionStart", "Stop", "PermissionRequest"] {
+    for event in ["SessionStart", "Stop", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Interrupt"] {
         let groups = events
             .entry(event)
             .or_insert_with(|| serde_json::json!([]));
@@ -985,7 +990,11 @@ fn ensure_hooks_json_content(
             }
         }
         if !found {
-            groups.push(serde_json::json!({ "hooks": [hook.clone()] }));
+            let mut group = serde_json::json!({ "hooks": [hook.clone()] });
+            if matches!(event, "PreToolUse" | "PostToolUse") {
+                group["matcher"] = serde_json::json!("^request_user_input$");
+            }
+            groups.push(group);
             changed = true;
         }
     }
@@ -1125,12 +1134,13 @@ impl AgentProvider for CodexAdapter {
             events: vec![
                 LifecycleKind::TurnCompleted,
                 LifecycleKind::InputRequired,
+                LifecycleKind::QuestionRequested,
                 LifecycleKind::PermissionRequested,
                 LifecycleKind::BackgroundRunning,
             ],
             launch_mode: AttentionLaunchMode::PermissionAsk,
             trust: Some("codex project trust (#1379)".into()),
-            min_version: None,
+            min_version: Some(CODEX_MIN_HOOK_VERSION.into()),
         }
     }
 
@@ -1659,6 +1669,11 @@ mod tests {
     fn codex_declares_attention_hook_and_readable_transcript() {
         assert!(CODEX.requires_attention_hook());
         assert!(CODEX.produces_readable_transcript());
+        let crate::agent::capabilities::AttentionCapability::Hook { events, min_version, .. } = CODEX.attention_capability() else {
+            panic!("Codex must expose native hook capability");
+        };
+        assert!(events.contains(&crate::agent::session_lifecycle::LifecycleKind::QuestionRequested));
+        assert_eq!(min_version.as_deref(), Some(CODEX_MIN_HOOK_VERSION));
     }
 
     fn read_hooks_json(project: &Path) -> serde_json::Value {
@@ -1694,7 +1709,7 @@ mod tests {
         assert!(config.contains("hooks = true"), "config: {config}");
 
         let hooks = read_hooks_json(temp.path());
-        for event in ["SessionStart", "Stop", "PermissionRequest"] {
+        for event in ["SessionStart", "Stop", "PermissionRequest", "PreToolUse", "PostToolUse"] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
@@ -1706,6 +1721,9 @@ mod tests {
                 command.contains("--data-binary @-"),
                 "{event} must forward the hook stdin as the POST body: {command}"
             );
+            if matches!(event, "PreToolUse" | "PostToolUse") {
+                assert_eq!(hooks["hooks"][event][0]["matcher"].as_str(), Some("^request_user_input$"));
+            }
         }
     }
 

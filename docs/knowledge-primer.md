@@ -374,6 +374,30 @@ Claude Code ends its turn when it launches background work (`run_in_background` 
 
 **Safety net:** `attention_autoclear.rs` arms on every mark; if the PTY then produces ≥512 bytes of output more than 3s after the mark with no user keystroke, the node flips back to `running` and `attention-cleared` is broadcast. The 3s grace absorbs the Stop-hook-vs-final-redraw race; the burst threshold ignores idle control-sequence trickle. This self-heals the cases the transcript scan can't see (hook-less providers, format drift, lost notifications). Every path that clears attention or accepts user input must call `attention_autoclear::disarm` (see `write_to_agent_blocking`, `http::ws`, `coordinator::drive`, `autopilot::pipeline`).
 
+### Cross-harness hook normalization (2026-09)
+
+All structured attention callbacks enter `http::routes::attention` and are
+normalized into the shared `agent-lifecycle` kinds. A clean `Stop` or native
+idle event is `turn_completed`/`ready`; a permission or question callback is
+`permission_requested`/`question_requested` and remains outstanding until its
+matching resolution; input submission and permission resolution are
+`work_resumed`/`running`. Errors, cancellation, malformed payloads, and
+unreadable transcripts are degraded review checkpoints, never successful turn
+completion. Background work is published as `background_running` without
+attention until its terminal callback arrives.
+
+The route keeps per-node ordering state and fences callbacks by provider turn
+id/session id. This matters for Kimi Code: a background `AskUserQuestion`
+returns before its answer, so `PostToolUse` only associates the request with a
+task id; a later `Notification` with `source_kind=background_task` and a
+terminal `task.*` type resolves it. OpenCode question events are tracked by
+request id and child sessions cannot overwrite their parent. Native hooks are
+provisioned only where the installed harness contract is verified; Terminal,
+Freebuff, Muse, and unvalidated MiniMax/DeepSeek profiles retain explicit
+capability gaps rather than guessing from PTY output. See
+`docs/learning/harness-attention-reliability.md` for the evidence matrix and
+remaining limitations.
+
 ### Auto-Spawn Behavior
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
 

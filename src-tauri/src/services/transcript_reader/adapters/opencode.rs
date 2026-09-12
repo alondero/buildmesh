@@ -152,8 +152,9 @@ impl TranscriptAdapter for OpenCodeAdapter {
             return None;
         }
         // OpenCode's plugin fires `session.idle` when the agent finishes
-        // a turn and waits for input (issue #1295) — mark for attention
-        // with `InputRequired`. `session.created` fires once at TUI boot
+        // a turn and waits for another prompt — classify as Ready.
+        // Only explicit question/permission requests need human attention.
+        // `session.created` fires once at TUI boot
         // carrying the freshly minted `ses_…` id; it's lifecycle-neutral
         // (the id-capture path persists the session id, the attention
         // route must not flip a fresh spawn into `AwaitingInput`).
@@ -165,8 +166,12 @@ impl TranscriptAdapter for OpenCodeAdapter {
             .map(str::to_ascii_lowercase);
         match event.as_deref() {
             Some("session.idle") => Some(HookClassification {
+                decision: HookDecision::Ready,
+                kind: None,
+            }),
+            Some("question.asked") => Some(HookClassification {
                 decision: HookDecision::MarkInput,
-                kind: Some(LifecycleKind::InputRequired),
+                kind: Some(LifecycleKind::QuestionRequested),
             }),
             Some("session.created") => Some(HookClassification {
                 decision: HookDecision::Ignore,
@@ -308,7 +313,7 @@ pub(crate) fn read_opencode_tail(
         Err(reason) => return TranscriptTail::unavailable(reason),
     };
     let row_budget = effective_tail(tail).saturating_mul(OPENCODE_TURN_TO_MESSAGE_FACTOR);
-    let Some(messages) = read_opencode_messages(&db_path, &session_id, row_budget) else {
+    let Some(messages) = read_opencode_messages(&db_path, session_id, row_budget) else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };
     read_opencode_tail_from_messages(&messages, tail)
@@ -328,7 +333,7 @@ pub(crate) fn read_opencode_digest(
         Ok(pair) => pair,
         Err(reason) => return TranscriptTail::unavailable(reason),
     };
-    let Some(messages) = read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
+    let Some(messages) = read_opencode_messages(&db_path, session_id, OPENCODE_DIGEST_WINDOW)
     else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };

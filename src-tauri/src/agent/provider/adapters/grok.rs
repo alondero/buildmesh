@@ -196,6 +196,18 @@ fn merge_buildmesh_handler(
     true
 }
 
+fn merge_question_handler(groups: &mut Vec<serde_json::Value>, handler: &serde_json::Value) -> bool {
+    let original = groups.clone();
+    groups.retain_mut(|group| {
+        let Some(handlers) = group.get_mut("hooks").and_then(|value| value.as_array_mut()) else { return true; };
+        let owned = handlers.iter().any(is_buildmesh_handler);
+        handlers.retain(|handler| !is_buildmesh_handler(handler));
+        !owned || !handlers.is_empty()
+    });
+    groups.push(serde_json::json!({"matcher":"^ask_user_question$", "hooks":[handler]}));
+    *groups != original
+}
+
 /// Write the attention hook file. Idempotent — preserves ALL existing
 /// hooks the user authored (sibling matcher groups, sibling handler
 /// fields, additional events), atomically (named temp file +
@@ -258,14 +270,18 @@ fn ensure_hooks_json(path: &Path) -> Result<(), String> {
         .ok_or_else(|| "hooks.json `hooks` value must be an object".to_string())?;
 
     let mut changed = false;
-    for event in ["Notification", "Stop"] {
+    for event in ["Notification", "Stop", "StopFailure", "StopCancelled", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"] {
         let groups = hooks_obj
             .entry(event)
             .or_insert_with(|| serde_json::json!([]));
         let groups_array = groups
             .as_array_mut()
             .ok_or_else(|| format!("hooks.json event `{event}` must be an array"))?;
-        changed = merge_buildmesh_handler(groups_array, &new_handler) || changed;
+        if matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure") {
+            changed = merge_question_handler(groups_array, &new_handler) || changed;
+        } else {
+            changed = merge_buildmesh_handler(groups_array, &new_handler) || changed;
+        }
     }
 
     if !changed {
@@ -462,6 +478,19 @@ impl AgentProvider for GrokAdapter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn question_matcher_migration_preserves_user_handlers_in_mixed_group() {
+        let owned = serde_json::json!({"type":"http", "url":HOOK_URL});
+        let user = serde_json::json!({"type":"command", "command":"user-policy"});
+        let mut groups = vec![serde_json::json!({"matcher":"Bash", "hooks":[owned.clone(), user.clone()]})];
+        assert!(merge_question_handler(&mut groups, &owned));
+        assert_eq!(groups, vec![
+            serde_json::json!({"matcher":"Bash", "hooks":[user]}),
+            serde_json::json!({"matcher":"^ask_user_question$", "hooks":[owned.clone()]})
+        ]);
+        assert!(!merge_question_handler(&mut groups, &owned));
+    }
 
     fn provision_grok(project: &Path) {
         let path = project.to_string_lossy().into_owned();
