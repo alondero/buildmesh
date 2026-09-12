@@ -192,7 +192,7 @@ pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
         .collect::<Vec<_>>();
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
     for node_id in node_ids {
-        crate::agent::hook_state::forget(node_id);
+        crate::agent::node_teardown::release(node_id);
     }
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {

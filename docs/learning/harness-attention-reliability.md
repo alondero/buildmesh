@@ -19,7 +19,7 @@ The local source of truth is the [provider inventory](../../src-tauri/src/agent/
 | Cursor | Project `.cursor/hooks.json`, `stop`; launch uses `--force` | Completion supported by contract. Do not infer an actual approval prompt from generic pre-tool events. Question support requires a verified CLI tool/event contract. |
 | OpenCode | Local ESM event plugin | Existing plugin forwards creation, idle, and permission requests; misses questions and resumption events. Idle was described/classified as input-required, conflating completion with questions. |
 | Grok | Global native HTTP hooks | Direct completion/notification path exists. Error/cancel outcomes and late callbacks need explicit handling. Question tool is `ask_user_question`. |
-| Command Code | Passive transcript watcher, no native attention hooks | Completion is not entirely unsupported: watcher is already present. Official native `Stop`/`SessionStart` hooks provide another verified integration surface. |
+| Command Code | Passive transcript watcher, no native attention hooks | Completion is not entirely unsupported: watcher is already present. Official native `Stop`/`SessionStart` hooks provide another verified integration surface for future work; this change ships the watcher only. |
 | Kimi | No attention hook at audit start | Installed native Kimi Code has hooks, including real permission events; this is a concrete missing integration. Native Kimi Code and legacy Python kimi-cli are different products/config roots. |
 | MiniMax Code (`mcode`) | No attention hooks | Installed 0.2.7 contains two hook systems with different event catalogs. Native hook capability exists, but a validated TUI delivery/config route is still required. |
 | Meta Muse | No attention hooks; readable event storage used for session/usage support | Installed 1.1.1 has structured logs and an MSP server, but no verified interactive attention-hook registration. A log watcher or MSP adapter needs real lifecycle fixtures. |
@@ -83,7 +83,7 @@ The same guide warns that Stop is a gate: another hook can cause a continuation 
 
 ### Command Code
 
-Native `Stop` and `SessionStart` use nested command-hook groups in `.commandcode/settings.json` or the global equivalent. Omit `matcher` for these lifecycle events: a matcher prevents them firing. Empty stdout with exit zero is neutral. Existing transcript watching is still a real completion path; introducing native hooks requires deduplication and must not discard successful live callbacks when a transcript fallback is missing. [Command Code hooks](https://commandcode.ai/docs/hooks), [mods lifecycle](https://commandcode.ai/docs/mods)
+Native `Stop` and `SessionStart` use nested command-hook groups in `.commandcode/settings.json` or the global equivalent. Omit `matcher` for these lifecycle events: a matcher prevents them firing. Empty stdout with exit zero is neutral. Existing transcript watching is still a real completion path; introducing native hooks requires deduplication and must not discard successful live callbacks when a transcript fallback is missing. This is documented contract evidence only; this change does not provision Command Code native hooks. [Command Code hooks](https://commandcode.ai/docs/hooks), [mods lifecycle](https://commandcode.ai/docs/mods)
 
 ### Remaining harnesses
 

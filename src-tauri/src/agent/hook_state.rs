@@ -1,11 +1,28 @@
-//! Best-effort native turn ordering and outstanding question tracking.
+//! Best-effort native turn ordering and outstanding question tracking for
+//! harness attention callbacks.
+//!
+//! The raw HTTP listener dispatches outside Tauri command handlers, so it
+//! cannot borrow a managed `tauri::State` at the point a callback arrives.
+//! This module therefore keeps a process-scoped store keyed by node id. The
+//! store is deliberately bounded as a last-resort guard against malformed or
+//! retired-node floods; normal node retirement calls
+//! [`crate::agent::node_teardown::release`] so entries leave immediately.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
+
+const MAX_HOOK_STATES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuestionKind {
+    Foreground,
+    Detached,
+}
 
 #[derive(Default)]
 pub(crate) struct HookState {
     turn: Option<String>,
-    questions: HashMap<String, bool>,
+    questions: HashMap<String, QuestionKind>,
     permission_requests: HashSet<String>,
     completed_tasks: VecDeque<String>,
     /// Whether the foreground harness turn is still executing. Background
@@ -19,11 +36,12 @@ impl HookState {
     pub(crate) fn accepts(&mut self, turn: Option<&str>, starts_turn: bool) -> bool {
         if starts_turn {
             self.turn = turn.map(str::to_owned);
-            self.questions.retain(|_, background| *background);
+            self.questions
+                .retain(|_, kind| matches!(kind, QuestionKind::Detached));
             self.permission_requests.retain(|key| {
                 self.questions
                     .get(key)
-                    .is_some_and(|background| *background)
+                    .is_some_and(|kind| matches!(kind, QuestionKind::Detached))
             });
             self.is_turn_active = true;
             return true;
@@ -34,18 +52,13 @@ impl HookState {
         }
     }
 
-    pub(crate) fn question(&mut self, key: &str, resolved: bool) {
-        if resolved {
-            self.questions.remove(key);
-            self.permission_requests.remove(key);
-        } else {
-            self.questions.insert(key.into(), false);
-            self.permission_requests.remove(key);
-        }
+    pub(crate) fn question(&mut self, key: &str, kind: QuestionKind) {
+        self.questions.insert(key.into(), kind);
+        self.permission_requests.remove(key);
     }
 
     pub(crate) fn permission_request(&mut self, key: &str) {
-        self.questions.insert(key.into(), false);
+        self.questions.insert(key.into(), QuestionKind::Foreground);
         self.permission_requests.insert(key.into());
     }
 
@@ -65,7 +78,7 @@ impl HookState {
         let mut foreground = self
             .questions
             .iter()
-            .filter(|(_, background)| !**background)
+            .filter(|(_, kind)| matches!(kind, QuestionKind::Foreground))
             .map(|(key, _)| key.clone());
         let Some(key) = foreground.next() else {
             return;
@@ -84,7 +97,7 @@ impl HookState {
             .iter()
             .any(|completed| completed == task)
         {
-            self.questions.insert(task.into(), true);
+            self.questions.insert(task.into(), QuestionKind::Detached);
         }
     }
 
@@ -102,6 +115,20 @@ impl HookState {
 
     pub(crate) fn has_questions(&self) -> bool {
         !self.questions.is_empty()
+    }
+
+    pub(crate) fn has_foreground_questions(&self) -> bool {
+        self.questions
+            .values()
+            .any(|kind| matches!(kind, QuestionKind::Foreground))
+    }
+
+    pub(crate) fn has_permission_requests(&self) -> bool {
+        !self.permission_requests.is_empty()
+    }
+
+    fn is_quiescent(&self) -> bool {
+        !self.is_turn_active && self.questions.is_empty()
     }
 
     pub(crate) fn end_turn(&mut self) {
@@ -130,7 +157,36 @@ static HOOK_STATES: LazyLock<parking_lot::Mutex<HashMap<i64, Arc<parking_lot::Mu
     LazyLock::new(Default::default);
 
 pub(crate) fn for_node(node_id: i64) -> Arc<parking_lot::Mutex<HookState>> {
-    HOOK_STATES.lock().entry(node_id).or_default().clone()
+    let mut states = HOOK_STATES.lock();
+    if let Some(owner) = states.get(&node_id) {
+        return owner.clone();
+    }
+    if states.len() >= MAX_HOOK_STATES {
+        // Prefer an idle entry. If every entry is active, keep the existing
+        // nodes intact and give this callback an ephemeral owner instead;
+        // lifecycle callbacks are best-effort, but the store must remain
+        // bounded even under a flood of concurrent nodes.
+        let Some(evict) = states.iter().find_map(|(id, owner)| {
+            owner
+                .try_lock()
+                .and_then(|state| state.is_quiescent().then_some(*id))
+        }) else {
+            tracing::warn!(
+                max_entries = MAX_HOOK_STATES,
+                "attention hook state store is full of active nodes; using ephemeral state"
+            );
+            return Arc::new(parking_lot::Mutex::new(HookState::default()));
+        };
+        states.remove(&evict);
+        tracing::warn!(
+            evicted_node = evict,
+            max_entries = MAX_HOOK_STATES,
+            "attention hook state store reached its bound"
+        );
+    }
+    let owner = Arc::new(parking_lot::Mutex::new(HookState::default()));
+    states.insert(node_id, owner.clone());
+    owner
 }
 
 pub(crate) fn forget(node_id: i64) {
@@ -154,14 +210,14 @@ mod tests {
     #[test]
     fn background_stop_cannot_hide_outstanding_questions() {
         let mut state = HookState::default();
-        state.question("first", false);
-        state.question("second", false);
+        state.question("first", QuestionKind::Foreground);
+        state.question("second", QuestionKind::Foreground);
         assert!(state.has_questions());
-        state.question("first", true);
+        state.resolve_question(Some("first"));
         assert!(state.has_questions());
-        state.question("second", true);
+        state.resolve_question(Some("second"));
         assert!(!state.has_questions());
-        state.question("old", false);
+        state.question("old", QuestionKind::Foreground);
         state.accepts(Some("next"), true);
         assert!(!state.has_questions());
     }
@@ -169,13 +225,13 @@ mod tests {
     #[test]
     fn detached_questions_survive_new_prompts_and_out_of_order_task_results() {
         let mut state = HookState::default();
-        state.question("call", false);
+        state.question("call", QuestionKind::Foreground);
         state.background_question("call", "task");
         state.accepts(Some("next"), true);
         assert!(state.has_questions());
         assert!(state.finish_background_task("task"));
         assert!(!state.has_questions());
-        state.question("early-call", false);
+        state.question("early-call", QuestionKind::Foreground);
         assert!(!state.finish_background_task("early-task"));
         state.background_question("early-call", "early-task");
         assert!(!state.has_questions());
@@ -188,11 +244,24 @@ mod tests {
         let other = for_node(9_900_002);
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &other));
-        first.lock().question("request", false);
+        first.lock().question("request", QuestionKind::Foreground);
         assert!(same.lock().has_questions());
         assert!(!other.lock().has_questions());
         forget(9_900_001);
         forget(9_900_002);
+    }
+
+    #[test]
+    fn hook_state_store_stays_bounded_when_retirement_is_missed() {
+        let first = 9_910_000;
+        for node_id in first..first + MAX_HOOK_STATES as i64 + 32 {
+            let owner = for_node(node_id);
+            owner.lock().end_turn();
+        }
+        assert!(HOOK_STATES.lock().len() <= MAX_HOOK_STATES);
+        for node_id in first..first + MAX_HOOK_STATES as i64 + 32 {
+            forget(node_id);
+        }
     }
 
     #[test]
@@ -201,7 +270,7 @@ mod tests {
         assert!(!state.is_turn_active());
         assert!(state.accepts(Some("turn"), true));
         assert!(state.is_turn_active());
-        state.question("request", false);
+        state.question("request", QuestionKind::Foreground);
         state.end_turn();
         assert!(!state.is_turn_active());
         assert!(state.has_questions());
@@ -212,11 +281,11 @@ mod tests {
     #[test]
     fn an_unidentified_reply_resolves_only_one_foreground_request() {
         let mut state = HookState::default();
-        state.question("one", false);
+        state.question("one", QuestionKind::Foreground);
         state.resolve_question(None);
         assert!(!state.has_questions());
-        state.question("one", false);
-        state.question("two", false);
+        state.question("one", QuestionKind::Foreground);
+        state.question("two", QuestionKind::Foreground);
         state.resolve_question(None);
         assert!(state.has_questions());
     }
@@ -224,7 +293,7 @@ mod tests {
     #[test]
     fn an_identified_reply_for_another_request_never_guesses() {
         let mut state = HookState::default();
-        state.question("one", false);
+        state.question("one", QuestionKind::Foreground);
         state.resolve_question(Some("other"));
         assert!(state.has_questions());
         state.resolve_question(Some("one"));
@@ -235,7 +304,7 @@ mod tests {
     fn clearing_permissions_does_not_clear_regular_questions() {
         let mut state = HookState::default();
         state.permission_request("approval");
-        state.question("question", false);
+        state.question("question", QuestionKind::Foreground);
         state.clear_permission_requests();
         assert!(state.has_questions());
         state.resolve_question(Some("question"));

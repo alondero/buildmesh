@@ -23,6 +23,7 @@ pub mod detection;
 pub(crate) mod hook_state;
 pub mod launch;
 pub mod launch_routing;
+pub(crate) mod node_teardown;
 pub mod output;
 pub mod process;
 pub mod provider;

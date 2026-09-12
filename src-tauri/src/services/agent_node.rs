@@ -405,13 +405,7 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // deleted node must release its entry even when it had no live PTY (the
     // normal `notify_process_terminated` path is otherwise never reached),
     // or every create/delete cycle permanently grows the global map.
-    crate::agent::hook_state::forget(session_id);
-    crate::agent::provider::muse::telemetry::forget(session_id);
-    // Drop the auto-clear guard too: an awaiting-input node being deleted
-    // without first being disarmed would otherwise leak its ARMED entry
-    // forever (issue #1263). `disarm` is a no-op on an unarmed node, so
-    // sibling-positioning with the other per-node cleanups is safe.
-    crate::attention_autoclear::disarm(session_id);
+    crate::agent::node_teardown::release(session_id);
     // Drop autopilot state too. The ledger delete is explicit as a
     // defensive belt: the table declares ON DELETE CASCADE and the
     // bundled SQLite build (rusqlite 0.32 / SQLite 3.46.0) has FK
@@ -1405,7 +1399,9 @@ mod tests {
             .expect("seed node should succeed");
 
             let state_owner = crate::agent::hook_state::for_node(node.id);
-            state_owner.lock().question("pending", false);
+            state_owner
+                .lock()
+                .question("pending", crate::agent::hook_state::QuestionKind::Foreground);
 
             // Real close order: Phase 1 (safety) precedes Phase 2 (delete).
             get_worktree_close_safety(node.id)
@@ -1416,7 +1412,7 @@ mod tests {
                 !std::sync::Arc::ptr_eq(&state_owner, &replacement_state),
                 "deleting a node must release its process-lifetime HookState entry",
             );
-            crate::agent::hook_state::forget(node.id);
+            crate::agent::node_teardown::release(node.id);
             assert!(
                 matches!(
                     db::get_agent_node_by_id(node.id),

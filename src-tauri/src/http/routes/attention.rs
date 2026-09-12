@@ -359,6 +359,9 @@ fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
 enum Decision {
     /// The harness accepted input or resolved a blocking tool request.
     Running,
+    /// Codex emitted catch-all `PostToolUse`; the route must verify that an
+    /// approval marker was pending before turning this into `Running`.
+    CodexToolResult,
     /// The user is needed — publish the Node Turn with attention marking and
     /// land the node in `AwaitingInput`.
     MarkInput,
@@ -389,18 +392,17 @@ fn accept_hook(
         .unwrap_or("")
         .to_ascii_lowercase()
         .replace('_', "");
-    if matches!(event.as_str(), "sessionstart" | "session.created")
+    let resets_session_state = matches!(event.as_str(), "sessionstart" | "session.created")
         && payload
             .session_id
             .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-    {
-        // A boot event with no session identity is not safe to use as a
-        // generation boundary: it could be a delayed callback from an older
-        // process. The route's session-id fence handles identified events;
-        // absent identities leave the existing ordering state intact.
-        *state = Default::default();
-    }
+            .is_some_and(|id| !id.trim().is_empty());
+    // A boot event with no session identity is not safe to use as a
+    // generation boundary: it could be a delayed callback from an older
+    // process. The route's session-id fence handles identified events;
+    // absent identities leave the existing ordering state intact. Defer the
+    // reset until the acceptance fence below so a dropped callback cannot
+    // mutate ordering state.
     if event == "notification"
         && payload.source_kind.as_deref() == Some("background_task")
         && classified.decision == Decision::BackgroundTaskCompleted
@@ -415,18 +417,6 @@ fn accept_hook(
     if !state.accepts(payload.turn_id.as_deref(), starts_turn) {
         return false;
     }
-    if event == "session.busy" {
-        state.mark_turn_active();
-    } else if matches!(event.as_str(), "stop" | "session.idle") {
-        state.end_turn();
-        // Codex's Stop payload always carries its turn id and has no
-        // PermissionResult event. Treat that identified Stop as the fallback
-        // resolution for an approval that was denied; other harnesses keep
-        // unresolved questions fenced until their native reply arrives.
-        if event == "stop" && payload.turn_id.is_some() {
-            state.clear_permission_requests();
-        }
-    }
     let key = payload
         .request_id
         .as_deref()
@@ -440,7 +430,7 @@ fn accept_hook(
         if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
             state.permission_request(key);
         } else {
-            state.question(key, false);
+            state.question(key, crate::agent::hook_state::QuestionKind::Foreground);
         }
     } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure")
         && payload.tool_name.as_deref() == Some("AskUserQuestion")
@@ -480,16 +470,46 @@ fn accept_hook(
                 .or(payload.tool_name.as_deref()),
         );
     }
+    let ends_turn = matches!(event.as_str(), "stop" | "session.idle");
+    // An identified Stop is Codex's only denied-permission fallback. It is an
+    // explicit turn fence, so clear that permission marker before deciding
+    // whether other foreground questions still block the callback. An
+    // unidentified Stop remains fenced and cannot clear anything.
+    if event == "stop" && payload.turn_id.is_some() {
+        state.clear_permission_requests();
+    }
+    // Detached/background questions do not keep the foreground model turn
+    // active. End it before the final question fence so a valid Kimi Stop can
+    // still authorize a later task-completion notification. Foreground
+    // questions, including unresolved permissions, keep the turn active until
+    // their explicit reply arrives; a dropped callback never mutates it.
+    if ends_turn && !state.has_foreground_questions() {
+        state.end_turn();
+    }
     // A real prompt is an explicit user action and must never be fenced by a
     // detached/background question. The background request remains tracked
     // and can still resolve later, but dropping this callback would leave the
     // node frozen in its previous attention state (review finding).
-    starts_turn
+    let accepted = starts_turn
         || !(state.has_questions()
             && matches!(
                 classified.decision,
-                Decision::Ready | Decision::SuppressPendingBackground | Decision::Running
-            ))
+                Decision::Ready
+                    | Decision::SuppressPendingBackground
+                    | Decision::Running
+                    | Decision::CodexToolResult
+            ));
+    if !accepted {
+        return false;
+    }
+
+    if resets_session_state {
+        *state = Default::default();
+    }
+    if event == "session.busy" {
+        state.mark_turn_active();
+    }
+    true
 }
 
 fn effective_decision(decision: Decision, state: &crate::agent::hook_state::HookState) -> Decision {
@@ -499,6 +519,22 @@ fn effective_decision(decision: Decision, state: &crate::agent::hook_state::Hook
         Decision::Ready
     } else {
         decision
+    }
+}
+
+fn normalize_decision(
+    decision: Decision,
+    state: &crate::agent::hook_state::HookState,
+    codex_permission_pending: bool,
+) -> Decision {
+    if decision == Decision::CodexToolResult {
+        if codex_permission_pending {
+            Decision::Running
+        } else {
+            Decision::Ignore
+        }
+    } else {
+        effective_decision(decision, state)
     }
 }
 
@@ -686,10 +722,18 @@ fn classify(
     // the matching permission marker, but that correlation must also clear
     // the UI's AwaitingInput state. `Ignore` would leave the orange prompt
     // visible until the later terminal `Stop`; this is still an in-flight
-    // turn, so publish `Running` and reserve `Ready` for `Stop`.
-    if provider == "codex" && matches!(event, Some("posttooluse" | "posttoolusefailure")) {
+    // turn, so publish `Running` and reserve `Ready` for `Stop`. A failed
+    // tool result is a degraded review checkpoint, never successful resume.
+    if provider == "codex" && event == Some("posttoolusefailure") {
+        return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
+            signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
+            semantic_turn: None,
+            ..detail
+        });
+    }
+    if provider == "codex" && event == Some("posttooluse") {
         return Classified {
-            decision: Decision::Running,
+            decision: Decision::CodexToolResult,
             detail,
         };
     }
@@ -1086,9 +1130,25 @@ pub async fn handle_post(
                     }
                 }
             }
+            let is_codex = provider_owned == "codex";
             detail.provider = Some(provider_owned);
 
+            let codex_post_tool_result = hook_payload.as_ref().is_some_and(|payload| {
+                is_codex
+                    && classified_decision == Decision::CodexToolResult
+                    && payload
+                        .hook_event_name
+                        .as_deref()
+                        .is_some_and(|event| {
+                            event.to_ascii_lowercase().replace('_', "") == "posttooluse"
+                        })
+            });
+            let codex_permission_pending =
+                codex_post_tool_result && state.has_permission_requests();
             if let Some(payload) = hook_payload {
+                // `PostToolUse` is catch-all in Codex. Only an approval marker
+                // makes it a lifecycle resume; ordinary tool output is
+                // correlation-neutral and must not spam `work_resumed`.
                 if !accept_hook(&mut state, &payload, &classified) {
                     return Ok(Applied::StaleDropped);
                 }
@@ -1099,7 +1159,11 @@ pub async fn handle_post(
             // the foreground turn has ended it is the authoritative clean
             // completion. This prevents an asynchronous background callback
             // from flipping an active turn to Ready.
-            let decision = effective_decision(classified_decision, &state);
+            let decision = normalize_decision(
+                classified_decision,
+                &state,
+                codex_permission_pending,
+            );
 
             // A real, high-confidence callback proves hook delivery — persist
             // the node's signal health as Ok so a provisioning failure earlier
@@ -1147,9 +1211,22 @@ pub async fn handle_post(
                     );
                     crate::node_turn::publish_background(session_id, app, detail);
                 }
-                Decision::BackgroundTaskCompleted => unreachable!(
-                    "background task completion must be normalized before lifecycle dispatch"
-                ),
+                Decision::BackgroundTaskCompleted => {
+                    // Keep the webhook fail-open if a future caller bypasses
+                    // `effective_decision`; an unexpected correlation event
+                    // must never panic the HTTP handler or kill its request
+                    // task.
+                    tracing::warn!(
+                        "attention webhook for node {} received an unnormalized background completion",
+                        session_id
+                    );
+                }
+                Decision::CodexToolResult => {
+                    tracing::warn!(
+                        "attention webhook for node {} received an unnormalized Codex tool result",
+                        session_id
+                    );
+                }
                 Decision::Ignore => {
                     tracing::debug!(
                         "attention webhook for node {}: lifecycle-neutral hook, session capture only",
@@ -1326,7 +1403,13 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "codex", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let permission_pending =
+                classified.decision == Decision::CodexToolResult && state.has_permission_requests();
+            let accepted = accept_hook(state, &payload, &classified);
+            (
+                accepted,
+                normalize_decision(classified.decision, state, permission_pending),
+            )
         };
         assert!(apply(&mut state, serde_json::json!({
             "hook_event_name":"UserPromptSubmit", "turn_id":"turn-1"
@@ -1342,6 +1425,71 @@ mod tests {
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"Stop", "turn_id":"turn-1"
         })), (true, Decision::Ready));
+    }
+
+    #[test]
+    fn codex_ordinary_tool_result_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+        })
+        .to_string();
+        let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+        assert_eq!(
+            classified.decision,
+            Decision::CodexToolResult,
+            "ordinary Codex tool output must remain a correlation-only decision"
+        );
+        assert_eq!(
+            normalize_decision(classified.decision, &crate::agent::hook_state::HookState::default(), false),
+            Decision::Ignore
+        );
+    }
+
+    #[test]
+    fn codex_failed_tool_result_requires_degraded_review() {
+        let body = serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+        })
+        .to_string();
+        let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
+    }
+
+    #[test]
+    fn dropped_stop_does_not_end_the_active_turn() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+            (accept_hook(state, &payload, &classified), classified.decision)
+        };
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "turn_id":"turn-1"})
+        )
+        .0);
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"PermissionRequest", "tool_name":"Bash"})
+        )
+        .0);
+
+        // A Stop without a turn token cannot prove that it belongs to the
+        // active turn. The pending approval fence must reject it without
+        // ending the foreground turn or clearing its marker.
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})),
+            (false, Decision::Ready)
+        );
+        assert!(state.is_turn_active());
+        assert!(state.has_permission_requests());
     }
 
     #[test]
