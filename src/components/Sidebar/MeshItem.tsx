@@ -9,6 +9,9 @@ import { useUIStore } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
+import { listen } from '@tauri-apps/api/event';
+import { pathMatchesGitEvent } from '../../lib/paths';
+import type { MeshSyncWarningPayload } from '../../types/generated/MeshSyncWarningPayload';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
@@ -123,6 +126,14 @@ export function MeshItem({
   const meshColor = getMeshColor(mesh.id, mesh.color);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  // The header no longer carries a sync *button* — the background sync (ADR
+  // 0020) and the spawn-time auto-sync keep the mesh fresh, and a permanent
+  // button shared the Regenerate icon (read as "regenerate"). What IS worth
+  // surfacing in the header is a failed sync: the backend emits
+  // `mesh-sync-warning` for any non-fatal sync failure (fetch failed,
+  // diverged history, ...), and until something re-syncs successfully the
+  // mesh is going stale. This flag drives that failure-only icon.
+  const [syncFailed, setSyncFailed] = useState(false);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Issue #735 — viewport clamping + ARIA menu keyboard navigation.
   // The menu container ref lets us measure its rendered size for clamping;
@@ -153,6 +164,29 @@ export function MeshItem({
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
 
+  // Light the failure icon only for THIS mesh: the event is app-global and
+  // carries the mesh path that failed, so match through the same
+  // path-normalisation helper every other mesh-scoped subscriber uses
+  // (slash/case/worktree-aware). A successful force sync below clears it.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    listen<MeshSyncWarningPayload>('mesh-sync-warning', (event) => {
+      if (pathMatchesGitEvent({ path: event.payload.mesh_path }, mesh.path)) {
+        setSyncFailed(true);
+      }
+    }).then((fn) => {
+      // The mesh (or the whole sidebar) can unmount before the IPC-side
+      // subscription resolves — unsubscribe immediately in that case.
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [mesh.path]);
+
   const handleSync = async () => {
     setSyncing(true);
     setSyncMessage(null);
@@ -160,6 +194,9 @@ export function MeshItem({
     try {
       const result = await gitSync(mesh.path);
       setSyncMessage(result.message);
+      // A sync that succeeded means the mesh is fresh again — clear the
+      // failure icon the warning event may have lit.
+      setSyncFailed(false);
       // The pull may have advanced HEAD — recompute the behind count.
       refreshBranchStatus();
     } catch (e) {
@@ -345,20 +382,28 @@ export function MeshItem({
               ↓{behind}
             </span>
           )}
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); handleSync(); }}
-            disabled={syncing}
-            title={syncing ? 'Syncing…' : 'Sync from upstream'}
-            className="text-text-muted hover:text-text-secondary disabled:opacity-50 transition-colors"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? 'animate-spin' : ''}>
-              <polyline points="23 4 23 10 17 10"/>
-              <polyline points="1 20 1 14 7 14"/>
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
-              <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
-            </svg>
-          </button>
+          {/* Failure-only sync indicator (no button): syncs are automatic
+              (background sync per ADR 0020 + spawn-time auto-sync), so a
+              header button duplicated the Regenerate icon for an action the
+              user rarely needs. The icon appears ONLY when the backend
+              reported a failed sync for this mesh — i.e. it may be going
+              stale — and clears on a successful "Force sync from upstream"
+              from the context menu. */}
+          {syncFailed && (
+            <span
+              role="img"
+              aria-label="Sync from upstream failed — mesh may be stale"
+              title="Last sync from upstream failed — the mesh may be stale. Right-click → Force sync from upstream to retry."
+              className="text-status-error transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/>
+                <polyline points="1 20 1 14 7 14"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+                <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+              </svg>
+            </span>
+          )}
           <NodeCreationForm
             mesh={mesh}
             isDropdownOpen={isDropdownOpen}
@@ -480,7 +525,7 @@ export function MeshItem({
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
               <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
             </svg>
-            {syncing ? 'Syncing...' : 'Sync Latest'}
+            {syncing ? 'Syncing…' : 'Force sync from upstream'}
           </button>
           <button
             role="menuitem"
