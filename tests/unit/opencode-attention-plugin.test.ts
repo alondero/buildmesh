@@ -47,4 +47,31 @@ describe("OpenCode attention delivery", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetch.mock.calls[0][1].body).hook_event_name).toBe("question.asked");
   });
+
+  it("preserves OpenCode permission ids across ask and reply", async () => {
+    vi.stubEnv("BUILDMESH_PORT", "2992");
+    vi.stubEnv("BUILDMESH_SESSION_ID", "42");
+    const fetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetch);
+    const plugin = await load()();
+
+    await plugin.event({ event: {
+      type: "permission.asked",
+      properties: { sessionID: "ses_Root", id: "perm-1", tool: { name: "Bash" } },
+    } });
+    await plugin.event({ event: {
+      type: "permission.replied",
+      properties: { sessionID: "ses_Root", requestID: "perm-1", reply: "once" },
+    } });
+
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+      hook_event_name: "permission.asked",
+      request_id: "perm-1",
+      tool_name: "Bash",
+    });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({
+      hook_event_name: "permission.replied",
+      request_id: "perm-1",
+    });
+  });
 });

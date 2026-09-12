@@ -101,9 +101,11 @@ For every enabled integration, test completion, structured question, approval, a
 
 ## Evidence collected in this change
 
-- Rust attention-route suite: **74 passed** (classification, aliases,
+- Rust attention-route suite: **78 passed** (classification, aliases,
   transcript degradation, OpenCode/Kimi correlation, stale turns).
-- Full Rust library suite: **3213 passed, 21 ignored** with serial execution.
+- Full Rust library + integration suite: **3228 library tests, 8 autopilot
+  security tests, 1 job-object test, and 9 PTY tests passed; 21 ignored** with
+  serial execution.
 - Native Kimi callback probe passed on Windows with stdin/body/header and
   bounded delivery assertions; the installed Kimi Code `doctor` acceptance
   check also passed (no model call).

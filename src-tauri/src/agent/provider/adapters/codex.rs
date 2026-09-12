@@ -942,7 +942,9 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
 /// Ensure `<project>/.codex/hooks.json` carries the Stop + PermissionRequest
 /// attention webhooks. Codex's matcher/event schema nests hook entries one
 /// level deeper than Claude Code's (each event maps to matcher groups, each
-/// carrying a `hooks` array — issue #884). Idempotent, and preserves any
+/// carrying a `hooks` array — issue #884). `PreToolUse` is matched to the
+/// native question tool; `PostToolUse` is catch-all so approved permissions
+/// can correlate by tool name. The helper is idempotent and preserves any
 /// unrelated top-level keys the user added.
 /// Return updated hooks JSON, or `None` when the existing document already
 /// contains the current Buildmesh handlers. The caller owns the runtime-aware
@@ -991,7 +993,7 @@ fn ensure_hooks_json_content(
         }
         if !found {
             let mut group = serde_json::json!({ "hooks": [hook.clone()] });
-            if matches!(event, "PreToolUse" | "PostToolUse") {
+            if event == "PreToolUse" {
                 group["matcher"] = serde_json::json!("^request_user_input$");
             }
             groups.push(group);
@@ -1697,7 +1699,10 @@ mod tests {
 
     /// Injection writes both files: the feature flag and the SessionStart +
     /// Stop + PermissionRequest webhooks in Codex's nested matcher/event
-    /// schema, POSTing the hook's stdin to the attention endpoint.
+    /// schema, POSTing the hook's stdin to the attention endpoint. The
+    /// request_user_input pre-hook remains narrowly matched, while
+    /// PostToolUse is catch-all so an approved permission for any tool can
+    /// clear its marker before the terminal Stop fallback.
     #[test]
     fn inject_writes_config_and_hooks() {
         let temp = TempDir::new().unwrap();
@@ -1721,8 +1726,13 @@ mod tests {
                 command.contains("--data-binary @-"),
                 "{event} must forward the hook stdin as the POST body: {command}"
             );
-            if matches!(event, "PreToolUse" | "PostToolUse") {
+            if event == "PreToolUse" {
                 assert_eq!(hooks["hooks"][event][0]["matcher"].as_str(), Some("^request_user_input$"));
+            } else if event == "PostToolUse" {
+                assert!(
+                    hooks["hooks"][event][0].get("matcher").is_none(),
+                    "PostToolUse must be catch-all so approved permissions correlate"
+                );
             }
         }
     }

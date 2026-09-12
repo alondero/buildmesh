@@ -387,11 +387,16 @@ completion. Background work is published as `background_running` without
 attention until its terminal callback arrives.
 
 The route keeps per-node ordering state and fences callbacks by provider turn
-id/session id. This matters for Kimi Code: a background `AskUserQuestion`
-returns before its answer, so `PostToolUse` only associates the request with a
-task id; a later `Notification` with `source_kind=background_task` and a
-terminal `task.*` type resolves it. OpenCode question events are tracked by
-request id and child sessions cannot overwrite their parent. Native hooks are
+id/session id. Foreground activity is tracked separately from outstanding
+questions, so a delayed background callback cannot publish `ready` in the
+middle of a live turn. This matters for Kimi Code: a background
+`AskUserQuestion` returns before its answer, so `PostToolUse` is correlation
+only; a later `Notification` with `source_kind=background_task` and a terminal
+`task.*` type resolves it after the foreground `Stop`. OpenCode question and
+permission events are tracked by request id (with a conservative single-
+request fallback), and child sessions cannot overwrite their parent. Codex has
+no permission-result hook, so its tool result or identified terminal `Stop`
+resolves the approval marker. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, Muse, and unvalidated MiniMax/DeepSeek profiles retain explicit
 capability gaps rather than guessing from PTY output. See

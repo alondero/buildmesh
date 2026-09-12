@@ -136,7 +136,19 @@ struct HookPayload {
     reason: Option<String>,
     #[serde(alias = "promptId", alias = "prompt_id")]
     turn_id: Option<String>,
-    #[serde(alias = "toolUseId", alias = "tool_use_id", alias = "requestID", alias = "elicitation_id", alias = "toolCallId", alias = "tool_call_id")]
+    #[serde(
+        alias = "toolUseId",
+        alias = "tool_use_id",
+        alias = "requestID",
+        alias = "requestId",
+        alias = "elicitation_id",
+        alias = "toolCallId",
+        alias = "tool_call_id",
+        alias = "callId",
+        alias = "call_id",
+        alias = "permissionID",
+        alias = "permission_id"
+    )]
     request_id: Option<String>,
     tool_output: Option<String>,
     source_kind: Option<String>,
@@ -150,7 +162,15 @@ impl HookPayload {
         // Grok sends both spellings in the same envelope. Serde aliases alone
         // reject this as a duplicate field; prefer the canonical snake case.
         for (canonical, aliases) in [
-            ("session_id", &["sessionId", "sessionID", "conversationId", "conversation_id"][..]),
+            (
+                "session_id",
+                &[
+                    "sessionId",
+                    "sessionID",
+                    "conversationId",
+                    "conversation_id",
+                ][..],
+            ),
             ("hook_event_name", &["hookEventName"][..]),
             ("transcript_path", &["transcriptPath"][..]),
             ("notification_type", &["notificationType"][..]),
@@ -165,7 +185,22 @@ impl HookPayload {
             ("artifact_directory_path", &["artifactDirectoryPath"][..]),
             ("model_name", &["modelName"][..]),
             ("turn_id", &["promptId", "prompt_id"][..]),
-            ("request_id", &["toolUseId", "tool_use_id", "requestID", "elicitation_id", "toolCallId", "tool_call_id"][..]),
+            (
+                "request_id",
+                &[
+                    "toolUseId",
+                    "tool_use_id",
+                    "requestID",
+                    "requestId",
+                    "elicitation_id",
+                    "toolCallId",
+                    "tool_call_id",
+                    "callId",
+                    "call_id",
+                    "permissionID",
+                    "permission_id",
+                ][..],
+            ),
         ] {
             for alias in aliases {
                 if let Some(value) = fields.remove(*alias) {
@@ -280,7 +315,9 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
         });
     }
 
-    if !payload.hook_event_name.as_deref().is_some_and(|event| event.eq_ignore_ascii_case("stop") || event.eq_ignore_ascii_case("notification")) {
+    if !payload.hook_event_name.as_deref().is_some_and(|event| {
+        event.eq_ignore_ascii_case("stop") || event.eq_ignore_ascii_case("notification")
+    }) {
         return None;
     }
     let description = payload
@@ -332,6 +369,10 @@ enum Decision {
     /// because background tasks are still running and the harness will
     /// re-invoke itself when they finish (issue #878).
     SuppressPendingBackground,
+    /// A Kimi background task reached a terminal notification. This is a
+    /// correlation event, not a completion by itself: the route resolves it
+    /// to `Ready` only after the foreground turn has stopped.
+    BackgroundTaskCompleted,
     /// Capture any structured session id, then stop. SessionStart (and similar
     /// boot events) must not look like a turn completion.
     Ignore,
@@ -342,9 +383,17 @@ fn accept_hook(
     payload: &HookPayload,
     classified: &Classified,
 ) -> bool {
-    let event = payload.hook_event_name.as_deref().unwrap_or("").to_ascii_lowercase().replace('_', "");
+    let event = payload
+        .hook_event_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace('_', "");
     if matches!(event.as_str(), "sessionstart" | "session.created")
-        && payload.session_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+        && payload
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
     {
         // A boot event with no session identity is not safe to use as a
         // generation boundary: it could be a delayed callback from an older
@@ -354,33 +403,103 @@ fn accept_hook(
     }
     if event == "notification"
         && payload.source_kind.as_deref() == Some("background_task")
-        && matches!(classified.decision, Decision::Ready | Decision::Running)
+        && classified.decision == Decision::BackgroundTaskCompleted
     {
-        return payload.source_id.as_deref().is_some_and(|task| state.finish_background_task(task)) && !state.has_questions();
+        return payload
+            .source_id
+            .as_deref()
+            .is_some_and(|task| state.finish_background_task(task))
+            && !state.has_questions();
     }
     let starts_turn = event == "userpromptsubmit";
-    if !state.accepts(payload.turn_id.as_deref(), starts_turn) { return false; }
-    let key = payload.request_id.as_deref().or(payload.tool_name.as_deref()).unwrap_or("question");
-    let tracks_input_request = classified.detail.kind == Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+    if !state.accepts(payload.turn_id.as_deref(), starts_turn) {
+        return false;
+    }
+    if event == "session.busy" {
+        state.mark_turn_active();
+    } else if matches!(event.as_str(), "stop" | "session.idle") {
+        state.end_turn();
+        // Codex's Stop payload always carries its turn id and has no
+        // PermissionResult event. Treat that identified Stop as the fallback
+        // resolution for an approval that was denied; other harnesses keep
+        // unresolved questions fenced until their native reply arrives.
+        if event == "stop" && payload.turn_id.is_some() {
+            state.clear_permission_requests();
+        }
+    }
+    let key = payload
+        .request_id
+        .as_deref()
+        .or(payload.tool_name.as_deref())
+        .unwrap_or("question");
+    let tracks_input_request = classified.detail.kind
+        == Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
         || matches!(event.as_str(), "permissionrequest" | "permission.asked")
         || (event == "pretooluse" && payload.tool_name.as_deref() == Some("ExitPlanMode"));
     if tracks_input_request && event != "notification" {
-        state.question(key, false);
+        if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
+            state.permission_request(key);
+        } else {
+            state.question(key, false);
+        }
     } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure")
         && payload.tool_name.as_deref() == Some("AskUserQuestion")
-        && payload.tool_input.as_ref().and_then(|input| input.get("background")).and_then(|value| value.as_bool()) == Some(true)
+        && payload
+            .tool_input
+            .as_ref()
+            .and_then(|input| input.get("background"))
+            .and_then(|value| value.as_bool())
+            == Some(true)
     {
-        if let Some(task) = payload.tool_output.as_deref().and_then(|output| output.lines().find_map(|line| line.strip_prefix("task_id: "))).filter(|task| !task.is_empty()) {
+        if let Some(task) = payload
+            .tool_output
+            .as_deref()
+            .and_then(|output| {
+                output
+                    .lines()
+                    .find_map(|line| line.strip_prefix("task_id: "))
+            })
+            .filter(|task| !task.is_empty())
+        {
             state.background_question(key, task);
         }
-    } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure" | "permissionresult" | "elicitationresult" | "question.replied" | "question.rejected") {
-        state.question(key, true);
+    } else if matches!(
+        event.as_str(),
+        "posttooluse"
+            | "posttoolusefailure"
+            | "permissionresult"
+            | "permission.replied"
+            | "elicitationresult"
+            | "question.replied"
+            | "question.rejected"
+    ) {
+        state.resolve_question(
+            payload
+                .request_id
+                .as_deref()
+                .or(payload.tool_name.as_deref()),
+        );
     }
     // A real prompt is an explicit user action and must never be fenced by a
     // detached/background question. The background request remains tracked
     // and can still resolve later, but dropping this callback would leave the
     // node frozen in its previous attention state (review finding).
-    starts_turn || !(state.has_questions() && matches!(classified.decision, Decision::Ready | Decision::SuppressPendingBackground | Decision::Running))
+    starts_turn
+        || !(state.has_questions()
+            && matches!(
+                classified.decision,
+                Decision::Ready | Decision::SuppressPendingBackground | Decision::Running
+            ))
+}
+
+fn effective_decision(decision: Decision, state: &crate::agent::hook_state::HookState) -> Decision {
+    if decision == Decision::BackgroundTaskCompleted && state.is_turn_active() {
+        Decision::Ignore
+    } else if decision == Decision::BackgroundTaskCompleted {
+        Decision::Ready
+    } else {
+        decision
+    }
 }
 
 /// The result of classifying a hook POST body: the [`Decision`] plus the
@@ -429,7 +548,7 @@ impl Classified {
 ///    while background tasks run. OpenCode's event name (issue #1295) is
 ///    passed through verbatim; Grok is handled separately under
 ///    `notificationType == "permission_prompt"` in rule 2b below.
-    ///    2b. Grok `Notification` with `notificationType == "permission_prompt"`
+///    2b. Grok `Notification` with `notificationType == "permission_prompt"`
 ///    (issue #1282) → `MarkInput`. Grok uses Grok's structured
 ///    notification-type vocabulary; the upstream event name is
 ///    `notification`, not a dedicated permission event.
@@ -439,7 +558,7 @@ impl Classified {
 ///    Claude-style transcript file, so this rule must fire BEFORE the
 ///    transcript-scan fallback (rule 5) — otherwise the node would land
 ///    in `Ready`.
-    ///    3b. An OpenCode `session.created` plugin event (issue #1294) →
+///    3b. An OpenCode `session.created` plugin event (issue #1294) →
 ///    `Ignore`. Fires once at TUI boot carrying the freshly minted
 ///    `ses_<…>` id; persisting that id is the primary capture path for
 ///    `agent_nodes.cli_session_id` (the SQLite poller remains the fallback
@@ -510,33 +629,87 @@ fn classify(
         notification_type: payload.notification_type.clone(),
         ..Default::default()
     };
-    let event = payload.hook_event_name.as_deref().map(|value| value.to_ascii_lowercase().replace('_', ""));
+    let event = payload
+        .hook_event_name
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase().replace('_', ""));
     let event = event.as_deref();
     if provider == "kimi" && event == Some("notification") {
         let terminal_task = payload.source_kind.as_deref() == Some("background_task")
-            && matches!(payload.notification_type.as_deref(), Some("task.completed" | "task.failed" | "task.killed" | "task.timed_out" | "task.lost"));
-        return Classified { decision: if terminal_task { Decision::Ready } else { Decision::Ignore }, detail };
+            && matches!(
+                payload.notification_type.as_deref(),
+                Some(
+                    "task.completed"
+                        | "task.failed"
+                        | "task.killed"
+                        | "task.timed_out"
+                        | "task.lost"
+                )
+            );
+        return Classified {
+            decision: if terminal_task {
+                Decision::BackgroundTaskCompleted
+            } else {
+                Decision::Ignore
+            },
+            detail,
+        };
     }
     // Kimi emits PostToolUse before the detached question task completes. The
-    // result is a correlation event, not resumed foreground work. Treat it as
-    // a pending completion so both result-before-notification and
-    // notification-before-result races converge on Ready once the task's
-    // terminal Notification arrives (review finding).
+    // result is a correlation event, not resumed foreground work. It must not
+    // publish Ready: PostToolUse is emitted while the model is still in its
+    // turn. The state tracker migrates the request to the task id and the
+    // terminal Notification below decides whether completion is safe.
     if provider == "kimi"
         && matches!(event, Some("posttooluse" | "posttoolusefailure"))
         && payload.tool_name.as_deref() == Some("AskUserQuestion")
-        && payload.tool_input.as_ref().and_then(|input| input.get("background")).and_then(|value| value.as_bool()) == Some(true)
-        && payload.tool_output.as_deref().is_some_and(|output| output.lines().any(|line| line.strip_prefix("task_id: ").is_some_and(|task| !task.is_empty())))
+        && payload
+            .tool_input
+            .as_ref()
+            .and_then(|input| input.get("background"))
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        && payload.tool_output.as_deref().is_some_and(|output| {
+            output.lines().any(|line| {
+                line.strip_prefix("task_id: ")
+                    .is_some_and(|task| !task.is_empty())
+            })
+        })
     {
-        return Classified { decision: Decision::Ready, detail };
+        return Classified {
+            decision: Decision::Ignore,
+            detail,
+        };
     }
-    if matches!(event, Some("userpromptsubmit" | "session.busy" | "permissionresult" | "permission.replied" | "elicitationresult" | "question.replied" | "question.rejected"))
-        || (matches!(event, Some("posttooluse" | "posttoolusefailure")) && payload.tool_name.as_deref().is_some_and(|name| matches!(name, "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode")))
+    if matches!(
+        event,
+        Some(
+            "userpromptsubmit"
+                | "session.busy"
+                | "permissionresult"
+                | "permission.replied"
+                | "elicitationresult"
+                | "question.replied"
+                | "question.rejected"
+        )
+    ) || (matches!(event, Some("posttooluse" | "posttoolusefailure"))
+        && payload.tool_name.as_deref().is_some_and(|name| {
+            matches!(
+                name,
+                "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode"
+            )
+        }))
     {
-        return Classified { decision: Decision::Running, detail };
+        return Classified {
+            decision: Decision::Running,
+            detail,
+        };
     }
     let question_tool = payload.tool_name.as_deref().is_some_and(|name| {
-        matches!(name, "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ask_question")
+        matches!(
+            name,
+            "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ask_question"
+        )
     });
     if event == Some("elicitation")
         || (event == Some("pretooluse") && question_tool)
@@ -550,16 +723,24 @@ fn classify(
             ..detail
         });
     }
-    if matches!(event, Some("pretooluse" | "posttooluse" | "subagentstop" | "elicitationresult"))
-        || (event == Some("notification")
-            && payload.notification_type.as_deref() == Some("auth_success"))
+    if matches!(
+        event,
+        Some("pretooluse" | "posttooluse" | "subagentstop" | "elicitationresult")
+    ) || (event == Some("notification")
+        && payload.notification_type.as_deref() == Some("auth_success"))
     {
         if event == Some("pretooluse") && payload.tool_name.as_deref() == Some("ExitPlanMode") {
             return Classified::mark_input(detail);
         }
-        return Classified { decision: Decision::Ignore, detail };
+        return Classified {
+            decision: Decision::Ignore,
+            detail,
+        };
     }
-    if matches!(event, Some("stopfailure" | "stopcancelled" | "interrupt" | "session.error")) {
+    if matches!(
+        event,
+        Some("stopfailure" | "stopcancelled" | "interrupt" | "session.error")
+    ) {
         // A failed/interrupted turn needs review, never a success indication.
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             semantic_turn: None,
@@ -600,10 +781,7 @@ fn classify(
             detail,
         };
     }
-    if matches!(
-        event,
-        Some("permissionrequest") | Some("permission.asked")
-    ) {
+    if matches!(event, Some("permissionrequest") | Some("permission.asked")) {
         return Classified::mark_input(detail);
     }
     if event.is_some_and(|event| !matches!(event, "stop" | "notification")) {
@@ -716,13 +894,18 @@ pub async fn handle_post(
             let node = crate::db::get_agent_node_by_id(session_id).ok();
             let provider = node
                 .as_ref()
-                .map(|node| crate::preferences::resolve_harness_provider(&node.provider).adapter().id().to_owned())
+                .map(|node| {
+                    crate::preferences::resolve_harness_provider(&node.provider)
+                        .adapter()
+                        .id()
+                        .to_owned()
+                })
                 .unwrap_or_default();
             (node, provider)
         })
-            .await
-            .ok()
-            .unwrap_or_default();
+        .await
+        .ok()
+        .unwrap_or_default();
     let stored_cli_session_id: String = node
         .as_ref()
         .and_then(|n| n.cli_session_id.clone())
@@ -808,15 +991,17 @@ pub async fn handle_post(
     let mut detail = classified.detail.clone();
     // The semantic turn always wins over the raw message for the
     // human-facing description; keep the health the classifier set.
-    detail.semantic_turn = semantic.filter(|turn| {
-        detail.kind != Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
-            && (classified.decision == Decision::Ready
-                || turn.kind != SemanticTurnKind::TurnFinished)
-    }).map(|turn| SemanticTurnPayload {
-        node_id: session_id,
-        kind: turn.kind,
-        description: turn.description,
-    });
+    detail.semantic_turn = semantic
+        .filter(|turn| {
+            detail.kind != Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+                && (classified.decision == Decision::Ready
+                    || turn.kind != SemanticTurnKind::TurnFinished)
+        })
+        .map(|turn| SemanticTurnPayload {
+            node_id: session_id,
+            kind: turn.kind,
+            description: turn.description,
+        });
 
     // Issue #1389 — every step below is blocking SQLite; one `spawn_blocking`
     // hop for the whole sequence. `app` is `&'static AppHandle` (returned by
@@ -828,7 +1013,7 @@ pub async fn handle_post(
     // closure constructed (avoids the `move ||` capture error
     // for `Option<String>`, which doesn't implement Copy).
     let stored_cli_session_id_owned = stored_cli_session_id;
-    let decision = classified.decision;
+    let classified_decision = classified.decision;
     let hook_payload = payload_parsed;
     let _ = crate::commands::run_blocking(
         "http_attention_apply",
@@ -885,6 +1070,13 @@ pub async fn handle_post(
                 }
             }
 
+            // A Kimi task notification can race with the foreground Stop.
+            // While the model is still active it is correlation-only; after
+            // the foreground turn has ended it is the authoritative clean
+            // completion. This prevents an asynchronous background callback
+            // from flipping an active turn to Ready.
+            let decision = effective_decision(classified_decision, &state);
+
             // A real, high-confidence callback proves hook delivery — persist
             // the node's signal health as Ok so a provisioning failure earlier
             // in the spawn doesn't linger. A degraded (unparseable/fieldless)
@@ -931,6 +1123,9 @@ pub async fn handle_post(
                     );
                     crate::node_turn::publish_background(session_id, app, detail);
                 }
+                Decision::BackgroundTaskCompleted => unreachable!(
+                    "background task completion must be normalized before lifecycle dispatch"
+                ),
                 Decision::Ignore => {
                     tracing::debug!(
                         "attention webhook for node {}: lifecycle-neutral hook, session capture only",
@@ -966,18 +1161,185 @@ mod tests {
         let mut state = crate::agent::hook_state::HookState::default();
         let mut apply = |value: serde_json::Value| {
             let body = value.to_string();
-            accept_hook(&mut state, &HookPayload::parse(body.as_bytes()).unwrap(), &classify(body.as_bytes(), "opencode", |_| Some(0)))
+            accept_hook(
+                &mut state,
+                &HookPayload::parse(body.as_bytes()).unwrap(),
+                &classify(body.as_bytes(), "opencode", |_| Some(0)),
+            )
         };
-        assert!(apply(serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"first"})));
-        assert!(apply(serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})));
-        assert!(apply(serde_json::json!({"hook_event_name":"question.asked", "request_id":"two"})));
-        assert!(!apply(serde_json::json!({"hook_event_name":"session.idle"})));
-        assert!(!apply(serde_json::json!({"hook_event_name":"question.replied", "request_id":"one"})));
-        assert!(apply(serde_json::json!({"hook_event_name":"question.rejected", "request_id":"two"})));
+        assert!(apply(
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"first"})
+        ));
+        assert!(apply(
+            serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})
+        ));
+        assert!(apply(
+            serde_json::json!({"hook_event_name":"question.asked", "request_id":"two"})
+        ));
+        assert!(!apply(
+            serde_json::json!({"hook_event_name":"session.idle"})
+        ));
+        assert!(!apply(
+            serde_json::json!({"hook_event_name":"question.replied", "request_id":"one"})
+        ));
+        assert!(apply(
+            serde_json::json!({"hook_event_name":"question.rejected", "request_id":"two"})
+        ));
         assert!(apply(serde_json::json!({"hook_event_name":"session.idle"})));
-        assert!(apply(serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"second"})));
-        assert!(!apply(serde_json::json!({"hook_event_name":"Stop", "promptId":"first"})));
+        assert!(apply(
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"second"})
+        ));
+        assert!(!apply(
+            serde_json::json!({"hook_event_name":"Stop", "promptId":"first"})
+        ));
         assert!(apply(serde_json::json!({"hook_event_name":"Stop"})));
+    }
+
+    #[test]
+    fn opencode_permission_reply_releases_the_same_request() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+            (
+                accept_hook(state, &payload, &classified),
+                classified.decision,
+            )
+        };
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"UserPromptSubmit", "promptId":"turn-1"
+                })
+            ),
+            (true, Decision::Running)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"permission.asked", "request_id":"perm-1", "tool_name":"Bash"
+                })
+            ),
+            (true, Decision::MarkInput)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"permission.replied", "request_id":"perm-1"
+                })
+            ),
+            (true, Decision::Running)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"session.idle"
+                })
+            ),
+            (true, Decision::Ready)
+        );
+    }
+
+    #[test]
+    fn codex_permission_reply_without_id_releases_a_sole_request() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+            (
+                accept_hook(state, &payload, &classified),
+                classified.decision,
+            )
+        };
+        assert!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"UserPromptSubmit", "promptId":"turn-1"
+                })
+            )
+            .0
+        );
+        assert!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PermissionRequest", "tool_name":"Bash"
+                })
+            )
+            .0
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PermissionResult"
+                })
+            ),
+            (true, Decision::Running)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"Stop"
+                })
+            ),
+            (true, Decision::Ready)
+        );
+    }
+
+    #[test]
+    fn codex_permission_is_released_by_the_following_tool_result() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+            (accept_hook(state, &payload, &classified), classified.decision)
+        };
+        assert!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"UserPromptSubmit", "turn_id":"turn-1"
+        })).0);
+        assert!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"PermissionRequest", "tool_name":"Bash"
+        })).0);
+        // Codex has no PermissionResult hook; the tool result is the
+        // observable approval/denial boundary and carries the tool name.
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"PostToolUse", "tool_name":"Bash"
+        })), (true, Decision::Ignore));
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"Stop", "turn_id":"turn-1"
+        })), (true, Decision::Ready));
+    }
+
+    #[test]
+    fn codex_denied_permission_does_not_wedge_the_terminal_stop() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+            (accept_hook(state, &payload, &classified), classified.decision)
+        };
+        assert!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"UserPromptSubmit", "turn_id":"turn-1"
+        })).0);
+        assert!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"PermissionRequest", "tool_name":"Bash"
+        })).0);
+    // A denied approval has no PostToolUse callback in Codex. Stop is the
+    // terminal fallback and clears only the permission marker.
+    assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"Stop", "turn_id":"turn-1"
+        })), (true, Decision::Ready));
     }
 
     #[test]
@@ -987,38 +1349,59 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let accepted = accept_hook(state, &payload, &classified);
+            (
+                accepted,
+                classified.decision,
+                effective_decision(classified.decision, state),
+            )
         };
 
-        // Kimi's background ask-user tool returns before the answer. Its
-        // PostToolUse migrates the request to the task id rather than clearing
-        // it, so a spurious Stop cannot mark the node complete.
         assert_eq!(
-            apply(&mut state, serde_json::json!({
-                "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
-                "tool_call_id":"call-1", "tool_input":{"background":true}
-            })),
-            (true, Decision::MarkInput)
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"UserPromptSubmit", "promptId":"turn-1"
+                })
+            ),
+            (true, Decision::Running, Decision::Running)
         );
+        assert!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-1", "tool_input":{"background":true}
+                })
+            )
+            .0
+        );
+        // PostToolUse only migrates the question to its detached task. It is
+        // correlation-only and must not complete the foreground turn.
         assert_eq!(
-            apply(&mut state, serde_json::json!({
-                "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
-                "tool_call_id":"call-1", "tool_input":{"background":true},
-                "tool_output":"task_id: task-1\ndescription: choose\nstatus: running"
-            })),
-            (false, Decision::Ready)
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-1", "tool_input":{"background":true},
+                    "tool_output":"task_id: task-1\ndescription: choose\nstatus: running"
+                })
+            ),
+            (true, Decision::Ignore, Decision::Ignore)
         );
         assert!(!apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})).0);
 
-        // The terminal task notification is the authoritative resolution.
+        // The terminal task notification is authoritative only after Stop.
         assert_eq!(
-            apply(&mut state, serde_json::json!({
-                "hook_event_name":"Notification", "notification_type":"task.completed",
-                "source_kind":"background_task", "source_id":"task-1"
-            })),
-            (true, Decision::Ready)
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"Notification", "notification_type":"task.completed",
+                    "source_kind":"background_task", "source_id":"task-1"
+                })
+            ),
+            (true, Decision::BackgroundTaskCompleted, Decision::Ready)
         );
-        assert_eq!(apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})), (true, Decision::Ready));
     }
 
     #[test]
@@ -1028,18 +1411,38 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let accepted = accept_hook(state, &payload, &classified);
+            (
+                accepted,
+                classified.decision,
+                effective_decision(classified.decision, state),
+            )
         };
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"Notification", "notification_type":"task.failed",
-            "source_kind":"background_task", "source_id":"task-early"
-        })), (false, Decision::Ready));
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
-            "tool_call_id":"call-early", "tool_input":{"background":true},
-            "tool_output":"task_id: task-early\nstatus: running"
-        })), (true, Decision::Ready));
-        assert_eq!(apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})), (true, Decision::Ready));
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"Notification", "notification_type":"task.failed",
+                    "source_kind":"background_task", "source_id":"task-early"
+                })
+            ),
+            (false, Decision::BackgroundTaskCompleted, Decision::Ready)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-early", "tool_input":{"background":true},
+                    "tool_output":"task_id: task-early\nstatus: running"
+                })
+            ),
+            (true, Decision::Ignore, Decision::Ignore)
+        );
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})),
+            (true, Decision::Ready, Decision::Ready)
+        );
     }
 
     #[test]
@@ -1049,21 +1452,44 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let accepted = accept_hook(state, &payload, &classified);
+            (
+                accepted,
+                classified.decision,
+                effective_decision(classified.decision, state),
+            )
         };
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
-            "tool_call_id":"call-failed", "tool_input":{"background":true}
-        })), (true, Decision::MarkInput));
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"PostToolUseFailure", "tool_name":"AskUserQuestion",
-            "tool_call_id":"call-failed", "tool_input":{"background":true},
-            "tool_output":"task_id: task-failed\nstatus: failed"
-        })), (false, Decision::Ready));
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"Notification", "notification_type":"task.failed",
-            "source_kind":"background_task", "source_id":"task-failed"
-        })), (true, Decision::Ready));
+        assert!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-failed", "tool_input":{"background":true}
+                })
+            )
+            .0
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PostToolUseFailure", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-failed", "tool_input":{"background":true},
+                    "tool_output":"task_id: task-failed\nstatus: failed"
+                })
+            ),
+            (true, Decision::Ignore, Decision::Ignore)
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"Notification", "notification_type":"task.failed",
+                    "source_kind":"background_task", "source_id":"task-failed"
+                })
+            ),
+            (true, Decision::BackgroundTaskCompleted, Decision::Ready)
+        );
     }
 
     #[test]
@@ -1073,35 +1499,82 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let accepted = accept_hook(state, &payload, &classified);
+            (
+                accepted,
+                classified.decision,
+                effective_decision(classified.decision, state),
+            )
         };
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
-            "tool_call_id":"call-detached", "tool_input":{"background":true}
-        })), (true, Decision::MarkInput));
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
-            "tool_call_id":"call-detached", "tool_input":{"background":true},
-            "tool_output":"task_id: task-detached\nstatus: running"
-        })), (false, Decision::Ready));
+        assert!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-detached", "tool_input":{"background":true}
+                })
+            )
+            .0
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
+                    "tool_call_id":"call-detached", "tool_input":{"background":true},
+                    "tool_output":"task_id: task-detached\nstatus: running"
+                })
+            ),
+            (true, Decision::Ignore, Decision::Ignore)
+        );
 
-        // A new prompt is an explicit user action. It starts a new foreground
-        // turn while retaining the detached request for later resolution.
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"UserPromptSubmit", "promptId":"foreground-2"
-        })), (true, Decision::Running));
-        assert_eq!(apply(&mut state, serde_json::json!({
-            "hook_event_name":"Notification", "notification_type":"task.completed",
-            "source_kind":"background_task", "source_id":"task-detached"
-        })), (true, Decision::Ready));
+        // A new prompt is explicit user activity and must remain accepted.
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"UserPromptSubmit", "promptId":"foreground-2"
+                })
+            ),
+            (true, Decision::Running, Decision::Running)
+        );
+        // The background callback cannot complete this active foreground turn.
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"Notification", "notification_type":"task.completed",
+                    "source_kind":"background_task", "source_id":"task-detached"
+                })
+            ),
+            (true, Decision::BackgroundTaskCompleted, Decision::Ignore)
+        );
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})),
+            (true, Decision::Ready, Decision::Ready)
+        );
     }
 
     #[test]
     fn elicitation_result_releases_the_exact_request() {
         let mut state = crate::agent::hook_state::HookState::default();
-        for (event, accepted) in [("Elicitation", true), ("Stop", false), ("ElicitationResult", true), ("Stop", true)] {
-            let body = serde_json::json!({"hook_event_name":event,"elicitation_id":"request-1"}).to_string();
-            assert_eq!(accept_hook(&mut state, &HookPayload::parse(body.as_bytes()).unwrap(), &classify(body.as_bytes(), "anthropic", |_| Some(0))), accepted, "{event}");
+        for (event, accepted) in [
+            ("Elicitation", true),
+            ("Stop", false),
+            ("ElicitationResult", true),
+            ("Stop", true),
+        ] {
+            let body = serde_json::json!({"hook_event_name":event,"elicitation_id":"request-1"})
+                .to_string();
+            assert_eq!(
+                accept_hook(
+                    &mut state,
+                    &HookPayload::parse(body.as_bytes()).unwrap(),
+                    &classify(body.as_bytes(), "anthropic", |_| Some(0))
+                ),
+                accepted,
+                "{event}"
+            );
         }
     }
 
@@ -1114,12 +1587,30 @@ mod tests {
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
             accept_hook(state, &payload, &classified)
         };
-        assert!(apply(&mut state, serde_json::json!({"hook_event_name":"PermissionRequest", "toolUseId":"p1", "tool_name":"Bash"})));
-        assert!(apply(&mut state, serde_json::json!({"hook_event_name":"PermissionRequest", "toolUseId":"p2", "tool_name":"Write"})));
-        assert!(!apply(&mut state, serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p1"})));
-        assert!(!apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})));
-        assert!(apply(&mut state, serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p2"})));
-        assert!(apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})));
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"PermissionRequest", "toolUseId":"p1", "tool_name":"Bash"})
+        ));
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"PermissionRequest", "toolUseId":"p2", "tool_name":"Write"})
+        ));
+        assert!(!apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p1"})
+        ));
+        assert!(!apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"Stop"})
+        ));
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p2"})
+        ));
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"Stop"})
+        ));
     }
 
     #[test]
@@ -1127,17 +1618,32 @@ mod tests {
         let body = br#"{"hook_event_name":"PreToolUse","hookEventName":"pre_tool_use","session_id":"12345678-1234-1234-1234-123456789abc","sessionId":"12345678-1234-1234-1234-123456789abc","tool_name":"ask_user_question","toolName":"ask_user_question"}"#;
         let classified = classify(body, "grok", |_| Some(0));
         assert_eq!(classified.decision, Decision::MarkInput);
-        assert_eq!(classified.detail.kind, Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested));
-        assert_eq!(classified.detail.signal_health, crate::agent::session_lifecycle::SignalHealth::Ok);
-        assert_eq!(hook_session_id(body, "grok").as_deref(), Some("12345678-1234-1234-1234-123456789abc"));
+        assert_eq!(
+            classified.detail.kind,
+            Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
+        );
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok
+        );
+        assert_eq!(
+            hook_session_id(body, "grok").as_deref(),
+            Some("12345678-1234-1234-1234-123456789abc")
+        );
     }
 
     #[test]
     fn failed_and_cancelled_turns_need_review_and_never_claim_success() {
         for event in ["StopFailure", "StopCancelled", "stop_failure", "Interrupt"] {
             let body = serde_json::json!({"hook_event_name":event,"last_assistant_message":"partial result"});
-            assert_eq!(classify_decision(body.to_string().as_bytes(), "grok", |_| Some(0)), Decision::MarkInput);
-            assert_eq!(semantic_turn(&HookPayload::parse(body.to_string().as_bytes()).unwrap()), None);
+            assert_eq!(
+                classify_decision(body.to_string().as_bytes(), "grok", |_| Some(0)),
+                Decision::MarkInput
+            );
+            assert_eq!(
+                semantic_turn(&HookPayload::parse(body.to_string().as_bytes()).unwrap()),
+                None
+            );
         }
     }
 
@@ -1148,22 +1654,48 @@ mod tests {
             serde_json::json!({"hook_event_name":"PermissionResult"}),
             serde_json::json!({"hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion"}),
         ] {
-            assert_eq!(classify_decision(body.to_string().as_bytes(), "kimi", |_| Some(0)), Decision::Running);
+            assert_eq!(
+                classify_decision(body.to_string().as_bytes(), "kimi", |_| Some(0)),
+                Decision::Running
+            );
         }
     }
 
     #[test]
     fn questions_are_not_turn_completions() {
         for (provider, payload) in [
-            ("anthropic", serde_json::json!({"hook_event_name":"Notification", "notification_type":"elicitation_dialog"})),
-            ("anthropic", serde_json::json!({"hook_event_name":"Elicitation", "message":"Choose an account"})),
-            ("anthropic", serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion"})),
-            ("codex", serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"request_user_input"})),
-            ("opencode", serde_json::json!({"hook_event_name":"question.asked"})),
+            (
+                "anthropic",
+                serde_json::json!({"hook_event_name":"Notification", "notification_type":"elicitation_dialog"}),
+            ),
+            (
+                "anthropic",
+                serde_json::json!({"hook_event_name":"Elicitation", "message":"Choose an account"}),
+            ),
+            (
+                "anthropic",
+                serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion"}),
+            ),
+            (
+                "codex",
+                serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"request_user_input"}),
+            ),
+            (
+                "opencode",
+                serde_json::json!({"hook_event_name":"question.asked"}),
+            ),
         ] {
             let classified = classify(payload.to_string().as_bytes(), provider, |_| Some(3));
-            assert_eq!(classified.decision, Decision::MarkInput, "{provider}: {payload}");
-            assert_eq!(classified.detail.kind, Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested), "{provider}: {payload}");
+            assert_eq!(
+                classified.decision,
+                Decision::MarkInput,
+                "{provider}: {payload}"
+            );
+            assert_eq!(
+                classified.detail.kind,
+                Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested),
+                "{provider}: {payload}"
+            );
         }
     }
 
@@ -1171,17 +1703,31 @@ mod tests {
     fn informational_events_do_not_complete_a_turn_or_request_permission() {
         for event in ["PreToolUse", "PostToolUse", "SubagentStop"] {
             let body = serde_json::json!({"hook_event_name":event, "tool_name":"Bash"});
-            assert_eq!(classify_decision(body.to_string().as_bytes(), "anthropic", |_| Some(0)), Decision::Ignore, "{event}");
+            assert_eq!(
+                classify_decision(body.to_string().as_bytes(), "anthropic", |_| Some(0)),
+                Decision::Ignore,
+                "{event}"
+            );
         }
         let body = br#"{"hook_event_name":"Notification","notification_type":"auth_success"}"#;
-        assert_eq!(classify_decision(body, "anthropic", |_| Some(0)), Decision::Ignore);
+        assert_eq!(
+            classify_decision(body, "anthropic", |_| Some(0)),
+            Decision::Ignore
+        );
     }
 
     #[test]
     fn unknown_named_events_degrade_instead_of_claiming_completion() {
-        let result = classify(br#"{"hook_event_name":"future_event"}"#, "anthropic", |_| Some(0));
+        let result = classify(
+            br#"{"hook_event_name":"future_event"}"#,
+            "anthropic",
+            |_| Some(0),
+        );
         assert_eq!(result.decision, Decision::MarkInput);
-        assert_eq!(result.detail.signal_health, crate::agent::session_lifecycle::SignalHealth::Degraded);
+        assert_eq!(
+            result.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
     }
 
     #[test]
@@ -1307,7 +1853,9 @@ mod tests {
             "type":"tool_result", "content":"659\t// Command running in background with ID: xyz.\n681\tconst LAUNCH_MARKER: &str = \"You will be notified when it completes\";"
         }]}});
         std::fs::write(transcript.path(), format!("{record}\n")).unwrap();
-        let body = serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()}).to_string();
+        let body =
+            serde_json::json!({"hook_event_name":"Stop", "transcript_path":transcript.path()})
+                .to_string();
         assert_eq!(classify_decision(body.as_bytes(), "claude", crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks), Decision::SuppressPendingBackground);
     }
 
@@ -1368,7 +1916,10 @@ mod tests {
         let body = stop_body("/tmp/session.jsonl");
         let result = classify(&body, "", |_| None);
         assert_eq!(result.decision, Decision::MarkInput);
-        assert_eq!(result.detail.signal_health, crate::agent::session_lifecycle::SignalHealth::Degraded);
+        assert_eq!(
+            result.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Degraded
+        );
     }
 
     #[test]
@@ -1634,8 +2185,7 @@ mod tests {
         let classified = classify(&body, "", |_| Some(0));
         assert_eq!(classified.decision, Decision::Ready);
         assert_eq!(
-            classified.detail.kind,
-            None,
+            classified.detail.kind, None,
             "ordinary idle must not claim the user is needed"
         );
         assert_eq!(
@@ -1719,10 +2269,7 @@ mod tests {
                 Decision::Ready,
                 "casing {casing:?} must hit the rule"
             );
-            assert_eq!(
-                classified.detail.kind,
-                None
-            );
+            assert_eq!(classified.detail.kind, None);
         }
     }
 
@@ -2076,10 +2623,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        assert_eq!(
-            classify_decision(&body, "", |_| Some(5)),
-            Decision::Ignore
-        );
+        assert_eq!(classify_decision(&body, "", |_| Some(5)), Decision::Ignore);
     }
 
     /// `hook_session_id` extracts the AGY UUID from `conversationId` via
