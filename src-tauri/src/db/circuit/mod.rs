@@ -38,15 +38,15 @@ pub(crate) use leases::{
 use crate::db::SqlResult;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun};
 
+type CircuitProbeLedger = Vec<(AutopilotCircuit, Vec<ledger::CircuitRunLedger>)>;
+type QueuedCircuitRun = Vec<(AutopilotCircuitRun, String)>;
+
 /// Hydrate the Circuits Probe's ledger and queue from one read connection so
 /// both views observe the same database snapshot.
 pub fn list_circuit_probe(
     mesh_id: i64,
     runs_per_circuit: i64,
-) -> SqlResult<(
-    Vec<(AutopilotCircuit, Vec<ledger::CircuitRunLedger>)>,
-    Vec<(AutopilotCircuitRun, String)>,
-)> {
+) -> SqlResult<(CircuitProbeLedger, QueuedCircuitRun)> {
     let db = crate::db::read_conn();
     let circuits = ledger::list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)?;
     let queued = queue::list_queued_circuit_runs_inner(&db, mesh_id)?;

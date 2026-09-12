@@ -542,7 +542,7 @@ where
 /// the routing contract; this is the thin caller-friendly version that
 /// resolves via [`crate::preferences::resolve_provider_env`].
 pub(crate) fn naming_backend_env(provider: &str) -> Vec<(String, String)> {
-    naming_backend_env_with(provider, |p| crate::preferences::resolve_provider_env(p))
+    naming_backend_env_with(provider, crate::preferences::resolve_provider_env)
 }
 
 pub(super) async fn summarize_and_rename_with(

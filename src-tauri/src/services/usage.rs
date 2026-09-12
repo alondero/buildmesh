@@ -778,8 +778,7 @@ pub fn deepseek_usage(api_key: &str) -> ProviderUsage {
 }
 
 // Command Code stores its CLI-owned credential in `~/.commandcode/auth.json`.
-// Its billing endpoint exposes both rate-limit windows and the credits pool, so
-// this fetcher returns the two meter kinds from one request.
+// Credits supply rolling windows; subscription enrichment adds the monthly meter.
 fn commandcode_auth_path() -> PathBuf {
     crate::env::commandcode_dir().join("auth.json")
 }
@@ -833,6 +832,84 @@ struct CommandCodeCredits {
     purchased_credits: f64,
     #[serde(rename = "freeCredits", alias = "free_credits", default)]
     free_credits: f64,
+    // Studio treats non-numeric grants as absent, preserving its tier fallback.
+    #[serde(rename = "monthlyCreditsGranted", alias = "monthly_credits_granted", default)]
+    monthly_credits_granted: serde_json::Value,
+}
+
+impl CommandCodeCredits {
+    fn balance(&self) -> BillingBalance {
+        BillingBalance {
+            remaining: self.monthly_credits + self.purchased_credits + self.free_credits,
+            monthly_spend: None,
+            currency: "USD".to_string(),
+        }
+    }
+}
+
+fn commandcode_positive_finite(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+#[derive(Deserialize)]
+struct CommandCodeSubscriptionResponse {
+    success: bool,
+    data: Option<CommandCodeSubscription>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandCodeSubscription {
+    plan_id: String,
+    status: String,
+    quantity: Option<f64>,
+    current_period_end: Option<String>,
+}
+
+fn commandcode_monthly_window(
+    credits: &CommandCodeCredits,
+    subscription: CommandCodeSubscriptionResponse,
+) -> Option<UsageWindow> {
+    let subscription = subscription.data.filter(|_| subscription.success)?;
+    if subscription.status == "past_due" || !credits.monthly_credits.is_finite() {
+        return None;
+    }
+    // Matches Studio's deployed tiers and CLI 1.53.1 (2026-09-12).
+    // The alpha API does not supply the allowance for every plan; preserve legacy IDs.
+    // Evidence and update sources: docs/research/command-code-monthly-usage.md.
+    let base: f64 = match subscription.plan_id.as_str() {
+        "individual-go" => 10.0,
+        "individual-goat" => 70.0,
+        "individual-pro" => 30.0,
+        "individual-pro-v1" => 80.0,
+        "individual-provider" => 15.0,
+        "individual-max" => 150.0,
+        "individual-ultra" => 300.0,
+        "teams-pro" => 40.0,
+        _ => return None,
+    };
+    let grant = commandcode_positive_finite(credits.monthly_credits_granted.as_f64());
+    // Studio floors organization quantity before checking its minimum. A
+    // positive fractional quantity below one therefore falls back to one
+    // base allowance, rather than becoming a zero-credit organization plan.
+    let seats = subscription.quantity.map(f64::floor).unwrap_or(1.0);
+    let seats = if seats.is_finite() && seats >= 1.0 { seats } else { 1.0 };
+    let total = match grant {
+        Some(grant) => grant.max(base),
+        None if subscription.plan_id == "teams-pro" => base * seats,
+        None => base,
+    };
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let resets_at = subscription.current_period_end
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(&date).ok())
+        .map(|date| date.to_rfc3339());
+    Some(UsageWindow {
+        label: "Monthly".to_string(),
+        used_percent: Some(((total - credits.monthly_credits.max(0.0)) / total * 100.0).clamp(0.0, 100.0)),
+        resets_at,
+    })
 }
 
 #[derive(Deserialize, Debug)]
@@ -891,7 +968,7 @@ fn commandcode_window(label: &str, window: CommandCodeQuotaWindow) -> Option<Usa
 
 fn parse_commandcode_credits_response(
     body: &str,
-) -> Result<(Vec<UsageWindow>, BillingBalance), UsageError> {
+) -> Result<(Vec<UsageWindow>, CommandCodeCredits), UsageError> {
     let response: CommandCodeCreditsResponse =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
     match response {
@@ -903,17 +980,7 @@ fn parse_commandcode_credits_response(
             .into_iter()
             .flatten()
             .collect();
-            let credits = response.credits;
-            Ok((
-                windows,
-                BillingBalance {
-                    remaining: credits.monthly_credits
-                        + credits.purchased_credits
-                        + credits.free_credits,
-                    monthly_spend: None,
-                    currency: "USD".to_string(),
-                },
-            ))
+            Ok((windows, response.credits))
         }
         CommandCodeCreditsResponse::Reported(response) => Ok((
             response
@@ -928,10 +995,11 @@ fn parse_commandcode_credits_response(
                     resets_at: window.resets_at,
                 })
                 .collect(),
-            BillingBalance {
-                remaining: response.monthly_credits + response.extra_credits,
-                monthly_spend: None,
-                currency: "USD".to_string(),
+            CommandCodeCredits {
+                monthly_credits: response.monthly_credits,
+                purchased_credits: response.extra_credits,
+                free_credits: 0.0,
+                monthly_credits_granted: serde_json::Value::Null,
             },
         )),
     }
@@ -992,17 +1060,90 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
         Err(error) => return unavailable("commandcode", format!("Failed to read response: {error}")),
     };
     match parse_commandcode_credits_response(&body) {
-        Ok((windows, balance)) => ProviderUsage {
-            provider: "commandcode".to_string(),
-            logged_in: true,
-            windows,
-            balance: Some(balance),
-            meters: vec![],
-            detail: None,
-            error: None,
-        },
+        Ok((windows, credits)) => {
+            let mut usage = ProviderUsage {
+                provider: "commandcode".to_string(),
+                logged_in: true,
+                windows,
+                balance: Some(credits.balance()),
+                meters: vec![],
+                detail: None,
+                error: None,
+            };
+            // Enrichment is optional: a failed subscription request must not discard
+            // successfully fetched windows or credits. Keep the extra wait bounded.
+            let reported_monthly = usage.windows.iter().any(|window| {
+                window.used_percent.is_some()
+                    && window.label.trim().to_ascii_lowercase().starts_with("monthly")
+            });
+            if reported_monthly {
+                usage.balance = None;
+                usage.detail = commandcode_extra_credits_detail(&credits);
+            } else {
+                let monthly = commandcode_fetch_monthly_window(&client, &token, live_url, &credits);
+                let monthly = match monthly {
+                    Ok(Some(monthly)) => Some(monthly),
+                    Ok(None) => {
+                        tracing::warn!(
+                            provider = "commandcode",
+                            "Command Code subscription has no usable monthly meter"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            provider = "commandcode",
+                            error = %error,
+                            "Command Code monthly usage enrichment failed"
+                        );
+                        None
+                    }
+                };
+                if let Some(monthly) = monthly {
+                    usage.windows.push(monthly);
+                    usage.balance = None;
+                    usage.detail = commandcode_extra_credits_detail(&credits);
+                }
+            }
+            usage
+        }
         Err(error) => unavailable("commandcode", format!("Failed to parse response: {error}")),
     }
+}
+
+fn commandcode_extra_credits_detail(credits: &CommandCodeCredits) -> Option<String> {
+    let extra = credits.purchased_credits + credits.free_credits;
+    (extra.is_finite() && extra != 0.0)
+        .then(|| format!("Additional credits: USD {extra:.2}"))
+}
+
+fn commandcode_fetch_monthly_window(
+    client: &Client,
+    token: &str,
+    credits_url: &str,
+    credits: &CommandCodeCredits,
+) -> Result<Option<UsageWindow>, String> {
+    let mut subscription_url = reqwest::Url::parse(credits_url)
+        .map_err(|error| format!("invalid credits URL: {error}"))?
+        .join("subscriptions")
+        .map_err(|error| format!("invalid subscription URL: {error}"))?;
+    subscription_url
+        .query_pairs_mut()
+        .append_pair("withPending", "true");
+    let response = client
+        .get(subscription_url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .map_err(|error| format!("request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("API error {}", status.as_u16()));
+    }
+    let subscription = response
+        .json::<CommandCodeSubscriptionResponse>()
+        .map_err(|error| format!("invalid response: {error}"))?;
+    Ok(commandcode_monthly_window(credits, subscription))
 }
 
 /// Test seam: pass an explicit loopback URL so the live-fetcher tests can
@@ -2530,8 +2671,6 @@ pub(crate) mod tests {
     use chrono::Timelike;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-
-    #[test]
 
     // ── OpenAI costs response parser (spec §3) ────────────────────────────
 
@@ -4912,14 +5051,14 @@ pub(crate) mod tests {
             "credits": {"monthlyCredits": 10, "purchasedCredits": 3, "freeCredits": 2}
         }"#;
 
-        let (windows, balance) = parse_commandcode_credits_response(body).unwrap();
+        let (windows, credits) = parse_commandcode_credits_response(body).unwrap();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
         assert_eq!(windows[0].used_percent, Some(25.0));
         assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, Some(20.0));
-        assert_eq!(balance.remaining, 15.0);
+        assert_eq!(credits.balance().remaining, 15.0);
     }
 
     #[test]
@@ -4932,10 +5071,172 @@ pub(crate) mod tests {
             "extraCredits": 2
         }"#;
 
-        let (windows, balance) = parse_commandcode_credits_response(body).unwrap();
+        let (windows, credits) = parse_commandcode_credits_response(body).unwrap();
         assert_eq!(windows[0].used_percent, Some(12.5));
         assert_eq!(windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
-        assert_eq!(balance.remaining, 10.0);
+        assert_eq!(credits.balance().remaining, 10.0);
+    }
+
+    #[test]
+    fn commandcode_monthly_matches_studio_tiers_grants_and_seats() {
+        for (plan, allowance) in [
+            ("individual-go", 10.0), ("individual-goat", 70.0),
+            ("individual-pro", 30.0), ("individual-pro-v1", 80.0),
+            ("individual-provider", 15.0), ("individual-max", 150.0),
+            ("individual-ultra", 300.0), ("teams-pro", 40.0),
+        ] {
+            let credits: CommandCodeCredits = serde_json::from_value(serde_json::json!({
+                "monthlyCredits": allowance / 2.0, "purchasedCredits": 100, "freeCredits": 50
+            })).unwrap();
+            let subscription = serde_json::from_value(serde_json::json!({
+                "success": true, "data": {"planId": plan, "status": "active",
+                "currentPeriodEnd": "2026-09-30T13:13:19.000Z"}
+            })).unwrap();
+            let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
+            assert_eq!(monthly.used_percent, Some(50.0), "{plan}");
+            assert_eq!(monthly.resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
+        }
+        for (plan, grant, seats, remaining, expected) in [
+            ("individual-goat", serde_json::json!(100), 1.0, 25.0, 75.0),
+            ("individual-goat", serde_json::json!(20), 1.0, 35.0, 50.0),
+            ("individual-go", serde_json::json!(10.25), 1.0, 5.125, 50.0),
+            ("teams-pro", serde_json::Value::Null, 3.9, 60.0, 50.0),
+            ("teams-pro", serde_json::json!(80), 3.0, 60.0, 25.0),
+            ("teams-pro", serde_json::json!(0), 0.0, 20.0, 50.0),
+            ("individual-goat", serde_json::json!("unknown"), 1.0, 35.0, 50.0),
+            ("individual-goat", serde_json::json!(-10), 1.0, 70.0, 0.0),
+            ("individual-goat", serde_json::Value::Null, 1.0, 80.0, 0.0),
+            ("individual-goat", serde_json::Value::Null, 1.0, 0.0, 100.0),
+            ("individual-goat", serde_json::Value::Null, 1.0, -5.0, 100.0),
+        ] {
+            let credits = serde_json::from_value(serde_json::json!({
+                "monthlyCredits": remaining, "monthlyCreditsGranted": grant
+            })).unwrap();
+            let subscription = serde_json::from_value(serde_json::json!({
+                "success": true, "data": {"planId": plan, "status": "active", "quantity": seats}
+            })).unwrap();
+            let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
+            assert_eq!(monthly.used_percent, Some(expected), "{plan}, {grant}, {seats}, {remaining}");
+            assert!(monthly.resets_at.is_none());
+        }
+        assert_eq!(commandcode_positive_finite(Some(0.25)), Some(0.25));
+        assert_eq!(commandcode_positive_finite(Some(0.0)), None);
+        assert_eq!(commandcode_positive_finite(Some(-0.25)), None);
+    }
+
+    #[test]
+    fn commandcode_monthly_rejects_unavailable_subscriptions_and_invalid_dates() {
+        let credits = serde_json::from_str(r#"{"monthlyCredits":35}"#).unwrap();
+        for body in [
+            r#"{"success":true,"data":null}"#,
+            r#"{"success":false,"data":{"planId":"individual-goat","status":"active"}}"#,
+            r#"{"success":true,"data":{"planId":"new-plan","status":"active"}}"#,
+            r#"{"success":true,"data":{"planId":"individual-goat","status":"past_due"}}"#,
+        ] {
+            assert!(commandcode_monthly_window(&credits, serde_json::from_str(body).unwrap()).is_none(), "{body}");
+        }
+        let subscription = serde_json::from_str(r#"{"success":true,"data":{
+            "planId":"individual-goat","status":"active","currentPeriodEnd":"not-a-date"
+        }}"#).unwrap();
+        let monthly = commandcode_monthly_window(&credits, subscription).unwrap();
+        assert_eq!(monthly.used_percent, Some(50.0));
+        assert!(monthly.resets_at.is_none());
+    }
+
+    const COMMANDCODE_MONTHLY_CREDITS: &str = r#"{
+        "windowLimits":{"fiveHour":{"cap":14,"used":0,"resetAt":0},
+        "weekly":{"cap":35,"used":7,"resetAt":1789547227218}},
+        "credits":{"monthlyCredits":35,"purchasedCredits":3,"freeCredits":2}
+    }"#;
+
+    #[test]
+    fn commandcode_usage_enriches_monthly_and_separates_extra_credits() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(&auth_path, r#"{"apiKey":"cmd_live_test"}"#).unwrap();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_t = observed.clone();
+        let port = spawn_loopback(2, move |req| {
+            let auth = req.headers().iter().find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string()).unwrap_or_default();
+            observed_t.lock().unwrap().push((req.url().to_string(), auth));
+            let body = if req.url() == "/alpha/billing/credits" {
+                COMMANDCODE_MONTHLY_CREDITS
+            } else {
+                r#"{"success":true,"data":{"planId":"individual-goat","status":"active",
+                "currentPeriodEnd":"2026-09-30T13:13:19.000Z"}}"#
+            };
+            req.respond(tiny_http::Response::from_string(body)).unwrap();
+        });
+        let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/alpha/billing/credits"));
+        assert_eq!(*observed.lock().unwrap(), vec![
+            ("/alpha/billing/credits".to_string(), "Bearer cmd_live_test".to_string()),
+            ("/alpha/billing/subscriptions?withPending=true".to_string(), "Bearer cmd_live_test".to_string()),
+        ]);
+        assert!(usage.logged_in);
+        assert!(usage.error.is_none());
+        assert_eq!(usage.windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), vec!["5-hour", "Weekly", "Monthly"]);
+        assert_eq!(usage.windows[0].used_percent, Some(0.0));
+        assert_eq!(usage.windows[1].used_percent, Some(20.0));
+        assert_eq!(usage.windows[2].used_percent, Some(50.0));
+        assert_eq!(usage.windows[2].resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
+        assert!(usage.balance.is_none());
+        assert_eq!(usage.detail.as_deref(), Some("Additional credits: USD 5.00"));
+    }
+
+    #[test]
+    fn commandcode_reported_monthly_window_replaces_combined_balance() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(&auth_path, r#"{"apiKey":"cmd_live_test"}"#).unwrap();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_t = observed.clone();
+        let port = spawn_loopback(1, move |req| {
+            observed_t.lock().unwrap().push(req.url().to_string());
+            req.respond(tiny_http::Response::from_string(r#"{
+                "windows":[{"label":"Monthly Limit","used_percent":39,
+                "resets_at":"2026-09-30T13:13:19+00:00"}],
+                "monthly_credits":42.7,"extra_credits":5
+            }"#)).unwrap();
+        });
+
+        let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+        assert_eq!(*observed.lock().unwrap(), vec!["/credits"]);
+        assert!(usage.logged_in);
+        assert!(usage.error.is_none());
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "Monthly Limit");
+        assert!(usage.balance.is_none());
+        assert_eq!(usage.detail.as_deref(), Some("Additional credits: USD 5.00"));
+    }
+
+    #[test]
+    fn commandcode_subscription_failures_preserve_live_windows_and_balance() {
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth_path = auth_dir.path().join("auth.json");
+        fs::write(&auth_path, r#"{"apiKey":"cmd_live_test"}"#).unwrap();
+        for (status, body) in [
+            (401, ""), (403, ""), (429, ""), (500, ""), (200, "not-json"),
+            (200, r#"{"success":true,"data":null}"#),
+            (200, r#"{"success":true,"data":{"planId":"unknown","status":"active"}}"#),
+            (200, r#"{"success":true,"data":{"planId":"individual-goat","status":"past_due"}}"#),
+        ] {
+            let port = spawn_loopback(2, move |req| {
+                let response = if req.url() == "/credits" {
+                    tiny_http::Response::from_string(COMMANDCODE_MONTHLY_CREDITS)
+                } else {
+                    tiny_http::Response::from_string(body).with_status_code(status)
+                };
+                req.respond(response).unwrap();
+            });
+            let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+            assert!(usage.logged_in, "{status}: {body}");
+            assert!(usage.error.is_none(), "{status}: {body}");
+            assert_eq!(usage.windows.len(), 2);
+            assert_eq!(usage.windows[1].used_percent, Some(20.0));
+            assert_eq!(usage.balance.unwrap().remaining, 40.0);
+            assert!(usage.detail.is_none());
+        }
     }
 
     #[test]

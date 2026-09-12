@@ -57,6 +57,32 @@ function meter(over: Partial<ProviderMeters> = {}): ProviderMeters {
 }
 
 describe('UsageBar (extracted, was on AccountCard)', () => {
+  it.each([0, 39, 100])('renders Command Code Monthly at %s percent with reset and separate credits', (percent) => {
+    const resetsAt = '2026-09-30T13:13:19+00:00';
+    render(
+      <UsagePanel
+        account={account({ id: 'commandcode', name: 'Command Code' })}
+        meter={meter({ provider: 'commandcode', usage: usage({
+          provider: 'commandcode',
+          windows: [
+            { label: '5-hour', usedPercent: 10, resetsAt: null },
+            { label: 'Weekly', usedPercent: 20, resetsAt: null },
+            { label: 'Monthly', usedPercent: percent, resetsAt },
+          ],
+          detail: 'Additional credits: USD 5.00',
+        }) })}
+      />,
+    );
+    expect(screen.getByText('Monthly')).toBeTruthy();
+    expect(screen.getByText(`${percent.toFixed(1)}%`)).toBeTruthy();
+    expect(screen.getByText(`Resets: ${new Date(resetsAt).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText('5-hour')).toBeTruthy();
+    expect(screen.getByText('Weekly')).toBeTruthy();
+    expect(screen.getByText('Additional credits: USD 5.00')).toBeTruthy();
+    expect(screen.queryByText('Balance remaining')).toBeNull();
+    expect(screen.queryByText('Unavailable')).toBeNull();
+  });
+
   it('renders 0% used as a real figure, not N/A', () => {
     render(<UsageBar window={{ label: 'Claude Sonnet 4.6 (Thinking)', usedPercent: 0, resetsAt: null }} />);
     expect(screen.getByText('0.0%')).toBeTruthy();

@@ -137,7 +137,7 @@ pub(crate) fn find_historic_id_for_directory_in(
     recorded_start: bool,
 ) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
-    let candidates = find_candidates(&sessions_dir, spawn_directory, cutoff, None);
+    let candidates = find_candidates(sessions_dir, spawn_directory, cutoff, None);
     crate::services::session_recovery::select_recovery_identity(
         candidates.into_iter().map(|candidate| (candidate.id, candidate.timestamp_ms)),
         anchor_ms,

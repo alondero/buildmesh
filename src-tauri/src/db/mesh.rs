@@ -864,10 +864,10 @@ pub(crate) fn set_mesh_worktree_directory_inner(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    Ok(conn.execute(
+    conn.execute(
         "UPDATE meshes SET worktree_directory = ?1 WHERE id = ?2",
         params![cleaned, id],
-    )?)
+    )
 }
 
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
