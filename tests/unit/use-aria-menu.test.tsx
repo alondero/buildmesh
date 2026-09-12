@@ -27,15 +27,25 @@ function Harness({
   onClose,
   enabled = true,
   itemCount,
+  initialActiveIndex,
 }: {
   onClose: () => void;
   enabled?: boolean;
   itemCount?: number;
+  initialActiveIndex?: number;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const count = itemCount ?? 3;
-  useAriaMenu({ rootRef, ...(itemCount === undefined ? {} : { itemCount }), activeIndex, setActiveIndex, onClose, enabled });
+  useAriaMenu({
+    rootRef,
+    ...(itemCount === undefined ? {} : { itemCount }),
+    activeIndex,
+    setActiveIndex,
+    onClose,
+    enabled,
+    ...(initialActiveIndex === undefined ? {} : { initialActiveIndex }),
+  });
   return (
     <>
       <button data-testid="outside">outside</button>
@@ -58,6 +68,26 @@ function Harness({
 describe('useAriaMenu — WAI-ARIA keyboard contract', () => {
   it('auto-focuses the first menuitem on mount', () => {
     render(<Harness onClose={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByTestId('item-0'));
+  });
+
+  it('seeds the open caret at initialActiveIndex instead of the first item', () => {
+    // Issue #1720 follow-up — NodeActivityTabs' "All sessions" list
+    // opens on the currently-selected session, not row 0. The seed
+    // drives BOTH the roving tabindex and the focus landing.
+    render(<Harness onClose={() => {}} initialActiveIndex={2} />);
+    expect(document.activeElement).toBe(screen.getByTestId('item-2'));
+    // Roving tabindex followed the seed too.
+    expect(screen.getByTestId('item-2').tabIndex).toBe(0);
+    expect(screen.getByTestId('item-0').tabIndex).toBe(-1);
+    // The index state really is seeded (not just focus): ArrowDown
+    // from the seeded caret wraps to item-0, not item-1.
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByTestId('item-0'));
+  });
+
+  it('falls back to the first item when initialActiveIndex is out of range', () => {
+    render(<Harness onClose={() => {}} itemCount={3} initialActiveIndex={7} />);
     expect(document.activeElement).toBe(screen.getByTestId('item-0'));
   });
 

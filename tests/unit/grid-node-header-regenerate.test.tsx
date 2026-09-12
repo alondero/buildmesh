@@ -211,13 +211,11 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     expect(current.getAttribute('data-spawn-id')).toBe('claude');
   });
 
-  it('marks the caret row with bg-bg-selection and keeps CSS hover paint off every row', () => {
-    // Issue #1720 follow-up — single-caret picker. The old test pinned
-    // the Current row lit at rest + alternates painting on hover, which
-    // made a pointer and the keyboard light TWO rows at once. Now
-    // exactly one row (the caret) carries the selection surface and
-    // hover moves it instead of painting a second highlight. The
-    // Current row keeps its identity badge, not a persistent highlight.
+  it('paints no caret and no CSS hover paint before any row holds focus', () => {
+    // Issue #1720 follow-up — single-caret picker. The caret IS focus:
+    // nothing is lit until a row is hovered or focused (both hosts move
+    // real focus, so the paint follows). The Current row keeps its
+    // identity badge, not a persistent highlight.
     render(
       <div role="menu">
         <RegenerateProviderMenu
@@ -233,16 +231,13 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
       expect(classes).not.toContain('hover:bg-bg-card');
       expect(classes).not.toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('bg-bg-card');
+      expect(classes).not.toContain('bg-bg-selection');
     }
-    // Mount caret = row 0 (Current) — auto-highlighted like a native
-    // dropdown's first option, and the only lit row.
-    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
-    expect(lit).toEqual([rows[0]]);
     // Identity badge is intact.
     expect(screen.getByTestId('regenerate-submenu-current').getAttribute('data-is-current')).toBe('true');
   });
 
-  it('moves the single caret to the hovered row (uncontrolled caret)', () => {
+  it('moves the single caret to the hovered row (caret is focus)', () => {
     render(
       <div role="menu">
         <RegenerateProviderMenu
@@ -254,32 +249,36 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     );
     const rows = screen.getAllByRole('menuitem');
     fireEvent.mouseEnter(rows[1]);
-    // Hover moved REAL focus (the channel the host's keyboard walk
-    // uses) and the caret followed — never a second lit row.
+    // Hover moved REAL focus — the same channel both hosts' keyboard
+    // walks use — and the highlight followed: exactly one lit row.
     expect(document.activeElement).toBe(rows[1]);
     const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
     expect(lit).toEqual([rows[1]]);
+    // Keyboard parity: focusing a row directly moves the same caret.
+    fireEvent.focus(rows[0]);
+    expect(rows[0].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(rows[1].className.split(/\s+/)).not.toContain('bg-bg-selection');
   });
 
-  it('controlled mode: hover routes through onActiveIndexChange for the host-driven caret', () => {
-    const onActiveIndexChange = vi.fn();
+  it('host keyboard walk (stepSubmenuFocus) drives the same caret via focus', () => {
+    // Both hosts (sidebar useSubmenu, kebab arrow handling) walk the
+    // rows with real focus; the picker must paint off that focus with
+    // no second index source to disagree with it.
     render(
       <div role="menu">
         <RegenerateProviderMenu
-          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex')]}
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex'), makeSpawnOption('kimi', 'Kimi')]}
           currentProviderId="claude"
           onPick={() => {}}
-          activeIndex={0}
-          onActiveIndexChange={onActiveIndexChange}
         />
       </div>,
     );
     const rows = screen.getAllByRole('menuitem');
-    fireEvent.mouseEnter(rows[1]);
-    // Controlled host (GridRegenerateButton) moves focus + index itself;
-    // the picker reports the move instead of acting unilaterally.
-    expect(onActiveIndexChange).toHaveBeenCalledWith(1);
-    expect(document.activeElement).not.toBe(rows[1]);
+    expect(rows).toHaveLength(3);
+    // act-wrapped: real focus (what the host walk does) + state flush.
+    act(() => { rows[2].focus(); });
+    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([rows[2]]);
   });
 });
 

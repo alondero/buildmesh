@@ -39,23 +39,19 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   });
   const selectedIndex = tabs.findIndex(tab => tab.member.id === selectedId && tab.utility === showingUtility);
   const closeMenu = () => { setOpen(false); triggerRef.current?.focus({ preventScroll: true }); };
-  // Issue #1720 follow-up — single-caret menu. The overflow rows paint
-  // only off `activeIndex` (no CSS hover paint); pointer entry routes
-  // through `moveCaret`, which moves DOM focus AND the roving index —
-  // the same move an arrow-key step makes. One highlight at any time,
-  // movable by pointer or keyboard. The strip's committed selection
-  // stays marked by the ✓ glyph / `aria-current` inside the menu and
-  // the tablist styling outside it.
-  const moveCaret = (next: number) => {
-    if (next === activeIndex) return;
-    const el = menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')[next];
-    el?.focus({ preventScroll: true });
-    setActiveIndex(next);
-  };
   useClickOutside(open ? menuId : null, () => setOpen(false));
   useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
+  // Issue #1720 follow-up — single-caret menu. Rows paint only off
+  // `activeIndex` (no CSS hover paint); pointer entry focuses the
+  // entered row and its focus handler syncs the index, so hover moves
+  // the caret instead of lighting a second row. The hook seeds the
+  // open caret at the selected session via `initialActiveIndex` (the
+  // mount effect would otherwise reset it to row 0 and clobber the
+  // trigger's pre-open `setActiveIndex`). The strip's committed
+  // selection stays marked by the ✓ glyph / `aria-current` — data,
+  // not a competing highlight.
   useAriaMenu({ rootRef: menuRef, activeIndex, setActiveIndex,
-    onClose: closeMenu, enabled: open });
+    onClose: closeMenu, enabled: open, initialActiveIndex: Math.max(0, selectedIndex) });
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
@@ -115,9 +111,13 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
         })}
       </div>
 
+
       <button ref={triggerRef} type="button" data-dropdown-for={menuId} aria-label={`All sessions (${tabs.length})`} title="All sessions"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
-        onClick={event => { event.stopPropagation(); setActiveIndex(Math.max(0, selectedIndex)); setOpen(!open); }}
+        // No `setActiveIndex` here — the hook's mount layout effect seeds
+        // the caret at `initialActiveIndex` (= `selectedIndex`) on open;
+        // setting it in the click would be clobbered immediately after.
+        onClick={event => { event.stopPropagation(); setOpen(!open); }}
         className="flex w-8 shrink-0 items-center justify-center border-l border-border-subtle text-text-muted hover:bg-bg-card hover:text-text-primary">
         <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6" /></svg>
       </button>
@@ -140,7 +140,10 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));
             }
           }}
-          onMouseEnter={() => moveCaret(index)}
+          // Pointer entry joins the keyboard's single caret: focus the
+          // row under the cursor; the focus handler syncs the index.
+          onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
+          onFocus={() => setActiveIndex(index)}
           className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs focus:outline-none ${
             index === activeIndex
               ? 'bg-bg-selection text-text-primary'
