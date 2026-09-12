@@ -9,7 +9,7 @@
 //! `.unwrap_or(true)`, display uses `.unwrap_or(false)` — instead of baking one
 //! direction into a shared helper and silently breaking the other.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use git2::{Oid, Repository, StatusOptions};
 
@@ -31,16 +31,17 @@ pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
 /// `Status::CURRENT`, but `StatusOptions` here never sets `include_unmodified`,
 /// so libgit2 never emits a `CURRENT` entry — the extra clause was a no-op.
 ///
-/// **Two semantically distinct callers, two helpers:**
+/// **Semantically distinct consumers:**
 /// - [`is_dirty`] is the *strict* gate: any non-ignored change is dirty. Use
 ///   it for data-safety decisions (worktree close, base restore) where
 ///   hiding any real work risks silent data loss.
-/// - [`is_dirty_mirrors_git_status`] is the *pull gate*: it additionally
-///   honours `submodule.<path>.ignore = {dirty,all,untracked}` from
-///   `.git/config`, mirroring what `git status` reports. Use it only when the
-///   user's contract is "the repo looks dirty iff `git status` says so" —
-///   which is exactly the sync-time ff-pull gate (`do_sync` Step 5), where a
-///   submodule's WT edits being hidden matches the user's mental model.
+/// - [`dirty_paths_mirrors_git_status`] (private) is the `git status`-parity
+///   path set: it additionally honours
+///   `submodule.<path>.ignore = {dirty,all,untracked}` from `.git/config`,
+///   mirroring what `git status` reports. Its only consumer is
+///   [`ff_pull_blockers`], the sync-time ff-pull gate (`do_sync` Step 5),
+///   where a submodule's WT edits being hidden matches the user's mental
+///   model.
 ///   Note: `commands/prune.rs` reads this kind of dirty signal too, but as a
 ///   UI badge (with `.unwrap_or(false)`), not a gate; that call site is fine
 ///   either way and intentionally stays on the strict helper today.
@@ -53,33 +54,32 @@ pub fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
         .any(|e| !e.status().is_ignored()))
 }
 
-/// `git status` parity variant of [`is_dirty`]. Honours
-/// `submodule.<path>.ignore = {dirty,all,untracked}` from `.git/config` —
-/// libgit2's `repo.statuses()` does not honour this config and always
-/// reports the gitlink's WT state as `WT_MODIFIED` when the submodule's WT
-/// differs from its HEAD. Without filtering, a mesh whose submodules have
-/// uncommitted internal edits gets its fast-forward pull falsely skipped
-/// with "fast-forward skipped: working tree has uncommitted changes" (the
-/// user-visible message is in `commands/git.rs`'s
-/// `sync_outcome_to_git_sync_result`; the gate that produces the variant is
-/// `do_sync` Step 5).
+/// The `git status`-parity dirty path set: every non-ignored
+/// modified/untracked path, honouring
+/// `submodule.<path>.ignore = {dirty,all,untracked}` from `.git/config`.
 ///
-/// **Scope of parity.** This helper matches `git status --ignore-submodules=
-/// dirty` *for submodule working-tree changes*. It does NOT distinguish
-/// staged gitlink advances (`+`-prefix lines in `git status`, surfacing as
-/// `INDEX_MODIFIED` on the parent's gitlink) from WT-dirt: the parent's view
-/// via `repo.statuses()` reports both as `WT_MODIFIED` on the gitlink path.
-/// That divergence is benign for the pull gate (a `git pull --ff-only` on a
+/// libgit2's `repo.statuses()` does not honour that config and always reports
+/// the gitlink's WT state as `WT_MODIFIED` when the submodule's WT differs
+/// from its HEAD, so without filtering a mesh with dirty submodules would get
+/// its fast-forward pull falsely skipped. This is the path universe
+/// [`ff_pull_blockers`] intersects the incoming `HEAD..upstream` diff against.
+///
+/// **Scope of parity.** Matches `git status --ignore-submodules=dirty` *for
+/// submodule working-tree changes*. It does NOT distinguish staged gitlink
+/// advances (`+`-prefix lines in `git status`, surfacing as `INDEX_MODIFIED`
+/// on the parent's gitlink) from WT-dirt: the parent's view via
+/// `repo.statuses()` reports both as `WT_MODIFIED` on the gitlink path. That
+/// divergence is benign for the ff-pull gate (a `git pull --ff-only` on a
 /// tree whose only dirt is staged changes either applies cleanly or aborts
 /// without data loss) but the parity claim should NOT be relied on by any
 /// future destructive-operation caller.
 ///
 /// **Do not use this for data-safety decisions** (worktree close, base
 /// restore, prune-badging): hiding submodule dirt in those callers risks
-/// silently dropping user work. Keep the use site narrow — only `do_sync`'s
-/// pre-pull gate (shared by the spawn auto-sync and the manual `git_sync`
-/// Tauri command) routes through this helper, because the user's contract
-/// there is "should the fast-forward pull happen?", not "is anything dirty?".
+/// silently dropping user work. Its only consumer is [`ff_pull_blockers`] —
+/// the `do_sync` Step 5 pre-pull gate shared by the spawn auto-sync and the
+/// manual `git_sync` Tauri command — because the user's contract there is
+/// "would this fast-forward overwrite my work?", not "is anything dirty?".
 ///
 /// **`ignore = all`:** hides everything for the submodule, including HEAD
 /// advance. **`ignore = untracked`:** only hides untracked files inside the
@@ -91,29 +91,102 @@ pub fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
 /// `.git/config`, so this reads `cfg.entries("submodule\\..*\\.ignore")`
 /// directly. Failure modes (no config, unreadable file) silently yield an
 /// empty map, so we err on the side of reporting dirty.
-pub fn is_dirty_mirrors_git_status(repo: &Repository) -> Result<bool, git2::Error> {
+///
+/// **Return shape:** `Ok(Some(set))` is the dirty/untracked path set
+/// (`Some(empty)` = clean); `Ok(None)` means a status entry carried no path
+/// (libgit2's `StatusEntry::path` is optional). No caller can reason about an
+/// unnameable entry, so `None` is the fail-closed signal — [`ff_pull_blockers`]
+/// turns it into an `Err` (skip the pull).
+fn dirty_paths_mirrors_git_status(
+    repo: &Repository,
+) -> Result<Option<BTreeSet<String>>, git2::Error> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo.statuses(Some(&mut opts))?;
     let ignore_rules = read_submodule_ignore_rules(repo);
-    Ok(statuses.iter().any(|e| {
-        let status = e.status();
-        if status.is_ignored() {
-            return false;
+    let mut paths = BTreeSet::new();
+    for e in statuses.iter() {
+        if e.status().is_ignored() {
+            continue;
         }
         let path = match e.path() {
             Some(p) => p,
-            None => return true,
+            None => return Ok(None),
         };
         if let Some(rule) = ignore_rules.get(path) {
             match rule.as_str() {
-                "dirty" => return false,
-                "all" => return false,
+                "dirty" | "all" => continue,
                 _ => {}
             }
         }
-        true
-    }))
+        paths.insert(path.to_string());
+    }
+    Ok(Some(paths))
+}
+
+/// The paths at which a fast-forward pull would overwrite local working-tree
+/// changes — the exact set `git` names in "Your local changes to the following
+/// files would be overwritten by merge" (tracked edits) or "untracked working
+/// tree files would be overwritten" (untracked collisions).
+///
+/// This is the *precise* replacement for the old blanket "is the tree dirty?"
+/// pull gate. `git pull --ff-only` does **not** refuse on a dirty tree in
+/// general — it refuses only when a path it is about to rewrite also has a
+/// local change. Local edits and untracked files in files the incoming commits
+/// never touch are preserved by the fast-forward, so they must not block it.
+/// Computing the intersection here lets `do_sync` skip the pull (and its
+/// redundant network re-fetch) exactly when git would refuse, and run it
+/// otherwise.
+///
+/// The intersection is between:
+/// - the locally dirty/untracked paths (submodule-ignore-aware, via
+///   [`dirty_paths_mirrors_git_status`]), and
+/// - every path the `HEAD..upstream` diff touches. Both sides of each delta are
+///   included so a local edit at the *source* of an upstream rename/delete, and
+///   an untracked file at the *destination*, are both caught.
+///
+/// `Ok(vec![])` means the fast-forward is safe despite a dirty tree. `Err` means
+/// "could not determine" (unreadable status, detached HEAD, no upstream) — the
+/// caller must fail closed and skip the pull, because we cannot prove it safe.
+pub fn ff_pull_blockers(repo: &Repository) -> Result<Vec<String>, String> {
+    let dirty = match dirty_paths_mirrors_git_status(repo).map_err(|e| e.to_string())? {
+        Some(paths) => paths,
+        None => return Err("working-tree status had an unnameable entry".to_string()),
+    };
+    if dirty.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let head = repo
+        .head()
+        .map_err(|e| format!("Failed to read HEAD: {}", e))?
+        .peel_to_commit()
+        .map_err(|e| format!("HEAD is not a commit: {}", e))?;
+    let branch =
+        head_branch_name(repo).ok_or_else(|| "HEAD is not on a branch".to_string())?;
+    let upstream_oid = upstream_oid_for_branch(repo, &branch)
+        .ok_or_else(|| format!("no upstream configured for refs/heads/{}", branch))?;
+    let upstream = repo
+        .find_commit(upstream_oid)
+        .map_err(|e| format!("upstream is not a commit: {}", e))?;
+
+    let head_tree = head.tree().map_err(|e| e.to_string())?;
+    let upstream_tree = upstream.tree().map_err(|e| e.to_string())?;
+    let diff = repo
+        .diff_tree_to_tree(Some(&head_tree), Some(&upstream_tree), None)
+        .map_err(|e| e.to_string())?;
+
+    let mut incoming: BTreeSet<String> = BTreeSet::new();
+    for delta in diff.deltas() {
+        if let Some(p) = delta.old_file().path() {
+            incoming.insert(p.to_string_lossy().into_owned());
+        }
+        if let Some(p) = delta.new_file().path() {
+            incoming.insert(p.to_string_lossy().into_owned());
+        }
+    }
+
+    Ok(dirty.intersection(&incoming).cloned().collect())
 }
 
 /// Read `submodule.<path>.ignore = {dirty,all,untracked,none}` entries from
@@ -350,30 +423,34 @@ mod tests {
     }
 
     #[test]
-    fn is_dirty_mirrors_git_status_submodule_wt_dirty_with_ignore_dirty_says_clean() {
+    fn dirty_paths_mirrors_git_status_submodule_wt_dirty_with_ignore_dirty_says_clean() {
         // Mirrors lambo-recomp's 2026-07-04 regression:
         //   - submodule WT has uncommitted edits
         //   - submodule HEAD matches the parent's recorded gitlink SHA
         //   - parent's .git/config sets `submodule.sub.ignore = dirty`
         // `git status` honours the ignore rule and reports clean.
-        // `is_dirty_mirrors_git_status` must do the same or the sync's
+        // `dirty_paths_mirrors_git_status` must do the same or the sync's
         // ff-pull is falsely skipped with "fast-forward skipped: working
         // tree has uncommitted changes" (the user-visible message lives in
         // commands/git.rs's sync_outcome_to_git_sync_result; the gate that
-        // emits SyncOutcome::FetchedButDirty is do_sync Step 5).
+        // emits SyncOutcome::FetchedButDirty is do_sync Step 5 via
+        // ff_pull_blockers).
         // Note: `is_dirty` (strict) would still report this as dirty — that's
-        // the correct behaviour for data-safety gates, just not for the fetch.
+        // the correct behaviour for data-safety gates, just not for the pull.
         let td = TestDir::new("prim_submod_ignore_dirty");
         let parent = make_submodule_setup(&td, Some("dirty"));
         assert!(
-            !is_dirty_mirrors_git_status(&parent).unwrap(),
-            "is_dirty_mirrors_git_status must mirror `git status`, which honours \
+            dirty_paths_mirrors_git_status(&parent)
+                .unwrap()
+                .unwrap()
+                .is_empty(),
+            "dirty_paths_mirrors_git_status must mirror `git status`, which honours \
              submodule.<path>.ignore = dirty"
         );
     }
 
     #[test]
-    fn is_dirty_mirrors_git_status_submodule_wt_dirty_without_ignore_dirty_says_dirty() {
+    fn dirty_paths_mirrors_git_status_submodule_wt_dirty_without_ignore_dirty_says_dirty() {
         // No `submodule.sub.ignore` set: libgit2's WT_MODIFIED on the
         // gitlink is the canonical dirty signal and `git status` agrees.
         // Pairs with the case above to pin down the symmetry: ignore=dirty
@@ -381,20 +458,26 @@ mod tests {
         let td = TestDir::new("prim_submod_no_ignore");
         let parent = make_submodule_setup(&td, None);
         assert!(
-            is_dirty_mirrors_git_status(&parent).unwrap(),
+            !dirty_paths_mirrors_git_status(&parent)
+                .unwrap()
+                .unwrap()
+                .is_empty(),
             "without ignore=dirty, a dirty submodule WT must still report as dirty"
         );
     }
 
     #[test]
-    fn is_dirty_mirrors_git_status_submodule_wt_dirty_with_ignore_all_says_clean() {
+    fn dirty_paths_mirrors_git_status_submodule_wt_dirty_with_ignore_all_says_clean() {
         // `submodule.X.ignore = all` hides everything for the submodule,
         // including any HEAD-advance dirt. Mirrors what
         // `git status --ignore-submodules=all` does.
         let td = TestDir::new("prim_submod_ignore_all");
         let parent = make_submodule_setup(&td, Some("all"));
         assert!(
-            !is_dirty_mirrors_git_status(&parent).unwrap(),
+            dirty_paths_mirrors_git_status(&parent)
+                .unwrap()
+                .unwrap()
+                .is_empty(),
             "ignore=all must filter WT-only submodule dirt"
         );
     }
@@ -413,6 +496,110 @@ mod tests {
             "strict is_dirty must NOT honour submodule.X.ignore — \
              data-safety gates depend on it staying strict"
         );
+    }
+
+    /// Build the "remote is ahead, local checkout can be dirtied" shape without
+    /// a network round-trip: local branch at the base commit, its upstream
+    /// (`origin/<branch>`) one commit ahead that changes `upstream_path`, and
+    /// the branch wired to the `origin` remote the way `git remote add` +
+    /// `push -u` would. The local branch is rewound to the base so the upstream
+    /// commit is visible only through the tracking ref (exactly what
+    /// `do_sync`'s behind-count and `ff_pull_blockers`' diff consume).
+    fn repo_behind_upstream(
+        td: &TestDir,
+        base_files: &[(&str, &str)],
+        upstream_path: &str,
+        upstream_content: &str,
+    ) -> git2::Repository {
+        let repo = init_repo_with_commit(td.path(), base_files);
+        let branch = head_branch_name(&repo).unwrap();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        // One commit ahead of base, on the upstream side only.
+        let ahead = commit_file(&repo, td.path(), upstream_path, upstream_content);
+
+        repo.remote("origin", td.path().to_str().unwrap()).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str(&format!("branch.{}.remote", branch), "origin")
+                .unwrap();
+            cfg.set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+        }
+        repo.reference(&format!("refs/remotes/origin/{}", branch), ahead, true, "test")
+            .unwrap();
+
+        {
+            let base_commit = repo.find_commit(base).unwrap();
+            repo.reset(base_commit.as_object(), git2::ResetType::Hard, None)
+                .unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn ff_pull_blockers_empty_on_clean_tree() {
+        let td = TestDir::new("ff_blockers_clean");
+        let repo = repo_behind_upstream(
+            &td,
+            &[("upstream.txt", "u0\n"), ("local.txt", "l0\n")],
+            "upstream.txt",
+            "u1\n",
+        );
+        assert_eq!(ff_pull_blockers(&repo).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn ff_pull_blockers_empty_for_non_overlapping_edits_and_untracked_files() {
+        // The 2026-09 aerogauge-recomp case: local edits + untracked files sit
+        // in paths the incoming commit never touches. `git pull --ff-only`
+        // fast-forwards and preserves them, so they must NOT be reported as
+        // blockers.
+        let td = TestDir::new("ff_blockers_nonoverlap");
+        let repo = repo_behind_upstream(
+            &td,
+            &[("upstream.txt", "u0\n"), ("local.txt", "l0\n")],
+            "upstream.txt",
+            "u1\n",
+        );
+        fs::write(td.path().join("local.txt"), "local edit\n").unwrap();
+        fs::write(td.path().join("scratch-untracked.txt"), "x\n").unwrap();
+        assert_eq!(
+            ff_pull_blockers(&repo).unwrap(),
+            Vec::<String>::new(),
+            "edits/untracked files in paths the ff does not rewrite must not block"
+        );
+    }
+
+    #[test]
+    fn ff_pull_blockers_lists_a_dirty_path_the_ff_would_overwrite() {
+        // The genuine blocker: local edit to the very file the incoming commit
+        // changes. `git pull --ff-only` aborts here, so we must report it.
+        let td = TestDir::new("ff_blockers_overlap");
+        let repo = repo_behind_upstream(
+            &td,
+            &[("upstream.txt", "u0\n"), ("local.txt", "l0\n")],
+            "upstream.txt",
+            "u1\n",
+        );
+        fs::write(td.path().join("upstream.txt"), "local edit\n").unwrap();
+        assert_eq!(
+            ff_pull_blockers(&repo).unwrap(),
+            vec!["upstream.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn ff_pull_blockers_lists_untracked_collision_with_an_incoming_add() {
+        // Untracked file at a path the ff adds: git refuses ("untracked working
+        // tree files would be overwritten"), so it is a real blocker.
+        let td = TestDir::new("ff_blockers_untracked_collision");
+        let repo = repo_behind_upstream(&td, &[("local.txt", "l0\n")], "new.txt", "incoming\n");
+        fs::write(td.path().join("new.txt"), "untracked local\n").unwrap();
+        assert_eq!(ff_pull_blockers(&repo).unwrap(), vec!["new.txt".to_string()]);
     }
 
     #[test]
