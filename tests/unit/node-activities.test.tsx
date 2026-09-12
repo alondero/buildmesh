@@ -178,6 +178,43 @@ describe('node activities', () => {
     expect(focusAgentTerminal).toHaveBeenCalled();
   });
 
+  it('opens the All sessions caret on the selected session, not row 0', async () => {
+    // Issue #1720 follow-up — the menu rows paint off the roving
+    // activeIndex, so the open caret must be seeded at the selected
+    // session (the hook's mount effect would otherwise reset it to
+    // row 0 and highlight the wrong row).
+    render(card());
+    fireEvent.click(screen.getByRole('tab', { name: /^Review.*Reviewer/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    const items = screen.getAllByRole('menuitem');
+    // Caret (focus + highlight) sits on the Review row (index 1).
+    expect(document.activeElement).toBe(items[1]);
+    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(items[0].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    // The committed selection marker agrees with the caret.
+    expect(items[1].getAttribute('aria-current')).toBe('true');
+    expect(items[0].getAttribute('aria-current')).toBeNull();
+  });
+
+  it('moves the All sessions caret to the hovered row — one highlight at any time', async () => {
+    // Issue #1720 follow-up — hover joins the keyboard's single caret
+    // (focus + index move together); a second row must never light up.
+    render(card());
+    fireEvent.click(screen.getByRole('tab', { name: /^Review.*Reviewer/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
+    const items = screen.getAllByRole('menuitem');
+    // Opened on the Review row; hover the Implementation row.
+    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
+    fireEvent.mouseEnter(items[0]);
+    expect(document.activeElement).toBe(items[0]);
+    expect(items[0].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(items[1].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    // No CSS hover paint on any row — hover moves the caret instead.
+    for (const item of items) {
+      expect(item.className.split(/\s+/)).not.toContain('hover:bg-bg-card-hover');
+    }
+  });
+
   it('keeps tab focus for keyboard activation from All sessions', async () => {
     render(card());
     await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));

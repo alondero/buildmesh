@@ -247,27 +247,65 @@ describe('GroupedProviderMenu — WAI-ARIA menu semantics (issue #814)', () => {
   });
 });
 
-describe('GroupedProviderMenu — selected-row contrast', () => {
+describe('GroupedProviderMenu — single-caret highlight (issue #1720 follow-up)', () => {
   // The menu paints on `bg-bg-overlay`; the old row highlight used
   // `bg-bg-card`, which is ~1/255 brighter than that surface and so was
-  // invisible — the user could not tell which row was active. Rows must
-  // use the semantic `bg-bg-selection` surface for the active row and
-  // `bg-bg-card-hover` for idle hover (the CommandOmnibar contract).
+  // invisible — the user could not tell which row was active. The #1720
+  // fix painted `bg-bg-selection` for the keyboard caret but KEPT CSS
+  // hover paint, so a pointer and the keyboard could light two rows at
+  // once. The single-caret contract: exactly one row carries
+  // `bg-bg-selection` (the roving `activeIndex`), hover MOVES that row
+  // instead of painting a second one, and no row carries CSS
+  // hover/focus background paint at all.
   const ROWS = [native('claude'), proxied('claude', 'minimax'), native('codex')];
 
-  it('paints the active row with bg-bg-selection and idle rows with hover:bg-bg-card-hover', () => {
+  it('paints exactly one caret row with bg-bg-selection and no row with CSS hover/focus paint', () => {
     render(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
     const items = screen.getAllByRole('menuitem');
     for (const item of items) {
       const classes = item.className.split(/\s+/);
       expect(classes).not.toContain('bg-bg-card');
       expect(classes).not.toContain('hover:bg-bg-card');
+      expect(classes).not.toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('focus:bg-bg-card');
+      expect(classes).not.toContain('focus:bg-bg-selection');
     }
-    // The auto-focused first row is the active one.
+    // The auto-focused first row is the one caret.
+    const lit = items.filter((item) => item.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([items[0]]);
+  });
+
+  it('moves the caret (focus + highlight) to the hovered row', () => {
+    render(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
+    const items = screen.getAllByRole('menuitem');
+    fireEvent.mouseEnter(items[2]);
+    // Hover moved REAL focus — the same channel the keyboard uses.
+    expect(document.activeElement).toBe(items[2]);
+    // And the highlight followed: exactly one lit row, the hovered one.
+    const lit = items.filter((item) => item.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([items[2]]);
+    // Roving tabindex followed too, so Tab still exits from the caret.
+    expect(items[2].tabIndex).toBe(0);
+    expect(items[0].tabIndex).toBe(-1);
+  });
+
+  it('keyboard and hover drive the SAME caret — no second highlight ever', () => {
+    render(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
+    const items = screen.getAllByRole('menuitem');
+    // Keyboard: ArrowDown moves the caret to row 1.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
+    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(items[0].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    // Pointer: hovering row 0 moves the same caret back — the previous
+    // hover-lit state (a second lit row) is exactly the bug this pins.
+    fireEvent.mouseEnter(items[0]);
+    expect(document.activeElement).toBe(items[0]);
     expect(items[0].className.split(/\s+/)).toContain('bg-bg-selection');
-    expect(items[1].className.split(/\s+/)).toContain('hover:bg-bg-card-hover');
-    expect(items[2].className.split(/\s+/)).toContain('hover:bg-bg-card-hover');
+    expect(items[1].className.split(/\s+/)).not.toContain('bg-bg-selection');
+    // Keyboard again: ArrowDown from the hover-moved caret goes to the
+    // next row (not back to where the keyboard left off).
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
+    expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
   });
 
   it('moves the selection surface to the next row on ArrowDown', () => {

@@ -211,12 +211,11 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     expect(current.getAttribute('data-spawn-id')).toBe('claude');
   });
 
-  it('marks the current row with bg-bg-selection and alternates with hover:bg-bg-card-hover', () => {
-    // The picker paints on `bg-bg-overlay`; the old `hover:bg-bg-card`
-    // highlight is ~1/255 brighter than that surface and was invisible,
-    // so the user could not tell the selected (current) row from the
-    // alternates. Current carries the semantic selection surface at
-    // rest; alternates highlight on hover only.
+  it('paints no caret and no CSS hover paint before any row holds focus', () => {
+    // Issue #1720 follow-up — single-caret picker. The caret IS focus:
+    // nothing is lit until a row is hovered or focused (both hosts move
+    // real focus, so the paint follows). The Current row keeps its
+    // identity badge, not a persistent highlight.
     render(
       <div role="menu">
         <RegenerateProviderMenu
@@ -226,20 +225,60 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
         />
       </div>,
     );
-    const current = screen.getByTestId('regenerate-submenu-current');
-    expect(current.className.split(/\s+/)).toContain('bg-bg-selection');
-    expect(current.className.split(/\s+/)).not.toContain('hover:bg-bg-card');
-
-    const alternates = screen
-      .getAllByRole('menuitem')
-      .filter((row) => row.getAttribute('data-is-current') !== 'true');
-    expect(alternates.length).toBeGreaterThan(0);
-    for (const row of alternates) {
+    const rows = screen.getAllByRole('menuitem');
+    for (const row of rows) {
       const classes = row.className.split(/\s+/);
-      expect(classes).toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('hover:bg-bg-card');
+      expect(classes).not.toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('bg-bg-card');
+      expect(classes).not.toContain('bg-bg-selection');
     }
+    // Identity badge is intact.
+    expect(screen.getByTestId('regenerate-submenu-current').getAttribute('data-is-current')).toBe('true');
+  });
+
+  it('moves the single caret to the hovered row (caret is focus)', () => {
+    render(
+      <div role="menu">
+        <RegenerateProviderMenu
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex')]}
+          currentProviderId="claude"
+          onPick={() => {}}
+        />
+      </div>,
+    );
+    const rows = screen.getAllByRole('menuitem');
+    fireEvent.mouseEnter(rows[1]);
+    // Hover moved REAL focus — the same channel both hosts' keyboard
+    // walks use — and the highlight followed: exactly one lit row.
+    expect(document.activeElement).toBe(rows[1]);
+    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([rows[1]]);
+    // Keyboard parity: focusing a row directly moves the same caret.
+    fireEvent.focus(rows[0]);
+    expect(rows[0].className.split(/\s+/)).toContain('bg-bg-selection');
+    expect(rows[1].className.split(/\s+/)).not.toContain('bg-bg-selection');
+  });
+
+  it('host keyboard walk (stepSubmenuFocus) drives the same caret via focus', () => {
+    // Both hosts (sidebar useSubmenu, kebab arrow handling) walk the
+    // rows with real focus; the picker must paint off that focus with
+    // no second index source to disagree with it.
+    render(
+      <div role="menu">
+        <RegenerateProviderMenu
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex'), makeSpawnOption('kimi', 'Kimi')]}
+          currentProviderId="claude"
+          onPick={() => {}}
+        />
+      </div>,
+    );
+    const rows = screen.getAllByRole('menuitem');
+    expect(rows).toHaveLength(3);
+    // act-wrapped: real focus (what the host walk does) + state flush.
+    act(() => { rows[2].focus(); });
+    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([rows[2]]);
   });
 });
 
