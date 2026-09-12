@@ -211,12 +211,13 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
     expect(current.getAttribute('data-spawn-id')).toBe('claude');
   });
 
-  it('marks the current row with bg-bg-selection and alternates with hover:bg-bg-card-hover', () => {
-    // The picker paints on `bg-bg-overlay`; the old `hover:bg-bg-card`
-    // highlight is ~1/255 brighter than that surface and was invisible,
-    // so the user could not tell the selected (current) row from the
-    // alternates. Current carries the semantic selection surface at
-    // rest; alternates highlight on hover only.
+  it('marks the caret row with bg-bg-selection and keeps CSS hover paint off every row', () => {
+    // Issue #1720 follow-up — single-caret picker. The old test pinned
+    // the Current row lit at rest + alternates painting on hover, which
+    // made a pointer and the keyboard light TWO rows at once. Now
+    // exactly one row (the caret) carries the selection surface and
+    // hover moves it instead of painting a second highlight. The
+    // Current row keeps its identity badge, not a persistent highlight.
     render(
       <div role="menu">
         <RegenerateProviderMenu
@@ -226,20 +227,59 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
         />
       </div>,
     );
-    const current = screen.getByTestId('regenerate-submenu-current');
-    expect(current.className.split(/\s+/)).toContain('bg-bg-selection');
-    expect(current.className.split(/\s+/)).not.toContain('hover:bg-bg-card');
-
-    const alternates = screen
-      .getAllByRole('menuitem')
-      .filter((row) => row.getAttribute('data-is-current') !== 'true');
-    expect(alternates.length).toBeGreaterThan(0);
-    for (const row of alternates) {
+    const rows = screen.getAllByRole('menuitem');
+    for (const row of rows) {
       const classes = row.className.split(/\s+/);
-      expect(classes).toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('hover:bg-bg-card');
+      expect(classes).not.toContain('hover:bg-bg-card-hover');
       expect(classes).not.toContain('bg-bg-card');
     }
+    // Mount caret = row 0 (Current) — auto-highlighted like a native
+    // dropdown's first option, and the only lit row.
+    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([rows[0]]);
+    // Identity badge is intact.
+    expect(screen.getByTestId('regenerate-submenu-current').getAttribute('data-is-current')).toBe('true');
+  });
+
+  it('moves the single caret to the hovered row (uncontrolled caret)', () => {
+    render(
+      <div role="menu">
+        <RegenerateProviderMenu
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex')]}
+          currentProviderId="claude"
+          onPick={() => {}}
+        />
+      </div>,
+    );
+    const rows = screen.getAllByRole('menuitem');
+    fireEvent.mouseEnter(rows[1]);
+    // Hover moved REAL focus (the channel the host's keyboard walk
+    // uses) and the caret followed — never a second lit row.
+    expect(document.activeElement).toBe(rows[1]);
+    const lit = rows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+    expect(lit).toEqual([rows[1]]);
+  });
+
+  it('controlled mode: hover routes through onActiveIndexChange for the host-driven caret', () => {
+    const onActiveIndexChange = vi.fn();
+    render(
+      <div role="menu">
+        <RegenerateProviderMenu
+          providers={[makeSpawnOption('claude', 'Claude Code'), makeSpawnOption('codex', 'Codex')]}
+          currentProviderId="claude"
+          onPick={() => {}}
+          activeIndex={0}
+          onActiveIndexChange={onActiveIndexChange}
+        />
+      </div>,
+    );
+    const rows = screen.getAllByRole('menuitem');
+    fireEvent.mouseEnter(rows[1]);
+    // Controlled host (GridRegenerateButton) moves focus + index itself;
+    // the picker reports the move instead of acting unilaterally.
+    expect(onActiveIndexChange).toHaveBeenCalledWith(1);
+    expect(document.activeElement).not.toBe(rows[1]);
   });
 });
 

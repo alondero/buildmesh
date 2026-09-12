@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
 import { splitRegenerateTargets } from '../../lib/regenerate';
@@ -18,10 +18,20 @@ export interface RegenerateProviderMenuProps {
    * render order). When omitted, every row stays in the natural Tab order
    * (the sidebar `NodeItem` submenu manages focus itself via the shared
    * `useSubmenu` hook and doesn't need roving tabindex). When
-   * provided (the `GridNodeHeader` inline dropdown via `useAriaMenu`),
+   * provided (the `GridRegenerateButton` inline dropdown via `useAriaMenu`),
    * only the active row gets `tabIndex=0` so Tab leaves the menu cleanly.
    */
   activeIndex?: number;
+  /**
+   * Issue #1720 follow-up — single-caret hover contract. Called INSTEAD of
+   * the internal index update for every user-driven caret move (pointer
+   * entry, focus landing). The host must keep DOM focus and its roving
+   * index in lockstep (see `GridRegenerateButton`'s `moveCaret`). When
+   * omitted (the sidebar `NodeItem` submenu), the caret is tracked
+   * internally and hover moves REAL focus so the host's
+   * `stepSubmenuFocus` walk and the highlight never disagree.
+   */
+  onActiveIndexChange?: (next: number) => void;
 }
 
 /**
@@ -33,13 +43,21 @@ export interface RegenerateProviderMenuProps {
  * `NodeItem` submenu, including the `data-spawn-group` / `data-spawn-id` /
  * `data-spawn-harness` contract tests rely on).
  *
- * Shared by the sidebar `NodeItem` context-menu submenu AND the new
- * `GridNodeHeader` toolbar dropdown / kebab submenu so the three surfaces
- * never drift (same ordering, same labels, same data attributes).
+ * Shared by the sidebar `NodeItem` context-menu submenu, the header kebab
+ * submenu, and the `GridRegenerateButton` inline dropdown so the three
+ * surfaces never drift (same ordering, same labels, same data attributes).
  *
  * The current row carries `data-is-current="true"` plus a dedicated
  * `${submenuTestId}-current` test id so tests can pin the in-place
  * affordance without parsing labels.
+ *
+ * Issue #1720 follow-up — single-caret highlight. Exactly ONE row paints
+ * the selection surface at any time: the row at the caret index (the
+ * `activeIndex` prop when controlled, internal state when not). Hovering
+ * a row MOVES the caret to it rather than lighting a second highlight —
+ * a native dropdown affordance where pointer and keyboard share one
+ * selection. The `current` badge keeps marking the node's provider for
+ * identity; it no longer implies a persistent second highlight.
  */
 export function RegenerateProviderMenu({
   providers,
@@ -47,6 +65,7 @@ export function RegenerateProviderMenu({
   onPick,
   submenuTestId = 'regenerate-submenu',
   activeIndex,
+  onActiveIndexChange,
 }: RegenerateProviderMenuProps) {
   const emptyTestId = `${submenuTestId}-empty`;
   const { current, others } = useMemo(
@@ -54,6 +73,14 @@ export function RegenerateProviderMenu({
     [providers, currentProviderId],
   );
   const otherGroups = useMemo(() => groupByHarness(others), [others]);
+
+  // Uncontrolled caret (sidebar `NodeItem` submenu): the index lives here
+  // and both pointer entry and REAL focus landing update it, so the
+  // highlight always sits on the focused row and the host's
+  // `stepSubmenuFocus` walk (which moves real focus) drives it correctly.
+  const [localIndex, setLocalIndex] = useState(0);
+  const controlled = onActiveIndexChange !== undefined;
+  const caretIndex = activeIndex ?? localIndex;
 
   // Flat index lookup for roving tabindex (mirrors `GroupedProviderMenu`):
   // current is 0 when present, then every alternate in render order
@@ -73,8 +100,38 @@ export function RegenerateProviderMenu({
     return map;
   }, [current, otherGroups]);
 
+  // Move the ONE caret to `next`. Controlled hosts route through their
+  // own lockstep move (focus + index); the uncontrolled sidebar path
+  // focuses the row (`focusWithoutScroll` semantics — the sidebar list
+  // scrolls under the open menu, and a bare `.focus()` would jump it)
+  // so keyboard walking and the highlight share one position.
+  const moveCaretFrom = (el: HTMLElement | null, next: number) => {
+    if (next === caretIndex) return;
+    if (controlled) {
+      onActiveIndexChange(next);
+      return;
+    }
+    el?.focus({ preventScroll: true });
+    setLocalIndex(next);
+  };
+
+  // Focus landing (host-driven keyboard walk, Tab, ...) syncs the
+  // uncontrolled caret; in controlled mode the host already owns the
+  // index, so the event is a no-op echo of its own focus() call.
+  const trackFocus = (id: string) => {
+    if (controlled) return;
+    const idx = flatIndexById.get(id);
+    if (idx !== undefined) setLocalIndex(idx);
+  };
+
   const tabIndexFor = (id: string): number | undefined =>
     activeIndex === undefined ? undefined : flatIndexById.get(id) === activeIndex ? 0 : -1;
+
+  // The single caret surface. Every row paints `bg-bg-selection` only when
+  // it IS the caret row; there is no CSS hover/focus paint anywhere (hover
+  // and focus both MOVE the caret instead).
+  const caretClass = (id: string): string =>
+    flatIndexById.get(id) === caretIndex ? 'bg-bg-selection text-text-primary' : '';
 
   if (providers.length === 0) {
     return (
@@ -102,12 +159,10 @@ export function RegenerateProviderMenu({
             data-is-current="true"
             data-testid={`${submenuTestId}-current`}
             onClick={() => onPick(current.id, current.label)}
+            onMouseEnter={(e) => moveCaretFrom(e.currentTarget, flatIndexById.get(current.id) ?? caretIndex)}
+            onFocus={() => trackFocus(current.id)}
             title="Regenerate in place on the current provider (kick-start a wonky harness)"
-            // The current provider is the row the user is regenerating
-            // from, so it carries the semantic selection surface at rest
-            // — clearly distinguishable from the alternates. (This menu
-            // sits on `bg-bg-overlay`, where `bg-bg-card` is invisible.)
-            className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium bg-bg-selection focus:outline-none flex items-center gap-2"
+            className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${caretClass(current.id)}`}
           >
             <ProviderIcon providerId={current.id} className="h-3.5 w-3.5 shrink-0" />
             <span className="flex-1 truncate">{`Current (${current.label})`}</span>
@@ -145,7 +200,9 @@ export function RegenerateProviderMenu({
                   data-spawn-id={native.id}
                   data-spawn-harness={native.harness_id}
                   onClick={() => onPick(native.id, native.label)}
-                  className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card-hover focus:bg-bg-selection focus:outline-none flex items-center gap-2"
+                  onMouseEnter={(e) => moveCaretFrom(e.currentTarget, flatIndexById.get(native.id) ?? caretIndex)}
+                  onFocus={() => trackFocus(native.id)}
+                  className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${caretClass(native.id)}`}
                 >
                   <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{native.label}</span>
@@ -161,7 +218,9 @@ export function RegenerateProviderMenu({
                   data-spawn-id={child.id}
                   data-spawn-harness={child.harness_id}
                   onClick={() => onPick(child.id, child.label)}
-                  className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card-hover focus:bg-bg-selection focus:outline-none flex items-center gap-2"
+                  onMouseEnter={(e) => moveCaretFrom(e.currentTarget, flatIndexById.get(child.id) ?? caretIndex)}
+                  onFocus={() => trackFocus(child.id)}
+                  className={`w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary focus:outline-none flex items-center gap-2 ${caretClass(child.id)}`}
                 >
                   <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{child.label}</span>

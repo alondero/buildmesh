@@ -58,6 +58,18 @@ export function GridRegenerateButton({
     requestAnimationFrame(() => trigger?.focus());
   };
 
+  // Issue #1720 follow-up — single-caret picker. The picker's rows
+  // paint only off `activeIndex` (no CSS hover paint); hover entry
+  // routes through `moveCaret`, which moves DOM focus and the roving
+  // index together, exactly like an arrow-key step via `useAriaMenu`.
+  // Result: one highlighted row at any time, movable by pointer OR
+  // keyboard (native dropdown affordance).
+  const moveCaret = (next: number) => {
+    const el = menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')[next];
+    el?.focus({ preventScroll: true });
+    setActiveIndex(next);
+  };
+
   useClickOutside<string>(open ? dropdownId('grid-regen', node.id) : null, () => setOpen(false));
 
   useAriaMenu({
@@ -134,6 +146,7 @@ export function GridRegenerateButton({
             onPick={handlePick}
             submenuTestId="grid-regenerate-submenu"
             activeIndex={activeIndex}
+            onActiveIndexChange={moveCaret}
           />
         </div>
       )}

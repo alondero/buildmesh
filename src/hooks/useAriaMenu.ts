@@ -27,6 +27,13 @@
  *     a menuitem, and a real browser can deliver the keydown to the
  *     focused element while the listener is on `document`.
  *
+ * Single-highlight menus (issue #1720 follow-up): `onActiveIndexChange`
+ * lets a caller intercept user-driven index moves to keep DOM focus
+ * and the roving index in lockstep — the pointer entry handlers then
+ * reuse the same move, so hover and keyboard drive ONE caret (native
+ * dropdown affordance). Callers without the callback keep the plain
+ * focus-moves / index-follows behaviour.
+ *
  * The `enabled` gate lets a caller mount the menu (and run the auto-
  * focus layout effect) without attaching the global keydown listener.
  * `BuildRunDropdown` and `MeshItem` want the listener only while the
@@ -60,6 +67,14 @@ export interface UseAriaMenuOptions {
   activeIndex: number;
   /** Setter for the roving-tabindex position. */
   setActiveIndex: (next: number) => void;
+  /**
+   * Single-highlight menus (issue #1720 follow-up): called INSTEAD of
+   * `setActiveIndex` for every user-driven index move (Arrow/ Home/End).
+   * The callback should also move DOM focus so the pointer and the
+   * keyboard share ONE caret — see `GroupedProviderMenu`'s `moveCaret`.
+   * Mount-time auto-focus still drives `setActiveIndex` directly.
+   */
+  onActiveIndexChange?: (next: number) => void;
   /** Close handler — called on Escape (and Tab if `closeOnTab` is true). */
   onClose: () => void;
   /**
@@ -84,6 +99,7 @@ export function useAriaMenu({
   itemCount,
   activeIndex,
   setActiveIndex,
+  onActiveIndexChange,
   onClose,
   closeOnTab = true,
   enabled = true,
@@ -101,6 +117,8 @@ export function useAriaMenu({
   activeIndexRef.current = activeIndex;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onActiveIndexChangeRef = useRef(onActiveIndexChange);
+  onActiveIndexChangeRef.current = onActiveIndexChange;
 
   useEffect(() => {
     if (!enabled) return;
@@ -132,26 +150,26 @@ export function useAriaMenu({
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         const next = focusMenuItem(root, (activeIndexRef.current + 1) % total, itemSelector, skipDisabled, 1);
-        if (next !== null) setActiveIndex(next);
+        if (next !== null) (onActiveIndexChangeRef.current ?? setActiveIndex)(next);
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         const next = focusMenuItem(root, (activeIndexRef.current - 1 + total) % total, itemSelector, skipDisabled, -1);
-        if (next !== null) setActiveIndex(next);
+        if (next !== null) (onActiveIndexChangeRef.current ?? setActiveIndex)(next);
         return;
       }
       if (e.key === 'Home') {
         e.preventDefault();
         const next = focusMenuItem(root, 0, itemSelector, skipDisabled, 1);
-        if (next !== null) setActiveIndex(next);
+        if (next !== null) (onActiveIndexChangeRef.current ?? setActiveIndex)(next);
         return;
       }
       if (e.key === 'End') {
         e.preventDefault();
         const last = total - 1;
         const next = focusMenuItem(root, last, itemSelector, skipDisabled, -1);
-        if (next !== null) setActiveIndex(next);
+        if (next !== null) (onActiveIndexChangeRef.current ?? setActiveIndex)(next);
         return;
       }
     };

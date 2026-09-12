@@ -39,6 +39,19 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   });
   const selectedIndex = tabs.findIndex(tab => tab.member.id === selectedId && tab.utility === showingUtility);
   const closeMenu = () => { setOpen(false); triggerRef.current?.focus({ preventScroll: true }); };
+  // Issue #1720 follow-up — single-caret menu. The overflow rows paint
+  // only off `activeIndex` (no CSS hover paint); pointer entry routes
+  // through `moveCaret`, which moves DOM focus AND the roving index —
+  // the same move an arrow-key step makes. One highlight at any time,
+  // movable by pointer or keyboard. The strip's committed selection
+  // stays marked by the ✓ glyph / `aria-current` inside the menu and
+  // the tablist styling outside it.
+  const moveCaret = (next: number) => {
+    if (next === activeIndex) return;
+    const el = menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')[next];
+    el?.focus({ preventScroll: true });
+    setActiveIndex(next);
+  };
   useClickOutside(open ? menuId : null, () => setOpen(false));
   useAnchoredPosition(triggerRef, menuRef, open, { align: 'end' });
   useAriaMenu({ rootRef: menuRef, activeIndex, setActiveIndex,
@@ -101,6 +114,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
             </div>;
         })}
       </div>
+
       <button ref={triggerRef} type="button" data-dropdown-for={menuId} aria-label={`All sessions (${tabs.length})`} title="All sessions"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
         onClick={event => { event.stopPropagation(); setActiveIndex(Math.max(0, selectedIndex)); setOpen(!open); }}
@@ -126,10 +140,11 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               requestAnimationFrame(() => tabRefs.current[index]?.focus({ preventScroll: true }));
             }
           }}
-          className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs focus:outline-none focus:bg-bg-selection ${
-            index === selectedIndex
+          onMouseEnter={() => moveCaret(index)}
+          className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-xs focus:outline-none ${
+            index === activeIndex
               ? 'bg-bg-selection text-text-primary'
-              : 'text-text-secondary hover:bg-bg-card-hover'
+              : 'text-text-secondary'
           }`}>
           <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
           <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.member.name}</span></span>
