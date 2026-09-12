@@ -946,7 +946,10 @@ pub async fn handle_post(
     // already been deleted (or never existed); both would turn a typo/flood
     // of unknown ids into an unbounded global-map leak. Existing nodes proceed
     // through the normal provider/session fences below.
-    if node.is_none() {
+    if node
+        .as_ref()
+        .is_none_or(|node| node.status == crate::models::SessionStatus::Archived)
+    {
         let _ = request::write_status_only(lines, "404 Not Found").await;
         return;
     }

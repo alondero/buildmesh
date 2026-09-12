@@ -835,6 +835,11 @@ fn close_merged_nodes(
                     tracing::warn!("autopilot: archive of node {} failed: {}", node_id, e);
                     continue;
                 }
+                // Archiving retains the row for history but closes the
+                // session permanently. Release any process-lifetime hook
+                // state just as the deleting path does; delayed callbacks for
+                // this archived node must not recreate a live tracker.
+                crate::agent::hook_state::forget(node_id);
                 // Terminal ledger state so the sweep never re-checks this PR.
                 let _ = db::set_autopilot_run_state(
                     node_id,
