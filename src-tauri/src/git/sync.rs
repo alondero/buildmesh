@@ -27,15 +27,22 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchOutcome {
     /// Fetched `new_commits` commits but the fast-forward pull was
-    /// skipped because the parent repo has uncommitted changes
-    /// (issue #213's "skip if dirty" criterion, which applies to the
-    /// *pull* only — the fetch is always safe and MUST run so the
-    /// remote-tracking refs worktree nodes are cut from stay fresh;
-    /// gating the fetch on dirt starved them without bound, 2026-07-17
-    /// incident). Silent from the spawn's perspective: the new node is
-    /// cut from the just-fetched ref, and the user already knows their
-    /// own checkout is dirty.
-    FetchedButDirty { new_commits: u32 },
+    /// skipped because local working-tree changes would be overwritten
+    /// by it (issue #213's "skip if dirty" criterion, sharpened by
+    /// ADR 0033: only *overlapping* local changes block — edits and
+    /// untracked files in paths the incoming commits never touch do
+    /// not). The fetch half always runs: it never touches the working
+    /// tree, and the remote-tracking refs it updates are what worktree
+    /// nodes are cut from. Silent from the spawn's perspective: the new
+    /// node is cut from the just-fetched ref, and the user already
+    /// knows their own checkout is dirty.
+    FetchedButDirty {
+        new_commits: u32,
+        /// Repo-relative paths whose local changes block the ff-pull
+        /// (the intersection `ff_pull_blockers` computed). Empty when
+        /// the block was fail-closed on an unreadable status.
+        blocking_paths: Vec<String>,
+    },
     /// No `origin` remote is configured. A purely local Mesh is a
     /// valid setup; we don't surface a toast for that.
     SkippedNoRemote,
@@ -113,14 +120,24 @@ impl FetchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncOutcome {
     /// Fetched `new_commits` commits but the fast-forward pull was
-    /// skipped because the repo has uncommitted changes (issue #213's
-    /// "skip if dirty" policy — applied to the *pull* only). The fetch
-    /// half always runs: it never touches the working tree, and the
-    /// remote-tracking refs it updates are what worktree nodes are cut
-    /// from. Pre-2026-07-17 the dirty gate sat before the fetch, so a
-    /// mesh whose root checkout stayed dirty never freshened its refs
-    /// on ANY path (background worker, spawn, manual Sync click).
-    FetchedButDirty { new_commits: u32 },
+    /// skipped because local working-tree changes would be overwritten
+    /// by it. Since ADR 0033 the gate is the precise
+    /// `ff_pull_blockers` intersection — a dirty tree alone no longer
+    /// blocks: local edits and untracked files in paths the incoming
+    /// commits do not rewrite are preserved by `git pull --ff-only`
+    /// and the pull runs. The fetch half always runs: it never touches
+    /// the working tree, and the remote-tracking refs it updates are
+    /// what worktree nodes are cut from. Pre-2026-07-17 the dirty gate
+    /// sat before the fetch, so a mesh whose root checkout stayed dirty
+    /// never freshened its refs on ANY path (background worker, spawn,
+    /// manual Sync click).
+    FetchedButDirty {
+        new_commits: u32,
+        /// Repo-relative paths whose local changes block the ff-pull
+        /// (the intersection `ff_pull_blockers` computed). Empty when
+        /// the block was fail-closed on an unreadable status.
+        blocking_paths: Vec<String>,
+    },
     /// The named remote is not configured on the repo. A purely local
     /// Mesh is a valid state; we don't surface a warning for that.
     SkippedNoRemote,
@@ -215,20 +232,28 @@ impl SyncOutcome {
 ///    upstream" as `UpToDate` (most common cause: a fresh local-only
 ///    branch that just gained a remote via `git remote add` but
 ///    hasn't been pushed).
-/// 5. **Dirty-check** (`unwrap_or(true)` = fail closed: an unreadable
-///    status call is treated as dirty, not as a green light to pull
-///    into a state we couldn't read). On dirty → `FetchedButDirty`.
-///    The gate sits HERE — after the fetch, before the pull — because
-///    only the pull mutates the working tree. Gating the fetch on dirt
-///    (the pre-2026-07-17 shape) starved the remote-tracking refs on
-///    any mesh whose root checkout stayed dirty.
+/// 5. **Clobber-check.** Compute [`primitives::ff_pull_blockers`] — the
+///    locally dirty/untracked paths that the `HEAD..upstream`
+///    fast-forward would overwrite, i.e. exactly the condition
+///    `git pull --ff-only` refuses on. Non-empty →
+///    `FetchedButDirty { new_commits, blocking_paths }`. Empty (which
+///    includes a dirty tree whose edits/untracked files the incoming
+///    commits never touch) → fall through to the pull, which git
+///    applies cleanly while preserving those local changes. An
+///    unreadable status/diff fails closed (skip). The gate sits HERE —
+///    after the fetch, before the pull — because only the pull mutates
+///    the working tree. Gating the fetch on dirt (the pre-2026-07-17
+///    shape) starved the remote-tracking refs on any mesh whose root
+///    checkout stayed dirty.
 /// 6. **`git pull --ff-only --no-rebase`.** The explicit `--no-rebase`
 ///    defeats a user's global `pull.rebase=true`, which would
 ///    otherwise turn this into a rebase and write conflict markers
 ///    on a diverged history (issue #213). The pull is the *only*
 ///    point in the algorithm that mutates the local branch, so the
 ///    `FetchedButDirty` skip above exists to make sure this pull is
-///    never asked to merge into a dirty tree.
+///    never asked to overwrite uncommitted work. It is not a blanket
+///    "dirty tree" skip: a fast-forward whose changed paths don't touch
+///    the local edits runs, and git preserves those edits.
 ///
 /// **Steps 1-3 are factored into [`do_fetch_only`]** (issue #446) so
 /// the PR-spawn fetch helper can reuse the open-repo + has-remote +
@@ -301,27 +326,42 @@ pub(crate) fn do_sync(
         return SyncOutcome::UpToDate;
     }
 
-    // Step 5: skip the PULL (not the fetch — that already ran) if the
-    // working tree is dirty. Fail-closed: a corrupt index or perm
-    // denied on .git is treated as dirty rather than as a green light
-    // to fast-forward into a state we couldn't read.
-    //
-    // We use `is_dirty_mirrors_git_status` here (not the strict `is_dirty`)
-    // because the user's contract at this gate is "is my tree dirty iff
-    // `git status` says so". `git status` honours `submodule.<path>.ignore`
-    // from `.git/config`, so a mesh with dirty submodules whose user has set
-    // `submodule.X.ignore = dirty` (very common in N64-recomp-style projects
-    // with build artifacts inside submodules) would otherwise be falsely
-    // blocked here. The strict helper is correct for the data-safety gates
-    // (close_safety, restore_to_base, prune badging) — see the helper's
-    // docstring for the use-site split.
-    if crate::git::primitives::is_dirty_mirrors_git_status(&repo).unwrap_or(true) {
+    // Step 5: skip the PULL (not the fetch — that already ran) only when
+    // it would overwrite local working-tree changes. `git pull --ff-only`
+    // does NOT refuse merely because the tree is dirty: it preserves local
+    // edits and untracked files in paths the incoming commits do not
+    // rewrite, and aborts only on a genuine path overlap. `ff_pull_blockers`
+    // computes exactly that overlap (ADR 0033 — replacing the old blanket
+    // "is the tree dirty?" gate, which blocked fast-forwards for irrelevant
+    // changes such as untracked build artifacts or edits in unrelated
+    // files). Fail-closed: if we can't read the status/diff we skip rather
+    // than fast-forward into a state we couldn't prove safe.
+    let blocking_paths = match crate::git::primitives::ff_pull_blockers(&repo) {
+        Ok(paths) => paths,
+        Err(reason) => {
+            tracing::warn!(
+                "do_sync: can't prove the ff-pull is safe on {} ({}); fetched, skipping pull",
+                host_path,
+                reason
+            );
+            return SyncOutcome::FetchedButDirty {
+                new_commits,
+                blocking_paths: Vec::new(),
+            };
+        }
+    };
+    if !blocking_paths.is_empty() {
         tracing::info!(
-            "do_sync: {} is {} behind but has uncommitted changes; fetched, skipping pull",
+            "do_sync: {} is {} behind; fetched, skipping pull — local changes would be \
+             overwritten at: {}",
             host_path,
-            new_commits
+            new_commits,
+            blocking_paths.join(", ")
         );
-        return SyncOutcome::FetchedButDirty { new_commits };
+        return SyncOutcome::FetchedButDirty {
+            new_commits,
+            blocking_paths,
+        };
     }
 
     // Step 6: `git pull --ff-only --no-rebase`. The `--no-rebase` is
@@ -792,9 +832,13 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         SPAWN_FETCH_TIMEOUT,
     );
     Ok(match outcome {
-        SyncOutcome::FetchedButDirty { new_commits } => {
-            FetchOutcome::FetchedButDirty { new_commits }
-        }
+        SyncOutcome::FetchedButDirty {
+            new_commits,
+            blocking_paths,
+        } => FetchOutcome::FetchedButDirty {
+            new_commits,
+            blocking_paths,
+        },
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
         SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },

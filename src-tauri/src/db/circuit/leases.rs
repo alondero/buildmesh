@@ -11,11 +11,23 @@ use crate::db::SqlResult;
 /// Repeated calls are idempotent and may repair a pre-lease active run after
 /// an upgrade.
 pub fn reserve_circuit_agent_slots(run_id: i64, slots: i64) -> SqlResult<bool> {
+    let mut db = crate::db::write_conn();
+    reserve_circuit_agent_slots_locked(&mut db, run_id, slots)
+}
+
+/// Per-test isolated variant of [`reserve_circuit_agent_slots`] (issue #1691).
+/// Opens its own transaction on `conn`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn reserve_circuit_agent_slots_locked(
+    conn: &mut Connection,
+    run_id: i64,
+    slots: i64,
+) -> SqlResult<bool> {
     if slots <= 0 {
         return Ok(true);
     }
-    let mut db = crate::db::write_conn();
-    let tx = db.transaction()?;
+    let tx = conn.transaction()?;
     let live: Option<String> = tx
         .query_row(
             "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
@@ -37,6 +49,11 @@ pub fn reserve_circuit_agent_slots(run_id: i64, slots: i64) -> SqlResult<bool> {
 
 pub fn circuit_agent_slots_reserved(run_id: i64) -> SqlResult<i64> {
     let db = crate::db::read_conn();
+    circuit_agent_slots_reserved_inner(&db, run_id)
+}
+
+/// Per-test isolated variant of [`circuit_agent_slots_reserved`] (issue #1691).
+pub(crate) fn circuit_agent_slots_reserved_inner(db: &Connection, run_id: i64) -> SqlResult<i64> {
     db.query_row(
         "SELECT slots FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
         params![run_id],
@@ -123,6 +140,14 @@ pub(crate) fn list_circuit_agent_ownerships_inner(db: &Connection) -> SqlResult<
 /// this accounting.
 pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
     let db = crate::db::read_conn();
+    count_active_circuit_agent_nodes_total_inner(&db)
+}
+
+/// Per-test isolated variant of [`count_active_circuit_agent_nodes_total`] (issue #1691).
+/// The public function reads the process-global reader pool; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB without sharing the global counter.
+pub(crate) fn count_active_circuit_agent_nodes_total_inner(db: &Connection) -> SqlResult<i64> {
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -135,6 +160,11 @@ pub fn count_active_circuit_agent_nodes_total() -> SqlResult<i64> {
 
 pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
     let db = crate::db::read_conn();
+    count_retained_circuit_agent_nodes_total_inner(&db)
+}
+
+/// Per-test isolated variant of [`count_retained_circuit_agent_nodes_total`] (issue #1691).
+pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) -> SqlResult<i64> {
     db.query_row(
         "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \

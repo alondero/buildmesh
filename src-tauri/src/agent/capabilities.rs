@@ -479,6 +479,10 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::COMMANDCODE)
     }
 
+    fn muse_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::MUSE)
+    }
+
     fn freebuff_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::FREEBUFF)
     }
@@ -722,6 +726,30 @@ mod tests {
             vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
         );
 
+        let muse = muse_caps();
+        assert_eq!(muse.harness_id, "muse");
+        assert!(muse.supports_resume);
+        assert!(muse.auto_resume_on_startup);
+        // Issue #1709: Muse exposes no native attention hook, so the turn
+        // signal comes from the backend-owned session-log watcher and
+        // `attention_capability` stays `None` (mirrors Command Code).
+        assert!(!muse.requires_attention_hook);
+        assert_eq!(muse.attention_capability, AttentionCapability::None);
+        assert!(muse.supports_passive_turn_watcher);
+        // Muse's durable session log is not a readable transcript the
+        // Coordinator can hydrate; the watcher reads run boundaries only.
+        assert!(!muse.produces_readable_transcript);
+        assert!(muse.supports_model_override);
+        assert!(!muse.supports_effort_override);
+        assert!(muse.supports_extra_args);
+        assert!(muse.supports_prefill);
+        assert!(!muse.is_plain_terminal);
+        assert_eq!(muse.effort_control, EffortControlKind::None);
+        assert_eq!(
+            muse.available_on,
+            vec!["linux".to_string(), "macos".to_string()]
+        );
+
         let freebuff = freebuff_caps();
         assert_eq!(freebuff.harness_id, "freebuff");
         assert!(freebuff.supports_resume);
@@ -758,6 +786,7 @@ mod tests {
             mcode_caps(),
             dsh_caps(),
             commandcode_caps(),
+            muse_caps(),
             freebuff_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
@@ -794,6 +823,7 @@ mod tests {
             &crate::agent::provider::adapters::MCODE,
             &crate::agent::provider::adapters::DSH,
             &crate::agent::provider::adapters::COMMANDCODE,
+            &crate::agent::provider::adapters::MUSE,
             &crate::agent::provider::adapters::FREEBUFF,
         ] {
             let from_trait = adapter.effort_control();

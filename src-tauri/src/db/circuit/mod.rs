@@ -25,14 +25,56 @@ pub(crate) use ledger::delete_circuits_for_mesh_inner;
 #[cfg(test)]
 pub(crate) use leases::{
     archive_circuit_agent_inner,
+    circuit_agent_slots_reserved_inner,
     circuit_agent_spawn_claim_inner,
     claim_circuit_agent_cleanup_inner,
     claim_circuit_agent_spawn_inner,
     clear_finished_circuit_cleanup_inner,
+    count_active_circuit_agent_nodes_total_inner,
+    count_retained_circuit_agent_nodes_total_inner,
     failed_circuit_agents_for_cleanup_inner,
+    list_circuit_agent_ownerships_inner,
     prune_terminal_circuit_runs_older_than_inner,
     release_circuit_agent_cleanup_inner,
     release_circuit_agent_spawn_inner,
+    reserve_circuit_agent_slots_locked,
+};
+
+#[cfg(test)]
+pub(crate) use ledger::{
+    cancel_circuit_run_locked,
+    cancel_circuit_runs_locked,
+    commit_circuit_advance_locked,
+    count_active_circuit_runs_inner,
+    count_running_circuit_steps_inner,
+    create_autopilot_circuit_inner,
+    create_circuit_run_locked,
+    create_node_circuit_run_locked,
+    delete_autopilot_circuit_locked,
+    get_autopilot_circuit_inner,
+    get_circuit_run_inner,
+    list_active_circuit_runs_inner,
+    list_circuit_run_ids_for_cleanup_inner,
+    list_circuit_run_steps_inner,
+    list_circuit_runs_inner,
+    list_circuits_with_recent_runs_inner,
+    list_circuit_trigger_identities_inner,
+    list_enabled_circuits_inner,
+    list_autopilot_circuits_inner,
+    latest_circuit_run_created_at_inner,
+    set_autopilot_circuit_enabled_inner,
+    set_circuit_run_state_inner,
+    set_circuit_step_agent_node_with_parent_inner,
+    clear_circuit_step_agent_node_inner,
+    transition_circuit_run_state_inner,
+    update_autopilot_circuit_graph_inner,
+};
+
+#[cfg(test)]
+pub(crate) use queue::{
+    move_queued_circuit_run_locked,
+    move_queued_circuit_run_to_edge_locked,
+    reorder_queued_circuit_runs_locked,
 };
 
 use crate::db::SqlResult;

@@ -77,7 +77,19 @@ use crate::services::github::{parse_blocked_by, GitHubClient, Issue};
 /// Empty or missing values retain the historical `draft_pr` default; callers
 /// that need a PR can explicitly reject `none` before starting work.
 pub(crate) fn configured_action_on_success(mesh_id: i64) -> String {
-    db::get_mesh_by_id(mesh_id)
+    let db = crate::db::read_conn();
+    configured_action_on_success_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`configured_action_on_success`] (issue #1691).
+/// The public function reads the process-global DB; this helper takes
+/// an explicit `&Connection` so parallel tests can each operate against
+/// their own in-memory DB.
+pub(crate) fn configured_action_on_success_inner(
+    db: &rusqlite::Connection,
+    mesh_id: i64,
+) -> String {
+    crate::db::mesh::get_mesh_by_id_inner(db, mesh_id)
         .ok()
         .and_then(|mesh| mesh.autopilot_action_on_success)
         .filter(|action| !action.trim().is_empty())
