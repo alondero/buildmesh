@@ -2,11 +2,16 @@
 //! (issue #1377) for the triage deck's one-tap Approve/Reject chips.
 
 use tauri::Emitter;
-use crate::http::MaybeTls;
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
 
 use crate::db;
-use crate::http::request;
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
+use crate::http::state;
+
+pub async fn list(_req: &ParsedRequest) -> Response {
+    Response::json("200 OK", list_json().await)
+}
 
 pub async fn list_json() -> String {
     match crate::commands::run_blocking("http_list_nodes", || {
@@ -19,16 +24,7 @@ pub async fn list_json() -> String {
     }
 }
 
-pub async fn create(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
-    else {
-        return;
-    };
-
+pub async fn create(req: &ParsedRequest) -> Response {
     #[derive(serde::Deserialize)]
     struct CreateNodeRequest {
         mesh_id: i64,
@@ -45,17 +41,15 @@ pub async fn create(
         80
     }
 
-    let req: CreateNodeRequest = match serde_json::from_slice(&body_bytes) {
+    let parsed: CreateNodeRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!("Invalid JSON: {}", e);
-            request::send_json_error(lines, "400 Bad Request", &msg).await;
-            return;
+            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
         }
     };
 
-    let mesh_id = req.mesh_id;
-    let provider = req.provider;
+    let mesh_id = parsed.mesh_id;
+    let provider = parsed.provider;
     let mesh = match crate::commands::run_blocking("http_create_node_mesh", move || {
         db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())
     })
@@ -63,8 +57,7 @@ pub async fn create(
     {
         Ok(m) => m,
         Err(_) => {
-            request::send_json_error(lines, "400 Bad Request", "Mesh not found").await;
-            return;
+            return Response::json_error("400 Bad Request", "Mesh not found");
         }
     };
 
@@ -87,15 +80,15 @@ pub async fn create(
     {
         Ok(n) => n,
         Err(e) => {
-            let msg = format!("Failed to create node: {}", e);
-            request::send_json_error(lines, "500 Internal Server Error", &msg).await;
-            return;
+            return Response::json_error(
+                "500 Internal Server Error",
+                &format!("Failed to create node: {}", e),
+            );
         }
     };
 
-    let Some(app) = crate::http::app_handle() else {
-        request::send_json_error(lines, "503 Service Unavailable", "App not ready").await;
-        return;
+    let Some(app) = state::app_handle() else {
+        return Response::json_error("503 Service Unavailable", "App not ready");
     };
 
     let node_id = node.id;
@@ -106,16 +99,17 @@ pub async fn create(
             node_id,
             crate::agent::spawn::SpawnIntent::Fresh,
             crate::agent::spawn::TerminalSize {
-                rows: req.rows,
-                cols: req.cols,
+                rows: parsed.rows,
+                cols: parsed.cols,
             },
         ),
     )
     .await
     {
-        let msg = format!("Failed to spawn agent: {}", e);
-        request::send_json_error(lines, "500 Internal Server Error", &msg).await;
-        return;
+        return Response::json_error(
+            "500 Internal Server Error",
+            &format!("Failed to spawn agent: {}", e),
+        );
     }
 
     let node = match crate::commands::run_blocking("http_reload_node", move || {
@@ -125,13 +119,10 @@ pub async fn create(
     {
         Ok(node) => node,
         Err(e) => {
-            request::send_json_error(
-                lines,
+            return Response::json_error(
                 "500 Internal Server Error",
                 &format!("Failed to reload node: {}", e),
-            )
-            .await;
-            return;
+            );
         }
     };
     let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
@@ -140,7 +131,7 @@ pub async fn create(
         "node-created",
         crate::commands::agent::NodeCreatedPayload { id: node_id },
     );
-    let _ = request::write_json(lines, "200 OK", &body).await;
+    Response::json("200 OK", body)
 }
 
 /// Body-shape cap for `/api/nodes/{id}/input`. The triage deck ships 2 bytes
@@ -148,7 +139,7 @@ pub async fn create(
 /// desktop-style "send a whole prompt" shortcut) keep working without a
 /// schema bump. Anything larger is rejected with `413` before any DB or PTY
 /// work runs.
-const INPUT_BODY_MAX_BYTES: usize = 1024;
+pub(crate) const INPUT_BODY_MAX_BYTES: usize = 1024;
 
 /// `POST /api/nodes/{id}/input` — fire a raw keystroke sequence into a
 /// node's PTY (issue #1377, triage deck Approve/Reject chips).
@@ -168,33 +159,22 @@ const INPUT_BODY_MAX_BYTES: usize = 1024;
 ///     the time we write the response
 ///   * `forward_mobile_input` is reused so the attention autoclear (a CR/LF
 ///     in the payload) runs through the same code path the WS does
-pub async fn post_input(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    node_id: i64,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, INPUT_BODY_MAX_BYTES).await
-    else {
-        return;
-    };
+pub async fn post_input(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
 
     #[derive(serde::Deserialize)]
     struct InputRequest {
         seq: String,
     }
 
-    let req: InputRequest = match serde_json::from_slice(&body_bytes) {
+    let parsed: InputRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!("Invalid JSON: {}", e);
-            request::send_json_error(lines, "400 Bad Request", &msg).await;
-            return;
+            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
         }
     };
-    if req.seq.is_empty() {
-        request::send_json_error(lines, "400 Bad Request", "seq must be non-empty").await;
-        return;
+    if parsed.seq.is_empty() {
+        return Response::json_error("400 Bad Request", "seq must be non-empty");
     }
 
     // Verify the node exists in the DB before touching the PTY. A 404 here
@@ -208,8 +188,7 @@ pub async fn post_input(
     .await
     .is_ok();
     if !node_exists {
-        request::send_json_error(lines, "404 Not Found", "Node not found").await;
-        return;
+        return Response::json_error("404 Not Found", "Node not found");
     }
 
     // Write the bytes to the PTY. `write_mobile_input` runs the attention
@@ -222,7 +201,7 @@ pub async fn post_input(
     // body already returns one, so T is inferred as `()`. The full result is
     // a single `Result<(), String>` whose `Err` carries either the PTY-write
     // failure or (rarely) the offload-task failure — both surface as 5xx.
-    let seq = req.seq.clone();
+    let seq = parsed.seq.clone();
     let write_result = crate::commands::run_blocking(
         "http_input_write_bytes",
         move || -> Result<(), String> {
@@ -233,22 +212,17 @@ pub async fn post_input(
     .await;
 
     match write_result {
-        Ok(()) => {
-            let body = r#"{"ok":true}"#;
-            let _ = request::write_json(lines, "200 OK", body).await;
-        }
+        Ok(()) => Response::json("200 OK", r#"{"ok":true}"#),
         Err(e) => {
             // PTY not running (process killed, spawn failed) or the offload
             // task itself failed — surface as 503 so the SPA knows the
             // keystroke never reached the agent. The WS path logs and
             // continues; a one-shot HTTP tap can't recover by retrying the
             // same socket.
-            request::send_json_error(
-                lines,
+            Response::json_error(
                 "503 Service Unavailable",
                 &format!("PTY not running: {}", e),
             )
-            .await;
         }
     }
 }
@@ -256,135 +230,21 @@ pub async fn post_input(
 #[cfg(test)]
 mod tests {
     //! Issue #1377 — `POST /api/nodes/{id}/input` is the new triage-deck
-    //! input endpoint (replaces the previous "open a terminal WS, send
-    //! bytes, close" pattern). The handler must:
+    //! input endpoint. The handler must:
     //!   * reject malformed JSON with `400 Bad Request`
-    //!   * reject an empty `seq` with `400 Bad Request` (otherwise we'd
-    //!     push zero bytes and the agent would never see a CR/LF — the
-    //!     triage chip's whole reason for existing)
-    //!   * reject a body past `INPUT_BODY_MAX_BYTES` with `413` BEFORE
-    //!     any DB call (the cap is the DoS bound)
-    //!   * return `404` when the node id isn't in the DB (the SPA can
-    //!     distinguish this from the PTY-down 503)
+    //!   * reject an empty `seq` with `400 Bad Request`
+    //!   * return `404` when the node id isn't in the DB
     //!
-    //! These tests call `post_input` directly over a TCP socket so the
-    //! body-read path is exercised end-to-end. They stop at the body/
-    //! DB boundary — the 404 case uses `node_id = 0`, which `db::
-    //! get_agent_node_by_id` resolves to "not found" in the per-test DB
-    //! without us having to seed a row. The PTY-down 503 path lives
-    //! behind a real `ProcessRegistry` and is covered by `ws::tests::
-    //! forward_mobile_input_handles_registry_error` (the same code path
-    //! `post_input` runs through `write_mobile_input`).
+    //! Body-size 413 is the router's `max_body` policy (see router tests);
+    //! these tests drive `post_input` through `ParsedRequest` so they do
+    //! not open sockets. The PTY-down 503 path lives behind a real
+    //! `ProcessRegistry` and is covered by `ws::tests::
+    //! forward_mobile_input_handles_registry_error`.
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use crate::http::router::ParsedRequest;
 
-    /// Drive `post_input` over a real TCP socket and return the response
-    /// bytes. `node_id = 0` exercises the 404 path without DB seeding
-    /// (the per-test DB has no row 0).
-    ///
-    /// Round-2 review fix (issue #1368): the previous driver hit a
-    /// Windows-specific WSAECONNRESET in the `rejects_oversized_body`
-    /// case. The server's `read_body_with_cap` short-circuits on
-    /// `content_length > max_bytes` BEFORE reading any body bytes,
-    /// writes a 413, then drops its BufStream. The client meanwhile
-    /// had written the full body via `stream.write_all(body)`. When
-    /// the server's BufStream drops with unread bytes in its recv
-    /// buffer, Windows sends RST (WSAECONNRESET) instead of a clean
-    /// FIN — the kernel refuses to deliver buffered-then-discarded
-    /// bytes and resets the connection. The client's `read_to_end`
-    /// then returns `Err(ConnectionReset)` with an empty buffer.
-    ///
-    /// The fix: for the cap-short-circuit case, the server doesn't
-    /// read anything, so the client shouldn't send anything either.
-    /// `drive_oversized` sends no body — `content_length` is what
-    /// trips the cap check, not the actual bytes. `drive` keeps the
-    /// old shape (write the body, expect the server to read it) for
-    /// the malformed / empty / unknown-node paths where the server
-    /// DOES read. Both helpers disable Nagle (`set_nodelay(true)`) so
-    /// the 413 / 400 / 404 response lands immediately rather than
-    /// waiting for a small-packet batch flush. The client does NOT
-    /// call `stream.shutdown()` — the server's BufStream drop is the
-    /// correct connection-closer.
-    async fn drive(body: &[u8], node_id: i64) -> Vec<u8> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let content_length = body.len();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
-            post_input(&mut lines, node_id, content_length).await;
-            // Half-close the server's write side so the kernel flushes the
-            // buffered 4xx response + FIN atomically. Without this, on
-            // Windows the BufStream drop closes the socket while bytes
-            // are still in the kernel send buffer; the client's
-            // `read_to_end` sees EOF with zero bytes — flaky in CI,
-            // deterministic on a busy dev box. Belt-and-braces with the
-            // `write_full` flush already inside `post_input`.
-            let _ = lines.get_mut().shutdown().await;
-        });
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        stream.set_nodelay(true).ok();
-        // Oversized Content-Length is rejected before a body read. Sending an
-        // unread body anyway can make Windows reset the socket on server close
-        // and discard the 413 response. A missing cap would still hang this test.
-        if content_length <= INPUT_BODY_MAX_BYTES {
-            stream.write_all(body).await.unwrap();
-        }
-        let mut resp = Vec::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read_to_end(&mut resp),
-        )
-        .await
-        .expect("server hung");
-        drop(stream);
-        let _ = server.await;
-        resp
-    }
-
-    /// Variant of `drive` for the cap-short-circuit path. The server
-    /// never reads the body — it inspects `content_length` first —
-    /// so the client must not write anything either. Otherwise the
-    /// server's BufStream drop closes the socket with unread bytes
-    /// in its recv buffer, and Windows sends RST instead of FIN.
-    /// Same Nagle-disable + no-shutdown conventions as `drive`.
-    async fn drive_oversized(node_id: i64) -> Vec<u8> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        // The body sent on the wire is empty — `content_length` is
-        // what the cap check trips on. 2058 is just past the 1024
-        // cap; the server sees the cap fire without reading.
-        let content_length = 2058;
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
-            post_input(&mut lines, node_id, content_length).await;
-        });
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        stream.set_nodelay(true).ok();
-        let mut resp = Vec::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read_to_end(&mut resp),
-        )
-        .await
-        .expect("server hung");
-        drop(stream);
-        let _ = server.await;
-        resp
-    }
-
-    fn status_line(resp: &[u8]) -> String {
-        String::from_utf8_lossy(resp)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    }
-
-    fn body(resp: &[u8]) -> String {
-        String::from_utf8_lossy(resp).into_owned()
+    fn req(body: &[u8], node_id: i64) -> ParsedRequest {
+        ParsedRequest::test_post("/api/nodes/0/input", body).with_ids(Some(node_id), None)
     }
 
     /// Issue #1377 (post-review): malformed JSON must reject with 400
@@ -392,13 +252,12 @@ mod tests {
     /// the caller's intent, so a parse failure is a client error.
     #[tokio::test]
     async fn rejects_malformed_json() {
-        let resp = drive(b"not json at all", 0).await;
-        let s = status_line(&resp);
-        assert!(s.starts_with("HTTP/1.1 400"), "expected 400; got: {s:?}");
+        let resp = post_input(&req(b"not json at all", 0)).await;
+        assert_eq!(resp.status_code(), 400);
+        let text = String::from_utf8_lossy(resp.body());
         assert!(
-            body(&resp).contains("Invalid JSON"),
-            "expected JSON-parse error envelope; got: {:?}",
-            body(&resp)
+            text.contains("Invalid JSON"),
+            "expected JSON-parse error envelope; got: {text:?}"
         );
     }
 
@@ -409,34 +268,8 @@ mod tests {
     /// tap that didn't deliver anything.
     #[tokio::test]
     async fn rejects_empty_seq() {
-        let resp = drive(br#"{"seq":""}"#, 0).await;
-        let s = status_line(&resp);
-        assert!(
-            s.starts_with("HTTP/1.1 400"),
-            "expected 400 for empty seq; got: {s:?}"
-        );
-    }
-
-    /// Body past `INPUT_BODY_MAX_BYTES` (1024) — the cap is the DoS
-    /// bound, and `request::read_body_or_send_error` short-circuits with
-    /// 413 BEFORE the JSON parser runs. A regression that drops the cap
-    /// (or moves it past the read) would let a malformed 10MB body
-    /// pin a tokio worker for the full upload window.
-    ///
-    /// Round-2 review note: uses `drive_oversized` (not `drive`) —
-    /// the cap short-circuit fires before any I/O, so the client
-    /// must not write the body either. Otherwise the server's
-    /// BufStream drop closes the socket with unread bytes in its
-    /// recv buffer and Windows sends RST (WSAECONNRESET) instead of
-    /// FIN, which `read_to_end` reports as an empty response.
-    #[tokio::test]
-    async fn rejects_oversized_body() {
-        let resp = drive_oversized(0).await;
-        let s = status_line(&resp);
-        assert!(
-            s.starts_with("HTTP/1.1 413"),
-            "expected 413 for oversized body; got: {s:?}"
-        );
+        let resp = post_input(&req(br#"{"seq":""}"#, 0)).await;
+        assert_eq!(resp.status_code(), 400, "expected 400 for empty seq");
     }
 
     /// `node_id = 0` doesn't exist in the per-test DB, so the
@@ -447,19 +280,13 @@ mod tests {
     /// can show different user-facing copy.
     #[tokio::test]
     async fn returns_404_for_unknown_node() {
-        // NOTE: relies on `db::init` having been called by another test
-        // first (the global OnceCell is process-shared). If this fails
-        // with "Database not initialized", check the test ordering.
-        let resp = drive(br#"{"seq":"y\r"}"#, 0).await;
-        let s = status_line(&resp);
+        crate::db::test_support::ensure_db_for_tests();
+        let resp = post_input(&req(br#"{"seq":"y\r"}"#, 0)).await;
+        assert_eq!(resp.status_code(), 404, "expected 404 for missing node");
+        let text = String::from_utf8_lossy(resp.body());
         assert!(
-            s.starts_with("HTTP/1.1 404"),
-            "expected 404 for missing node; got: {s:?}"
-        );
-        assert!(
-            body(&resp).contains("Node not found"),
-            "expected 'Node not found' envelope; got: {:?}",
-            body(&resp)
+            text.contains("Node not found"),
+            "expected 'Node not found' envelope; got: {text:?}"
         );
     }
 }

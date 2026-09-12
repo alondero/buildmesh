@@ -12,15 +12,14 @@
 //! the dispatcher (src/http/mod.rs) for one release as a deprecation shim
 //! with a `Deprecation: true` response header.
 
-use crate::http::MaybeTls;
-
 use crate::db;
 use crate::http::request;
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
+use crate::http::state;
 
-pub async fn discover(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-) {
+pub async fn discover(req: &ParsedRequest) -> Response {
+    let mesh_id = req.id0();
     // Issue #1389 — `services::agent_node_discovery::discover` walks every
     // session directory under `~/.claude/projects/`, `~/.cursor/projects/`,
     // and `~/.gemini/antigravity-cli/brain/` and reads each JSONL line by
@@ -47,14 +46,10 @@ pub async fn discover(
     {
         Ok(Some(nodes)) => {
             let body = serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string());
-            let _ = request::write_json(lines, "200 OK", &body).await;
+            Response::json("200 OK", body)
         }
-        Ok(None) => {
-            request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
-        }
-        Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
-        }
+        Ok(None) => Response::json_error("404 Not Found", "Mesh not found"),
+        Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
 
@@ -76,23 +71,13 @@ fn default_cols() -> u16 {
     80
 }
 
-pub async fn import_and_resume(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
-    else {
-        return;
-    };
+pub async fn import_and_resume(req: &ParsedRequest) -> Response {
+    let mesh_id = req.id0();
 
-    let req: ImportAndResumeRequest = match serde_json::from_slice(&body_bytes) {
+    let parsed: ImportAndResumeRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
-            return;
+            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
         }
     };
 
@@ -103,26 +88,22 @@ pub async fn import_and_resume(
     // AND canonicalises — the stored value is the same lowercase form
     // the spawn pipeline writes, so downstream resume lookups don't need
     // a separate case-fold step.
-    let cli_session_id = match request::parse_cli_session_id(&req.cli_session_id) {
+    let cli_session_id = match request::parse_cli_session_id(&parsed.cli_session_id) {
         Some(canonical) => canonical,
         None => {
-            request::send_json_error(
-                lines,
+            return Response::json_error(
                 "400 Bad Request",
                 "cli_session_id must be a valid UUID",
-            )
-            .await;
-            return;
+            );
         }
     };
 
-    let mesh_id = mesh_id;
     let session_name = crate::session_naming::on_spawn();
     // Store the harness/profile id verbatim (issue #535); resolve to a
     // concrete executor only at the spawn seam. Absent → "anthropic".
-    let provider_id = req.provider.as_deref().unwrap_or("anthropic").to_string();
-    let branch_owned = req.branch.clone();
-    let worktree_owned = req.worktree_name.clone();
+    let provider_id = parsed.provider.as_deref().unwrap_or("anthropic").to_string();
+    let branch_owned = parsed.branch.clone();
+    let worktree_owned = parsed.worktree_name.clone();
     let cli_session_id_for_closure = cli_session_id.clone();
 
     // Issue #1389 / PR #1429 review feedback: bundle the entire pre-spawn
@@ -192,18 +173,15 @@ pub async fn import_and_resume(
     {
         Ok(Some(node)) => node,
         Ok(None) => {
-            request::send_json_error(lines, "404 Not Found", "Mesh not found").await;
-            return;
+            return Response::json_error("404 Not Found", "Mesh not found");
         }
         Err(msg) => {
-            request::send_json_error(lines, "500 Internal Server Error", &msg).await;
-            return;
+            return Response::json_error("500 Internal Server Error", &msg);
         }
     };
 
-    let Some(app) = crate::http::app_handle() else {
-        request::send_json_error(lines, "503 Service Unavailable", "App not ready").await;
-        return;
+    let Some(app) = state::app_handle() else {
+        return Response::json_error("503 Service Unavailable", "App not ready");
     };
 
     if let Err(e) = crate::agent::spawn::spawn_with_intent(
@@ -214,8 +192,8 @@ pub async fn import_and_resume(
                 cause: crate::agent::spawn::ResumeCause::Explicit,
             },
             crate::agent::spawn::TerminalSize {
-                rows: req.rows,
-                cols: req.cols,
+                rows: parsed.rows,
+                cols: parsed.cols,
             },
         ).with_lifecycle_lease(),
     )
@@ -229,12 +207,11 @@ pub async fn import_and_resume(
             "spawn_error": e,
         }))
         .unwrap_or_else(|_| "{}".to_string());
-        let _ = request::write_json(lines, "207 Multi-Status", &body).await;
-        return;
+        return Response::json("207 Multi-Status", body);
     }
 
     let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
-    let _ = request::write_json(lines, "200 OK", &body).await;
+    Response::json("200 OK", body)
 }
 
 #[cfg(test)]
@@ -245,52 +222,23 @@ mod tests {
     //! flags. The validator must reject at the route boundary before any
     //! DB work.
     //!
-    //! These tests call `import_and_resume` directly with a real TCP socket
-    //! so the body-read path is exercised end-to-end. They stop at the
-    //! validator — `mesh_id = 0` never reaches a mesh lookup because the
-    //! validator short-circuits with 400 first, and a successful validator
-    //! pass falls through to `db::get_mesh_by_id(0)` which returns 404 in
-    //! the per-test DB.
+    //! These tests call `import_and_resume` through [`ParsedRequest`] so they
+    //! do not open sockets. They stop at the validator — `mesh_id = 0` never
+    //! reaches a mesh lookup because the validator short-circuits with 400
+    //! first, and a successful validator pass falls through to
+    //! `db::get_mesh_by_id(0)` which returns 404 in the per-test DB.
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
-    /// Drive `import_and_resume` over a real TCP socket and return the
-    /// response bytes. `mesh_id` is irrelevant for the validator path.
-    async fn drive(body: &[u8]) -> Vec<u8> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Hoist the byte count out — `usize` is `Copy`, so the spawned
-        // task captures it by value rather than borrowing the slice.
-        let content_length = body.len();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut lines = tokio::io::BufStream::new(crate::http::MaybeTls::Plain(stream));
-            import_and_resume(&mut lines, 0, content_length).await;
-        });
-
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        stream.write_all(body).await.unwrap();
-        stream.shutdown().await.unwrap();
-
-        let mut resp = Vec::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            stream.read_to_end(&mut resp),
+    async fn drive(body: &[u8]) -> Response {
+        import_and_resume(
+            &ParsedRequest::test_post("/api/meshes/0/agent-nodes/import-and-resume", body)
+                .with_ids(Some(0), None),
         )
         .await
-        .expect("server hung");
-        let _ = server.await;
-        resp
     }
 
-    fn status_line(resp: &[u8]) -> String {
-        String::from_utf8_lossy(resp)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
+    fn status_line(resp: &Response) -> String {
+        format!("HTTP/1.1 {}", resp.status)
     }
 
     /// Exact attack from issue #1237: `--dangerously-skip-permissions` in the
@@ -304,7 +252,7 @@ mod tests {
         assert!(s.starts_with("HTTP/1.1 400"), "expected 400; got: {s:?}");
         // The error envelope must carry a UUID-validation message so the
         // mobile SPA can surface something actionable.
-        let body_str = String::from_utf8_lossy(&resp);
+        let body_str = String::from_utf8_lossy(resp.body());
         assert!(
             body_str.contains("must be a valid UUID"),
             "expected UUID validation message; got: {body_str:?}"

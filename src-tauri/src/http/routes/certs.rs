@@ -31,6 +31,42 @@
 
 use std::path::Path;
 
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
+use crate::http::state;
+
+pub async fn status(_req: &ParsedRequest) -> Response {
+    let Some(dir) = state::tls_dir() else {
+        return Response::empty("503 Service Unavailable");
+    };
+    match status_json(&dir) {
+        Ok(json) => Response::json("200 OK", json).with_header("Access-Control-Allow-Origin", "*"),
+        Err(_) => Response::empty("503 Service Unavailable"),
+    }
+}
+
+pub async fn install(_req: &ParsedRequest) -> Response {
+    let Some(dir) = state::tls_dir() else {
+        return Response::empty("503 Service Unavailable");
+    };
+    let profile = state::app_identifier()
+        .as_deref()
+        .map(crate::http::state::port_profile_label)
+        .unwrap_or("custom");
+    match install_cert_der(&dir) {
+        Ok(bytes) => Response::bytes(
+            "200 OK",
+            "application/x-x509-ca-cert",
+            bytes,
+        )
+        .with_header(
+            "Content-Disposition",
+            format!("attachment; filename=\"buildmesh-{profile}-root-ca.der\""),
+        ),
+        Err(_) => Response::empty("503 Service Unavailable"),
+    }
+}
+
 /// Serialize a `CertChainStatus` (minus `cert_path`) as the response body
 /// for `GET /__certs/status`. Returns a JSON string so the caller in
 /// `http::mod::handle_connection` can hand it straight to the writer

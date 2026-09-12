@@ -6,7 +6,8 @@
 //! the SPA shell directly so the existing QR code at `http://lan-ip:1992/`
 //! keeps working unchanged.
 
-use crate::http::{MaybeTls, request};
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
 
 #[derive(rust_embed::Embed)]
 #[folder = "../dist/mobile"]
@@ -144,23 +145,19 @@ fn end_of_doctype_declaration(html: &str, start: usize) -> usize {
     html.len()
 }
 
+pub fn spa_shell(_req: &ParsedRequest) -> Response {
+    serve_spa_shell()
+}
+
 /// Serve the SPA shell at `/` (or `/v2` for backward compat).
-/// `extra_header` lets the dispatcher inject a `Set-Cookie` line on the
-/// initial token-bearing request; each extra line MUST end with `\r\n`.
-pub async fn serve_spa_shell(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    extra_header: Option<&str>,
-) -> std::io::Result<()> {
+pub fn serve_spa_shell() -> Response {
     let Some(file) = MobileAssets::get("index.html") else {
-        let body = "Not found — run `npm run build:mobile` to populate the mobile bundle.";
-        let response = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
+        return Response::bytes(
+            "404 Not Found",
+            "text/plain",
+            "Not found — run `npm run build:mobile` to populate the mobile bundle.",
         );
-        return request::write_full(lines, response.as_bytes()).await;
     };
-    let extra = extra_header.unwrap_or("");
     // Inject a tiny error-catcher so JS errors from the SPA land in the dev
     // log instead of disappearing on the phone's screen. `__debug/log` is
     // matched in `handle_connection` (see the diagnostics section) — it
@@ -212,21 +209,8 @@ window.addEventListener('unhandledrejection', function (e) {
     // Compute length off the rendered string rather than `file.data.len()` —
     // we just appended the shim to the body, so the Content-Length header
     // must match what we actually write.
-    let body_bytes = body.as_bytes();
-    let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{}\r\n",
-        body_bytes.len(),
-        extra
-    );
-    // Single write+flush for headers + body. Without the flush, the last
-    // partial chunk of the body can sit in the BufStream buffer when the
-    // function returns — the connection drops before it reaches the wire,
-    // and Chrome surfaces that as ERR_CONTENT_LENGTH_MISMATCH on the
-    // shell HTML too.
-    let mut combined = Vec::with_capacity(headers.len() + body_bytes.len());
-    combined.extend_from_slice(headers.as_bytes());
-    combined.extend_from_slice(body_bytes);
-    request::write_full(lines, &combined).await
+    Response::bytes("200 OK", "text/html; charset=utf-8", body.into_bytes())
+        .with_header("Cache-Control", "no-cache")
 }
 
 /// Serve a single bundled asset by request path. `path_without_query` is
@@ -236,20 +220,22 @@ window.addEventListener('unhandledrejection', function (e) {
 /// well-formed, we honour it with `206 Partial Content` so module
 /// scripts can stream-parse without tripping Chrome's
 /// `ERR_CONTENT_LENGTH_MISMATCH` (the issue this was added for).
-pub async fn serve_asset(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    path_without_query: &str,
-    range_header: Option<&str>,
-) -> std::io::Result<()> {
+pub fn asset(req: &ParsedRequest) -> Response {
+    let normalized = req.path.strip_prefix("/v2").unwrap_or(&req.path);
+    serve_asset(normalized, req.header("Range"))
+}
+
+/// Serve a single bundled asset by request path. `path_without_query` is
+/// the full path like `/assets/index-abc.js`; we strip the leading slash
+/// and look it up in the embedded asset list. `range_header` is the
+/// optional value of the `Range:` request header — when present and
+/// well-formed, we honour it with `206 Partial Content` so module
+/// scripts can stream-parse without tripping Chrome's
+/// `ERR_CONTENT_LENGTH_MISMATCH` (the issue this was added for).
+pub fn serve_asset(path_without_query: &str, range_header: Option<&str>) -> Response {
     let relative = path_without_query.trim_start_matches('/');
     let Some(file) = MobileAssets::get(relative) else {
-        let body = "Asset not found.";
-        let response = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        return request::write_full(lines, response.as_bytes()).await;
+        return Response::bytes("404 Not Found", "text/plain", "Asset not found.");
     };
     let mime = mime_for(relative);
     let total = file.data.len();
@@ -263,44 +249,19 @@ pub async fn serve_asset(
     // client can fall back to a full GET.
     if let Some(spec) = range_header.and_then(parse_bytes_range) {
         let Some((start, end)) = resolve_range(spec, total) else {
-            let resp = format!(
-                "HTTP/1.1 416 Range Not Satisfiable\r\n\
-                 Content-Range: bytes */{total}\r\n\
-                 Content-Length: 0\r\n\r\n"
-            );
-            return request::write_full(lines, resp.as_bytes()).await;
+            return Response::empty("416 Range Not Satisfiable")
+                .with_header("Content-Range", format!("bytes */{total}"));
         };
-        let slice = &file.data[start..=end];
-        let headers = format!(
-            "HTTP/1.1 206 Partial Content\r\n\
-             Content-Type: {mime}\r\n\
-             Content-Length: {len}\r\n\
-             Content-Range: bytes {start}-{end}/{total}\r\n\
-             Accept-Ranges: bytes\r\n\
-             Cache-Control: public, max-age=31536000, immutable\r\n\r\n",
-            len = slice.len(),
-        );
-        // Coalesce headers + body into one write so a single flush
-        // covers both — eliminates the last-partial-chunk race that
-        // produced ERR_CONTENT_LENGTH_MISMATCH on Android Chrome.
-        let mut combined = Vec::with_capacity(headers.len() + slice.len());
-        combined.extend_from_slice(headers.as_bytes());
-        combined.extend_from_slice(slice);
-        return request::write_full(lines, &combined).await;
+        let slice = file.data[start..=end].to_vec();
+        return Response::bytes("206 Partial Content", mime, slice)
+            .with_header("Content-Range", format!("bytes {start}-{end}/{total}"))
+            .with_header("Accept-Ranges", "bytes")
+            .with_header("Cache-Control", "public, max-age=31536000, immutable");
     }
 
-    let headers = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: {mime}\r\n\
-         Content-Length: {total}\r\n\
-         Accept-Ranges: bytes\r\n\
-         Cache-Control: public, max-age=31536000, immutable\r\n\r\n"
-    );
-    // Same coalesce+flush pattern as the 206 branch above.
-    let mut combined = Vec::with_capacity(headers.len() + total);
-    combined.extend_from_slice(headers.as_bytes());
-    combined.extend_from_slice(&file.data);
-    request::write_full(lines, &combined).await
+    Response::bytes("200 OK", mime, &file.data)
+        .with_header("Accept-Ranges", "bytes")
+        .with_header("Cache-Control", "public, max-age=31536000, immutable")
 }
 
 /// One of the three forms of a `Range: bytes=...` value, before
