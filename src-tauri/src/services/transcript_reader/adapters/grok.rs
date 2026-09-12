@@ -4,7 +4,7 @@
 //! `~/.grok/sessions/<urlencoded-cwd>/<session-id>/` carrying
 //! `chat_history.jsonl` (the per-message conversation log) and
 //! `updates.jsonl` (event-level telemetry). The reader uses
-//! `chat_history.jsonl`. Per-message JSON: `{"role", "content"}` where
+//! `chat_history.jsonl`. Native message JSON: `{"type", "content"}` (legacy: `role`) where
 //! `content` may be a string or an array of typed blocks.
 //!
 //! Issue #1661 step 2: Grok is the **first harness migrated end-to-end**
@@ -48,7 +48,7 @@ impl TranscriptAdapter for GrokAdapter {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             return false;
         };
-        value.get("role").and_then(|role| role.as_str()) == Some("assistant")
+        message_role(&value) == Some("assistant")
             && value.get("content").is_some_and(|content| match content {
                 serde_json::Value::String(text) => !text.trim().is_empty(),
                 serde_json::Value::Array(blocks) => blocks
@@ -146,18 +146,23 @@ pub(crate) fn grok_locator_in(
     session_id: &str,
     node_path: &str,
 ) -> Option<PathBuf> {
-    let session = sessions_root
-        .join(grok_urlencode_cwd(node_path))
-        .join(session_id);
-    let chat = session.join("chat_history.jsonl");
-    if chat.exists() {
-        return Some(chat);
-    }
-    let updates = session.join("updates.jsonl");
-    if updates.exists() {
-        return Some(updates);
-    }
-    None
+    let find = |cwd: &str| {
+        let session = sessions_root.join(grok_urlencode_cwd(cwd)).join(session_id);
+        ["chat_history.jsonl", "updates.jsonl"]
+            .into_iter()
+            .map(|name| session.join(name))
+            .find(|path| path.is_file())
+    };
+    find(node_path).or_else(|| {
+        // Windows resolves mixed separators and trims trailing separators
+        // before Grok encodes its cwd. Keep exact lookup first and never
+        // rewrite POSIX guest paths. Avoid a duplicate probe for an already
+        // canonical Windows path.
+        (env::is_windows_path(node_path)
+            && (node_path.contains('/') || node_path.ends_with('\\')))
+            .then(|| find(node_path.replace('/', "\\").trim_end_matches('\\')))
+            .flatten()
+    })
 }
 
 /// Percent-encode the harness-cwd path Grok uses as its session-directory
@@ -178,8 +183,13 @@ pub(crate) fn grok_urlencode_cwd(node_path: &str) -> String {
     out
 }
 
+// Both parsing and revision tracking must agree on which records are reports.
+fn message_role(value: &serde_json::Value) -> Option<&str> {
+    value.get("type").or_else(|| value.get("role")).and_then(|role| role.as_str())
+}
+
 /// Pull tool calls out of a Grok assistant line's `tool_calls` array. Grok
-/// names the input field `args` (not `input` like Claude), and the parser
+/// encodes native `arguments` as JSON text (legacy: `args`), and the parser
 /// honours the same shared `MAX_TOOL_STRING` truncation so a `Write` carrying
 /// a multi-MB body doesn't blow up the payload.
 fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
@@ -195,7 +205,13 @@ fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let input = obj.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            let input = obj.get("arguments").or_else(|| obj.get("args"))
+                .map(|value| match value {
+                    serde_json::Value::String(text) => serde_json::from_str(text)
+                        .unwrap_or_else(|_| value.clone()),
+                    _ => value.clone(),
+                })
+                .unwrap_or(serde_json::Value::Null);
             Some(ToolCall {
                 name,
                 input: truncate_json_strings(input, MAX_TOOL_STRING),
@@ -222,9 +238,7 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        // Grok lines are not gated on an outer `type` discriminator (no
-        // Codex-style envelope), so dispatch on the inner `role` field.
-        let role = match val.get("role").and_then(|r| r.as_str()) {
+        let role = match message_role(&val) {
             Some("user") => "user",
             Some("assistant") => "assistant",
             // `tool` (tool-result echoes), `system`, plus every unknown event
@@ -267,7 +281,7 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
                 text: truncate(&text, MAX_TURN_TEXT),
                 tool_calls,
             };
-            if !turn.text.is_empty() {
+            if !turn.text.trim().is_empty() {
                 last_assistant_message = Some(turn.text.clone());
             }
             push_bounded(&mut turns, turn, keep);
@@ -293,6 +307,19 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_tool_calls_decode_arguments_without_exposing_reasoning() {
+        let parsed = parse_grok_turns([
+            r#"{"type":"reasoning","content":"private"}"#.to_string(),
+            r#"{"type":"assistant","content":"Reading the file.","tool_calls":[{"name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}]}"#.to_string(),
+            r#"{"type":"tool_result","content":"file contents"}"#.to_string(),
+        ].into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].tool_calls[0].name, "read_file");
+        assert_eq!(parsed.turns[0].tool_calls[0].input, serde_json::json!({"path": "src/lib.rs"}));
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Reading the file."));
+    }
 
     #[test]
     fn grok_urlencode_cwd_matches_rfc3986_unreserved_only() {

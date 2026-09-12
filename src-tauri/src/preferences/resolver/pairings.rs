@@ -141,9 +141,9 @@ pub(crate) fn resolve_pairing(
 pub fn resolve_stored_pairing_and_account(
     spawn_option_id: &str,
 ) -> Result<Option<(ProviderPairing, ProviderAccount)>, String> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
-    let Some(provider_id) = provider_id else {
+    let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
+    let harness_id = id.harness_id();
+    let Some(provider_id) = id.provider_id() else {
         return Ok(None);
     };
     let accounts = provider_accounts();

@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use crate::http::MaybeTls;
 
 /// Wall-clock budget for reading a request body once the head is in. Bounds the
-/// same slowloris class that `http::mod::REQUEST_HEAD_TIMEOUT` bounds for the
+/// same slowloris class that `http::router::REQUEST_HEAD_TIMEOUT` bounds for the
 /// head: a client that advertises `Content-Length: 262144` and dribbles bytes
 /// once a second would otherwise pin a tokio worker for the entire upload
 /// window. 60 s is long enough for a legitimate 256 KB upload over a constrained
@@ -108,6 +108,14 @@ pub async fn write_full(lines: &mut BufStream<MaybeTls>, bytes: &[u8]) -> std::i
     let writer = lines.get_mut();
     writer.write_all(bytes).await?;
     writer.flush().await
+}
+
+/// Encode a [`crate::http::response::Response`] and flush it to the wire.
+pub async fn write_response(
+    lines: &mut BufStream<MaybeTls>,
+    response: &crate::http::response::Response,
+) -> std::io::Result<()> {
+    write_full(lines, &response.encode()).await
 }
 
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
@@ -212,30 +220,6 @@ pub async fn write_status_only(
     write_full(lines, response.as_bytes()).await
 }
 
-/// Write a `429 Too Many Requests` whose **body** is uniform with the
-/// auth-failure shapes (empty) and whose **`Retry-After` header** carries
-/// the pacing hint. The body uniformity is the load-bearing security
-/// property: a caller presenting a stolen token MUST NOT be able to
-/// distinguish "rate-limited" from "bad token" by reading the response —
-/// the only signal they get is the status line + header. `retry_after_secs`
-/// is taken straight from the rate-limit [`crate::http::rate_limit::Outcome`]
-/// computation (always `>= 1`) so we never emit `Retry-After: 0`,
-/// which would invite an instant retry loop.
-pub async fn write_rate_limited(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    retry_after_secs: u32,
-) -> std::io::Result<()> {
-    // Header-only line, no body — same wire shape as every other
-    // 4xx/5xx the auth paths emit (issue #552 AC: "uniform with the other
-    // auth-failure shapes").
-    let response = format!(
-        "HTTP/1.1 429 Too Many Requests\r\n\
-         Retry-After: {retry_after_secs}\r\n\
-         Content-Length: 0\r\n\r\n"
-    );
-    write_full(lines, response.as_bytes()).await
-}
-
 pub async fn write_json(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
@@ -244,33 +228,6 @@ pub async fn write_json(
     let response = format!(
         "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         status,
-        body.len(),
-        body
-    );
-    write_full(lines, response.as_bytes()).await
-}
-
-/// Write a JSON response that also carries a `Retry-After` header (issue
-/// #750, item 1). Used for the drive route's `409 in_progress` arm — the
-/// orchestrator briefly waits for a peer to finalize a `pending` claim; if
-/// the wait window expires the route returns 409 with `Retry-After: 1` so the
-/// Coordinator retries after a short backoff rather than hammering
-/// immediately. Body shape matches the other 4xx JSON errors the route
-/// emits (`{"error":"..."}`).
-pub async fn write_json_with_retry_after(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    status: &str,
-    body: &str,
-    retry_after_secs: u32,
-) -> std::io::Result<()> {
-    // Same wire shape as `write_json` plus the `Retry-After` header. The
-    // floor on `retry_after_secs` is the caller's responsibility — the
-    // rate-limit-style `>= 1` rule keeps a Coordinator from spinning in an
-    // instant-retry loop.
-    let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\n\r\n{}",
-        status,
-        retry_after_secs,
         body.len(),
         body
     );

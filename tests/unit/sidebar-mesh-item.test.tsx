@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import {
   DndContext,
   KeyboardSensor,
@@ -284,9 +285,68 @@ describe('MeshItem', () => {
     expect(props.onOpenWorktreesProbe).toHaveBeenCalledWith(3);
   });
 
-  it('renders a sync button in the header to the left of the Add Node form', async () => {
+  // The header no longer carries a sync button — syncs are automatic
+  // (background sync + spawn-time auto-sync) and the button duplicated the
+  // Regenerate icon. The header shows a failure-only icon instead; the
+  // manual action moved into the context menu as "Force sync from upstream".
+  it('renders no sync button in the header', () => {
     renderMeshItem();
-    expect(await screen.findByTitle('Sync from upstream')).toBeTruthy();
+    expect(screen.queryByTitle('Sync from upstream')).toBeNull();
+    expect(screen.queryByText(/Force sync from upstream/)).toBeNull();
+  });
+
+  it('lights the failure-only sync icon when the backend reports a failed sync for this mesh', async () => {
+    // Spawn-time auto-sync failures (fetch failed, diverged history, …)
+    // arrive as a `mesh-sync-warning` Tauri event carrying the mesh path
+    // that failed. The icon must NOT be a button — it is a status light,
+    // not an action.
+    renderMeshItem();
+    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
+
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+
+    const icon = await screen.findByLabelText('Sync from upstream failed — mesh may be stale');
+    expect(icon.tagName).toBe('SPAN');
+  });
+
+  it('ignores mesh-sync-warning events for other meshes', async () => {
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: '/tmp/some-other-mesh',
+        outcome: 'diverged',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'diverged from upstream',
+      });
+    });
+
+    // Give any (incorrect) state update a tick to flush, then assert the
+    // icon never lit.
+    await waitFor(() => {});
+    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
   });
 
   it('shows a behind-count badge when the branch is behind upstream', async () => {
@@ -306,11 +366,11 @@ describe('MeshItem', () => {
         : Promise.resolve({}),
     );
     renderMeshItem();
-    await screen.findByTitle('Sync from upstream');
+    await screen.findByText('my-mesh');
     expect(screen.queryByText(/↓/)).toBeNull();
   });
 
-  it('runs gitSync, spins, and shows the result message when the sync button is clicked', async () => {
+  it('offers "Force sync from upstream" in the context menu and runs gitSync when clicked', async () => {
     let resolveSync!: (v: unknown) => void;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'git_sync') return new Promise((res) => { resolveSync = res; });
@@ -318,16 +378,51 @@ describe('MeshItem', () => {
     });
     renderMeshItem();
 
-    await userEvent.click(await screen.findByTitle('Sync from upstream'));
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Force sync from upstream'));
 
-    // While the pull is in flight the button reflects the syncing state.
-    const spinning = screen.getByTitle('Syncing…');
-    expect(spinning.querySelector('.animate-spin')).toBeTruthy();
+    // The menu closes on click (the sync runs in the sidebar row, not the
+    // menu — unlike the old header button there is no persistent spin
+    // surface to observe; the result message below is the feedback).
+    expect(screen.queryByText('Force sync from upstream')).toBeNull();
 
     resolveSync({ fetched: true, pulled: true, new_commits: 3, message: 'Pulled 3 commits' });
 
     expect(await screen.findByText('Pulled 3 commits')).toBeTruthy();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
+  });
+
+  it('clears the failure icon after a successful force sync', async () => {
+    // The stale indicator must be a status light that a successful manual
+    // sync resets — otherwise the user stays alarmed after the mesh is
+    // demonstrably fresh again.
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'git_sync' ? Promise.resolve({ fetched: true, pulled: true, new_commits: 0, message: 'Already up to date' }) : Promise.resolve({}),
+    );
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+    await screen.findByLabelText('Sync from upstream failed — mesh may be stale');
+
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Force sync from upstream'));
+
+    await screen.findByText('Already up to date');
+    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
   });
 
   // Issue #1264 — the sync result's 4-second auto-clear timeout was
@@ -355,9 +450,11 @@ describe('MeshItem', () => {
 
     const { unmount } = renderMeshItem();
 
-    // Kick off the sync — the 4000 ms timer is armed in the `finally`
-    // block AFTER the IPC resolves.
-    await userEvent.click(await screen.findByTitle('Sync from upstream'));
+    // Kick off the sync via the context-menu "Force sync from upstream"
+    // item — the 4000 ms timer is armed in the `finally` block AFTER the
+    // IPC resolves.
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Force sync from upstream'));
     resolveSync({ fetched: true, pulled: true, new_commits: 1, message: 'Pulled 1 commit' });
     await vi.waitFor(() => screen.getByText('Pulled 1 commit'));
 
@@ -449,12 +546,12 @@ describe('MeshItem', () => {
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
       // Five menuitems, in render order: Properties, File Explorer,
-      // Sync Latest, Archive, GitHub Issues.
+      // Force sync from upstream, Archive, GitHub Issues.
       const items = document.querySelectorAll('[role="menuitem"]');
       expect(items).toHaveLength(5);
       expect(items[0].textContent).toMatch(/Properties/);
       expect(items[1].textContent).toMatch(/File Explorer/);
-      expect(items[2].textContent).toMatch(/Sync Latest/);
+      expect(items[2].textContent).toMatch(/Force sync from upstream/);
       expect(items[3].textContent).toMatch(/Archive/);
       expect(items[4].textContent).toMatch(/GitHub Issues/);
     });
@@ -495,7 +592,7 @@ describe('MeshItem', () => {
       expect(items).toHaveLength(6);
       expect(items[0].textContent).toMatch(/Properties/);
       expect(items[1].textContent).toMatch(/File Explorer/);
-      expect(items[2].textContent).toMatch(/Sync Latest/);
+      expect(items[2].textContent).toMatch(/Force sync from upstream/);
       expect(items[3].textContent).toMatch(/Archive/);
       expect(items[4].textContent).toMatch(/GitHub Issues/);
       expect(items[5].textContent).toMatch(/View on GitHub/);

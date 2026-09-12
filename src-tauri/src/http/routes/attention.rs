@@ -13,19 +13,20 @@
 //! is loopback (issue #496 / ADR-0012) — an external machine cannot spoof
 //! attention events even if it can reach the port.
 
-use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::agent::session_lifecycle::{SemanticTurnKind, SemanticTurnPayload};
-use crate::http::MaybeTls;
 use crate::services::transcript_reader::adapter::HookDecision;
 
 use crate::http::request;
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
+use crate::http::state;
 
 /// Hook payloads are small (a handful of metadata fields); 64 KB is far above
 /// any real payload while still bounding what a local process can make us
 /// buffer.
-const MAX_HOOK_BODY: usize = 64 * 1024;
+pub(crate) const MAX_HOOK_BODY: usize = 64 * 1024;
 
 /// The fields of agent harness hook stdin JSON this route cares about. Unknown
 /// fields are ignored; every field is optional so an empty or legacy body
@@ -904,29 +905,22 @@ fn verify_attention_token(
     adapter.verify_attention_token(query_string, minted)
 }
 
-pub async fn handle_post(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    path_without_query: &str,
-    query_string: Option<&str>,
-    peer: SocketAddr,
-    content_length: usize,
-) {
+pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Loopback-only: the Claude Code hook always posts from 127.0.0.1/::1. A
     // non-loopback peer is an external spoof attempt — refuse before doing work.
-    if !peer.ip().is_loopback() {
-        let _ = request::write_status_only(lines, "403 Forbidden").await;
-        return;
+    if !req.peer.ip().is_loopback() {
+        return Response::empty("403 Forbidden");
     }
 
     // Parse the session id early — the token gate below needs it to
     // look up the session's provider and decide whether to enforce
     // the hook token. Bad path → 400 before any other work.
-    let session_id: Option<i64> = path_without_query
+    let session_id: Option<i64> = req
+        .path
         .strip_prefix("/api/attention/")
         .and_then(|s| s.parse().ok());
     let Some(session_id) = session_id else {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
+        return Response::empty("400 Bad Request");
     };
 
     // Runtime-scoped token gate (issue #1366, round-2 + round-3 +
@@ -969,21 +963,16 @@ pub async fn handle_post(
     let provider = provider_owned.as_str();
     if !verify_attention_token(
         provider,
-        query_string,
+        req.query(),
         crate::agent::runtime_hook_token().as_deref(),
     ) {
-        let _ = request::write_status_only(lines, "403 Forbidden").await;
-        return;
+        return Response::empty("403 Forbidden");
     }
 
-    let Some(body) = request::read_body_or_send_error(lines, content_length, MAX_HOOK_BODY).await
-    else {
-        return;
-    };
+    let body = &req.body;
 
-    let Some(app) = crate::http::app_handle() else {
-        let _ = request::write_status_only(lines, "503 Service Unavailable").await;
-        return;
+    let Some(app) = state::app_handle() else {
+        return Response::empty("503 Service Unavailable");
     };
     // The path id is untrusted input. Do not create a process-lifetime
     // HookState entry or attempt a lifecycle publish for a node that has
@@ -994,8 +983,7 @@ pub async fn handle_post(
         .as_ref()
         .is_none_or(|node| node.status == crate::models::SessionStatus::Archived)
     {
-        let _ = request::write_status_only(lines, "404 Not Found").await;
-        return;
+        return Response::empty("404 Not Found");
     }
 
     // Cheap, CPU-only classification happens on the async worker: parse,
@@ -1012,14 +1000,14 @@ pub async fn handle_post(
     // (the existing UUID validator would silently drop it). Provider
     // is read from the row already fetched for the token gate above —
     // no extra DB hop.
-    let hook_uuid = hook_session_id(&body, provider);
+    let hook_uuid = hook_session_id(body, provider);
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
     // distinguish "the model finished its turn" from "the harness
     // aborted the turn" — log at debug so it's there when needed without
     // polluting the happy path (issue #1285, #1367).
-    let payload_parsed = HookPayload::parse(&body);
+    let payload_parsed = HookPayload::parse(body);
     match payload_parsed {
         Some(ref payload) => {
             if let Some(ref reason) = payload
@@ -1052,7 +1040,7 @@ pub async fn handle_post(
     let semantic = payload_parsed.as_ref().and_then(semantic_turn);
 
     let classified = classify(
-        &body,
+        body,
         provider,
         crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks,
     );
@@ -1073,7 +1061,7 @@ pub async fn handle_post(
 
     // Issue #1389 — every step below is blocking SQLite; one `spawn_blocking`
     // hop for the whole sequence. `app` is `&'static AppHandle` (returned by
-    // `crate::http::app_handle()`), which is what lets `move ||` capture it.
+    // `state::app_handle()`), which is what lets `move ||` capture it.
     // N1 fix: the row we fetched for the token gate above is also the
     // row we'll persist + check ordering-token against — share it via
     // `move ||` capture rather than re-querying SQLite. Use clear
@@ -1242,7 +1230,7 @@ pub async fn handle_post(
     // Both outcomes answer 200 OK — the harnesses' fail-open contract (an
     // applied callback and a stale-dropped one are indistinguishable to the
     // poster; a stale drop simply changed nothing).
-    let _ = request::write_status_only(lines, "200 OK").await;
+    Response::empty("200 OK")
 }
 
 /// Outcome of the single blocking apply pass (issue #1364 review): the

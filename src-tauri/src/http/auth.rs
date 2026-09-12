@@ -15,10 +15,10 @@
 //!   `401 Unauthorized` returned when no valid credential is presented at all.
 
 use rusqlite::Connection;
-use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
+use crate::http::response::Response;
 
 /// Which surface a presented credential proves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,24 +174,13 @@ fn outcome(role: Option<Role>, required: RequiredScope) -> AuthOutcome {
     }
 }
 
-/// Dispatcher convenience: authorize and, on failure, write the matching status
-/// line and return `None` so the caller can `return` immediately. On success
-/// returns `Some(role)` and writes nothing.
-pub async fn guard(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    headers: &str,
-    required: RequiredScope,
-) -> Option<Role> {
-    match authorize(headers, required) {
-        AuthOutcome::Ok(role) => Some(role),
-        AuthOutcome::Unauthorized => {
-            let _ = request::write_status_only(lines, "401 Unauthorized").await;
-            None
-        }
-        AuthOutcome::Forbidden => {
-            let _ = request::write_status_only(lines, "403 Forbidden").await;
-            None
-        }
+/// Map a failed [`AuthOutcome`] to the matching empty-body status response.
+/// `Ok` returns `None` so the dispatcher can proceed.
+pub fn deny_response(outcome: AuthOutcome) -> Option<Response> {
+    match outcome {
+        AuthOutcome::Ok(_) => None,
+        AuthOutcome::Unauthorized => Some(Response::empty("401 Unauthorized")),
+        AuthOutcome::Forbidden => Some(Response::empty("403 Forbidden")),
     }
 }
 

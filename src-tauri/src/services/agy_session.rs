@@ -299,7 +299,7 @@ pub(crate) fn find_historic_id_for_directory_in(
     recorded_start: bool,
 ) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
-    let candidates = collect_candidates(&brain_dir, cutoff)
+    let candidates = collect_candidates(brain_dir, cutoff)
         .into_iter()
         .filter(|candidate| {
             candidate

@@ -52,7 +52,12 @@ pub fn harness_runtime(profile_id: &str) -> Option<crate::models::EnvType> {
 }
 
 pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
-    let (harness_id, _) = crate::agent::provider::parse_spawn_option_id(profile_id);
+    // Bind the typed value so its lifetime outlives the borrowed
+    // `harness_id` slice — issue #1659 item 1 — the original
+    // `parse_spawn_option_id` returned slices borrowing `profile_id`
+    // directly, so this binding didn't exist before.
+    let id = crate::agent::provider::SpawnOptionId::from(profile_id);
+    let harness_id = id.harness_id();
     let profiles = harness_profiles();
     let preferred = crate::agent::detection::preferred_profiles(&crate::agent::detection::currently_installed_profiles(profiles.clone()),
         crate::agent::provider::Platform::current(),
@@ -180,15 +185,28 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// **Composite Spawn Option ids** (issue #575 / ADR-0016): a Proxied
 /// Provider id has the shape `<harness>:<provider>` (e.g. `claude:minimax`).
 /// Only the *harness* part drives the executor choice — the provider part
-/// is just a credential key. We split on the first `:` via
-/// [`crate::agent::provider::parse_spawn_option_id`] so the legacy bare
+/// is just a credential key. We parse via
+/// [`crate::agent::provider::SpawnOptionId`] so the legacy bare
 /// ids (`"minimax"`, `"kimi"`, custom account ids) still resolve through
 /// the same path during the post-#575 migration window, and the post-
 /// migration composite ids (`"claude:minimax"`) resolve to the same
 /// Anthropic executor as the bare form did.
+///
+/// Prefer [`resolve_harness_provider_for`] when the caller already holds a
+/// typed `SpawnOptionId` — it skips the redundant `&str` → `SpawnOptionId`
+/// re-parse that this `&str` overload performs internally (issue #1730
+/// review fix-up: previously `services::agent_node::decide_resume` and
+/// `autopilot::compatibility::resolve_autopilot_spawn_option` each parsed
+/// `new_provider` twice across the two calls).
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    let (harness_id, _provider_id) =
-        crate::agent::provider::parse_spawn_option_id(profile_id);
+    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(profile_id))
+}
+
+/// Typed entry point — accept an already-parsed [`SpawnOptionId`] and
+/// resolve the executor from its harness half (see
+/// [`resolve_harness_provider`] for the rationale).
+pub fn resolve_harness_provider_for(spawn_option: &crate::agent::provider::SpawnOptionId) -> Provider {
+    let harness_id = spawn_option.harness_id();
     match harness_profiles().into_iter().find(|p| p.id == harness_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
         None => Provider::from_db_str(harness_id),

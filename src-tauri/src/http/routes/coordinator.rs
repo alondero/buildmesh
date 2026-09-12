@@ -7,15 +7,14 @@
 //! transcript turns) — plus the drive route `POST /nodes/{id}/prompt` (issue
 //! #319), which writes a prompt to a live node's PTY and returns an honest
 //! verdict. Auth (the off-by-default master switch + the read- or drive-scoped
-//! token) is enforced by the dispatcher in `http::mod` via
-//! `auth::guard(.., CoordinatorRead | CoordinatorWrite)` (issue #500) before any
+//! token) is enforced by the dispatcher in `http::router` via
+//! `auth::authorize(.., CoordinatorRead | CoordinatorWrite)` (issue #500) before any
 //! handler is reached.
 
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
-use crate::http::request;
-use tokio::io::BufStream;
-use crate::http::MaybeTls;
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
@@ -23,6 +22,10 @@ use crate::http::MaybeTls;
 /// flagged `unsupported` (degrade-and-flag, ADR-0008 §3). Returns `[]` rather
 /// than erroring if the DB read fails, so a Coordinator scan degrades to "no
 /// nodes" instead of a 500.
+pub async fn list(_req: &ParsedRequest) -> Response {
+    Response::json("200 OK", list_nodes_json())
+}
+
 pub fn list_nodes_json() -> String {
     match db::list_coordinator_node_rows() {
         Ok(rows) => {
@@ -48,6 +51,14 @@ pub fn list_nodes_json() -> String {
 /// missing/unreadable/shape-changed transcript) is a `200` carrying a typed
 /// `{"status":"unavailable",...}` envelope, so the Coordinator always gets a
 /// structured answer.
+pub async fn log(req: &ParsedRequest) -> Response {
+    let tail = req.tail_param();
+    match log_json(req.id0(), tail) {
+        Some(body) => Response::json("200 OK", body),
+        None => Response::empty("404 Not Found"),
+    }
+}
+
 pub fn log_json(node_id: i64, tail: usize) -> Option<String> {
     let node = db::get_agent_node_by_id(node_id).ok()?;
     let result = enrichment::transcript_tail(&node, tail);
@@ -98,7 +109,7 @@ fn validate_drive_request<'a>(
 
 /// `POST /nodes/{id}/prompt` — drive a live node by writing `prompt` to its PTY
 /// (ADR-0008 §5, issue #319). Auth (the drive-scoped token + drive kill-switch)
-/// is enforced by the dispatcher via `auth::guard(.., CoordinatorWrite)` (issue
+/// is enforced by the dispatcher via `auth::authorize(.., CoordinatorWrite)` (issue
 /// #500) before this is reached.
 ///
 /// Outcomes:
@@ -112,30 +123,19 @@ fn validate_drive_request<'a>(
 ///   `Retry-After: 1` (issue #750, item 1 — atomic claim-before-send)
 /// - written → `200 {"verdict":..,"idempotency_key":..,"replayed":..}`
 /// - duplicate key → `200` replaying the original verdict, no second write
-pub async fn prompt(
-    lines: &mut BufStream<MaybeTls>,
-    node_id: i64,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 256 * 1024).await
-    else {
-        return;
-    };
+pub async fn prompt(req: &ParsedRequest) -> Response {
+    let node_id = req.id0();
 
-    let req: PromptRequest = match serde_json::from_slice(&body_bytes) {
+    let parsed: PromptRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
-            return;
+            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
         }
     };
-    let idempotency_key = match validate_drive_request(&req.prompt, &req.idempotency_key) {
-        Ok(key) => key,
+    let idempotency_key = match validate_drive_request(&parsed.prompt, &parsed.idempotency_key) {
+        Ok(key) => key.to_string(),
         Err((status, message)) => {
-            request::send_json_error(lines, status, message).await;
-            return;
+            return Response::json_error(status, message);
         }
     };
 
@@ -150,8 +150,8 @@ pub async fn prompt(
     // tokio worker and stall every other route sharing the pool.
     match drive::drive_node_with_key_async(
         node_id,
-        idempotency_key.to_string(),
-        req.prompt.clone(),
+        idempotency_key.clone(),
+        parsed.prompt.clone(),
     )
     .await
     {
@@ -164,27 +164,25 @@ pub async fn prompt(
                 "replayed": outcome.replayed,
             })
             .to_string();
-            let _ = request::write_json(lines, "200 OK", &body).await;
+            Response::json("200 OK", body)
         }
         Err(drive::DriveError::NotLive) => {
             if db::get_agent_node_by_id(node_id).is_err() {
-                request::send_json_error(lines, "404 Not Found", "Unknown node").await;
+                Response::json_error("404 Not Found", "Unknown node")
             } else {
-                request::send_json_error(
-                    lines,
+                Response::json_error(
                     "409 Conflict",
                     "Node is not live — only a node with a running agent can be driven",
                 )
-                .await;
             }
         }
         Err(drive::DriveError::WriteFailed(e)) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+            Response::json_error("500 Internal Server Error", &e)
         }
         // The ledger couldn't be consulted, so we refused to risk a double-send.
         // 503 tells the Coordinator this is transient and safe to retry.
         Err(drive::DriveError::LedgerUnavailable(e)) => {
-            request::send_json_error(lines, "503 Service Unavailable", &e).await;
+            Response::json_error("503 Service Unavailable", &e)
         }
         // Same idempotency key + *different* prompt payload — Stripe-style
         // reject (issue #750, item 2). 409 is the right shape: the request
@@ -192,14 +190,10 @@ pub async fn prompt(
         // (existing row with a different payload) forbids the action. The
         // Coordinator must mint a fresh key rather than silently drop the
         // new prompt.
-        Err(drive::DriveError::KeyPayloadMismatch) => {
-            request::send_json_error(
-                lines,
-                "409 Conflict",
-                "key_payload_mismatch: same idempotency_key with a different prompt — mint a fresh key",
-            )
-            .await;
-        }
+        Err(drive::DriveError::KeyPayloadMismatch) => Response::json_error(
+            "409 Conflict",
+            "key_payload_mismatch: same idempotency_key with a different prompt — mint a fresh key",
+        ),
         // A peer holds the claim in `pending` and the orchestrator's brief
         // wait window expired (issue #750, item 1). 409 + `Retry-After: 1`
         // tells the Coordinator to back off briefly and try again — the
@@ -210,8 +204,11 @@ pub async fn prompt(
             // Body uniformity with the other 4xx shapes — `{"error":"..."}`.
             // The status line + `Retry-After` header is the load-bearing
             // signal; the body is purely informational.
-            let body = r#"{"error":"in_progress: another caller is currently driving this key"}"#.to_string();
-            let _ = request::write_json_with_retry_after(lines, "409 Conflict", &body, 1).await;
+            Response::json(
+                "409 Conflict",
+                r#"{"error":"in_progress: another caller is currently driving this key"}"#,
+            )
+            .with_header("Retry-After", "1")
         }
     }
 }

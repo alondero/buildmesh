@@ -1,11 +1,11 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
-use crate::agent::provider::parse_spawn_option_id;
+use crate::agent::provider::SpawnOptionId;
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
 use crate::models::{AgentNode, PendingWorktreeRemoval, SessionStatus};
-use crate::preferences::resolve_harness_provider;
+use crate::preferences::resolve_harness_provider_for;
 
 /// Error type for agent node service operations
 #[derive(Debug)]
@@ -657,10 +657,17 @@ pub fn decide_resume(
     new_provider: &str,
     cli_session_id: Option<&str>,
 ) -> Option<String> {
-    let (old_harness, _) = parse_spawn_option_id(old_provider);
-    let (new_harness, _) = parse_spawn_option_id(new_provider);
-    let same_harness = old_harness == new_harness;
-    let new_provider_enum = resolve_harness_provider(new_provider);
+    // Parse both providers through the typed `SpawnOptionId` once each
+    // (issue #1659 item 1) and compare the harness halves. The
+    // provider half is irrelevant here — resume lives on the executor
+    // keyed by `old_harness == new_harness`. Route the executor lookup
+    // through the typed entry point so `new_provider` is parsed exactly
+    // once on this path (review #1730 fix: previously
+    // `resolve_harness_provider(&str)` re-parsed the id internally).
+    let old_id = SpawnOptionId::from(old_provider);
+    let new_id = SpawnOptionId::from(new_provider);
+    let same_harness = old_id.harness_id() == new_id.harness_id();
+    let new_provider_enum = resolve_harness_provider_for(&new_id);
     if same_harness && new_provider_enum.adapter().supports_resume() {
         cli_session_id.map(String::from)
     } else {

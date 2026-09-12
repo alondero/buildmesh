@@ -150,7 +150,7 @@ fn resolve_pairing(
 /// ADR-0025) — the pairing-scoped, surface-aware successor to the #538
 /// account-only resolver.
 ///
-/// Resolution by id shape ([`crate::agent::provider::parse_spawn_option_id`]):
+/// Resolution by id shape ([`crate::agent::provider::SpawnOptionId`]):
 ///   * **Composite proxied id** (`<harness>:<provider>`, e.g. `claude:minimax`,
 ///     `codex:minimax`): resolve the `(harness, provider)` **stored pairing**
 ///     and emit env for that pairing's surface — `ANTHROPIC_*` for `Anthropic`,
@@ -166,8 +166,9 @@ fn resolve_pairing(
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
 /// means a clean slate, not a leaked override.
 pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
+    let harness_id = id.harness_id();
+    let provider_id = id.provider_id();
     let accounts = provider_accounts();
     let pairings = provider_pairings();
     match provider_id {
@@ -205,8 +206,9 @@ pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
 /// UI can prompt the user to fill the `Default model` tier on the **Harnesses**
 /// page (ADR-0025).
 pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), String> {
-    let (harness_id, provider_id) =
-        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
+    let harness_id = id.harness_id();
+    let provider_id = id.provider_id();
     let accounts = provider_accounts();
     let pairings = provider_pairings();
     let (pairing_opt, account_id) = match provider_id {

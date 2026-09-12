@@ -3,6 +3,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::agent::provider::SpawnOptionId;
 use crate::autopilot::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
@@ -29,7 +30,14 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if trimmed.split(':').next().unwrap_or(trimmed) == "terminal" {
+    // Issue #1659 circuit-trigger entry seam: route the harness-half
+    // extraction through the typed `SpawnOptionId` so the same first-`:`-
+    // split rule every other entry seam uses applies here. A bare
+    // `"terminal"` parses as a native row; a Proxied form
+    // (`"terminal:<provider>"`) — rejected today by
+    // `BUILTIN_HARNESS_IDS` but the contract holds regardless —
+    // would also match.
+    if SpawnOptionId::from(trimmed).harness_id() == "terminal" {
         return Err("Terminal cannot be used as the reviewer provider.".into());
     }
     Ok(Some(trimmed.to_string()))
@@ -406,7 +414,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     let run_ids: Vec<i64> = runs_by_circuit.values().flatten().map(|run| run.id).collect();
     let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> = std::collections::HashMap::new();
     if !run_ids.is_empty() {
-        let placeholders = std::iter::repeat("?").take(run_ids.len()).collect::<Vec<_>>().join(",");
+        let placeholders = std::iter::repeat_n("?", run_ids.len()).collect::<Vec<_>>().join(",");
         let mut step_stmt = db.prepare(&format!(
             "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                     outcome, error_message, started_at, completed_at \

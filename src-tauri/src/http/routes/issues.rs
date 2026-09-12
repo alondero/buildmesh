@@ -1,25 +1,21 @@
 //! GitHub issue browsing + issue-driven agent spawning.
 
-use crate::http::MaybeTls;
+use crate::http::response::Response;
+use crate::http::router::ParsedRequest;
+use crate::http::state;
 
-use crate::http::request;
-
-pub async fn list(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-) {
+pub async fn list(req: &ParsedRequest) -> Response {
+    let mesh_id = req.id0();
     // Await the async command wrapper (not the `*_blocking` core): this route
-    // runs inside `tauri::async_runtime::spawn` (http/mod.rs), so calling the
+    // runs inside `tauri::async_runtime::spawn` (http/server.rs), so calling the
     // blocking core directly would park a Tauri worker. The wrapper offloads to
     // the blocking pool via `run_blocking`.
     match crate::commands::pr::get_repo_issues(mesh_id).await {
         Ok(issues) => {
             let body = serde_json::to_string(&issues).unwrap_or_else(|_| "[]".to_string());
-            let _ = request::write_json(lines, "200 OK", &body).await;
+            Response::json("200 OK", body)
         }
-        Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
-        }
+        Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
 
@@ -36,30 +32,19 @@ struct SpawnRequest {
     provider: Option<String>,
 }
 
-pub async fn spawn(
-    lines: &mut tokio::io::BufStream<MaybeTls>,
-    mesh_id: i64,
-    issue_number: i64,
-    content_length: usize,
-) {
-    let Some(body_bytes) =
-        request::read_body_or_send_error(lines, content_length, 256 * 1024).await
-    else {
-        return;
-    };
+pub async fn spawn(req: &ParsedRequest) -> Response {
+    let mesh_id = req.id0();
+    let issue_number = req.id1();
 
-    let req: SpawnRequest = match serde_json::from_slice(&body_bytes) {
+    let parsed: SpawnRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
-            return;
+            return Response::json_error("400 Bad Request", &format!("Invalid JSON: {}", e));
         }
     };
 
-    let Some(app) = crate::http::app_handle() else {
-        request::send_json_error(lines, "503 Service Unavailable", "App not ready").await;
-        return;
+    let Some(app) = state::app_handle() else {
+        return Response::json_error("503 Service Unavailable", "App not ready");
     };
 
     // spawn_issue_agent is a #[tauri::command] but takes plain args except
@@ -70,17 +55,15 @@ pub async fn spawn(
         app.clone(),
         mesh_id,
         issue_number,
-        req.title,
-        req.provider,
+        parsed.title,
+        parsed.provider,
     )
     .await
     {
         Ok(node) => {
             let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
-            let _ = request::write_json(lines, "200 OK", &body).await;
+            Response::json("200 OK", body)
         }
-        Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
-        }
+        Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
