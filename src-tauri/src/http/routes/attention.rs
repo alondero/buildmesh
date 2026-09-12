@@ -354,11 +354,12 @@ fn accept_hook(
     }
     if event == "notification"
         && payload.source_kind.as_deref() == Some("background_task")
-        && classified.decision == Decision::Running
+        && matches!(classified.decision, Decision::Ready | Decision::Running)
     {
         return payload.source_id.as_deref().is_some_and(|task| state.finish_background_task(task)) && !state.has_questions();
     }
-    if !state.accepts(payload.turn_id.as_deref(), event == "userpromptsubmit") { return false; }
+    let starts_turn = event == "userpromptsubmit";
+    if !state.accepts(payload.turn_id.as_deref(), starts_turn) { return false; }
     let key = payload.request_id.as_deref().or(payload.tool_name.as_deref()).unwrap_or("question");
     let tracks_input_request = classified.detail.kind == Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
         || matches!(event.as_str(), "permissionrequest" | "permission.asked")
@@ -375,7 +376,11 @@ fn accept_hook(
     } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure" | "permissionresult" | "elicitationresult" | "question.replied" | "question.rejected") {
         state.question(key, true);
     }
-    !(state.has_questions() && matches!(classified.decision, Decision::Ready | Decision::SuppressPendingBackground | Decision::Running))
+    // A real prompt is an explicit user action and must never be fenced by a
+    // detached/background question. The background request remains tracked
+    // and can still resolve later, but dropping this callback would leave the
+    // node frozen in its previous attention state (review finding).
+    starts_turn || !(state.has_questions() && matches!(classified.decision, Decision::Ready | Decision::SuppressPendingBackground | Decision::Running))
 }
 
 /// The result of classifying a hook POST body: the [`Decision`] plus the
@@ -510,7 +515,20 @@ fn classify(
     if provider == "kimi" && event == Some("notification") {
         let terminal_task = payload.source_kind.as_deref() == Some("background_task")
             && matches!(payload.notification_type.as_deref(), Some("task.completed" | "task.failed" | "task.killed" | "task.timed_out" | "task.lost"));
-        return Classified { decision: if terminal_task { Decision::Running } else { Decision::Ignore }, detail };
+        return Classified { decision: if terminal_task { Decision::Ready } else { Decision::Ignore }, detail };
+    }
+    // Kimi emits PostToolUse before the detached question task completes. The
+    // result is a correlation event, not resumed foreground work. Treat it as
+    // a pending completion so both result-before-notification and
+    // notification-before-result races converge on Ready once the task's
+    // terminal Notification arrives (review finding).
+    if provider == "kimi"
+        && matches!(event, Some("posttooluse" | "posttoolusefailure"))
+        && payload.tool_name.as_deref() == Some("AskUserQuestion")
+        && payload.tool_input.as_ref().and_then(|input| input.get("background")).and_then(|value| value.as_bool()) == Some(true)
+        && payload.tool_output.as_deref().is_some_and(|output| output.lines().any(|line| line.strip_prefix("task_id: ").is_some_and(|task| !task.is_empty())))
+    {
+        return Classified { decision: Decision::Ready, detail };
     }
     if matches!(event, Some("userpromptsubmit" | "session.busy" | "permissionresult" | "permission.replied" | "elicitationresult" | "question.replied" | "question.rejected"))
         || (matches!(event, Some("posttooluse" | "posttoolusefailure")) && payload.tool_name.as_deref().is_some_and(|name| matches!(name, "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode")))
@@ -988,7 +1006,7 @@ mod tests {
                 "tool_call_id":"call-1", "tool_input":{"background":true},
                 "tool_output":"task_id: task-1\ndescription: choose\nstatus: running"
             })),
-            (false, Decision::Running)
+            (false, Decision::Ready)
         );
         assert!(!apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})).0);
 
@@ -998,7 +1016,7 @@ mod tests {
                 "hook_event_name":"Notification", "notification_type":"task.completed",
                 "source_kind":"background_task", "source_id":"task-1"
             })),
-            (true, Decision::Running)
+            (true, Decision::Ready)
         );
         assert_eq!(apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})), (true, Decision::Ready));
     }
@@ -1015,12 +1033,12 @@ mod tests {
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"Notification", "notification_type":"task.failed",
             "source_kind":"background_task", "source_id":"task-early"
-        })), (false, Decision::Running));
+        })), (false, Decision::Ready));
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
             "tool_call_id":"call-early", "tool_input":{"background":true},
             "tool_output":"task_id: task-early\nstatus: running"
-        })), (true, Decision::Running));
+        })), (true, Decision::Ready));
         assert_eq!(apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})), (true, Decision::Ready));
     }
 
@@ -1041,11 +1059,41 @@ mod tests {
             "hook_event_name":"PostToolUseFailure", "tool_name":"AskUserQuestion",
             "tool_call_id":"call-failed", "tool_input":{"background":true},
             "tool_output":"task_id: task-failed\nstatus: failed"
-        })), (false, Decision::Running));
+        })), (false, Decision::Ready));
         assert_eq!(apply(&mut state, serde_json::json!({
             "hook_event_name":"Notification", "notification_type":"task.failed",
             "source_kind":"background_task", "source_id":"task-failed"
+        })), (true, Decision::Ready));
+    }
+
+    #[test]
+    fn user_prompt_submission_is_not_fenced_by_detached_background_question() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
+            (accept_hook(state, &payload, &classified), classified.decision)
+        };
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"PreToolUse", "tool_name":"AskUserQuestion",
+            "tool_call_id":"call-detached", "tool_input":{"background":true}
+        })), (true, Decision::MarkInput));
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"PostToolUse", "tool_name":"AskUserQuestion",
+            "tool_call_id":"call-detached", "tool_input":{"background":true},
+            "tool_output":"task_id: task-detached\nstatus: running"
+        })), (false, Decision::Ready));
+
+        // A new prompt is an explicit user action. It starts a new foreground
+        // turn while retaining the detached request for later resolution.
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"UserPromptSubmit", "promptId":"foreground-2"
         })), (true, Decision::Running));
+        assert_eq!(apply(&mut state, serde_json::json!({
+            "hook_event_name":"Notification", "notification_type":"task.completed",
+            "source_kind":"background_task", "source_id":"task-detached"
+        })), (true, Decision::Ready));
     }
 
     #[test]

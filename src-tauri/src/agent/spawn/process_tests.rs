@@ -5,7 +5,7 @@ fn attention_hook_covers_question_lifecycle_and_bounds_delivery_time() {
     let temp = TempDir::new().unwrap();
     inject_attention_hook(temp.path()).unwrap();
     let settings = read_injected_settings(temp.path());
-    for event in ["Elicitation", "ElicitationResult", "PermissionRequest", "StopFailure", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+    for event in ["Elicitation", "ElicitationResult", "StopFailure", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"] {
         let group = &settings["hooks"][event][0];
         let command = group["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains("--max-time 2"), "{event}");
@@ -14,6 +14,10 @@ fn attention_hook_covers_question_lifecycle_and_bounds_delivery_time() {
             assert_eq!(group["matcher"], "^(AskUserQuestion|ExitPlanMode)$");
         }
     }
+    assert!(
+        settings["hooks"]["PermissionRequest"].is_null(),
+        "Claude runs with bypassed permissions; do not provision a dead PermissionRequest hook"
+    );
 }
 use tempfile::TempDir;
 

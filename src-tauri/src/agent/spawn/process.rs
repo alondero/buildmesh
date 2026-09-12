@@ -266,7 +266,6 @@ fn ensure_hooks_json(path: &Path, new_handler: &serde_json::Value) -> Result<(),
     changed = merge_buildmesh_handler(stop_groups_array, new_handler, &[]) || changed;
 
     for (event, matcher) in [
-        ("PermissionRequest", None),
         ("Elicitation", None),
         ("ElicitationResult", None),
         ("StopFailure", None),

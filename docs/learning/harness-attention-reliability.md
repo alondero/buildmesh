@@ -40,7 +40,7 @@ The table's Buildmesh claims are grounded in each corresponding [adapter](../../
 | Cursor | Stop completion and transcript pending-task suppression | Completion-only. Cursor CLI's `AskQuestion` bypasses pre/post hooks, so Buildmesh does not claim question detection from generic tool events. |
 | OpenCode | Plugin idle/busy, permission, question asked/replied/rejected, session creation, and parent/child correlation | High for the documented plugin event stream; a missing or disabled plugin falls back to the explicit degraded path. |
 | Grok | Stop, idle/task notifications, prompt submission, failures/cancellation, and `ask_user_question` pre/post/failure | High when the native HTTP hook is provisioned and the runtime token is presented; callbacks from another process are rejected. |
-| Kimi Code | Native 0.27 hooks for Stop/failure/interruption, permissions, prompt submission, question/plan pre/post/failure, and terminal background-task notifications | High on native Kimi Code 0.27+; background questions are correlated by task id and are not cleared by their early PostToolUse. Python `kimi-cli` is a separate unsupported product. |
+| Kimi Code | Native 0.27 hooks for Stop/failure/interruption, permissions, prompt submission, question/plan pre/post/failure, and terminal background-task notifications | High on native Kimi Code 0.27+; background questions are correlated by task id, their early PostToolUse is not treated as resumed work, and terminal completion lands in Ready. Python `kimi-cli` is a separate unsupported product. |
 | Command Code | Passive transcript watcher and existing lifecycle classifier | Medium completion confidence; no native question observer is claimed without a verified delivery fixture. |
 | MiniMax Code, Muse, Freebuff, DeepSeek Harness, Terminal | Explicit capability gaps remain | No guessed native hook is installed. These harnesses need a validated plugin, MSP/log, profile, or protocol integration before Buildmesh can promise parity. |
 | Dynamic/proxied entries | Resolve to the concrete adapter selected at spawn | A custom executable/name inherits a contract only when it actually implements that adapter's verified protocol. |
@@ -101,7 +101,7 @@ For every enabled integration, test completion, structured question, approval, a
 
 ## Evidence collected in this change
 
-- Rust attention-route suite: **73 passed** (classification, aliases,
+- Rust attention-route suite: **74 passed** (classification, aliases,
   transcript degradation, OpenCode/Kimi correlation, stale turns).
 - Full Rust library suite: **3213 passed, 21 ignored** with serial execution.
 - Native Kimi callback probe passed on Windows with stdin/body/header and
