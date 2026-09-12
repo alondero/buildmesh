@@ -1,15 +1,16 @@
 // Buildmesh attention plugin for OpenCode (issues #1295 + #1294).
 //
 // Loaded by the OpenCode TUI as an ESM module from `.opencode/plugins/`.
-// Forwards three harness events back to Buildmesh's local attention
-// endpoint so the agent node reaches `awaiting_input` like every other
-// harness AND captures the freshly minted `ses_<…>` session id at TUI
+// Forwards lifecycle and human-input events to Buildmesh's attention
+// endpoint and captures the freshly minted `ses_<…>` session id at TUI
 // boot, which is the primary path for `agent_nodes.cli_session_id`
 // (issue #1294):
 //   - `session.created`   — TUI minted a new `ses_<…>` id at boot;
 //                            persistence only, no Node Turn.
-//   - `session.idle`       — turn ended, agent is at its prompt.
+//   - `session.idle`       — turn ended, agent is Ready.
 //   - `permission.asked`   — agent is blocked on a tool approval decision.
+//   - `question.asked`     — agent is waiting for an answer.
+//   - resolution / busy   — clear attention when work resumes.
 //
 // Every callback includes `sessionID` so the route's ordering-token
 // fence (`attention.rs:690-702`) can compare against the stored id and
@@ -25,10 +26,10 @@
 // re-imports would defeat the per-node URL.
 //
 // Plugin contract: https://opencode.ai/docs/plugins
-//   `event({ event })` is the typed-event dispatch. We consume exactly the
-// three event kinds Buildmesh routes or persists; everything else is
-// dropped so OpenCode's own session/status chatter doesn't drown the
-// attention callback.
+//   `event({ event })` is the typed-event dispatch. We consume the lifecycle,
+//   question, and permission event kinds Buildmesh routes or persists;
+//   unrelated status chatter is dropped so it cannot drown the attention
+//   callback.
 
 const logPath = process.env.BUILDMESH_PLUGIN_LOG;
 
@@ -48,7 +49,6 @@ const logPath = process.env.BUILDMESH_PLUGIN_LOG;
 // id when present (the upstream plugin is the authority) and fall
 // back to the cache so a future revision that drops the field from
 // `session.idle` / `permission.asked` doesn't lose fencing.
-let cachedSessionId = null;
 
 function buildmeshUrl() {
   const port = process.env.BUILDMESH_PORT;
@@ -123,36 +123,37 @@ function isValidSessionId(id) {
 // multiple candidates are non-empty.
 function pickSessionId(event) {
   if (!event || typeof event !== "object") return undefined;
-  if (typeof event.sessionID === "string" && event.sessionID.length > 0) {
+  const isSessionCreated = event.type === "session.created";
+  if (isValidSessionId(event.sessionID)) {
     return event.sessionID;
   }
-  if (typeof event.session_id === "string" && event.session_id.length > 0) {
+  if (isValidSessionId(event.session_id)) {
     return event.session_id;
   }
-  if (typeof event.id === "string" && event.id.length > 0) {
+  if (isSessionCreated && isValidSessionId(event.id)) {
     return event.id;
   }
   const props = event.properties;
   if (props && typeof props === "object") {
-    if (typeof props.sessionID === "string" && props.sessionID.length > 0) {
+    if (isValidSessionId(props.sessionID)) {
       return props.sessionID;
     }
-    if (typeof props.session_id === "string" && props.session_id.length > 0) {
+    if (isValidSessionId(props.session_id)) {
       return props.session_id;
     }
-    if (typeof props.id === "string" && props.id.length > 0) {
+    if (isSessionCreated && isValidSessionId(props.id)) {
       return props.id;
     }
     const info = props.info;
     if (info && typeof info === "object") {
-      if (typeof info.id === "string" && info.id.length > 0) return info.id;
-      if (typeof info.sessionID === "string" && info.sessionID.length > 0) {
+      if (isSessionCreated && isValidSessionId(info.id)) return info.id;
+      if (isValidSessionId(info.sessionID)) {
         return info.sessionID;
       }
     }
   }
   const info = event.info;
-  if (info && typeof info === "object" && typeof info.id === "string") {
+  if (isSessionCreated && info && typeof info === "object" && isValidSessionId(info.id)) {
     return info.id;
   }
   // OpenCode's typed-event layer wraps the payload under `.data` on some
@@ -160,17 +161,49 @@ function pickSessionId(event) {
   // wired through that bus doesn't lose fencing on resumed sessions.
   const data = event.data;
   if (data && typeof data === "object") {
-    if (typeof data.sessionID === "string" && data.sessionID.length > 0) {
+    if (isValidSessionId(data.sessionID)) {
       return data.sessionID;
     }
-    if (typeof data.session_id === "string" && data.session_id.length > 0) {
+    if (isValidSessionId(data.session_id)) {
       return data.session_id;
     }
-    if (typeof data.id === "string" && data.id.length > 0) {
+    if (isSessionCreated && isValidSessionId(data.id)) {
       return data.id;
     }
   }
   return undefined;
+}
+
+// Permission/question ids are distinct from session ids. In particular,
+// OpenCode's `permission.asked` uses `properties.id`, while its reply carries
+// that same value as `properties.requestID`; never let the former be mistaken
+// for a session id or the route cannot correlate the resolution.
+function pickRequestId(event) {
+  if (!event || typeof event !== "object") return undefined;
+  const props = event.properties;
+  const data = event.data;
+  const candidates = [
+    event.requestID,
+    event.requestId,
+    event.permissionID,
+    event.permissionId,
+    event.call_id,
+    event.callId,
+    event.id,
+    props?.requestID,
+    props?.requestId,
+    props?.permissionID,
+    props?.permissionId,
+    props?.call_id,
+    props?.callId,
+    props?.id,
+    data?.requestID,
+    data?.requestId,
+    data?.permissionID,
+    data?.permissionId,
+    data?.id,
+  ];
+  return candidates.find((value) => typeof value === "string" && value.length > 0);
 }
 
 // Forward the permission event's tool info when OpenCode provides it.
@@ -237,14 +270,14 @@ async function postAttention(body) {
       await appendLog(`attention ${res.status}\n`);
     }
   } catch (_err) {
-    // Network/loopback failure or timeout — swallow (Buildmesh's
-    // autoclear safety net arms on every mark; a missed callback
-    // self-heals within a few PTY output bursts).
+    // Fail open for the harness. A lost callback is a delivery gap;
+    // PTY autoclear cannot recover a callback that never arrived.
     await appendLog("attention error\n");
   }
 }
 
 export const BuildmeshAttention = async () => {
+  let cachedSessionId = null;
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -268,6 +301,8 @@ export const BuildmeshAttention = async () => {
       // documented shape via `pickSessionId` so a future upstream
       // rename doesn't drop captures.
       if (event.type === "session.created") {
+        // Child sessions share the plugin bus but must not claim the node.
+        if (event.properties?.info?.parentID || event.info?.parentID) return;
         const id = pickSessionId(event);
         if (!isValidSessionId(id)) {
           await appendLog("session.created missing or malformed id\n");
@@ -282,15 +317,47 @@ export const BuildmeshAttention = async () => {
         return;
       }
 
+      const suppliedId = pickSessionId(event);
+      if (cachedSessionId && isValidSessionId(suppliedId) && suppliedId !== cachedSessionId) return;
+
+      if (event.type === "session.status" && event.properties?.status?.type === "busy") {
+        const body = { hook_event_name: "session.busy" };
+        const id = suppliedId ?? cachedSessionId;
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+
+      if (event.type === "question.asked") {
+        const id = suppliedId ?? cachedSessionId;
+        const body = {
+          hook_event_name: "question.asked",
+          message: event.properties?.questions?.[0]?.question ?? "OpenCode is asking a question",
+        };
+        const requestId = pickRequestId(event);
+        if (requestId) body.request_id = requestId;
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+      if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
+        const body = { hook_event_name: event.type };
+        const requestId = pickRequestId(event);
+        if (requestId) body.request_id = requestId;
+        const id = suppliedId ?? cachedSessionId;
+        if (isValidSessionId(id)) body.sessionID = id;
+        await postAttention(body);
+        return;
+      }
+
       // `session.idle` — the agent finished its turn and is sitting at
       // the input prompt waiting. We use a dedicated `hook_event_name`
       // (`session.idle`) that mirrors the upstream OpenCode plugin event
       // type. The classifier has a dedicated rule that maps this event
-      // to `InputRequired`. We deliberately do NOT post a
+      // to `Ready`. We deliberately do NOT post a
       // `transcript_path` because OpenCode has no Claude-style
       // transcript file — the classifier's transcript-scan fallback
-      // would otherwise classify this as `Ready` (turn done, no pending
-      // tasks).
+      // is not the source of truth for this harness.
       //
       // Best-effort fencing (issue #1294 round-3 review): `sessionID`
       // is attached when we can resolve one (event-supplied or cached
@@ -343,6 +410,8 @@ export const BuildmeshAttention = async () => {
             ? `OpenCode is asking for permission: ${toolName}`
             : "OpenCode is asking for permission",
         };
+        const requestId = pickRequestId(event);
+        if (requestId) body.request_id = requestId;
         if (toolName) body.tool_name = toolName;
         if (isValidSessionId(id)) {
           body.sessionID = id;
@@ -355,10 +424,8 @@ export const BuildmeshAttention = async () => {
         return;
       }
 
-      // Other events (`session.status`, `permission.replied`, ...) are
-      // intentionally ignored — Buildmesh's turn pipeline doesn't need
-      // them and forwarding every status transition would spam the
-      // attention endpoint.
+      // Other event kinds are intentionally ignored; Buildmesh's turn
+      // pipeline only needs the lifecycle and human-input signals above.
     },
   };
 };

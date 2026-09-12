@@ -77,6 +77,22 @@ pub fn on_marked(node_id: i64) {
     );
 }
 
+pub fn on_signal_marked(
+    node_id: i64,
+    kind: Option<crate::agent::session_lifecycle::LifecycleKind>,
+    semantic: Option<crate::agent::session_lifecycle::SemanticTurnKind>,
+) {
+    use crate::agent::session_lifecycle::{LifecycleKind, SemanticTurnKind};
+    if matches!(kind, Some(LifecycleKind::QuestionRequested | LifecycleKind::PermissionRequested))
+        || matches!(semantic, Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation))
+    {
+        // Background output and terminal redraws cannot answer a question.
+        disarm(node_id);
+    } else {
+        on_marked(node_id);
+    }
+}
+
 /// Disarm: the user typed into the node (or another path cleared attention
 /// itself) — the stale-mark hypothesis no longer holds.
 pub fn disarm(node_id: i64) {
@@ -203,6 +219,25 @@ mod tests {
         // No mark → nothing to clear, whatever the node prints.
         on_output(990_001, BURST_BYTES * 10);
         assert!(!ARMED.lock().unwrap().contains_key(&990_001));
+    }
+
+    #[test]
+    fn structured_questions_and_permissions_survive_background_output() {
+        use crate::agent::session_lifecycle::{LifecycleKind, SemanticTurnKind};
+        let node = 990_100;
+        for (kind, semantic) in [
+            (Some(LifecycleKind::QuestionRequested), None),
+            (Some(LifecycleKind::PermissionRequested), None),
+            (None, Some(SemanticTurnKind::PermissionRequest)),
+        ] {
+            on_marked(node);
+            on_signal_marked(node, kind, semantic);
+            assert!(!take_crossed(node, BURST_BYTES * 10, Instant::now() + std::time::Duration::from_secs(10)));
+            assert!(!ARMED.lock().unwrap().contains_key(&node));
+        }
+        on_signal_marked(node, None, None);
+        assert!(ARMED.lock().unwrap().contains_key(&node));
+        disarm(node);
     }
 
     #[test]

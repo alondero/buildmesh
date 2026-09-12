@@ -33,8 +33,9 @@ pub fn publish_with_signal(
     semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
     detail: crate::agent::session_lifecycle::HookSignalDetail,
 ) {
-    crate::commands::attention::mark_attention_with_signal(node_id, app, semantic_turn, &detail);
-    publish_passive(node_id, app);
+    if crate::commands::attention::mark_attention_with_signal(node_id, app, semantic_turn, &detail) {
+        publish_passive(node_id, app);
+    }
 }
 
 /// Publish a Node Turn that is a clean turn completion (issue #1364): the
@@ -48,18 +49,31 @@ pub fn publish_ready(
     app: &AppHandle,
     detail: crate::agent::session_lifecycle::HookSignalDetail,
 ) {
-    publish_passive(node_id, app);
-    let _ = crate::agent::session_lifecycle::on_turn_completed(
+    publish_ready_with_sink(
         &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
         node_id,
         &detail,
+        || publish_passive(node_id, app),
     );
+}
+
+fn publish_ready_with_sink(
+    sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
+    node_id: i64,
+    detail: &crate::agent::session_lifecycle::HookSignalDetail,
+    on_ready: impl FnOnce(),
+) {
+    match crate::agent::session_lifecycle::on_turn_completed(sink, node_id, detail) {
+        Ok(true) => on_ready(),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(node_id, %error, "failed to publish ready turn"),
+    }
 }
 
 /// Publish a Node Turn that is only a background-wait yield (issue #878,
 /// #1364): the harness ended its turn with background tasks still running
-/// and will re-invoke itself, so the user is NOT needed. No status write —
-/// the node stays `Running` — but the `agent-lifecycle` `BackgroundRunning`
+/// and will re-invoke itself, so the user is NOT needed. The node is written
+/// as `Running` before the `agent-lifecycle` `BackgroundRunning`
 /// event is emitted on both transports so clients can distinguish "busy on
 /// background work" from "waiting for input".
 pub fn publish_background(
@@ -67,16 +81,52 @@ pub fn publish_background(
     app: &AppHandle,
     detail: crate::agent::session_lifecycle::HookSignalDetail,
 ) {
-    publish_passive(node_id, app);
-    let _ = crate::agent::session_lifecycle::on_background_running(
+    let result = crate::agent::session_lifecycle::on_background_running(
         &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
         node_id,
         &detail,
     );
+    match result {
+        Ok(true) => publish_passive(node_id, app),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(node_id, %error, "failed to publish background turn"),
+    }
 }
 
 /// The attention-independent consumers, shared by both publish flavours.
 fn publish_passive(node_id: i64, app: &AppHandle) {
     crate::session_naming::on_turn(node_id, app.clone());
     crate::autopilot::pipeline::on_turn(node_id, app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session_lifecycle::{testing::RecordingSink, HookSignalDetail};
+    use crate::models::SessionStatus;
+    use std::cell::Cell;
+
+    #[test]
+    fn ready_consumers_observe_persisted_ready_and_cleared_attention() {
+        let sink = RecordingSink::with_status(SessionStatus::AwaitingInput);
+        let called = Cell::new(false);
+        publish_ready_with_sink(&sink, 42, &HookSignalDetail::default(), || {
+            assert_eq!(sink.status(), Some(SessionStatus::Ready));
+            assert_eq!(sink.effects(), vec![
+                "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
+            ]);
+            called.set(true);
+        });
+        assert!(called.get());
+    }
+
+    #[test]
+    fn ready_consumers_do_not_run_after_failed_or_rejected_transition() {
+        for sink in [RecordingSink::failing_writes(), RecordingSink::with_status(SessionStatus::Completed)] {
+            let called = Cell::new(false);
+            publish_ready_with_sink(&sink, 42, &HookSignalDetail::default(), || called.set(true));
+            assert!(!called.get());
+            assert!(sink.effects().is_empty());
+        }
+    }
 }

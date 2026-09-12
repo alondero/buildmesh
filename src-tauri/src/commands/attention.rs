@@ -60,13 +60,17 @@ pub fn mark_attention_with_signal(
     app: &AppHandle,
     semantic_turn: Option<crate::agent::session_lifecycle::SemanticTurnPayload>,
     detail: &crate::agent::session_lifecycle::HookSignalDetail,
-) {
+) -> bool {
     let sink = AppSessionLifecycleSink { app };
-    let _ = crate::agent::session_lifecycle::on_attention_with_signal(&sink, node_id, semantic_turn, detail);
+    let semantic_kind = semantic_turn.as_ref().map(|turn| turn.kind);
+    if !crate::agent::session_lifecycle::on_attention_with_signal(&sink, node_id, semantic_turn, detail).unwrap_or(false) {
+        return false;
+    }
     // Arm the resume-detection safety net (issue #878): if the agent starts
     // producing output again without user input, the mark was stale and gets
     // auto-cleared.
-    crate::attention_autoclear::on_marked(node_id);
+    crate::attention_autoclear::on_signal_marked(node_id, detail.kind, semantic_kind);
+    true
 }
 
 /// Clear the attention state for a node — called when the user resumes it.

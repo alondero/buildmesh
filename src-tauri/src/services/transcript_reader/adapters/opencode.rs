@@ -152,8 +152,9 @@ impl TranscriptAdapter for OpenCodeAdapter {
             return None;
         }
         // OpenCode's plugin fires `session.idle` when the agent finishes
-        // a turn and waits for input (issue #1295) — mark for attention
-        // with `InputRequired`. `session.created` fires once at TUI boot
+        // a turn and waits for another prompt — classify as Ready.
+        // Only explicit question/permission requests need human attention.
+        // `session.created` fires once at TUI boot
         // carrying the freshly minted `ses_…` id; it's lifecycle-neutral
         // (the id-capture path persists the session id, the attention
         // route must not flip a fresh spawn into `AwaitingInput`).
@@ -165,8 +166,12 @@ impl TranscriptAdapter for OpenCodeAdapter {
             .map(str::to_ascii_lowercase);
         match event.as_deref() {
             Some("session.idle") => Some(HookClassification {
+                decision: HookDecision::Ready,
+                kind: None,
+            }),
+            Some("question.asked") => Some(HookClassification {
                 decision: HookDecision::MarkInput,
-                kind: Some(LifecycleKind::InputRequired),
+                kind: Some(LifecycleKind::QuestionRequested),
             }),
             Some("session.created") => Some(HookClassification {
                 decision: HookDecision::Ignore,

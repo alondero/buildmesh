@@ -337,6 +337,10 @@ pub fn parse_opencode_session_id(s: &str) -> Option<String> {
 pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String> {
     match provider {
         "opencode" => parse_opencode_session_id(raw),
+        "kimi" => match raw.strip_prefix("session_") {
+            Some(uuid) => parse_cli_session_id(uuid).map(|id| format!("session_{id}")),
+            None => parse_cli_session_id(raw),
+        },
         // Codex/Claude/AGY/Grok/Cursor all use UUIDs (the alias stack on
         // `HookPayload::session_id` accepts every casing each harness
         // ships; canonicalisation to lowercase happens in
@@ -349,6 +353,17 @@ pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_session_ids_preserve_native_prefix() {
+        let id = "session_8a979720-1cb0-408c-b29c-9f0f68f2982b";
+        assert_eq!(parse_session_id_for_provider("kimi", id), Some(id.into()));
+        assert_eq!(parse_session_id_for_provider("anthropic", id), None);
+        for invalid in ["session_", "session_--flag", "session_$(whoami)", "session_8a979720-1cb0-408c-b29c-9f0f68f2982b/x"] {
+            assert_eq!(parse_session_id_for_provider("kimi", invalid), None);
+        }
+        assert_eq!(parse_session_id_for_provider("kimi", "8a979720-1cb0-408c-b29c-9f0f68f2982b"), Some("8a979720-1cb0-408c-b29c-9f0f68f2982b".into()));
+    }
 
     #[test]
     fn bearer_token_extracts_and_trims() {

@@ -249,6 +249,38 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
+  it('work_resumed clears a stale semantic attention reason', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+    capturedHandler!({
+      payload: {
+        session_id: 42,
+        kind: 'work_resumed',
+        status: 'running',
+        message: 'agent resumed work',
+        provider_event: 'PermissionResult',
+        provider_session_id: null,
+        completion_reason: null,
+        transcript_path: null,
+        timestamp: '2026-09-12T00:00:00+00:00',
+        signal_health: 'ok',
+        semantic_turn: null,
+      },
+    });
+
+    expect(surface.__calls).toEqual([
+      { method: 'patchAgentNode', args: [42, { status: 'running', signal_health: 'ok' }] },
+      { method: 'setSemanticTurn', args: [42, null] },
+    ]);
+  });
+
   it('agent-lifecycle with a semantic turn patches it through (issue #1364)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;

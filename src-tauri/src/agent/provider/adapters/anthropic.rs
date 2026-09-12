@@ -44,6 +44,8 @@ impl AgentProvider for AnthropicAdapter {
             events: vec![
                 LifecycleKind::TurnCompleted,
                 LifecycleKind::InputRequired,
+                LifecycleKind::QuestionRequested,
+                LifecycleKind::PermissionRequested,
                 LifecycleKind::BackgroundRunning,
             ],
             launch_mode: AttentionLaunchMode::SkipPermissions,

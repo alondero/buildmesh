@@ -72,12 +72,14 @@ fn hook_command(platform: Platform) -> String {
 /// signal here. Idempotent, and preserves any unrelated top-level keys the
 /// user added. Writes atomically to prevent corruption.
 fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
-    let mut settings: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("invalid agy hooks.json at {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("failed to read agy hooks.json at {}: {e}", path.display())),
+    };
     if !settings.is_object() {
-        settings = serde_json::json!({});
+        return Err(format!("agy hooks.json at {} must be a JSON object", path.display()));
     }
 
     // Stop fires the moment a turn ends. The simple shape — AGY's harness
@@ -620,6 +622,50 @@ mod tests {
                 .unwrap();
         assert!(parsed["user-tool"]["Stop"].is_array());
         assert!(parsed["buildmesh-attention"]["Stop"].is_array());
+    }
+
+    #[test]
+    fn hook_provisioning_preserves_invalid_existing_configuration() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        for original in ["{\"user-tool\":", "[]", "null", "\"user configuration\""] {
+            std::fs::write(&path, original).unwrap();
+
+            let result = ensure_hooks_json(&path, "echo callback");
+
+            assert!(result.is_err(), "must reject existing config: {original}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn hook_provisioning_preserves_non_utf8_configuration() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        let original = [0xff, 0xfe, b'{', b'}'];
+        std::fs::write(&path, original).unwrap();
+
+        let error = ensure_hooks_json(&path, "echo callback").unwrap_err();
+
+        assert!(error.contains("failed to read agy hooks.json"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn hook_provisioning_reports_unreadable_path_without_replacing_it() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        std::fs::create_dir(&path).unwrap();
+        let sentinel = path.join("user-data");
+        std::fs::write(&sentinel, "keep").unwrap();
+
+        let error = ensure_hooks_json(&path, "echo callback").unwrap_err();
+
+        assert!(error.contains("failed to read agy hooks.json"));
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep");
     }
 
     /// Issue #1367: Under `--dangerously-skip-permissions`, AGY automatically

@@ -347,6 +347,58 @@ pub(crate) fn runtime_for_spawn_path(path: &str) -> EnvType {
     }
 }
 
+/// Resolve Kimi Code's config in the environment that will execute the CLI.
+/// Guest login overrides belong to the guest, never to the Windows host.
+pub(crate) fn kimi_home_for_spawn(spawn_path: &str, distro: Option<&str>) -> Option<PathBuf> {
+    let runtime = runtime_for_spawn_path(spawn_path);
+    let path = if runtime == EnvType::Wsl {
+        let distro = distro.map(str::to_string).or_else(get_default_wsl_distro)?;
+        let mut command = command_no_window("wsl.exe");
+        command.args(["-d", &distro, "--cd", "~", "--exec", "sh", "-lc",
+            "printf '__BUILDMESH_KIMI_HOME__%s\\n' \"${KIMI_CODE_HOME:-$HOME/.kimi-code}\""]);
+        let output = crate::process_util::run_command_with_timeout(command, "WSL Kimi home", std::time::Duration::from_secs(10)).ok()?;
+        if !output.status.success() { return None; }
+        parse_marked_wsl_path(&output.stdout, "__BUILDMESH_KIMI_HOME__")?
+    } else if runtime == EnvType::WindowsInterop {
+        let command = super::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $path = if ([string]::IsNullOrWhiteSpace($env:KIMI_CODE_HOME)) { Join-Path $env:USERPROFILE '.kimi-code' } else { $env:KIMI_CODE_HOME }; [Console]::Write($path)");
+        let output = crate::process_util::run_command_with_timeout(command, "Windows Kimi home", std::time::Duration::from_secs(10)).ok()?;
+        if !output.status.success() { return None; }
+        let path = String::from_utf8(output.stdout).ok()?;
+        if !super::is_windows_path(path.trim()) { return None; }
+        PathBuf::from(path.trim())
+    } else {
+        kimi_home_from_vars(cfg!(windows), |key| env::var(key).ok())?
+    };
+    Some(PathBuf::from(super::to_host_path(&path.to_string_lossy())))
+}
+
+fn kimi_home_from_vars(windows: bool, get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    if let Some(path) = get("KIMI_CODE_HOME").filter(|path| !path.trim().is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let home = if windows { get("USERPROFILE").or_else(|| get("HOME")) } else { get("HOME") }?;
+    Some(PathBuf::from(home).join(".kimi-code"))
+}
+
+#[cfg(test)]
+mod kimi_tests {
+    use super::*;
+
+    #[test]
+    fn kimi_home_uses_runtime_override_and_native_home() {
+        let vars = |key: &str| match key {
+            "USERPROFILE" => Some("C:/Users/windows".into()),
+            "HOME" => Some("/home/linux".into()),
+            _ => None,
+        };
+        assert_eq!(kimi_home_from_vars(true, vars), Some(PathBuf::from("C:/Users/windows/.kimi-code")));
+        assert_eq!(kimi_home_from_vars(false, vars), Some(PathBuf::from("/home/linux/.kimi-code")));
+        assert_eq!(kimi_home_from_vars(false, |key| if key == "KIMI_CODE_HOME" { Some("/custom/kimi".into()) } else { vars(key) }), Some(PathBuf::from("/custom/kimi")));
+        assert_eq!(kimi_home_from_vars(false, |_| None), None);
+        assert_eq!(parse_marked_wsl_path(b"banner\n__BUILDMESH_KIMI_HOME__/custom/kimi\n", "__BUILDMESH_KIMI_HOME__"), Some(PathBuf::from("/custom/kimi")));
+    }
+}
+
 pub(crate) fn cli_dir_for_spawn(native: PathBuf, guest_relative: &str, spawn_path: &str) -> Option<PathBuf> {
     if runtime_for_spawn_path(spawn_path) == EnvType::WindowsInterop { return super::windows_cli_home(guest_relative); }
     if runtime_for_spawn_path(spawn_path) == EnvType::Wsl {

@@ -16,6 +16,11 @@ use toml_edit::{value, DocumentMut, Item, Table};
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
 
+/// Native `request_user_input` hooks were verified against Codex 0.154.0.
+/// Older binaries may accept the config but omit the callbacks Buildmesh uses
+/// to track an outstanding human question.
+const CODEX_MIN_HOOK_VERSION: &str = "0.154.0";
+
 fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,
@@ -937,7 +942,9 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
 /// Ensure `<project>/.codex/hooks.json` carries the Stop + PermissionRequest
 /// attention webhooks. Codex's matcher/event schema nests hook entries one
 /// level deeper than Claude Code's (each event maps to matcher groups, each
-/// carrying a `hooks` array — issue #884). Idempotent, and preserves any
+/// carrying a `hooks` array — issue #884). `PreToolUse` is matched to the
+/// native question tool; `PostToolUse` is catch-all so approved permissions
+/// can correlate by tool name. The helper is idempotent and preserves any
 /// unrelated top-level keys the user added.
 /// Return updated hooks JSON, or `None` when the existing document already
 /// contains the current Buildmesh handlers. The caller owns the runtime-aware
@@ -962,7 +969,7 @@ fn ensure_hooks_json_content(
     };
 
     let mut changed = false;
-    for event in ["SessionStart", "Stop", "PermissionRequest"] {
+    for event in ["SessionStart", "Stop", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Interrupt"] {
         let groups = events
             .entry(event)
             .or_insert_with(|| serde_json::json!([]));
@@ -972,6 +979,9 @@ fn ensure_hooks_json_content(
 
         let mut found = false;
         for group in groups.iter_mut() {
+            let old_post_matcher = event == "PostToolUse"
+                && group.get("matcher").and_then(|value| value.as_str())
+                    == Some("^request_user_input$");
             let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
@@ -980,12 +990,22 @@ fn ensure_hooks_json_content(
                     handlers[index] = hook.clone();
                     changed = true;
                 }
+                if old_post_matcher && handlers.iter().all(is_buildmesh_hook_handler) {
+                    if let Some(group) = group.as_object_mut() {
+                        group.remove("matcher");
+                        changed = true;
+                    }
+                }
                 found = true;
                 break;
             }
         }
         if !found {
-            groups.push(serde_json::json!({ "hooks": [hook.clone()] }));
+            let mut group = serde_json::json!({ "hooks": [hook.clone()] });
+            if event == "PreToolUse" {
+                group["matcher"] = serde_json::json!("^request_user_input$");
+            }
+            groups.push(group);
             changed = true;
         }
     }
@@ -1125,12 +1145,13 @@ impl AgentProvider for CodexAdapter {
             events: vec![
                 LifecycleKind::TurnCompleted,
                 LifecycleKind::InputRequired,
+                LifecycleKind::QuestionRequested,
                 LifecycleKind::PermissionRequested,
                 LifecycleKind::BackgroundRunning,
             ],
             launch_mode: AttentionLaunchMode::PermissionAsk,
             trust: Some("codex project trust (#1379)".into()),
-            min_version: None,
+            min_version: Some(CODEX_MIN_HOOK_VERSION.into()),
         }
     }
 
@@ -1659,6 +1680,11 @@ mod tests {
     fn codex_declares_attention_hook_and_readable_transcript() {
         assert!(CODEX.requires_attention_hook());
         assert!(CODEX.produces_readable_transcript());
+        let crate::agent::capabilities::AttentionCapability::Hook { events, min_version, .. } = CODEX.attention_capability() else {
+            panic!("Codex must expose native hook capability");
+        };
+        assert!(events.contains(&crate::agent::session_lifecycle::LifecycleKind::QuestionRequested));
+        assert_eq!(min_version.as_deref(), Some(CODEX_MIN_HOOK_VERSION));
     }
 
     fn read_hooks_json(project: &Path) -> serde_json::Value {
@@ -1682,7 +1708,10 @@ mod tests {
 
     /// Injection writes both files: the feature flag and the SessionStart +
     /// Stop + PermissionRequest webhooks in Codex's nested matcher/event
-    /// schema, POSTing the hook's stdin to the attention endpoint.
+    /// schema, POSTing the hook's stdin to the attention endpoint. The
+    /// request_user_input pre-hook remains narrowly matched, while
+    /// PostToolUse is catch-all so an approved permission for any tool can
+    /// clear its marker before the terminal Stop fallback.
     #[test]
     fn inject_writes_config_and_hooks() {
         let temp = TempDir::new().unwrap();
@@ -1694,7 +1723,7 @@ mod tests {
         assert!(config.contains("hooks = true"), "config: {config}");
 
         let hooks = read_hooks_json(temp.path());
-        for event in ["SessionStart", "Stop", "PermissionRequest"] {
+        for event in ["SessionStart", "Stop", "PermissionRequest", "PreToolUse", "PostToolUse"] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
@@ -1706,6 +1735,14 @@ mod tests {
                 command.contains("--data-binary @-"),
                 "{event} must forward the hook stdin as the POST body: {command}"
             );
+            if event == "PreToolUse" {
+                assert_eq!(hooks["hooks"][event][0]["matcher"].as_str(), Some("^request_user_input$"));
+            } else if event == "PostToolUse" {
+                assert!(
+                    hooks["hooks"][event][0].get("matcher").is_none(),
+                    "PostToolUse must be catch-all so approved permissions correlate"
+                );
+            }
         }
     }
 
@@ -1819,6 +1856,29 @@ mod tests {
                 .iter()
                 .any(is_buildmesh_hook_handler)
         }));
+    }
+
+    #[test]
+    fn inject_migrates_old_post_tool_matcher_to_catch_all() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let old_hook = attention_hook_handler(42);
+        let old = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "^request_user_input$",
+                    "hooks": [old_hook]
+                }]
+            }
+        });
+        std::fs::write(codex_dir.join("hooks.json"), serde_json::to_string(&old).unwrap())
+            .unwrap();
+
+        provision_codex(temp.path());
+
+        let hooks = read_hooks_json(temp.path());
+        assert!(hooks["hooks"]["PostToolUse"][0].get("matcher").is_none());
     }
 
     #[test]

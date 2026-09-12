@@ -1,4 +1,24 @@
 use super::inject_attention_hook;
+
+#[test]
+fn attention_hook_covers_question_lifecycle_and_bounds_delivery_time() {
+    let temp = TempDir::new().unwrap();
+    inject_attention_hook(temp.path()).unwrap();
+    let settings = read_injected_settings(temp.path());
+    for event in ["Elicitation", "ElicitationResult", "StopFailure", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+        let group = &settings["hooks"][event][0];
+        let command = group["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("--max-time 2"), "{event}");
+        assert!(command.contains("--data-binary @-"), "{event}");
+        if matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure") {
+            assert_eq!(group["matcher"], "^(AskUserQuestion|ExitPlanMode)$");
+        }
+    }
+    assert!(
+        settings["hooks"]["PermissionRequest"].is_null(),
+        "Claude runs with bypassed permissions; do not provision a dead PermissionRequest hook"
+    );
+}
 use tempfile::TempDir;
 
 fn read_injected_settings(project: &std::path::Path) -> serde_json::Value {
@@ -328,9 +348,7 @@ fn attention_hook_refuses_to_overwrite_malformed_user_file() {
     std::fs::write(&path, malformed).unwrap();
 
     let result = inject_attention_hook(temp.path());
-    let err = result
-        .err()
-        .expect("provision must refuse a malformed existing file");
+    let err = result.expect_err("provision must refuse a malformed existing file");
     assert!(
         err.contains("malformed"),
         "Err message must explain the refusal; got {err}"

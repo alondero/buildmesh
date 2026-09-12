@@ -18,6 +18,9 @@ use crate::agent::session_lifecycle::{
 /// Records every status write and event emit.
 #[derive(Default)]
 pub struct RecordingSink {
+    status: RefCell<Option<SessionStatus>>,
+    fail_writes: bool,
+    effects: RefCell<Vec<&'static str>>,
     writes: RefCell<Vec<(i64, SessionStatus)>>,
     writes_if: RefCell<Vec<(i64, SessionStatus, SessionStatus)>>,
     writes_unless: RefCell<Vec<(i64, SessionStatus, Vec<SessionStatus>)>>,
@@ -37,6 +40,22 @@ pub struct RecordingSink {
 impl RecordingSink {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_status(status: SessionStatus) -> Self {
+        Self { status: RefCell::new(Some(status)), ..Self::default() }
+    }
+
+    pub fn failing_writes() -> Self {
+        Self { fail_writes: true, ..Self::default() }
+    }
+
+    pub fn status(&self) -> Option<SessionStatus> {
+        *self.status.borrow()
+    }
+
+    pub fn effects(&self) -> Vec<&'static str> {
+        self.effects.borrow().clone()
     }
 
     pub fn writes(&self) -> Vec<(i64, SessionStatus)> {
@@ -101,6 +120,14 @@ impl SessionLifecycleSink for RecordingSink {
         self.writes_unless
             .borrow_mut()
             .push((node_id, new, forbidden.to_vec()));
+        if self.fail_writes {
+            return Err("status write failed".into());
+        }
+        if self.status.borrow().as_ref().is_some_and(|status| forbidden.contains(status)) {
+            return Ok(false);
+        }
+        *self.status.borrow_mut() = Some(new);
+        self.effects.borrow_mut().push("status-written");
         Ok(true)
     }
 
@@ -126,6 +153,11 @@ impl SessionLifecycleSink for RecordingSink {
 
     fn emit_attention_cleared(&self, node_id: i64) {
         self.attention_cleared.borrow_mut().push(node_id);
+        self.effects.borrow_mut().push("attention-cleared");
+    }
+
+    fn disarm_attention_autoclear(&self, _node_id: i64) {
+        self.effects.borrow_mut().push("autoclear-disarmed");
     }
 
     fn emit_resume_failed(&self, node_id: i64, reason: &str) {
@@ -136,5 +168,6 @@ impl SessionLifecycleSink for RecordingSink {
 
     fn emit_lifecycle_changed(&self, payload: LifecycleChangedPayload) {
         self.lifecycle_changed.borrow_mut().push(payload);
+        self.effects.borrow_mut().push("lifecycle-emitted");
     }
 }
