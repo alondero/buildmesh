@@ -166,6 +166,38 @@ pub fn create_agent_node(
             .map(|path| crate::env::resolve_raw_path(path).env_type).unwrap_or(env)
     });
     let db = write_conn();
+    create_agent_node_inner(
+        &db, mesh_id, name, path, branch, env, provider,
+        worktree_name, source_issue, source_pr, source_pr_pinned_sha,
+        use_worktree, head_repo_owner, head_repo_clone_url, worktree_path,
+    )
+}
+
+/// Per-test isolated variant of [`create_agent_node`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB.
+pub(crate) fn create_agent_node_inner(
+    db: &Connection,
+    mesh_id: i64,
+    name: &str,
+    path: &str,
+    branch: &str,
+    env: EnvType,
+    provider: &str,
+    worktree_name: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    use_worktree: bool,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    worktree_path: Option<&str>,
+) -> SqlResult<AgentNode> {
+    let env = crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
+        worktree_path.filter(|path| use_worktree && !path.trim().is_empty())
+            .map(|path| crate::env::resolve_raw_path(path).env_type).unwrap_or(env)
+    });
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
     let next_position: i64 = db.query_row(
@@ -206,7 +238,7 @@ pub fn create_agent_node(
         ],
     )?;
     let id = db.last_insert_rowid();
-    get_agent_node_by_id_inner(&db, id)
+    get_agent_node_by_id_inner(db, id)
 }
 
 /// Persist new grid positions for a batch of agent nodes (drag-to-reorder).

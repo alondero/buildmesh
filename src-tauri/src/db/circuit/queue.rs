@@ -48,6 +48,15 @@ pub(crate) fn list_queued_circuit_runs_inner(
 /// the front/back boundary. Running and terminal rows cannot be reordered.
 pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<bool> {
     let mut db = crate::db::write_conn();
+    move_queued_circuit_run_inner(&mut db, run_id, toward_front)
+}
+
+/// Per-test isolated variant of [`move_queued_circuit_run`] (issue #1691).
+pub(crate) fn move_queued_circuit_run_inner(
+    db: &mut Connection,
+    run_id: i64,
+    toward_front: bool,
+) -> SqlResult<bool> {
     let tx = db.transaction()?;
     let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
         "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
@@ -97,6 +106,15 @@ pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<boo
 /// (worker promoted/cancelled it between render and command).
 pub fn move_queued_circuit_run_to_edge(run_id: i64, to_front: bool) -> SqlResult<bool> {
     let mut db = crate::db::write_conn();
+    move_queued_circuit_run_to_edge_inner(&mut db, run_id, to_front)
+}
+
+/// Per-test isolated variant of [`move_queued_circuit_run_to_edge`] (issue #1691).
+pub(crate) fn move_queued_circuit_run_to_edge_inner(
+    db: &mut Connection,
+    run_id: i64,
+    to_front: bool,
+) -> SqlResult<bool> {
     let tx = db.transaction()?;
     let Some((mesh_id, position)): Option<(i64, i64)> = tx.query_row(
         "SELECT mesh_id, queue_position FROM autopilot_circuit_runs \
@@ -139,6 +157,16 @@ pub fn move_queued_circuit_run_to_edge(run_id: i64, to_front: bool) -> SqlResult
 /// moves, so subsets and stale ids abort with a domain error asking the
 /// caller to refresh. Returns the number of rows repositioned.
 pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> Result<usize, String> {
+    let mut db = crate::db::write_conn();
+    reorder_queued_circuit_runs_inner(&mut db, mesh_id, ordered_run_ids)
+}
+
+/// Per-test isolated variant of [`reorder_queued_circuit_runs`] (issue #1691).
+pub(crate) fn reorder_queued_circuit_runs_inner(
+    db: &mut Connection,
+    mesh_id: i64,
+    ordered_run_ids: &[i64],
+) -> Result<usize, String> {
     if ordered_run_ids.is_empty() {
         return Ok(0);
     }
@@ -152,7 +180,6 @@ pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> Res
             }
         }
     }
-    let mut db = crate::db::write_conn();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     // The full pending set for this mesh: the payload must match it exactly
     // or positions would collide with rows the caller did not pass.

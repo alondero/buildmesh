@@ -91,7 +91,16 @@ pub(crate) use agent_node::{
 };
 
 #[cfg(test)]
-pub(crate) use agent_node::adopt_manual_pool_slug_inner;
+pub(crate) use agent_node::{
+    adopt_manual_pool_slug_inner,
+    create_agent_node_inner,
+};
+
+#[cfg(test)]
+pub(crate) use mesh::{
+    create_mesh_inner,
+    delete_mesh_inner,
+};
 
 #[allow(unused_imports)]
 pub(crate) use warm_pool::{

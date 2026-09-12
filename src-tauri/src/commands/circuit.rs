@@ -547,7 +547,20 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
 /// commit (`drive_run`'s context seeding).
 #[command]
 pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
-    let circuit = crate::db::get_autopilot_circuit(circuit_id)
+    let mut db = crate::db::write_conn();
+    trigger_circuit_now_locked(&mut db, circuit_id)
+}
+
+/// Per-test isolated variant of [`trigger_circuit_now`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&mut Connection` so parallel tests can each
+/// operate against their own in-memory DB. Production callers go
+/// through the public function; tests use this one.
+pub fn trigger_circuit_now_locked(
+    conn: &mut rusqlite::Connection,
+    circuit_id: i64,
+) -> Result<i64, String> {
+    let circuit = crate::db::circuit::get_autopilot_circuit_inner(conn, circuit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
@@ -573,9 +586,11 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     context.with_app_reviewer_provider();
-    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
+    let action =
+        crate::services::autopilot::configured_action_on_success_inner(conn, circuit.mesh_id);
     context.with_autopilot_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::create_circuit_run(
+    let run_id = crate::db::circuit::create_circuit_run_inner(
+        conn,
         circuit.id,
         circuit.mesh_id,
         &identity,
