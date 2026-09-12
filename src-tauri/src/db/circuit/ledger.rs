@@ -615,14 +615,14 @@ pub fn create_circuit_run(
     context_json: &str,
 ) -> SqlResult<i64> {
     let mut db = crate::db::write_conn();
-    create_circuit_run_inner(&mut db, circuit_id, mesh_id, trigger_identity, context_json)
+    create_circuit_run_locked(&mut db, circuit_id, mesh_id, trigger_identity, context_json)
 }
 
 /// Per-test isolated variant of [`create_circuit_run`] (issue #1691).
-/// The public function locks the process-global writer; this helper
-/// takes an explicit `&Connection` so parallel tests can each operate
-/// against their own in-memory DB.
-pub(crate) fn create_circuit_run_inner(
+/// Opens its own transaction on `db`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn create_circuit_run_locked(
     db: &mut Connection,
     circuit_id: i64,
     mesh_id: i64,

@@ -48,11 +48,14 @@ pub(crate) fn list_queued_circuit_runs_inner(
 /// the front/back boundary. Running and terminal rows cannot be reordered.
 pub fn move_queued_circuit_run(run_id: i64, toward_front: bool) -> SqlResult<bool> {
     let mut db = crate::db::write_conn();
-    move_queued_circuit_run_inner(&mut db, run_id, toward_front)
+    move_queued_circuit_run_locked(&mut db, run_id, toward_front)
 }
 
 /// Per-test isolated variant of [`move_queued_circuit_run`] (issue #1691).
-pub(crate) fn move_queued_circuit_run_inner(
+/// Opens its own transaction on `db`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn move_queued_circuit_run_locked(
     db: &mut Connection,
     run_id: i64,
     toward_front: bool,
@@ -106,11 +109,14 @@ pub(crate) fn move_queued_circuit_run_inner(
 /// (worker promoted/cancelled it between render and command).
 pub fn move_queued_circuit_run_to_edge(run_id: i64, to_front: bool) -> SqlResult<bool> {
     let mut db = crate::db::write_conn();
-    move_queued_circuit_run_to_edge_inner(&mut db, run_id, to_front)
+    move_queued_circuit_run_to_edge_locked(&mut db, run_id, to_front)
 }
 
 /// Per-test isolated variant of [`move_queued_circuit_run_to_edge`] (issue #1691).
-pub(crate) fn move_queued_circuit_run_to_edge_inner(
+/// Opens its own transaction on `db`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn move_queued_circuit_run_to_edge_locked(
     db: &mut Connection,
     run_id: i64,
     to_front: bool,
@@ -158,11 +164,14 @@ pub(crate) fn move_queued_circuit_run_to_edge_inner(
 /// caller to refresh. Returns the number of rows repositioned.
 pub fn reorder_queued_circuit_runs(mesh_id: i64, ordered_run_ids: &[i64]) -> Result<usize, String> {
     let mut db = crate::db::write_conn();
-    reorder_queued_circuit_runs_inner(&mut db, mesh_id, ordered_run_ids)
+    reorder_queued_circuit_runs_locked(&mut db, mesh_id, ordered_run_ids)
 }
 
 /// Per-test isolated variant of [`reorder_queued_circuit_runs`] (issue #1691).
-pub(crate) fn reorder_queued_circuit_runs_inner(
+/// Opens its own transaction on `db`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn reorder_queued_circuit_runs_locked(
     db: &mut Connection,
     mesh_id: i64,
     ordered_run_ids: &[i64],

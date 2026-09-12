@@ -37,7 +37,7 @@ pub(crate) use leases::{
     prune_terminal_circuit_runs_older_than_inner,
     release_circuit_agent_cleanup_inner,
     release_circuit_agent_spawn_inner,
-    reserve_circuit_agent_slots_inner,
+    reserve_circuit_agent_slots_locked,
 };
 
 #[cfg(test)]
@@ -48,7 +48,7 @@ pub(crate) use ledger::{
     count_active_circuit_runs_inner,
     count_running_circuit_steps_inner,
     create_autopilot_circuit_inner,
-    create_circuit_run_inner,
+    create_circuit_run_locked,
     create_node_circuit_run_locked,
     delete_autopilot_circuit_locked,
     get_autopilot_circuit_inner,
@@ -72,9 +72,9 @@ pub(crate) use ledger::{
 
 #[cfg(test)]
 pub(crate) use queue::{
-    move_queued_circuit_run_inner,
-    move_queued_circuit_run_to_edge_inner,
-    reorder_queued_circuit_runs_inner,
+    move_queued_circuit_run_locked,
+    move_queued_circuit_run_to_edge_locked,
+    reorder_queued_circuit_runs_locked,
 };
 
 use crate::db::SqlResult;

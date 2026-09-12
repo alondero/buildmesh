@@ -170,9 +170,11 @@ pub fn create_agent_node(
     )
 }
 
-/// Resolve the spawn `EnvType` once per call so the public function and
-/// the per-test helper share the same logic instead of duplicating the
-/// harness-runtime fallback (issue #1691 review cleanup).
+/// Resolve the spawn `EnvType` from the harness config, the resolved
+/// worktree path, and the caller-supplied default. Shared by
+/// [`create_agent_node`] and [`create_agent_node_inner`] so the
+/// harness-runtime fallback is computed once per call rather than
+/// duplicated between the public wrapper and the per-test helper.
 fn resolve_spawn_env(
     provider: &str,
     worktree_path: Option<&str>,
@@ -192,9 +194,12 @@ fn resolve_spawn_env(
 /// takes an explicit `&Connection` so parallel tests can each operate
 /// against their own in-memory DB.
 ///
-/// `env` is the *resolved* spawn environment — the caller must run
-/// [`resolve_spawn_env`] first so the helper does not duplicate the
-/// harness-runtime fallback.
+/// `env` is the *resolved* spawn environment. Production callers
+/// ([`create_agent_node`]) run [`resolve_spawn_env`] first because the
+/// env depends on the harness config and worktree path; test callers
+/// pass the env directly because the test knows the env it wants and
+/// does not need harness-runtime fallback.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_agent_node_inner(
     db: &Connection,
     mesh_id: i64,

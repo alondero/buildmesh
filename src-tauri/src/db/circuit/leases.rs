@@ -12,11 +12,14 @@ use crate::db::SqlResult;
 /// an upgrade.
 pub fn reserve_circuit_agent_slots(run_id: i64, slots: i64) -> SqlResult<bool> {
     let mut db = crate::db::write_conn();
-    reserve_circuit_agent_slots_inner(&mut db, run_id, slots)
+    reserve_circuit_agent_slots_locked(&mut db, run_id, slots)
 }
 
 /// Per-test isolated variant of [`reserve_circuit_agent_slots`] (issue #1691).
-pub(crate) fn reserve_circuit_agent_slots_inner(
+/// Opens its own transaction on `conn`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn reserve_circuit_agent_slots_locked(
     conn: &mut Connection,
     run_id: i64,
     slots: i64,

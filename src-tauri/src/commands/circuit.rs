@@ -603,7 +603,7 @@ pub fn trigger_circuit_now_locked(
     let action =
         crate::services::autopilot::configured_action_on_success_inner(conn, circuit.mesh_id);
     context.with_autopilot_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::circuit::create_circuit_run_inner(
+    let run_id = crate::db::circuit::create_circuit_run_locked(
         conn,
         circuit.id,
         circuit.mesh_id,
