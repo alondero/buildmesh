@@ -525,8 +525,15 @@ pub(crate) fn set_autopilot_circuit_enabled_inner(
 /// `[floor, ceiling]` range; this accessor only writes. Errors when the
 /// row doesn't exist so a stale editor can't silently no-op. `updated_at`
 /// stamps so the Probe list shows fresh edit times.
-pub fn set_autopilot_circuit_concurrency_limit(id: i64, concurrency_limit: i64) -> SqlResult<()> {
-    let db = crate::db::write_conn();
+///
+/// Takes an explicit connection (issue #1691): the command already holds
+/// the writer guard for the read that derives the blueprint, so this shares
+/// that connection rather than re-locking the process-global writer.
+pub(crate) fn set_autopilot_circuit_concurrency_limit_inner(
+    db: &Connection,
+    id: i64,
+    concurrency_limit: i64,
+) -> SqlResult<()> {
     let changed = db.execute(
         "UPDATE autopilot_circuits SET concurrency_limit = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, concurrency_limit],
