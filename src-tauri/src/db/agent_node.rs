@@ -161,10 +161,7 @@ pub fn create_agent_node(
     head_repo_clone_url: Option<&str>,
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
-    let env = crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
-        worktree_path.filter(|path| use_worktree && !path.trim().is_empty())
-            .map(|path| crate::env::resolve_raw_path(path).env_type).unwrap_or(env)
-    });
+    let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
     let db = write_conn();
     create_agent_node_inner(
         &db, mesh_id, name, path, branch, env, provider,
@@ -173,10 +170,31 @@ pub fn create_agent_node(
     )
 }
 
+/// Resolve the spawn `EnvType` once per call so the public function and
+/// the per-test helper share the same logic instead of duplicating the
+/// harness-runtime fallback (issue #1691 review cleanup).
+fn resolve_spawn_env(
+    provider: &str,
+    worktree_path: Option<&str>,
+    use_worktree: bool,
+    default: EnvType,
+) -> EnvType {
+    crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
+        worktree_path
+            .filter(|path| use_worktree && !path.trim().is_empty())
+            .map(|path| crate::env::resolve_raw_path(path).env_type)
+            .unwrap_or(default)
+    })
+}
+
 /// Per-test isolated variant of [`create_agent_node`] (issue #1691).
 /// The public function locks the process-global writer; this helper
 /// takes an explicit `&Connection` so parallel tests can each operate
 /// against their own in-memory DB.
+///
+/// `env` is the *resolved* spawn environment — the caller must run
+/// [`resolve_spawn_env`] first so the helper does not duplicate the
+/// harness-runtime fallback.
 pub(crate) fn create_agent_node_inner(
     db: &Connection,
     mesh_id: i64,
@@ -194,10 +212,6 @@ pub(crate) fn create_agent_node_inner(
     head_repo_clone_url: Option<&str>,
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
-    let env = crate::preferences::harness_runtime(provider).unwrap_or_else(|| {
-        worktree_path.filter(|path| use_worktree && !path.trim().is_empty())
-            .map(|path| crate::env::resolve_raw_path(path).env_type).unwrap_or(env)
-    });
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
     let next_position: i64 = db.query_row(

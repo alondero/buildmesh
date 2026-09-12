@@ -547,8 +547,18 @@ pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
 /// commit (`drive_run`'s context seeding).
 #[command]
 pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
-    let mut db = crate::db::write_conn();
-    trigger_circuit_now_locked(&mut db, circuit_id)
+    // Three-phase discipline (CLAUDE.md hard rule): all DB writes under
+    // the writer mutex, then drop the guard before any signal/IO. The
+    // worker wake signals a condvar other DB callers can park on; firing
+    // it while holding the writer mutex would deadlock any reader pool
+    // checkout that races the wake against the next commit.
+    let run_id = {
+        let mut db = crate::db::write_conn();
+        trigger_circuit_now_locked(&mut db, circuit_id)?
+    };
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
+    Ok(run_id)
 }
 
 /// Per-test isolated variant of [`trigger_circuit_now`] (issue #1691).
@@ -556,6 +566,10 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
 /// takes an explicit `&mut Connection` so parallel tests can each
 /// operate against their own in-memory DB. Production callers go
 /// through the public function; tests use this one.
+///
+/// Does NOT wake the circuit worker — the caller must drop the writer
+/// mutex first so the wake's condvar signal doesn't deadlock concurrent
+/// reader-pool checkouts (CLAUDE.md three-phase pattern).
 pub fn trigger_circuit_now_locked(
     conn: &mut rusqlite::Connection,
     circuit_id: i64,
@@ -597,8 +611,6 @@ pub fn trigger_circuit_now_locked(
         &context.to_json()?,
     )
     .map_err(|e| e.to_string())?;
-    crate::services::circuit_worker::wake_circuit_worker();
-    tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
     Ok(run_id)
 }
 

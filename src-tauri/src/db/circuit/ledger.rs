@@ -65,19 +65,19 @@ pub fn create_node_circuit_run(
     max_rounds: i32,
     reviewer_provider: Option<String>,
 ) -> Result<i64, String> {
-    let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
-        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_override,
+        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider,
     )
 }
 
 /// Per-test isolated variant of [`create_node_circuit_run`] (issue #1691).
 /// The public function locks the process-global writer; this helper
-/// takes an explicit `&Connection` so parallel tests can each operate
-/// against their own in-memory DB. `reviewer_provider` is normalised
-/// the same way the public function does (a bare `terminal` is rejected
-/// before any DB work happens).
+/// takes an explicit `&mut Connection` so parallel tests can each
+/// operate against their own in-memory DB. `reviewer_provider` is
+/// normalised *inside* the helper so the validation is not duplicated
+/// between the public wrapper and the test path (issue #1691 review
+/// cleanup) — a bare `terminal` is rejected before any DB work happens.
 pub(crate) fn create_node_circuit_run_locked(
     db: &mut Connection,
     node_id: i64,

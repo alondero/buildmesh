@@ -428,7 +428,9 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     set_autopilot_circuit_enabled_inner(&conn, created.id, true).unwrap();
 
     {
-        // (using outer conn)
+        // Re-running the migration against the in-memory DB must be a no-op
+        // for circuit rows (no drops, no resets), so an enabled circuit
+        // survives restarts.
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 
@@ -876,10 +878,10 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         None,
     )
     .unwrap();
-    // Both helpers below are global (not mesh-scoped). The shared
-    // process-global DB holds other tests' rows too, so assert the
-    // *delta* this test contributes rather than an absolute total —
-    // see buildmesh-gh1655-circuit-tests-isolation.
+    // Both helpers below are global (not mesh-scoped). With the
+    // per-test in-memory DB (issue #1691), this test's own rows are
+    // the only ones visible to it, so the delta equals the absolute
+    // count this test contributes.
     let active_before = count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap();
     set_circuit_step_agent_node_with_parent_inner(&conn, run_id, "spawn", agent.id, None).unwrap();
     assert_eq!(
@@ -982,8 +984,9 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     .unwrap();
 
     delete_autopilot_circuit_locked(&mut conn, circuit.id).unwrap();
-    // The shared process-global DB holds other tests' rows too — count
-    // only this circuit's descendants.
+    // With the per-test in-memory DB (issue #1691), the only rows
+    // visible to this test are the ones it created — so counting
+    // `this circuit's descendants` is just counting all descendants.
     let remaining_runs: i64 = {
         // (using outer conn)
         conn.query_row(
@@ -1062,10 +1065,10 @@ fn concurrency_counters_count_only_running_work() {
     let c2 = create_autopilot_circuit_inner(&conn, mesh_a.id, "two", "", 4, "{}").unwrap();
     let cb = create_autopilot_circuit_inner(&conn, mesh_b.id, "bee", "", 4, "{}").unwrap();
 
-    // `count_active_circuit_agent_nodes_total` is global. The shared
-    // process-global DB holds other tests' rows too, so capture the
-    // baseline BEFORE we add anything and assert the *delta* (3 distinct
-    // agents — 101, 102, 999) rather than an absolute total — see
+    // `count_active_circuit_agent_nodes_total` is global. With the
+    // per-test in-memory DB (issue #1691), this test's rows are the
+    // only ones visible to it, so the delta equals the absolute count
+    // we just contributed (3 distinct agents — 101, 102, 999).
     // buildmesh-gh1655-circuit-tests-isolation.
     let active_before = count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap();
 
@@ -1158,10 +1161,10 @@ let r2 = create_circuit_run_inner(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap(
 // Run-level admission gate (issue #1467).
 // ---------------------------------------------------------------------------
 
-/// `running`/`paused` runs count as admitted; `pending` runs do NOT
-/// (the gate's job is exactly to decide whether a pending run gets to
+/// `running`/`paused` runs count as admitted; `pending` runs do NOT.
+/// The gate's job is exactly to decide whether a pending run gets to
 /// become running — if it counted, every pending run would see itself
-/// + peers and the gate would deadlock). This is the contract that
+/// plus peers and the gate would deadlock. This is the contract that
 /// lets the worker treat admission as a per-run counter, distinct
 /// from the per-agent-node counter.
 #[test]
@@ -1302,8 +1305,9 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     commit_circuit_advance_locked(&mut conn, done, Some("completed"), Some("{}"), &[]).unwrap();
     let live = create_circuit_run_inner(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
 
-    // The shared process-global DB holds other tests' runs too — scope
-    // the assertion to this circuit.
+    // With the per-test in-memory DB (issue #1691), the only runs
+    // visible to this test are the two we just created — the
+    // scope-to-this-circuit filter is now belt-and-suspenders.
     let active = list_active_circuit_runs_inner(&conn, )
         .unwrap()
         .into_iter()
@@ -1361,8 +1365,10 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     set_autopilot_circuit_enabled_inner(&conn, on_a.id, true).unwrap();
     set_autopilot_circuit_enabled_inner(&conn, on_b.id, true).unwrap();
 
-    // The shared process-global DB holds other tests' circuits — scope
-    // to the ids this test created.
+    // With the per-test in-memory DB (issue #1691), the only circuits
+    // visible to this test are the three we just created. The id
+    // filter is now belt-and-suspenders against future test additions
+    // that might inadvertently create a fourth enabled circuit.
     let listed: Vec<i64> = list_enabled_circuits_inner(&conn, )
         .unwrap()
         .into_iter()
@@ -1619,8 +1625,8 @@ fn paused_runs_stay_active_and_counters_count_them() {
     .unwrap();
 
     // Pause the run: it must stay in the active list and keep counting.
-    // (The ledger DB is process-global across this module's tests, so
-    // scope the assertion to this circuit rather than the whole table.)
+    // With the per-test in-memory DB (issue #1691), the only run visible
+    // to this test is `r1`; the circuit-scoped filter is belt-and-suspenders.
     set_circuit_run_state_inner(&conn, r1, "paused").unwrap();
     let active = list_active_circuit_runs_inner(&conn, ).unwrap();
     let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
