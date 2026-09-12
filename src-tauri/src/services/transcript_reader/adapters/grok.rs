@@ -154,10 +154,13 @@ pub(crate) fn grok_locator_in(
             .find(|path| path.is_file())
     };
     find(node_path).or_else(|| {
-        // Windows resolves mixed separators before Grok encodes its cwd.
-        // Keep exact lookup first and never rewrite POSIX guest paths.
-        env::is_windows_path(node_path)
-            .then(|| find(&node_path.replace('/', "\\")))
+        // Windows resolves mixed separators and trims trailing separators
+        // before Grok encodes its cwd. Keep exact lookup first and never
+        // rewrite POSIX guest paths. Avoid a duplicate probe for an already
+        // canonical Windows path.
+        (env::is_windows_path(node_path)
+            && (node_path.contains('/') || node_path.ends_with('\\')))
+            .then(|| find(node_path.replace('/', "\\").trim_end_matches('\\')))
             .flatten()
     })
 }
@@ -278,7 +281,7 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
                 text: truncate(&text, MAX_TURN_TEXT),
                 tool_calls,
             };
-            if !turn.text.is_empty() {
+            if !turn.text.trim().is_empty() {
                 last_assistant_message = Some(turn.text.clone());
             }
             push_bounded(&mut turns, turn, keep);
@@ -309,13 +312,13 @@ mod tests {
     fn native_tool_calls_decode_arguments_without_exposing_reasoning() {
         let parsed = parse_grok_turns([
             r#"{"type":"reasoning","content":"private"}"#.to_string(),
-            r#"{"type":"assistant","content":"","tool_calls":[{"name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}]}"#.to_string(),
+            r#"{"type":"assistant","content":"Reading the file.","tool_calls":[{"name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}]}"#.to_string(),
             r#"{"type":"tool_result","content":"file contents"}"#.to_string(),
         ].into_iter(), 10);
         assert_eq!(parsed.turns.len(), 1);
         assert_eq!(parsed.turns[0].tool_calls[0].name, "read_file");
         assert_eq!(parsed.turns[0].tool_calls[0].input, serde_json::json!({"path": "src/lib.rs"}));
-        assert!(parsed.last_assistant_message.is_none());
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Reading the file."));
     }
 
     #[test]

@@ -2066,11 +2066,10 @@ mod tests {
         assert!(content.ends_with('…'), "large args body must be truncated");
     }
 
-    /// `grok_locator_in` prefers `chat_history.jsonl` over `updates.jsonl`
-    /// when both exist (chat_history is the primary conversation log).
-    /// Layout: `<sessions_root>/<urlencoded-cwd>/<id>/{chat_history.jsonl,
-    /// updates.jsonl}`. Passing an empty `node_path` leaves the cwd segment
-    /// empty so the session id sits directly under `sessions_root`.
+    /// A native Grok completion is readable through the circuit report seam
+    /// even when the persisted Windows cwd uses mixed separators. User and
+    /// tool-result records do not advance the assistant revision; a later
+    /// assistant response with identical text does.
     #[test]
     fn grok_native_transcript_recovers_circuit_report() {
         let temp = tempfile::tempdir().unwrap();
@@ -2102,9 +2101,14 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
         let file = session.join("chat_history.jsonl");
         std::fs::write(&file, "{}\n").unwrap();
-        assert_eq!(super::adapters::grok::grok_locator_in(temp.path(), "session-99", r"F:\src\repo/.claude/worktrees/task"), Some(file));
+        assert_eq!(super::adapters::grok::grok_locator_in(temp.path(), "session-99", r"F:\src\repo/.claude/worktrees/task/"), Some(file));
     }
 
+    /// `grok_locator_in` prefers `chat_history.jsonl` over `updates.jsonl`
+    /// when both exist (chat_history is the primary conversation log).
+    /// Layout: `<sessions_root>/<urlencoded-cwd>/<id>/{chat_history.jsonl,
+    /// updates.jsonl}`. Passing an empty `node_path` leaves the cwd segment
+    /// empty so the session id sits directly under `sessions_root`.
     #[test]
     fn grok_locator_prefers_chat_history_over_updates() {
         let suffix = std::process::id();
