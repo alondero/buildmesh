@@ -979,6 +979,9 @@ fn ensure_hooks_json_content(
 
         let mut found = false;
         for group in groups.iter_mut() {
+            let old_post_matcher = event == "PostToolUse"
+                && group.get("matcher").and_then(|value| value.as_str())
+                    == Some("^request_user_input$");
             let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
@@ -986,6 +989,12 @@ fn ensure_hooks_json_content(
                 if handlers[index] != *hook {
                     handlers[index] = hook.clone();
                     changed = true;
+                }
+                if old_post_matcher && handlers.iter().all(is_buildmesh_hook_handler) {
+                    if let Some(group) = group.as_object_mut() {
+                        group.remove("matcher");
+                        changed = true;
+                    }
                 }
                 found = true;
                 break;
@@ -1847,6 +1856,29 @@ mod tests {
                 .iter()
                 .any(is_buildmesh_hook_handler)
         }));
+    }
+
+    #[test]
+    fn inject_migrates_old_post_tool_matcher_to_catch_all() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let old_hook = attention_hook_handler(42);
+        let old = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "^request_user_input$",
+                    "hooks": [old_hook]
+                }]
+            }
+        });
+        std::fs::write(codex_dir.join("hooks.json"), serde_json::to_string(&old).unwrap())
+            .unwrap();
+
+        provision_codex(temp.path());
+
+        let hooks = read_hooks_json(temp.path());
+        assert!(hooks["hooks"]["PostToolUse"][0].get("matcher").is_none());
     }
 
     #[test]
