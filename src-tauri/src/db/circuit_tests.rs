@@ -427,6 +427,69 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
 }
 
 #[test]
+fn set_autopilot_circuit_concurrency_limit_persists_and_errors_on_missing() {
+    // The canvas editor's per-circuit step-slot control. Only
+    // `concurrency_limit` changes; every other column is untouched.
+    let conn = isolated_test_conn();
+    let mesh =
+        create_mesh_inner(&conn, "circuit-set-concurrency-mesh", "/tmp/circuit-set-concurrency").unwrap();
+    let created =
+        create_autopilot_circuit_inner(&conn, mesh.id, "tunable", "desc", 2, &sample_graph_json()).unwrap();
+
+    set_autopilot_circuit_concurrency_limit_inner(&conn, created.id, 5).unwrap();
+    let reloaded = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    assert_eq!(reloaded.concurrency_limit, 5);
+    assert_eq!(reloaded.name, "tunable");
+    assert_eq!(reloaded.description, "desc");
+    assert!(!reloaded.enabled, "a budget change must not flip the draft-first flag");
+
+    // A stale editor writing against a deleted circuit must error.
+    let missing = set_autopilot_circuit_concurrency_limit_inner(&conn, 999_999, 3);
+    assert!(missing.is_err());
+}
+
+#[test]
+fn update_circuit_concurrency_limit_clamps_by_blueprint_and_errors_on_missing() {
+    // Exercises the command's locked seam directly (not just its DB
+    // primitive): the blueprint floor must be applied and the returned row
+    // must report the clamped value.
+    let mut conn = isolated_test_conn();
+    let mesh =
+        create_mesh_inner(&conn, "circuit-cmd-concurrency-mesh", "/tmp/circuit-cmd-concurrency").unwrap();
+    let review_graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
+        .to_json()
+        .unwrap();
+    // Persist a 1-slot review circuit — the legacy state the floor exists to
+    // prevent. The command must clamp it up to 2 on the next write.
+    let created =
+        create_autopilot_circuit_inner(&conn, mesh.id, "review-loop", "", 1, &review_graph).unwrap();
+
+    let updated = crate::commands::circuit::update_circuit_concurrency_limit_locked(
+        &mut conn,
+        created.id,
+        1,
+    )
+    .unwrap();
+    assert_eq!(updated.concurrency_limit, 2);
+    assert_eq!(
+        get_autopilot_circuit_inner(&conn, created.id)
+            .unwrap()
+            .unwrap()
+            .concurrency_limit,
+        2,
+        "the clamped value must be what the returned row reports"
+    );
+
+    // A stale editor writing against a deleted circuit must error.
+    let missing = crate::commands::circuit::update_circuit_concurrency_limit_locked(
+        &mut conn,
+        999_999,
+        3,
+    );
+    assert!(missing.is_err());
+}
+
+#[test]
 fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     let conn = isolated_test_conn();
     // Every app start runs `db::init` → `evolve_to` against the existing

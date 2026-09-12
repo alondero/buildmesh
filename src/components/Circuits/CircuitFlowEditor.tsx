@@ -32,7 +32,7 @@ import '@xyflow/react/dist/style.css';
 
 import type { AutopilotCircuit } from '../../lib/tauri';
 import type { CircuitRunDetail } from '../../lib/tauri';
-import { approveCircuitStep, updateCircuitGraph } from '../../lib/tauri';
+import { approveCircuitStep, updateCircuitConcurrencyLimit, updateCircuitGraph } from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
@@ -45,12 +45,14 @@ import { QuickConnectMenu } from './QuickConnectMenu';
 import { InspectorPanel } from './InspectorPanel';
 import { RunHistoryDrawer } from './RunHistoryDrawer';
 import {
+  MAX_STEP_SLOTS,
   NODE_SPECS,
   conditionFromHandle,
   defaultKind,
   edgeKey,
   layoutPositions,
   makeNodeId,
+  minStepSlots,
   parseGraph,
   sourceOutcomes,
   specFor,
@@ -131,6 +133,43 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   } | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingStepSlots, setSavingStepSlots] = useState(false);
+
+  // Step-slot budget (the `N` in "all N of this circuit's step slots are
+  // busy"). The floor is blueprint-specific and the ceiling shared; both
+  // mirror the Rust model. Held locally, seeded from the persisted row, so
+  // a selection reflects immediately and the command's clamped value can be
+  // adopted without refetching the run ledger (#1736 review).
+  const [stepSlots, setStepSlots] = useState(circuit.concurrency_limit);
+  const minSlots = minStepSlots(initial.blueprint);
+  // A row can sit outside the current floor/ceiling — a review circuit
+  // persisted before the 2-slot floor existed, or an imported graph. Keep
+  // the persisted value in the option list: a controlled <select> whose
+  // value matches no option makes the DOM fall back to the first option
+  // instead, which both misreports the budget and swallows clicks on that
+  // option (React only fires onChange when the DOM value actually changes).
+  const stepSlotOptions = useMemo(() => {
+    const persisted = circuit.concurrency_limit;
+    const inRange = Array.from(
+      { length: MAX_STEP_SLOTS - minSlots + 1 },
+      (_, i) => minSlots + i
+    );
+    return inRange.includes(persisted)
+      ? inRange
+      : [...inRange, persisted].sort((a, b) => a - b);
+  }, [minSlots, circuit.concurrency_limit]);
+  const stepSlotLabel = (n: number) =>
+    n < minSlots
+      ? `${n} (below minimum)`
+      : n > MAX_STEP_SLOTS
+        ? `${n} (above maximum)`
+        : `${n}`;
+
+  // Follow the parent when it refetches (graph save, live run event): the
+  // editor stays a pure function of its props.
+  useEffect(() => {
+    setStepSlots(circuit.concurrency_limit);
+  }, [circuit.concurrency_limit]);
 
   // Default observed run: newest active one, else newest overall.
   useEffect(() => {
@@ -484,6 +523,26 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
     }
   };
 
+  const handleStepSlotsChange = async (limit: number) => {
+    const previous = stepSlots;
+    // Optimistic: the controlled select must not snap back mid-flight.
+    setStepSlots(limit);
+    setSavingStepSlots(true);
+    setEditorError(null);
+    try {
+      // The command returns the persisted row, clamped to the blueprint's
+      // floor/ceiling, so adopt it directly — no run-ledger refetch.
+      const updated = await updateCircuitConcurrencyLimit(circuit.id, limit);
+      setStepSlots(updated.concurrency_limit);
+    } catch (err) {
+      console.error('Failed to update circuit step slots:', err);
+      setStepSlots(previous);
+      setEditorError(formatError(err));
+    } finally {
+      setSavingStepSlots(false);
+    }
+  };
+
   // Esc closes (menus clear first via their own Escape handlers). When
   // the editor is dirty, route through the discard banner instead of
   // closing — matches `<Modal dirty>` (issue #1244). Issue #649 — driven
@@ -551,6 +610,27 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             unsaved
           </span>
         )}
+        <label
+          className="flex items-center gap-1 text-xs text-text-muted"
+          htmlFor="editor-step-slots"
+          title="Concurrent steps this circuit may run at once. Steps wait while every slot is busy."
+        >
+          Step slots
+          <select
+            id="editor-step-slots"
+            data-testid="editor-step-slots"
+            value={stepSlots}
+            disabled={savingStepSlots}
+            onChange={(e) => void handleStepSlotsChange(Number(e.target.value))}
+            className="px-1.5 py-0.5 rounded-md bg-text-muted/10 text-text-primary text-xs disabled:opacity-40"
+          >
+            {stepSlotOptions.map((n) => (
+              <option key={n} value={n}>
+                {stepSlotLabel(n)}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="flex-1" />
         <button
           type="button"

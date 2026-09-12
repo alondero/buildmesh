@@ -115,6 +115,22 @@ impl CircuitBlueprintKind {
         }
     }
 
+    /// Upper bound on a circuit's step-slot budget. The floor is
+    /// blueprint-specific ([`Self::min_concurrency_limit`]); this ceiling
+    /// keeps one circuit from monopolising the app-wide agent pool.
+    pub const MAX_CONCURRENCY_LIMIT: i64 = 16;
+
+    /// Clamp a requested step-slot budget into this blueprint's allowed
+    /// `[min_concurrency_limit, MAX_CONCURRENCY_LIMIT]` range. Shared by
+    /// creation ([`validate_circuit_request`]) and the post-creation
+    /// editor control so both enforce the same floor and ceiling.
+    pub fn clamp_concurrency_limit(self, requested: i64) -> i64 {
+        requested.clamp(
+            self.min_concurrency_limit(),
+            Self::MAX_CONCURRENCY_LIMIT,
+        )
+    }
+
     /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
     /// blueprint. The review blueprint is labelled-issue-driven — a
     /// manual fire would mint a run with no `issue.*` context.
@@ -714,6 +730,21 @@ impl CircuitGraph {
         self.blueprint == Some(CircuitBlueprintKind::IssueDrivenAutopilotReview)
     }
 
+    /// The blueprint governing this graph's runtime policy. When the explicit
+    /// marker is absent — graphs persisted before the discriminator existed —
+    /// fall back to the legacy-shape heuristic, mirroring the TS `parseGraph`
+    /// upgrade path, so a legacy review circuit is never mistaken for a
+    /// walking skeleton.
+    pub fn effective_blueprint(&self) -> CircuitBlueprintKind {
+        self.blueprint.unwrap_or_else(|| {
+            if self.has_legacy_issue_review_shape() {
+                CircuitBlueprintKind::IssueDrivenAutopilotReview
+            } else {
+                CircuitBlueprintKind::WalkingSkeleton
+            }
+        })
+    }
+
     /// Recognize graph_json written before `blueprint` was added. This is a
     /// one-time compatibility migration, not the runtime blueprint policy;
     /// notably it does not compare any prompt text.
@@ -1286,7 +1317,7 @@ pub fn validate_circuit_request(
         _ => None,
     };
 
-    let concurrency_limit = concurrency_limit.clamp(blueprint.min_concurrency_limit(), 16);
+    let concurrency_limit = blueprint.clamp_concurrency_limit(concurrency_limit);
 
     Ok(ValidatedCircuitRequest {
         trigger_kind: selected_trigger,
@@ -2228,6 +2259,36 @@ mod tests {
             timeout_seconds: None,
         };
         assert!(g.is_issue_driven_autopilot_review());
+    }
+
+    #[test]
+    fn effective_blueprint_classifies_a_markerless_legacy_review_graph() {
+        // Mirrors the canvas's `parseGraph`: a graph persisted before the
+        // `blueprint` discriminator existed is classified by shape, so the
+        // editor command cannot mistake it for a walking skeleton (floor 1)
+        // and let its reviewer deadlock.
+        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        graph.nodes.push(CircuitNode {
+            id: "review_prompt".into(),
+            kind: CircuitNodeKind::InjectPty {
+                prompt: "legacy".into(),
+                target_node_id: Some("reviewer".into()),
+            },
+        });
+        let mut raw: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("blueprint");
+        let legacy = CircuitGraph::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+
+        assert_eq!(legacy.blueprint, None);
+        assert_eq!(
+            legacy.effective_blueprint(),
+            CircuitBlueprintKind::IssueDrivenAutopilotReview
+        );
+        // An explicit marker always wins; a plain skeleton stays a skeleton.
+        assert_eq!(
+            CircuitGraph::walking_skeleton("p").effective_blueprint(),
+            CircuitBlueprintKind::WalkingSkeleton
+        );
     }
 
     #[test]

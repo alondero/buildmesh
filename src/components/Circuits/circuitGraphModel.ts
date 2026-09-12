@@ -16,6 +16,7 @@ import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
 import type { CircuitEdge } from '../../types/generated/CircuitEdge';
+import type { CircuitBlueprintKind } from '../../types/generated/CircuitBlueprintKind';
 import type { EdgeCondition } from '../../types/generated/EdgeCondition';
 import type { StepOutcome } from '../../types/generated/StepOutcome';
 import {
@@ -40,6 +41,21 @@ export type KindDiscriminator = CircuitNodeKind['type'];
  * v2 → v3 (issue #1219): added `timeout_seconds` to `SpawnAgentNode`.
  */
 export const CIRCUIT_GRAPH_VERSION = 3;
+
+/**
+ * Step-slot budget bounds, mirroring the Rust domain model
+ * (`CircuitBlueprintKind::min_concurrency_limit` /
+ * `MAX_CONCURRENCY_LIMIT`). The editor offers only values the backend
+ * will keep; the backend re-clamps as defence in depth.
+ */
+export const MAX_STEP_SLOTS = 16;
+
+/** Lowest step-slot budget a blueprint permits. The review blueprint's
+ *  implementation and reviewer nodes share one pool, so 1 slot would
+ *  deadlock the reviewer behind the implementation node. */
+export function minStepSlots(blueprint: CircuitBlueprintKind | null | undefined): number {
+  return blueprint === 'issue_driven_autopilot_review' ? 2 : 1;
+}
 
 /** One palette entry: a node kind plus its presentation grouping. */
 export interface NodeKindSpec {

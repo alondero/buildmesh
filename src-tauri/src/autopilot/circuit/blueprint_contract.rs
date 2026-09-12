@@ -691,6 +691,25 @@ mod tests {
     }
 
     #[test]
+    fn clamp_concurrency_limit_enforces_blueprint_floor_and_shared_ceiling() {
+        // Floor: the review blueprint can never drop to a single slot.
+        assert_eq!(
+            CircuitBlueprintKind::IssueDrivenAutopilotReview.clamp_concurrency_limit(1),
+            2
+        );
+        // Ceiling: any blueprint clamps above the shared maximum.
+        assert_eq!(
+            CircuitBlueprintKind::WalkingSkeleton.clamp_concurrency_limit(99),
+            CircuitBlueprintKind::MAX_CONCURRENCY_LIMIT
+        );
+        // In-range values pass through untouched.
+        assert_eq!(
+            CircuitBlueprintKind::WalkingSkeleton.clamp_concurrency_limit(4),
+            4
+        );
+    }
+
+    #[test]
     fn validate_circuit_request_accepts_walking_skeleton_with_every_trigger_root() {
         for trigger in [
             CircuitTriggerKind::Manual,

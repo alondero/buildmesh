@@ -19,6 +19,8 @@ import {
   parseGraph,
   toGraph,
   CIRCUIT_GRAPH_VERSION,
+  MAX_STEP_SLOTS,
+  minStepSlots,
   fuzzyScore,
   fuzzyFilterSpecs,
   MUSTACHE_PATHS,
@@ -58,6 +60,22 @@ const ALL_DISCRIMINATORS = [
   'all_completed',
   'any_completed',
 ] as const;
+
+describe('step-slot budget bounds', () => {
+  it('floors the review blueprint at 2 and everything else at 1', () => {
+    // A 1-slot review circuit would deadlock its reviewer; the walking
+    // skeleton and legacy/blueprint-less graphs start at 1. This mirrors
+    // `CircuitBlueprintKind::min_concurrency_limit` in the Rust model.
+    expect(minStepSlots('issue_driven_autopilot_review')).toBe(2);
+    expect(minStepSlots('walking_skeleton')).toBe(1);
+    expect(minStepSlots(null)).toBe(1);
+    expect(minStepSlots(undefined)).toBe(1);
+  });
+
+  it('keeps the shared ceiling at the Rust model value of 16', () => {
+    expect(MAX_STEP_SLOTS).toBe(16);
+  });
+});
 
 describe('node catalogue', () => {
   it('covers every discriminator of the generated AST union', () => {
