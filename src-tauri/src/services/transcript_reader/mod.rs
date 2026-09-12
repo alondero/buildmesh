@@ -2066,6 +2066,44 @@ mod tests {
         assert!(content.ends_with('…'), "large args body must be truncated");
     }
 
+    /// A native Grok completion is readable through the circuit report seam
+    /// even when the persisted Windows cwd uses mixed separators. User and
+    /// tool-result records do not advance the assistant revision; a later
+    /// assistant response with identical text does.
+    #[test]
+    fn grok_native_transcript_recovers_circuit_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("F%3A%5Csrc%5Crepo%5C.claude%5Cworktrees%5Ctask").join("session-99");
+        std::fs::create_dir_all(&session).unwrap();
+        let file = session.join("chat_history.jsonl");
+        std::fs::write(&file, concat!(
+            "{\"type\":\"user\",\"content\":\"Fix the module\"}\n",
+            "{\"type\":\"reasoning\",\"content\":\"Private reasoning\"}\n",
+            "{\"type\":\"assistant\",\"content\":\"Module fixed. Tests passed.\"}\n",
+            "{\"type\":\"tool_result\",\"content\":\"tool output\"}\n",
+        )).unwrap();
+        let path = super::adapters::grok::grok_locator_in(temp.path(), "session-99", r"F:\src\repo/.claude/worktrees/task").unwrap();
+        let report = assistant_report_from_file(&path, TranscriptFormat::Grok).expect("completed Grok turn must be readable by the circuit");
+        assert_eq!(report.text, "Module fixed. Tests passed.");
+        use std::io::Write;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "{{\"type\":\"user\",\"content\":\"Next task\"}}").unwrap();
+        writeln!(writer, "{{\"type\":\"tool_result\",\"content\":\"More tool output\"}}").unwrap();
+        assert_eq!(assistant_report_from_file(&path, TranscriptFormat::Grok).unwrap().revision, report.revision);
+        writeln!(writer, "{{\"type\":\"assistant\",\"content\":\"Module fixed. Tests passed.\"}}").unwrap();
+        assert_ne!(assistant_report_from_file(&path, TranscriptFormat::Grok).unwrap().revision, report.revision);
+    }
+
+    #[test]
+    fn grok_locator_recovers_native_windows_cwd_from_mixed_separators() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("F%3A%5Csrc%5Crepo%5C.claude%5Cworktrees%5Ctask").join("session-99");
+        std::fs::create_dir_all(&session).unwrap();
+        let file = session.join("chat_history.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        assert_eq!(super::adapters::grok::grok_locator_in(temp.path(), "session-99", r"F:\src\repo/.claude/worktrees/task/"), Some(file));
+    }
+
     /// `grok_locator_in` prefers `chat_history.jsonl` over `updates.jsonl`
     /// when both exist (chat_history is the primary conversation log).
     /// Layout: `<sessions_root>/<urlencoded-cwd>/<id>/{chat_history.jsonl,
