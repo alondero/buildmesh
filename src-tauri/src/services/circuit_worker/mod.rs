@@ -2304,29 +2304,62 @@ fn fail_run_step(
 // The turn webhook (`/api/attention/{id}`) is best-effort HTTP — a lost
 // POST leaves a FINISHED piloted agent looking `running` forever, and
 // the run wedges with it (the legacy pipeline learned this as #874).
-// Once the node's PTY has been quiet for [`LOST_TURN_QUIET_MS`] and its
-// status still says `running`, synthesize the turn: mark it awaiting
-// input through the normal lifecycle seam (which arms attention
-// autoclear, so a false positive self-heals the moment output resumes)
-// and let the next observation pass advance the run.
+// Quiet PTY output only makes the node eligible for a readiness check.
+// Background tests can be silent for minutes; a false turn can cause a
+// review gate to fail and kill the agent before autoclear can recover it.
+// Publish through the normal lifecycle seam only after a finished turn or
+// explicit input request, and only while the observation is still current.
 // ---------------------------------------------------------------------------
 
-/// Quiet window before the watchdog synthesizes a missed turn. The spec
-/// pins 60s — deliberately tighter than the legacy pipeline's 180s LLM-
-/// classified watchdog, because autoclear makes false positives cheap.
+/// Quiet window before checking for a missed turn, also the retry interval
+/// for background or unavailable readiness evidence.
 pub(crate) const LOST_TURN_QUIET_MS: u128 = 60_000;
 
 /// Pure eligibility predicate: alive process, quiet past the window,
 /// status still claiming to be mid-turn.
-fn should_synthesize_turn(is_alive: bool, quiet_ms: Option<u128>, status: SessionStatus) -> bool {
+fn should_check_quiet_turn(is_alive: bool, quiet_ms: Option<u128>, status: SessionStatus) -> bool {
     is_alive
         && quiet_ms.is_some_and(|q| q >= LOST_TURN_QUIET_MS)
         && status == SessionStatus::Running
 }
 
+#[derive(PartialEq, Eq)]
+struct QuietTurnEvidence {
+    lifecycle: Option<String>,
+    input: Option<String>,
+    report: Option<String>,
+}
+
+fn quiet_turn_is_current(
+    before: &QuietTurnEvidence,
+    after: &QuietTurnEvidence,
+    is_alive: bool,
+    quiet_ms: Option<u128>,
+    status: SessionStatus,
+) -> bool {
+    before == after && should_check_quiet_turn(is_alive, quiet_ms, status)
+}
+
+fn recover_quiet_turn(
+    output: &str,
+    classify: impl FnOnce(&str) -> Option<crate::autopilot::evaluator::Classification>,
+    still_current: impl FnOnce() -> bool,
+    publish: impl FnOnce(),
+) {
+    use crate::autopilot::evaluator::{quiet_turn_prompt, Classification};
+    // Kept at the publication boundary: review verdicts interpret WORKING as
+    // changes requested, so background progress must never reach that gate.
+    if !output.trim().is_empty()
+        && matches!(classify(&quiet_turn_prompt(output)), Some(Classification::Completed | Classification::Blocked))
+        && still_current()
+    {
+        publish();
+    }
+}
+
 /// Fast-tick pass: recover every quiet piloted node bound to a running
-/// circuit run. Cheap by construction — only steps already known to be
-/// Running with an attached agent are evaluated.
+/// circuit run. Readiness classification is throttled per agent and runs on
+/// this dedicated worker thread, outside any DB connection.
 fn lost_turn_watchdog_pass(app: &AppHandle) {
     let runs = match db::list_active_circuit_runs() {
         Ok(r) => r,
@@ -2362,23 +2395,55 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 continue;
             };
             let quiet_ms = crate::autopilot::evaluator::millis_since_last_output(agent_node_id);
-            if !should_synthesize_turn(
+            if !should_check_quiet_turn(
                 crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
                 quiet_ms,
                 node.status,
             ) {
                 continue;
             }
-            tracing::warn!(
-                "circuits: run {} piloted agent {} quiet {}ms with status 'running' — \
-                 synthesizing the turn webhook may have lost",
-                active.run.id,
-                agent_node_id,
-                quiet_ms.unwrap_or(0)
-            );
-            // The normal mark-attention seam: lifecycle write + event +
-            // autoclear arming, exactly as if the hook had landed.
-            crate::commands::attention::mark_attention(agent_node_id, app);
+            use crate::autopilot::evaluator;
+            // Unknown/background evidence is retried at most once per minute,
+            // including when a transcript changes without any PTY output.
+            if evaluator::millis_since_last_evaluation(agent_node_id)
+                .is_some_and(|elapsed| elapsed < LOST_TURN_QUIET_MS)
+            {
+                continue;
+            }
+            evaluator::note_evaluation(agent_node_id);
+            let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
+            let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
+            let report = crate::coordinator::enrichment::assistant_report(&node);
+            let evidence = QuietTurnEvidence {
+                lifecycle: stamp,
+                input: input_stamp,
+                report: report.as_ref().map(|report| report.revision.clone()),
+            };
+            let Some(output) = select_turn_report(
+                report,
+                view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
+                evaluator::has_turn_start(agent_node_id),
+                || evaluator::cleaned_turn_tail(agent_node_id),
+            ) else { continue; };
+            recover_quiet_turn(&output, |prompt| {
+                let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
+                    .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
+                    .unwrap_or_else(|| "claude".into());
+                evaluator::classify_with_prompt(agent_node_id, &crate::session_naming::naming_backend_env(&provider), prompt)
+            }, || {
+                // Classification can take 30s. A hook, user input, or resumed
+                // output during that interval invalidates the quiet observation.
+                let Ok(current) = db::get_agent_node_by_id(agent_node_id) else { return false; };
+                quiet_turn_is_current(&evidence, &QuietTurnEvidence {
+                    lifecycle: db::agent_turn_stamp(agent_node_id).ok().flatten(),
+                    input: crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id),
+                    report: crate::coordinator::enrichment::assistant_report(&current).map(|report| report.revision),
+                }, crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
+                    evaluator::millis_since_last_output(agent_node_id), current.status)
+            }, || {
+                tracing::warn!("circuits: run {} agent {} has a confirmed quiet turn; recovering missed webhook", active.run.id, agent_node_id);
+                crate::commands::attention::mark_attention(agent_node_id, app);
+            });
         }
     }
 }
@@ -3594,26 +3659,114 @@ mod tests {
     // -- lost-turn watchdog eligibility -------------------------------------------
 
     #[test]
+    fn watchdog_run_104_background_report_does_not_publish_a_turn() {
+        use crate::autopilot::circuit::stepper::Capacity;
+        use crate::autopilot::evaluator::Classification;
+        let report = "The tests are progressing (1-9 passed, including `controller_accessories`, `haptics_race_e2e`, `eeprom_exit_flush`, and `controller_pak_rom_filesystem`). Waiting for the final e2e tests to finish.";
+        assert!(should_check_quiet_turn(true, Some(60_012), SessionStatus::Running));
+        for classification in [Some(Classification::Working), Some(Classification::Continue), None] {
+            let mut view = RunView {
+                run_id: 104,
+                graph: CircuitGraph::agent_review(None, None, 3),
+                state: RunState::Pending,
+                context: CircuitContext::new(),
+                steps: vec![],
+            };
+            view.context.set("source.agent_id", "3914");
+            let capacity = Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
+            advance(&mut view, &CircuitEvent::Triggered);
+            advance(&mut view, &CircuitEvent::Tick(capacity));
+            advance(&mut view, &CircuitEvent::TurnClassified {
+                node_id: "await_source".into(), classification: Some(Classification::Completed), output: Some("PR opened".into()),
+            });
+            advance(&mut view, &CircuitEvent::Tick(capacity));
+            view.attach_agent_node("reviewer", 3923);
+            recover_quiet_turn(report, |_| classification, || true, || {
+                advance(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some(report.into()) });
+            });
+            assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running,
+                "background/unknown evidence must not finish the reviewer step");
+            assert!(advance(&mut view, &CircuitEvent::Tick(capacity)).effects.is_empty());
+            assert_eq!(view.state, RunState::Running);
+            assert!(view.step("verdict").is_none());
+            // The eventual final report still releases the same reviewer.
+            recover_quiet_turn("Review complete. Approved.", |_| Some(Classification::Completed), || true, || {
+                advance(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some("Review complete. Approved.".into()) });
+            });
+            advance(&mut view, &CircuitEvent::Tick(capacity));
+            assert_eq!(view.step("verdict").unwrap().status, StepStatus::Running);
+        }
+    }
+
+    #[test]
+    fn watchdog_recovers_final_reports_and_real_input_requests() {
+        use crate::autopilot::evaluator::Classification;
+        for (report, classification) in [
+            ("Review complete. Changes requested: fix the shutdown flush.", Classification::Completed),
+            ("May I run the test command?", Classification::Blocked),
+        ] {
+            let published = std::cell::Cell::new(false);
+            recover_quiet_turn(report, |prompt| {
+                assert!(prompt.ends_with(report));
+                assert!(prompt.contains("Waiting for tests is not BLOCKED"));
+                Some(classification)
+            }, || true, || published.set(true));
+            assert!(published.get());
+        }
+        recover_quiet_turn(" ", |_| panic!("empty report must not invoke classifier"), || panic!("no observation to recheck"), || panic!("no report is not a turn"));
+    }
+
+    #[test]
+    fn watchdog_discards_a_turn_that_changed_during_classification() {
+        use crate::autopilot::evaluator::Classification;
+        let snapshot = || QuietTurnEvidence {
+            lifecycle: Some("turn-1".into()), input: Some("input-1".into()), report: Some("report-1".into()),
+        };
+        for change in 0..6 {
+            let after = std::cell::RefCell::new(snapshot());
+            let alive = std::cell::Cell::new(true);
+            let quiet_ms = std::cell::Cell::new(Some(60_000));
+            let status = std::cell::Cell::new(SessionStatus::Running);
+            recover_quiet_turn("Review complete. Approved.", |_| {
+                match change {
+                    0 => after.borrow_mut().lifecycle = Some("turn-2".into()),
+                    1 => after.borrow_mut().input = Some("input-2".into()),
+                    2 => after.borrow_mut().report = Some("report-2".into()),
+                    3 => alive.set(false),
+                    4 => quiet_ms.set(Some(0)),
+                    5 => status.set(SessionStatus::Ready),
+                    _ => unreachable!(),
+                }
+                Some(Classification::Completed)
+            }, || quiet_turn_is_current(&snapshot(), &after.borrow(), alive.get(), quiet_ms.get(), status.get()),
+                || panic!("changed observation {change} must not publish attention"));
+        }
+        // Optional correlation data may be absent, but explicit changes fence.
+        let absent = QuietTurnEvidence { lifecycle: None, input: None, report: None };
+        assert!(quiet_turn_is_current(&absent, &absent, true, Some(60_000), SessionStatus::Running));
+    }
+
+    #[test]
     fn watchdog_needs_alive_quiet_and_still_running() {
         let running = SessionStatus::Running;
-        assert!(should_synthesize_turn(true, Some(LOST_TURN_QUIET_MS), running));
+        assert!(should_check_quiet_turn(true, Some(LOST_TURN_QUIET_MS), running));
         // Below the window: the agent may legitimately be mid-tool-call.
-        assert!(!should_synthesize_turn(
+        assert!(!should_check_quiet_turn(
             true,
             Some(LOST_TURN_QUIET_MS - 1),
             running
         ));
         // No output timing known (never registered): conservative no-op.
-        assert!(!should_synthesize_turn(true, None, running));
+        assert!(!should_check_quiet_turn(true, None, running));
         // Dead process: AgentLost observation owns that path.
-        assert!(!should_synthesize_turn(false, Some(LOST_TURN_QUIET_MS * 10), running));
+        assert!(!should_check_quiet_turn(false, Some(LOST_TURN_QUIET_MS * 10), running));
         // Already yielded (awaiting/completed/idle...): observation owns it.
         for status in [
             SessionStatus::AwaitingInput,
             SessionStatus::Completed,
             SessionStatus::Error,
         ] {
-            assert!(!should_synthesize_turn(true, Some(LOST_TURN_QUIET_MS), status));
+            assert!(!should_check_quiet_turn(true, Some(LOST_TURN_QUIET_MS), status));
         }
     }
 
