@@ -123,6 +123,18 @@ describe('ProbePanel', () => {
     expect(useUIStore.getState().probeOpen).toBe(false);
   });
 
+  it('points the close chevron right, toward the edge the dock collapses into', () => {
+    // Lucide `panel-right-close` (`m8 9 3 3-3 3`, tip at x=11 pointing
+    // right); the previous `m10 9-3 3 3 3` was `panel-right-open`'s
+    // left-pointing reopen chevron.
+    useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
+    render(<ProbePanel />);
+
+    const closeButton = screen.getByRole('button', { name: 'Close panel' });
+    const chevron = closeButton.querySelector('path[d^="m8 9"]');
+    expect(chevron?.getAttribute('d')).toBe('m8 9 3 3-3 3');
+  });
+
   it('shows the active tab label in the header', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
     render(<ProbePanel />);
