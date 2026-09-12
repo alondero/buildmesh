@@ -1,6 +1,6 @@
 //! Admin device-management routes (issue #502) — the first real operations
 //! mounted in the `/admin/*` namespace #500 reserved. Both are Admin-guarded by
-//! the dispatcher (`auth::guard(.., RequiredScope::Admin)`) before they're
+//! the dispatcher (`auth::authorize(.., RequiredScope::Admin)`) before they're
 //! reached, so a coordinator token is 403 and an anonymous request is 401.
 //!
 //! - `GET /admin/devices` → list paired devices (id, label, IP, timestamps).
@@ -12,8 +12,9 @@
 //! (`commands::devices`); both back onto the shared `db` + `revocation` layer.
 
 use crate::db;
-use crate::http::{request, revocation, MaybeTls};
-use tokio::io::BufStream;
+use crate::http::response::Response;
+use crate::http::revocation;
+use crate::http::router::ParsedRequest;
 
 /// Best-effort human label for a paired device, derived from its `User-Agent`
 /// at pairing (e.g. "Safari on iPhone"). Pure so it's unit-testable without a
@@ -74,6 +75,10 @@ pub fn device_label_from_user_agent(ua: Option<&str>) -> Option<String> {
 /// connection). Convert to `async` + `run_blocking` so the read moves to
 /// Tauri's blocking pool, matching the shape `http/routes/meshes.rs` and
 /// `nodes.rs` adopted in PR #1388.
+pub async fn list(_req: &ParsedRequest) -> Response {
+    Response::json("200 OK", list_devices_json().await)
+}
+
 pub async fn list_devices_json() -> String {
     match crate::commands::run_blocking("http_list_devices", || {
         db::list_device_sessions().map_err(|e| e.to_string())
@@ -94,7 +99,8 @@ pub async fn list_devices_json() -> String {
 /// run on the request tokio worker. Offload it via `run_blocking`; the
 /// follow-up `revocation::revoke(device_id)` kick remains cheap and
 /// non-blocking, so it stays on the async worker.
-pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
+pub async fn revoke(req: &ParsedRequest) -> Response {
+    let device_id = req.id0();
     match crate::commands::run_blocking("http_revoke_device", move || {
         db::revoke_device_session(device_id).map_err(|e| e.to_string())
     })
@@ -103,14 +109,10 @@ pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
         Ok(true) => {
             // Row gone (blocks future requests); now drop any open socket.
             revocation::revoke(device_id);
-            let _ = request::write_status_only(lines, "204 No Content").await;
+            Response::empty("204 No Content")
         }
-        Ok(false) => {
-            request::send_json_error(lines, "404 Not Found", "Unknown device").await;
-        }
-        Err(e) => {
-            request::send_json_error(lines, "500 Internal Server Error", &e).await;
-        }
+        Ok(false) => Response::json_error("404 Not Found", "Unknown device"),
+        Err(e) => Response::json_error("500 Internal Server Error", &e),
     }
 }
 
