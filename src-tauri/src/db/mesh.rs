@@ -108,7 +108,14 @@ fn parse_str(s: String) -> Option<String> {
 
 pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     let db = write_conn();
+    create_mesh_inner(&db, name, path)
+}
 
+/// Per-test isolated variant of [`create_mesh`]. The public function locks
+/// the process-global writer connection; this helper takes an explicit
+/// `&Connection` so parallel tests can each operate against their own
+/// in-memory DB without contending on the global mutex (issue #1691).
+pub(crate) fn create_mesh_inner(db: &Connection, name: &str, path: &str) -> SqlResult<Mesh> {
     // Check if mesh with this path already exists (idempotent upsert)
     let existing: Option<i64> = db.query_row(
         "SELECT id FROM meshes WHERE path = ?1",
@@ -117,7 +124,7 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     ).ok();
 
     if let Some(id) = existing {
-        return get_mesh_by_id_inner(&db, id);
+        return get_mesh_by_id_inner(db, id);
     }
 
     // Append at end of position list
@@ -137,7 +144,7 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
         params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();
-    get_mesh_by_id_inner(&db, id)
+    get_mesh_by_id_inner(db, id)
 }
 
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
@@ -902,9 +909,17 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = write_conn();
+    delete_mesh_inner(&db, id)
+}
+
+/// Per-test isolated variant of [`delete_mesh`] (issue #1691). The
+/// public function locks the process-global writer; this helper takes
+/// an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB.
+pub(crate) fn delete_mesh_inner(db: &Connection, id: i64) -> SqlResult<()> {
     // Autopilot Circuits ledger (spec #1205): explicit child deletes —
     // same defensive rule as the warm pool below.
-    crate::db::circuit::delete_circuits_for_mesh_inner(&db, id)?;
+    crate::db::circuit::delete_circuits_for_mesh_inner(db, id)?;
     // Autopilot Runs ledger (issue #1231): explicit child delete. The
     // schema declares `ON DELETE CASCADE` on `autopilot_runs.node_id`,
     // and the bundled SQLite build (rusqlite 0.32 / SQLite 3.46.0)
@@ -923,7 +938,7 @@ pub fn delete_mesh(id: i64) -> SqlResult<()> {
     // explicitly anyway as a defensive belt against a future system
     // libsqlite link (issue #609). Same pattern as
     // `delete_autopilot_run` above.
-    crate::db::warm_pool::delete_warm_worktrees_for_mesh_inner(&db, id)?;
+    crate::db::warm_pool::delete_warm_worktrees_for_mesh_inner(db, id)?;
     db.execute("DELETE FROM meshes WHERE id = ?1", params![id])?;
     Ok(())
 }

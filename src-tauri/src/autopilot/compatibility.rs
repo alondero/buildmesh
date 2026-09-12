@@ -237,6 +237,7 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
         "mcode" | "minimax-code" => Some("mcode"),
         "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
         "commandcode" | "command-code" | "cmdc" => Some("commandcode"),
+        "muse" => Some("muse"),
         "terminal" => Some("terminal"),
         _ => None,
     }
@@ -465,6 +466,15 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
         assert_eq!(resolve_harness_adapter_id("CommandCode"), Some("commandcode"));
         assert_eq!(resolve_harness_adapter_id("  CMDC  "), Some("commandcode"));
+    }
+
+    /// Issue #1709: Muse resolves to its own adapter so the compatibility gate
+    /// can see the passive session-log watcher capability.
+    #[test]
+    fn resolve_harness_adapter_id_maps_muse() {
+        assert_eq!(resolve_harness_adapter_id("muse"), Some("muse"));
+        assert_eq!(resolve_harness_adapter_id("Muse"), Some("muse"));
+        assert_eq!(resolve_harness_adapter_id("  MUSE  "), Some("muse"));
     }
 
     /// Unknown harness ids return `None` (no silent fallback to Anthropic,
@@ -888,6 +898,20 @@ mod tests {
             result.reasons
         );
         assert_eq!(result.resolved_harness_id.as_deref(), Some("commandcode"));
+    }
+
+    /// Issue #1709: Muse has no native hook, but its backend-owned session-log
+    /// watcher emits the same terminal turn signals as Command Code's, so the
+    /// Tauri-command seam must allow it for an Autopilot Mesh.
+    #[test]
+    fn compute_for_mesh_allows_muse_via_passive_watcher() {
+        let result = compute_for_mesh(Some("muse"), None, None, true);
+        assert!(
+            result.allowed,
+            "Muse watcher should allow Autopilot: {:?}",
+            result.reasons
+        );
+        assert_eq!(result.resolved_harness_id.as_deref(), Some("muse"));
     }
 
     /// `compute_for_mesh` falls through to mesh default when explicit is

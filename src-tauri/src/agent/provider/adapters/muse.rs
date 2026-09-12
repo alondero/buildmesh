@@ -19,13 +19,25 @@
 //! The chosen policy is **`--disable-approval`** (maintainer decision,
 //! issue #1705). `--yolo` is never baked in.
 //!
-//! **Attention launch mode.** With `--disable-approval` the harness never
-//! raises a permission prompt, so the future attention-hook slice (filed
-//! separately) will land with `AttentionLaunchMode::SkipPermissions` — a
-//! `PermissionRequested` lifecycle signal is impossible by construction.
-//! Until that slice ships, `attention_capability` stays `None` (mirrors the
-//! pre-#1705 shape); the launch-mode mapping is documented here so the
-//! follow-up implementer does not have to reverse-engineer it.
+//! **Attention (issue #1709).** Muse exposes no interactive attention-hook
+//! registration: `muse --help` has no hook/event flag, there is no workspace
+//! or global hook config file, and the MSP lifecycle events (`turn/*`,
+//! `approval/*`, `userInput/*` in `muse schema generate-json-schema`) are
+//! served only on the separate `muse serve` stdio plane — the headless
+//! architecture Buildmesh's PTY spawn does not use.
+//!
+//! The interactive TUI does, however, append run boundaries to its durable
+//! session log (`~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`).
+//! Muse therefore supplies its turn signal through the passive watcher
+//! (`services::muse_watcher`), mirroring Command Code: `requires_attention_hook`
+//! stays `false` and `attention_capability` stays `None`.
+//!
+//! **Launch mode is `SkipPermissions`.** With `--disable-approval` the harness
+//! never raises a tool-approval prompt — every observed `approval_disabled`
+//! session carries zero `approval/requested` records — so a
+//! `PermissionRequested` lifecycle signal is impossible by construction and is
+//! deliberately not classified. A `run/terminal` record yields the node back
+//! to the user; `terminal` is `completed | failed | cancelled`.
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
@@ -68,6 +80,17 @@ impl AgentProvider for MuseAdapter {
     }
     fn requires_attention_hook(&self) -> bool {
         false
+    }
+    // Issue #1709: no native hook exists, so Muse's turn signal comes from the
+    // backend-owned session-log watcher instead.
+    fn supports_passive_turn_watcher(&self) -> bool {
+        true
+    }
+    fn on_spawn_activated(&self, node_id: i64) {
+        crate::services::muse_watcher::activate(node_id);
+    }
+    fn on_process_terminated(&self, node_id: i64) {
+        crate::services::muse_watcher::stop(node_id);
     }
     fn produces_readable_transcript(&self) -> bool {
         // Issue #1708: the muse reader
@@ -123,10 +146,12 @@ impl AgentProvider for MuseAdapter {
     fn after_fresh_spawn(
         &self,
         node_id: i64,
-        _spawn_path: &str,
+        spawn_path: &str,
         _env_type: EnvType,
-        _app: &tauri::AppHandle,
+        app: &tauri::AppHandle,
     ) {
+        let spawn_path = spawn_path.to_string();
+        let app = app.clone();
         tauri::async_runtime::spawn(async move {
             for delay in [200, 500, 1000, 2000, 4000, 8000] {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -137,11 +162,58 @@ impl AgentProvider for MuseAdapter {
                     crate::services::session_recovery::recover_live_node(node_id)
                 })
                 .await;
-                if matches!(result, Ok(Some(_))) {
-                    break;
+                let Ok(Some(session_id)) = result else {
+                    continue;
+                };
+                // Capture is the watcher's arm point: the same session index
+                // that supplied the id also resolves the log path.
+                let spawn_path = spawn_path.clone();
+                let app = app.clone();
+                let started = crate::blocking::run_blocking("muse watcher start", move || {
+                    crate::services::muse_watcher::start_for_session(
+                        node_id,
+                        &session_id,
+                        &spawn_path,
+                        &app,
+                    )
+                })
+                .await;
+                match started {
+                    Ok(()) => break,
+                    // The id is durable once captured, so a transient log-path
+                    // failure (e.g. a not-yet-visible WSL file) retries on the
+                    // next tick instead of stranding the watcher.
+                    Err(error) => {
+                        tracing::warn!("muse watcher: could not start for node {node_id}: {error}")
+                    }
                 }
             }
         });
+    }
+
+    fn before_resume_spawn<'a>(
+        &'a self,
+        node_id: i64,
+        session_id: &str,
+        spawn_path: &str,
+        _env_type: EnvType,
+        app: &'a tauri::AppHandle,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let session_id = session_id.to_string();
+        let spawn_path = spawn_path.to_string();
+        let app = app.clone();
+        Box::pin(async move {
+            if let Err(error) = crate::services::muse_watcher::start_for_resumed_session_async(
+                node_id,
+                &session_id,
+                &spawn_path,
+                app,
+            )
+            .await
+            {
+                tracing::warn!("muse watcher: could not resume watch for node {node_id}: {error}");
+            }
+        })
     }
 }
 

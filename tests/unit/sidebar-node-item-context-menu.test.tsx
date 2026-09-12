@@ -601,11 +601,13 @@ describe('NodeItem context menu (issue #776)', () => {
       expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
     });
 
-    it('paints parent menu rows and the current picker row with contrasting surfaces', async () => {
+    it('paints parent menu rows with the menu hover token and the picker with a single caret', async () => {
       // The context menu and picker sit on `bg-bg-overlay`, where
       // `hover:bg-bg-card` is ~1/255 brighter and therefore invisible.
-      // Parent rows use the menu hover token; the current picker row
-      // carries the semantic selection surface.
+      // Parent rows use the menu hover token; the picker paints the
+      // selection surface ONLY on the row holding focus (the single
+      // caret — issue #1720 follow-up), so the Current row is lit at
+      // rest by the host's open-and-focus-first walk.
       const node = makeNode({ provider: 'anthropic', status: 'idle' });
       await openSubmenu(node, [
         makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
@@ -616,8 +618,23 @@ describe('NodeItem context menu (issue #776)', () => {
         expect(classes).not.toContain('hover:bg-bg-card');
         expect(classes).toContain('hover:bg-bg-card-hover');
       }
+      // Picker rows carry no CSS hover paint — hover moves the caret.
+      for (const row of screen.getAllByRole('menuitem')) {
+        if (row.getAttribute('data-testid') === 'regenerate-submenu-current') continue;
+        if (!row.closest('[data-testid="regenerate-submenu"]')) continue;
+        expect(row.className.split(/\s+/)).not.toContain('hover:bg-bg-card');
+      }
+      // The caret paints exactly one row — the one holding focus.
+      // Hovering the Current row (the pointer path) moves focus and
+      // the highlight there; no second row is lit.
       const current = screen.getByTestId('regenerate-submenu-current');
-      expect(current.className.split(/\s+/)).toContain('bg-bg-selection');
+      fireEvent.mouseEnter(current);
+      expect(document.activeElement).toBe(current);
+      const pickerRows = Array.from(
+        screen.getByTestId('regenerate-submenu').querySelectorAll('[role="menuitem"]'),
+      );
+      const lit = pickerRows.filter((row) => row.className.split(/\s+/).includes('bg-bg-selection'));
+      expect(lit).toEqual([current]);
     });
 
     it('clicking a picker row invokes regenerateAgentNode(nodeId, providerId) and closes the menu', async () => {

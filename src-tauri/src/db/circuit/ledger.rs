@@ -65,8 +65,27 @@ pub fn create_node_circuit_run(
     max_rounds: i32,
     reviewer_provider: Option<String>,
 ) -> Result<i64, String> {
-    let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let mut db = crate::db::write_conn();
+    create_node_circuit_run_locked(
+        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider,
+    )
+}
+
+/// Per-test isolated variant of [`create_node_circuit_run`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&mut Connection` so parallel tests can each
+/// operate against their own in-memory DB. `reviewer_provider` is
+/// normalised *inside* the helper so the validation is not duplicated
+/// between the public wrapper and the test path (issue #1691 review
+/// cleanup) — a bare `terminal` is rejected before any DB work happens.
+pub(crate) fn create_node_circuit_run_locked(
+    db: &mut Connection,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+) -> Result<i64, String> {
+    let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
     let existing: Option<i64> = tx.query_row(
@@ -195,6 +214,21 @@ pub fn create_autopilot_circuit(
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
     let db = crate::db::write_conn();
+    create_autopilot_circuit_inner(&db, mesh_id, name, description, concurrency_limit, graph_json)
+}
+
+/// Per-test isolated variant of [`create_autopilot_circuit`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB.
+pub(crate) fn create_autopilot_circuit_inner(
+    db: &Connection,
+    mesh_id: i64,
+    name: &str,
+    description: &str,
+    concurrency_limit: i64,
+    graph_json: &str,
+) -> SqlResult<AutopilotCircuit> {
     // Draft-first (issue #1356): new blueprints start disabled so the
     // GitHub/interval pollers cannot fire while the user is still
     // authoring. Trigger Now still mints a run against a disabled row.
@@ -206,7 +240,7 @@ pub fn create_autopilot_circuit(
          VALUES (?1, ?2, ?3, 0, ?4, ?5)",
         params![mesh_id, name, description, concurrency_limit, graph_json],
     )?;
-    get_autopilot_circuit_inner(&db, db.last_insert_rowid())?
+    get_autopilot_circuit_inner(db, db.last_insert_rowid())?
         .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
 }
 
@@ -245,6 +279,14 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
 
 pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>> {
     let db = crate::db::read_conn();
+    list_autopilot_circuits_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`list_autopilot_circuits`] (issue #1691).
+pub(crate) fn list_autopilot_circuits_inner(
+    db: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<AutopilotCircuit>> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at, is_preset \
@@ -260,6 +302,11 @@ pub fn list_autopilot_circuits(mesh_id: i64) -> SqlResult<Vec<AutopilotCircuit>>
 /// so one query serves the whole worker pass.
 pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
     let db = crate::db::read_conn();
+    list_enabled_circuits_inner(&db)
+}
+
+/// Per-test isolated variant of [`list_enabled_circuits`] (issue #1691).
+pub(crate) fn list_enabled_circuits_inner(db: &Connection) -> SqlResult<Vec<AutopilotCircuit>> {
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
                 graph_json, created_at, updated_at, is_preset \
@@ -276,6 +323,14 @@ pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
 /// included) restarts the cadence, because the user just intervened.
 pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String>> {
     let db = crate::db::read_conn();
+    latest_circuit_run_created_at_inner(&db, circuit_id)
+}
+
+/// Per-test isolated variant of [`latest_circuit_run_created_at`] (issue #1691).
+pub(crate) fn latest_circuit_run_created_at_inner(
+    db: &Connection,
+    circuit_id: i64,
+) -> SqlResult<Option<String>> {
     db.query_row(
         "SELECT MAX(created_at) FROM autopilot_circuit_runs WHERE circuit_id = ?1",
         params![circuit_id],
@@ -289,6 +344,14 @@ pub fn latest_circuit_run_created_at(circuit_id: i64) -> SqlResult<Option<String
 /// from rewriting identical rows every cycle.
 pub fn list_circuit_trigger_identities(circuit_id: i64) -> SqlResult<Vec<String>> {
     let db = crate::db::read_conn();
+    list_circuit_trigger_identities_inner(&db, circuit_id)
+}
+
+/// Per-test isolated variant of [`list_circuit_trigger_identities`] (issue #1691).
+pub(crate) fn list_circuit_trigger_identities_inner(
+    db: &Connection,
+    circuit_id: i64,
+) -> SqlResult<Vec<String>> {
     let mut stmt = db.prepare(
         "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
     )?;
@@ -441,10 +504,43 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
 
 pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
     let db = crate::db::write_conn();
+    set_autopilot_circuit_enabled_inner(&db, id, enabled)
+}
+
+/// Per-test isolated variant of [`set_autopilot_circuit_enabled`] (issue #1691).
+pub(crate) fn set_autopilot_circuit_enabled_inner(
+    db: &Connection,
+    id: i64,
+    enabled: bool,
+) -> SqlResult<()> {
     db.execute(
         "UPDATE autopilot_circuits SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, i64::from(enabled)],
     )?;
+    Ok(())
+}
+
+/// Persist a circuit's step-slot budget — the canvas editor's per-circuit
+/// concurrency control. The IPC boundary clamps to the blueprint's
+/// `[floor, ceiling]` range; this accessor only writes. Errors when the
+/// row doesn't exist so a stale editor can't silently no-op. `updated_at`
+/// stamps so the Probe list shows fresh edit times.
+///
+/// Takes an explicit connection (issue #1691): the command already holds
+/// the writer guard for the read that derives the blueprint, so this shares
+/// that connection rather than re-locking the process-global writer.
+pub(crate) fn set_autopilot_circuit_concurrency_limit_inner(
+    db: &Connection,
+    id: i64,
+    concurrency_limit: i64,
+) -> SqlResult<()> {
+    let changed = db.execute(
+        "UPDATE autopilot_circuits SET concurrency_limit = ?2, updated_at = datetime('now') WHERE id = ?1",
+        params![id, concurrency_limit],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 
@@ -455,6 +551,15 @@ pub fn set_autopilot_circuit_enabled(id: i64, enabled: bool) -> SqlResult<()> {
 /// `updated_at` stamps so the Probe list shows fresh edit times.
 pub fn update_autopilot_circuit_graph(id: i64, graph_json: &str) -> SqlResult<()> {
     let db = crate::db::write_conn();
+    update_autopilot_circuit_graph_inner(&db, id, graph_json)
+}
+
+/// Per-test isolated variant of [`update_autopilot_circuit_graph`] (issue #1691).
+pub(crate) fn update_autopilot_circuit_graph_inner(
+    db: &Connection,
+    id: i64,
+    graph_json: &str,
+) -> SqlResult<()> {
     let changed = db.execute(
         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
         params![id, graph_json],
@@ -473,6 +578,11 @@ pub fn update_autopilot_circuit_graph(id: i64, graph_json: &str) -> SqlResult<()
 /// `delete_mesh` follows for `warm_worktrees`.
 pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
     let mut db = crate::db::write_conn();
+    delete_autopilot_circuit_locked(&mut db, id)
+}
+
+/// Per-test isolated variant of [`delete_autopilot_circuit`] (issue #1691).
+pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> SqlResult<()> {
     let tx = db.transaction()?;
     tx.execute(
         "DELETE FROM autopilot_circuit_run_steps WHERE run_id IN \
@@ -529,6 +639,20 @@ pub fn create_circuit_run(
     context_json: &str,
 ) -> SqlResult<i64> {
     let mut db = crate::db::write_conn();
+    create_circuit_run_locked(&mut db, circuit_id, mesh_id, trigger_identity, context_json)
+}
+
+/// Per-test isolated variant of [`create_circuit_run`] (issue #1691).
+/// Opens its own transaction on `db`; the `_locked` suffix distinguishes
+/// this from the `_inner` helpers that operate inside an externally-managed
+/// transaction.
+pub(crate) fn create_circuit_run_locked(
+    db: &mut Connection,
+    circuit_id: i64,
+    mesh_id: i64,
+    trigger_identity: &str,
+    context_json: &str,
+) -> SqlResult<i64> {
     let tx = db.transaction()?;
     let next_position: i64 = tx.query_row(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM autopilot_circuit_runs WHERE mesh_id = ?1",
@@ -557,7 +681,15 @@ pub fn create_circuit_run(
 /// callers must not string-match the driver error for this case.
 pub fn cancel_circuit_run(run_id: i64) -> SqlResult<Vec<i64>> {
     let mut db = crate::db::write_conn();
-    let tx = db.transaction()?;
+    cancel_circuit_run_locked(&mut db, run_id)
+}
+
+/// Per-test isolated variant of [`cancel_circuit_run`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB.
+pub(crate) fn cancel_circuit_run_locked(conn: &mut Connection, run_id: i64) -> SqlResult<Vec<i64>> {
+    let tx = conn.transaction()?;
     let result = cancel_circuit_run_inner(&tx, run_id)?;
     tx.commit()?;
     Ok(result.agents)
@@ -647,7 +779,18 @@ pub struct BatchCancelResult {
 
 pub fn cancel_circuit_runs(run_ids: &[i64]) -> SqlResult<BatchCancelResult> {
     let mut db = crate::db::write_conn();
-    let tx = db.transaction()?;
+    cancel_circuit_runs_locked(&mut db, run_ids)
+}
+
+/// Per-test isolated variant of [`cancel_circuit_runs`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB.
+pub(crate) fn cancel_circuit_runs_locked(
+    conn: &mut Connection,
+    run_ids: &[i64],
+) -> SqlResult<BatchCancelResult> {
+    let tx = conn.transaction()?;
     let mut agents: Vec<i64> = Vec::new();
     let mut sources: Vec<i64> = Vec::new();
     let mut cancelled: Vec<i64> = Vec::new();
@@ -683,6 +826,14 @@ pub fn cancel_circuit_runs(run_ids: &[i64]) -> SqlResult<BatchCancelResult> {
 /// agents from a completed or failed run.
 pub fn list_circuit_run_ids_for_cleanup(circuit_id: i64) -> SqlResult<Vec<i64>> {
     let db = crate::db::read_conn();
+    list_circuit_run_ids_for_cleanup_inner(&db, circuit_id)
+}
+
+/// Per-test isolated variant of [`list_circuit_run_ids_for_cleanup`] (issue #1691).
+pub(crate) fn list_circuit_run_ids_for_cleanup_inner(
+    db: &Connection,
+    circuit_id: i64,
+) -> SqlResult<Vec<i64>> {
     let mut stmt = db.prepare(
         "SELECT id FROM autopilot_circuit_runs \
          WHERE circuit_id = ?1 AND state IN ('pending', 'running', 'paused', 'completed', 'failed', 'cancelled') \
@@ -707,6 +858,11 @@ pub struct ActiveCircuitRun {
 
 pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
     let db = crate::db::read_conn();
+    list_active_circuit_runs_inner(&db)
+}
+
+/// Per-test isolated variant of [`list_active_circuit_runs`] (issue #1691).
+pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<ActiveCircuitRun>> {
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
@@ -740,6 +896,15 @@ pub fn list_active_circuit_runs() -> SqlResult<Vec<ActiveCircuitRun>> {
 
 pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<AutopilotCircuitRun>> {
     let db = crate::db::read_conn();
+    list_circuit_runs_inner(&db, circuit_id, limit)
+}
+
+/// Per-test isolated variant of [`list_circuit_runs`] (issue #1691).
+pub(crate) fn list_circuit_runs_inner(
+    db: &Connection,
+    circuit_id: i64,
+    limit: i64,
+) -> SqlResult<Vec<AutopilotCircuitRun>> {
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -767,6 +932,16 @@ pub fn list_circuit_runs(circuit_id: i64, limit: i64) -> SqlResult<Vec<Autopilot
 #[cfg(test)]
 pub fn set_circuit_run_state(run_id: i64, state: &str) -> SqlResult<()> {
     let db = crate::db::write_conn();
+    set_circuit_run_state_inner(&db, run_id, state)
+}
+
+/// Per-test isolated variant of [`set_circuit_run_state`] (issue #1691).
+#[cfg(test)]
+pub(crate) fn set_circuit_run_state_inner(
+    db: &Connection,
+    run_id: i64,
+    state: &str,
+) -> SqlResult<()> {
     db.execute(
         "UPDATE autopilot_circuit_runs SET state = ?2, updated_at = datetime('now') \
          WHERE id = ?1 AND state IN ('pending', 'running', 'paused')",
@@ -784,6 +959,16 @@ pub fn transition_circuit_run_state(
     next_state: &str,
 ) -> SqlResult<bool> {
     let db = crate::db::write_conn();
+    transition_circuit_run_state_inner(&db, run_id, expected_state, next_state)
+}
+
+/// Per-test isolated variant of [`transition_circuit_run_state`] (issue #1691).
+pub(crate) fn transition_circuit_run_state_inner(
+    db: &Connection,
+    run_id: i64,
+    expected_state: &str,
+    next_state: &str,
+) -> SqlResult<bool> {
     let updated = db.execute(
         "UPDATE autopilot_circuit_runs SET state = ?3, updated_at = datetime('now') \
          WHERE id = ?1 AND state = ?2 AND state IN ('pending', 'running', 'paused')",
@@ -804,6 +989,14 @@ pub fn is_terminal_run_state(state: &str) -> bool {
 /// One run row by id, or `None` when the id is unknown.
 pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
     let db = crate::db::read_conn();
+    get_circuit_run_inner(&db, run_id)
+}
+
+/// Per-test isolated variant of [`get_circuit_run`] (issue #1691).
+pub(crate) fn get_circuit_run_inner(
+    db: &Connection,
+    run_id: i64,
+) -> SqlResult<Option<AutopilotCircuitRun>> {
     let mut stmt = db.prepare(
         "SELECT id, circuit_id, mesh_id, trigger_identity, state, \
                 context_json, source_agent_node_id, created_at, updated_at \
@@ -827,6 +1020,14 @@ pub fn get_circuit_run(run_id: i64) -> SqlResult<Option<AutopilotCircuitRun>> {
 
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
     let db = crate::db::read_conn();
+    list_circuit_run_steps_inner(&db, run_id)
+}
+
+/// Per-test isolated variant of [`list_circuit_run_steps`] (issue #1691).
+pub(crate) fn list_circuit_run_steps_inner(
+    db: &Connection,
+    run_id: i64,
+) -> SqlResult<Vec<AutopilotCircuitRunStep>> {
     let mut stmt = db.prepare(
         "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                 outcome, error_message, started_at, completed_at \
@@ -911,6 +1112,55 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = crate::db::write_conn();
     let tx = db.transaction()?;
+    let woke = commit_circuit_advance_inner(
+        &tx, run_id, run_state, context_json, step_ops,
+    )?;
+    tx.commit()?;
+    drop(db);
+    if woke {
+        crate::services::circuit_worker::wake_circuit_worker();
+    }
+    Ok(())
+}
+
+/// Per-test isolated wrapper of [`commit_circuit_advance`] (issue #1691).
+/// Opens a transaction on the supplied `&mut Connection`, runs the
+/// atomic commit logic, and commits — all on the test's private
+/// in-memory DB. The public function locks the process-global writer;
+/// this helper lets parallel tests run without contending on the global
+/// mutex.
+#[cfg(test)]
+pub(crate) fn commit_circuit_advance_locked(
+    conn: &mut Connection,
+    run_id: i64,
+    run_state: Option<&str>,
+    context_json: Option<&str>,
+    step_ops: &[CircuitStepOp],
+) -> SqlResult<()> {
+    let tx = conn.transaction()?;
+    let _woke = commit_circuit_advance_inner(
+        &tx, run_id, run_state, context_json, step_ops,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Per-test isolated variant of [`commit_circuit_advance`] (issue #1691).
+/// The public function locks the process-global writer; this helper
+/// takes an explicit `&Connection` so parallel tests can each operate
+/// against their own in-memory DB. Returns `true` when a terminal-state
+/// commit actually fired so the caller can wake the worker (production
+/// only — tests can ignore the boolean).
+///
+/// Does NOT commit the transaction — the caller must commit so it can
+/// drop the writer guard before waking the circuit worker.
+pub(crate) fn commit_circuit_advance_inner(
+    tx: &Connection,
+    run_id: i64,
+    run_state: Option<&str>,
+    context_json: Option<&str>,
+    step_ops: &[CircuitStepOp],
+) -> SqlResult<bool> {
     let durable_state = tx
         .query_row(
             "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
@@ -935,8 +1185,7 @@ pub fn commit_circuit_advance(
             "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
             params![run_id],
         )?;
-        tx.commit()?;
-        return Ok(());
+        return Ok(false);
     }
     let prior_context_json = if run_state.map(is_terminal_run_state).unwrap_or(false) {
         tx.query_row(
@@ -1054,11 +1303,7 @@ pub fn commit_circuit_advance(
             params![run_id],
         )?;
     }
-    tx.commit()?;
-    if terminal_woke {
-        crate::services::circuit_worker::wake_circuit_worker();
-    }
-    Ok(())
+    Ok(terminal_woke)
 }
 
 /// Attach a spawned agent and its optional presentation parent to a step.
@@ -1072,6 +1317,19 @@ pub fn set_circuit_step_agent_node_with_parent(
     parent_agent_node_id: Option<i64>,
 ) -> SqlResult<bool> {
     let db = crate::db::write_conn();
+    set_circuit_step_agent_node_with_parent_inner(
+        &db, run_id, node_id, agent_node_id, parent_agent_node_id,
+    )
+}
+
+/// Per-test isolated variant of [`set_circuit_step_agent_node_with_parent`] (issue #1691).
+pub(crate) fn set_circuit_step_agent_node_with_parent_inner(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
+) -> SqlResult<bool> {
     let updated = db.execute(
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = ?3, parent_agent_node_id = ?4 \
          WHERE run_id = ?1 AND node_id = ?2",
@@ -1084,6 +1342,15 @@ pub fn set_circuit_step_agent_node_with_parent(
 /// longer consume mesh/global agent capacity on the run's remaining steps.
 pub fn clear_circuit_step_agent_node(run_id: i64, node_id: &str) -> SqlResult<()> {
     let db = crate::db::write_conn();
+    clear_circuit_step_agent_node_inner(&db, run_id, node_id)
+}
+
+/// Per-test isolated variant of [`clear_circuit_step_agent_node`] (issue #1691).
+pub(crate) fn clear_circuit_step_agent_node_inner(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+) -> SqlResult<()> {
     db.execute(
         "UPDATE autopilot_circuit_run_steps SET agent_node_id = NULL \
          WHERE run_id = ?1 AND node_id = ?2",
@@ -1112,6 +1379,14 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 /// their steps still hold real agents even though the graph is parked.
 pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
     let db = crate::db::read_conn();
+    count_running_circuit_steps_inner(&db, circuit_id)
+}
+
+/// Per-test isolated variant of [`count_running_circuit_steps`] (issue #1691).
+pub(crate) fn count_running_circuit_steps_inner(
+    db: &Connection,
+    circuit_id: i64,
+) -> SqlResult<i64> {
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
          JOIN autopilot_circuit_runs r ON r.id = s.run_id \
@@ -1159,6 +1434,11 @@ pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
 /// the reviewer step in `pending_slot` indefinitely.
 pub fn count_active_circuit_runs(mesh_id: i64) -> SqlResult<i64> {
     let db = crate::db::read_conn();
+    count_active_circuit_runs_inner(&db, mesh_id)
+}
+
+/// Per-test isolated variant of [`count_active_circuit_runs`] (issue #1691).
+pub(crate) fn count_active_circuit_runs_inner(db: &Connection, mesh_id: i64) -> SqlResult<i64> {
     db.query_row(
         "SELECT COUNT(*) FROM autopilot_circuit_runs \
          WHERE mesh_id = ?1 AND state IN ('running', 'paused')",

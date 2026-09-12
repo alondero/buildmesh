@@ -27,6 +27,12 @@
  *     a menuitem, and a real browser can deliver the keydown to the
  *     focused element while the listener is on `document`.
  *
+ * The keyboard walk already moves REAL focus (`focusMenuItem` calls
+ * `.focus()`), so single-highlight menus get the "hover and keyboard
+ * share one caret" contract for free: the rows paint off `activeIndex`
+ * and hover handlers simply focus the row (see `GroupedProviderMenu`).
+ * The hook needs no hover awareness of its own.
+ *
  * The `enabled` gate lets a caller mount the menu (and run the auto-
  * focus layout effect) without attaching the global keydown listener.
  * `BuildRunDropdown` and `MeshItem` want the listener only while the
@@ -34,6 +40,13 @@
  * keeps the listener mounted for the component's lifetime (the menu is
  * only rendered while open, so unmount tears it down anyway); the hook
  * matches that with `enabled` defaulting to `true`.
+ *
+ * `initialActiveIndex` seeds the open caret for menus whose logical
+ * starting row is not the first rendered item — `NodeActivityTabs`'
+ * "All sessions" list opens on the currently-selected session, not row
+ * 0. It is read ONLY by the mount layout effect (via a ref, so changing
+ * the prop later re-seeds every open rather than tracking mid-session
+ * arrow moves), then focus lands on that row instead of row 0.
  *
  * The keyboard handler reads `itemCount`, `activeIndex`, and `onClose`
  * from refs so a long-lived listener sees the live values without re-
@@ -63,6 +76,12 @@ export interface UseAriaMenuOptions {
   /** Close handler — called on Escape (and Tab if `closeOnTab` is true). */
   onClose: () => void;
   /**
+   * Row the open caret lands on instead of the first item. Read once per
+   * menu open (mount layout effect); defaults to 0. Out-of-range values
+   * fall back to the first item.
+   */
+  initialActiveIndex?: number;
+  /**
    * Close on Tab. Default `true` (WAI-ARIA `menu` is a non-modal popover —
    * Tab leaves and closes; `closeOnTab: false` is reserved for a future
    * modal variant).
@@ -85,6 +104,7 @@ export function useAriaMenu({
   activeIndex,
   setActiveIndex,
   onClose,
+  initialActiveIndex,
   closeOnTab = true,
   enabled = true,
   itemSelector = '[role="menuitem"]',
@@ -101,6 +121,8 @@ export function useAriaMenu({
   activeIndexRef.current = activeIndex;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const initialActiveIndexRef = useRef(initialActiveIndex);
+  initialActiveIndexRef.current = initialActiveIndex;
 
   useEffect(() => {
     if (!enabled) return;
@@ -171,10 +193,16 @@ export function useAriaMenu({
     if (!enabled) return;
     const root = rootRef.current;
     if (!root) return;
-    // Reset to the first item whenever the menu (re)mounts. Set the
-    // index synchronously so the roving tabindex render passes `0` to
-    // the first menuitem before paint.
-    const first = focusMenuItem(root, 0, itemSelector, skipDisabled, 1);
+    // `initialActiveIndex` seeds the starting row (see the doc header);
+    // an out-of-range or omitted value lands on the first item. Set the
+    // index synchronously so the roving tabindex render passes the
+    // seeded row its `tabIndex=0` before paint, then move focus.
+    const seed = initialActiveIndexRef.current;
+    const start =
+      seed !== undefined && seed >= 0 && seed < (itemCountRef.current ?? root.querySelectorAll<HTMLElement>(itemSelector).length)
+        ? seed
+        : 0;
+    const first = focusMenuItem(root, start, itemSelector, skipDisabled, 1);
     if (first !== null) setActiveIndex(first);
     // Re-run only when `enabled` flips — the menu's open/close is the
     // gate, and the layout effect mirrors the lifetime of the listener.

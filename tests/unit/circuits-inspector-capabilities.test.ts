@@ -57,7 +57,7 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     const c = HARNESS_CAPABILITIES.anthropic;
     expect(c.harness_id).toBe('anthropic');
     // Issue #1481 — pin supports_passive_turn_watcher across every harness
-    // (TS vitest is opt-in per field; only commandcode.rs:100 overrides the
+    // (TS vitest is opt-in per field; commandcode.rs and muse.rs override the
     // trait default of `false`, see provider/mod.rs:348).
     expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(true);
@@ -224,18 +224,23 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.effort_control.kind).toBe('none');
   });
 
-  // Muse (issue #1708) — durable per-session JSONL reader is wired,
-  // so the Coordinator Node Digest hydrates and the archived-node
-  // resume picker surfaces muse rows. The pin catches a flip-back to
-  // `produces_readable_transcript: false`.
+  // Muse — Linux + macOS only. Issue #1708 wired the durable per-session
+  // JSONL reader (`services::transcript_reader::adapters::muse`), so the
+  // Coordinator Node Digest hydrates and the archived-node resume picker
+  // surfaces muse rows (`produces_readable_transcript: true`). Issue #1709
+  // wired the passive session-log watcher (`supports_passive_turn_watcher:
+  // true`) since Muse exposes no native attention hook. Both invariants
+  // land here so a flip-back on either flag trips this test.
   it('Muse matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.muse;
     expect(c.harness_id).toBe('muse');
     expect(c.supports_resume).toBe(true);
     expect(c.auto_resume_on_startup).toBe(true);
-    expect(c.supports_passive_turn_watcher).toBe(false);
+    // Issue #1709 — passive turn watcher is wired.
+    expect(c.supports_passive_turn_watcher).toBe(true);
     expect(c.requires_attention_hook).toBe(false);
     expect(c.attention_capability).toEqual({ kind: 'none' });
+    // Issue #1708 — transcript reader is wired.
     expect(c.produces_readable_transcript).toBe(true);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);

@@ -1582,6 +1582,12 @@ export const setCircuitEnabled = (circuitId: number, enabled: boolean) =>
 export const updateCircuitGraph = (circuitId: number, graphJson: string) =>
   _invoke<void>('update_circuit_graph', { circuitId, graphJson });
 
+/** Per-circuit step-slot budget — the `N` in "all N of this circuit's step
+ *  slots are busy". The backend clamps to the blueprint's floor (a review
+ *  circuit's is 2) and shared ceiling, and returns the persisted row. */
+export const updateCircuitConcurrencyLimit = (circuitId: number, concurrencyLimit: number) =>
+  _invoke<AutopilotCircuit>('update_circuit_concurrency_limit', { circuitId, concurrencyLimit });
+
 export const deleteCircuit = (circuitId: number) =>
   _invoke<void>('delete_circuit', { circuitId });
 

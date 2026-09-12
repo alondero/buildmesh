@@ -399,8 +399,15 @@ request fallback), and child sessions cannot overwrite their parent. Codex has
 no permission-result hook, so its tool result or identified terminal `Stop`
 resolves the approval marker. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
-Freebuff, Muse, and unvalidated MiniMax/DeepSeek profiles retain explicit
-capability gaps rather than guessing from PTY output. See
+Freebuff, and unvalidated MiniMax/DeepSeek profiles retain explicit
+capability gaps rather than guessing from PTY output. Muse has no native hook
+either: `services::muse_watcher` tails the interactive TUI's durable
+`~/.local/share/muse/sessions/…/session.jsonl` run boundaries (`runtime.session`
+records with `payload.kind == "run"` and `event.kind == "terminal"`) and
+publishes each as a Node Turn — a passive watcher like Command Code's, with
+`requires_attention_hook = false` and `attention_capability = None`. Because
+Buildmesh launches `muse --disable-approval`, a `PermissionRequested` signal is
+impossible by construction and is not classified. See
 `docs/learning/harness-attention-reliability.md` for the evidence matrix and
 remaining limitations.
 

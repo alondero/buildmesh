@@ -56,6 +56,15 @@ export interface GroupedProviderMenuProps {
  * handler mirrors the WAI-ARIA pattern used by `MeshItem` (issue #735)
  * and `KebabActions` in `GridNodeHeader` so the three menus (context,
  * kebab, spawn) feel identical.
+ *
+ * Issue #1720 follow-up — single-caret hover contract. Like a native
+ * `<select>` dropdown there is exactly ONE highlighted row at any
+ * time: the row at `activeIndex`. Hovering a row focuses it (and its
+ * focus handler syncs the index), so the highlight moves to the
+ * pointer instead of a second row lighting up; keyboard arrows move
+ * the same caret (focus + index) back. Pointer and keyboard share one
+ * state, so the two can never disagree. Rows therefore carry no CSS
+ * `hover:` background paint.
  */
 export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose }: GroupedProviderMenuProps) {
   // Group by `group_key`, preserving the backend's harness order and the
@@ -96,6 +105,14 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   // site; pre-#837 this menu omitted Tab handling and the test for it
   // (`grouped-provider-menu.test.tsx`) only covered Escape, but the
   // hook's default is the canonical WAI-ARIA `menu` behaviour.
+  //
+  // Issue #1720 follow-up — single-caret menu. Rows paint ONLY off
+  // `activeIndex` (no CSS `hover:` paint), so exactly one row is
+  // highlighted at any time. The hook's keyboard walk already moves
+  // real focus AND the index together; hover joins that same channel
+  // by focusing the entered row, and the row's focus handler syncs the
+  // index — pointer and keyboard share ONE caret and can never light
+  // two rows.
   useAriaMenu({
     rootRef: menuRef,
     itemCount: flatItems.length,
@@ -103,6 +120,14 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
     setActiveIndex,
     onClose: () => onClose?.(),
   });
+
+  // Sync the roving index to the row that holds focus. Arrow keys
+  // already set the index before focus lands, so for them this is an
+  // idempotent echo; hover entry (below) relies on it entirely.
+  const syncCaretToFocus = (id: string) => {
+    const idx = flatIndexById.get(id);
+    if (idx !== undefined) setActiveIndex(idx);
+  };
 
   // Build a lookup so each render's `tabIndex` resolves the flat index
   // in O(1). The map is keyed by `SpawnOption.id` (unique per backend
@@ -137,11 +162,13 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
         // the harness badge).
         const native = options.find((o) => !o.is_proxied);
         const proxiedChildren = options.filter((o) => o.is_proxied);
-        // The roving-active row (keyboard focus) paints with the semantic
+        // The ONE caret row (keyboard focus == pointer hover, both
+        // routed through `activeIndex`) paints with the semantic
         // selection surface. `bg-bg-card` is ~1/255 brighter than the
         // `bg-bg-overlay` menu, so it was invisible — the same reason
         // CommandOmnibar's listbox rows use `bg-bg-selection` for the
-        // active row and `bg-bg-card-hover` only for idle hover.
+        // active row. Hover is NOT painted in CSS: `onMouseEnter` moves
+        // the caret itself, so there is never a second lit row.
         const activeId = flatItems[activeIndex]?.id;
         return (
           <div key={groupKey} data-spawn-group={groupKey} className="border-b border-border-subtle last:border-b-0">
@@ -156,10 +183,16 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                 data-spawn-id={native.id}
                 data-spawn-harness={native.harness_id}
                 onClick={(e) => { e.stopPropagation(); onSelect(native.id, e.altKey); }}
+                // Pointer entry: focus the row under the cursor
+                // (preventScroll so focusing inside the scrollable
+                // dropdown never jumps it). The event already carries
+                // the element — no DOM re-query needed.
+                onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
+                onFocus={() => syncCaretToFocus(native.id)}
                 className={`w-full text-left px-3 py-1.5 text-xs font-medium focus:outline-none flex items-center gap-2 ${
                   native.id === activeId
                     ? 'bg-bg-selection text-text-primary'
-                    : 'text-text-primary hover:bg-bg-card-hover'
+                    : 'text-text-primary'
                 }`}
               >
                 <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
@@ -183,10 +216,14 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                     data-spawn-id={child.id}
                     data-spawn-harness={child.harness_id}
                     onClick={(e) => { e.stopPropagation(); onSelect(child.id, e.altKey); }}
+                    // See the native row: hover joins the keyboard's
+                    // single caret by focusing the entered row.
+                    onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
+                    onFocus={() => syncCaretToFocus(child.id)}
                     className={`w-full text-left pl-7 pr-3 py-1 text-xs focus:outline-none flex items-center gap-2 ${
                       child.id === activeId
                         ? 'bg-bg-selection text-text-primary'
-                        : 'text-text-secondary hover:bg-bg-card-hover'
+                        : 'text-text-secondary'
                     }`}
                   >
                     <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />

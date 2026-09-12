@@ -92,15 +92,26 @@ pub(super) fn emit_sync_outcome_event(
     outcome: Result<crate::git::sync::FetchOutcome, crate::git::sync::FetchError>,
 ) {
     let payload = match outcome {
-        Ok(crate::git::sync::FetchOutcome::FetchedButDirty { new_commits }) => {
+        Ok(crate::git::sync::FetchOutcome::FetchedButDirty {
+            new_commits,
+            blocking_paths,
+        }) => {
             // Silent, like Synced/UpToDate: the fetch reached the remote and
             // advanced the tracking refs the worktree is cut from — the new
             // node IS fresh. Only the parent checkout's fast-forward was
-            // skipped, and the user already knows their own tree is dirty.
+            // skipped, because a local change sits at a path the incoming
+            // commits rewrite (ADR 0033; unrelated edits and untracked files
+            // no longer block).
+            let blockers = if blocking_paths.is_empty() {
+                "<unknown>".to_string()
+            } else {
+                blocking_paths.join(", ")
+            };
             tracing::info!(
                 "provision_workspace: auto-sync fetched {} commit(s) but skipped the pull \
-                 (parent dirty) for session {}",
+                 (local changes would be overwritten at: {}) for session {}",
                 new_commits,
+                blockers,
                 session_id
             );
             return;

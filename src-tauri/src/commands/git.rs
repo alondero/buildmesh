@@ -363,11 +363,14 @@ pub struct GitSyncResult {
 /// shape the frontend expects (the wire type is unchanged).
 ///
 /// Note: the shared helper always runs the fetch (a fetch never
-/// touches the working tree) and only skips the fast-forward pull
-/// when the tree is dirty (returning `FetchedButDirty` → "Fetched N
-/// new commits — fast-forward skipped: working tree has uncommitted
-/// changes"). A manual Sync click on a dirty mesh therefore still
-/// freshens the remote-tracking refs that worktree nodes are cut from.
+/// touches the working tree) and skips the fast-forward pull only
+/// when it would overwrite local changes (returning `FetchedButDirty`
+/// → "Fetched N new commits — fast-forward skipped: changes to <paths>
+/// would be overwritten"). Since ADR 0033 a dirty tree alone does not
+/// skip the pull: edits and untracked files in paths the incoming
+/// commits don't rewrite are preserved by git and the pull proceeds. A
+/// manual Sync click on a dirty mesh therefore still freshens the
+/// remote-tracking refs that worktree nodes are cut from.
 ///
 /// **Fetch scope trade-off:** the pre-#274 inline code did
 /// `git fetch` with NO arguments, which git resolves to "fetch the
@@ -465,17 +468,33 @@ fn sync_outcome_to_git_sync_result(
 ) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
-        SyncOutcome::FetchedButDirty { new_commits } => GitSyncResult {
-            fetched: true,
-            pulled: false,
+        SyncOutcome::FetchedButDirty {
             new_commits,
-            message: format!(
-                "Fetched {} new commit{}; fast-forward skipped: working tree has \
-                 uncommitted changes",
+            blocking_paths,
+        } => {
+            // Since ADR 0033 a dirty tree alone no longer blocks the pull —
+            // only local changes at paths the incoming commits rewrite do.
+            // Name them so the user can see the block is real, not a blanket
+            // "your tree is dirty" (which used to fire on unrelated edits and
+            // untracked files).
+            let overwritten = if blocking_paths.is_empty() {
+                // Fail-closed: status was unreadable, so we can't name paths.
+                "uncommitted changes".to_string()
+            } else {
+                format!("changes to {}", format_overwrite_paths(&blocking_paths))
+            };
+            GitSyncResult {
+                fetched: true,
+                pulled: false,
                 new_commits,
-                plural_s(new_commits)
-            ),
-        },
+                message: format!(
+                    "Fetched {} new commit{}; fast-forward skipped: {} would be overwritten",
+                    new_commits,
+                    plural_s(new_commits),
+                    overwritten
+                ),
+            }
+        }
         SyncOutcome::SkippedNoRemote => GitSyncResult {
             fetched: false,
             pulled: false,
@@ -544,6 +563,22 @@ fn sync_outcome_to_git_sync_result(
 /// `sync_outcome_to_git_sync_result` for the "N new commit[s]" wording.
 fn plural_s(n: u32) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// Render the ff-pull blocking paths for the Sync toast. Caps at three names
+/// (then "and N more") so a collision with a large changeset stays readable.
+fn format_overwrite_paths(paths: &[String]) -> String {
+    const MAX: usize = 3;
+    let mut listed = paths
+        .iter()
+        .take(MAX)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > MAX {
+        listed.push_str(&format!(" and {} more", paths.len() - MAX));
+    }
+    listed
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────

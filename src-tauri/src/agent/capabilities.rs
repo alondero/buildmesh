@@ -487,7 +487,9 @@ mod tests {
         // Issue #1708: muse now produces a readable transcript
         // (see `services::transcript_reader::adapters::muse::MuseAdapter`)
         // — the descriptor must mirror that flip so the inventory test
-        // fails closed when the flag reverts.
+        // fails closed when the flag reverts. Issue #1709 (Muse passive
+        // turn watcher) flipped `supports_passive_turn_watcher` to true;
+        // both invariants land in the merged inventory pin below.
         capabilities_for(&crate::agent::provider::adapters::MUSE)
     }
 
@@ -752,18 +754,20 @@ mod tests {
         // transcript reader now hydrates the Coordinator Node Digest
         // and the `resumable = supports_resume && produces_readable_transcript`
         // conjunction in `provider_menu.rs:53` surfaces muse rows in the
-        // archived-node resume picker. Pin the descriptor so a future
-        // flip-back to `false` trips here.
+        // archived-node resume picker. Issue #1709: Muse has no native
+        // attention hook, but the backend session-log watcher supplies
+        // the turn signal, so `requires_attention_hook` stays false while
+        // `supports_passive_turn_watcher` flips true. Both invariants land
+        // here so a future flip-back on either flag trips this test.
         let muse = muse_caps();
         assert_eq!(muse.harness_id, "muse");
         assert!(muse.supports_resume);
         assert!(muse.auto_resume_on_startup);
         assert!(!muse.requires_attention_hook);
-        // Mirror the dsh/freebuff pattern — no attention hook shipped
-        // yet (issue #1708 acceptance criteria list this as separate
-        // work). A follow-up that ships a hook will flip this and pin
-        // `min_version` here.
         assert_eq!(muse.attention_capability, AttentionCapability::None);
+        // Issue #1709 — passive turn watcher is wired.
+        assert!(muse.supports_passive_turn_watcher);
+        // Issue #1708 — transcript reader is wired.
         assert!(muse.produces_readable_transcript);
         assert!(muse.supports_model_override);
         assert!(!muse.supports_effort_override);
@@ -797,6 +801,7 @@ mod tests {
             mcode_caps(),
             dsh_caps(),
             commandcode_caps(),
+            muse_caps(),
             freebuff_caps(),
             muse_caps(),
         ] {
@@ -834,6 +839,7 @@ mod tests {
             &crate::agent::provider::adapters::MCODE,
             &crate::agent::provider::adapters::DSH,
             &crate::agent::provider::adapters::COMMANDCODE,
+            &crate::agent::provider::adapters::MUSE,
             &crate::agent::provider::adapters::FREEBUFF,
             &crate::agent::provider::adapters::MUSE,
         ] {
