@@ -227,23 +227,6 @@ pub struct SpawnOptionId {
 }
 
 impl SpawnOptionId {
-    pub const fn new(harness_id: String, provider_id: Option<String>) -> Self {
-        Self {
-            harness_id,
-            provider_id,
-        }
-    }
-
-    /// Re-serialise back to the wire-shape composite string. The inverse of
-    /// `FromStr` — `SpawnOptionId::from(s).as_str() == s` for every `s`
-    /// (pinned by `spawn_option_id_round_trips_via_display`).
-    pub fn as_str(&self) -> String {
-        match &self.provider_id {
-            Some(p) => format!("{}:{}", self.harness_id, p),
-            None => self.harness_id.clone(),
-        }
-    }
-
     pub fn is_proxied(&self) -> bool {
         self.provider_id.is_some()
     }
@@ -261,16 +244,7 @@ impl std::str::FromStr for SpawnOptionId {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.split_once(':') {
-            Some((harness, provider)) => Ok(SpawnOptionId {
-                harness_id: harness.to_string(),
-                provider_id: Some(provider.to_string()),
-            }),
-            None => Ok(SpawnOptionId {
-                harness_id: s.to_string(),
-                provider_id: None,
-            }),
-        }
+        Ok(SpawnOptionId::from(s))
     }
 }
 
@@ -285,8 +259,6 @@ impl std::fmt::Display for SpawnOptionId {
 
 impl From<&str> for SpawnOptionId {
     fn from(value: &str) -> Self {
-        // Inlined: avoids an extra Result-unwrap and matches the original
-        // `parse_spawn_option_id`'s "always succeeds" contract.
         match value.split_once(':') {
             Some((harness, provider)) => SpawnOptionId {
                 harness_id: harness.to_string(),
@@ -851,7 +823,7 @@ mod tests {
         assert_eq!(id.harness_id(), "claude");
         assert_eq!(id.provider_id(), None);
         assert!(!id.is_proxied());
-        assert_eq!(id.as_str(), "claude");
+        assert_eq!(id.to_string(), "claude");
     }
 
     /// Composite ids split on the first `:` and tag `is_proxied()`.
@@ -861,7 +833,7 @@ mod tests {
         assert_eq!(id.harness_id(), "claude");
         assert_eq!(id.provider_id(), Some("minimax"));
         assert!(id.is_proxied());
-        assert_eq!(id.as_str(), "claude:minimax");
+        assert_eq!(id.to_string(), "claude:minimax");
     }
 
     /// A provider id that itself contains `:` is preserved intact on the
@@ -874,7 +846,7 @@ mod tests {
         let id = SpawnOptionId::from("claude:weird:id");
         assert_eq!(id.harness_id(), "claude");
         assert_eq!(id.provider_id(), Some("weird:id"));
-        assert_eq!(id.as_str(), "claude:weird:id");
+        assert_eq!(id.to_string(), "claude:weird:id");
     }
 
     /// `FromStr` and `Display` are mutual inverses for every input — the

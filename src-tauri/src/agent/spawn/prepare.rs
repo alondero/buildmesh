@@ -446,7 +446,7 @@ pub(super) async fn prepare_context(
     // Parse `node.provider` once at the prepare boundary (issue #1659
     // item 1). The launch phase consumes the typed value; no phase
     // downstream of this line should re-parse the raw composite string.
-    let harness_id = SpawnOptionId::from(node.provider.as_str());
+    let spawn_option_id = SpawnOptionId::from(node.provider.as_str());
     let node_mesh_id = node.mesh_id;
     Ok(PrepareOutcome::Ready(Box::new(PreparedPhases {
         workspace: WorkspaceToProvision {
@@ -469,7 +469,7 @@ pub(super) async fn prepare_context(
             explicit_effort,
             explicit_extra_args,
             explicit_timeout_seconds,
-            harness_id,
+            spawn_option_id,
             node_mesh_id,
             registry_mesh_id: mesh_id,
             session_id_mode,

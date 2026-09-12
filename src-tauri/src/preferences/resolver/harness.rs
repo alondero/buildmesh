@@ -191,9 +191,22 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// the same path during the post-#575 migration window, and the post-
 /// migration composite ids (`"claude:minimax"`) resolve to the same
 /// Anthropic executor as the bare form did.
+///
+/// Prefer [`resolve_harness_provider_for`] when the caller already holds a
+/// typed `SpawnOptionId` — it skips the redundant `&str` → `SpawnOptionId`
+/// re-parse that this `&str` overload performs internally (issue #1730
+/// review fix-up: previously `services::agent_node::decide_resume` and
+/// `autopilot::compatibility::resolve_autopilot_spawn_option` each parsed
+/// `new_provider` twice across the two calls).
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    let id = crate::agent::provider::SpawnOptionId::from(profile_id);
-    let harness_id = id.harness_id();
+    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(profile_id))
+}
+
+/// Typed entry point — accept an already-parsed [`SpawnOptionId`] and
+/// resolve the executor from its harness half (see
+/// [`resolve_harness_provider`] for the rationale).
+pub fn resolve_harness_provider_for(spawn_option: &crate::agent::provider::SpawnOptionId) -> Provider {
+    let harness_id = spawn_option.harness_id();
     match harness_profiles().into_iter().find(|p| p.id == harness_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
         None => Provider::from_db_str(harness_id),

@@ -489,52 +489,60 @@ fn prepare_does_not_acquire_the_in_flight_claim() {
 }
 
 /// Pin the **prepare → launch** DTO boundary (issue #1659 item 1):
-/// `LaunchParams.harness_id: SpawnOptionId` is parsed once from
-/// `node.provider` here and consumed as a typed value by `launch_process`.
-/// The launcher reads `harness_id.harness_id()` (the harness half) for the
-/// per-Mesh override + application-default lookups (issue #1148 AC #12:
-/// native and Proxied rows consume the same default layer), so the
-/// composite-id wire shape must survive the typed-value boundary intact.
+/// `LaunchParams.spawn_option_id: SpawnOptionId` carries the parsed
+/// value across the spawn-phase boundary. `launch_process` reads
+/// `spawn_option_id.harness_id()` for the per-Mesh override +
+/// application-default lookups (issue #1148 AC #12: native and Proxied
+/// rows consume the same default layer), so the composite-id wire shape
+/// must survive the typed-value boundary intact.
 ///
-/// A future refactor that re-introduces a string intermediate between
-/// prepare and launch (or that drops the parse at this boundary) trips
-/// this pin.
+/// This is a **compilation pin**: the test constructs a real
+/// `LaunchParams` value with `spawn_option_id: SpawnOptionId` exactly as
+/// `prepare_context` does. A future refactor that reverts the field
+/// type to `String`, removes the field, or renames it again fails to
+/// compile — the assertions below then exercise the typed value the
+/// way the launch phase consumes it.
 #[test]
 fn prepare_threads_typed_spawn_option_id_into_launch_params() {
+    use super::launch::LaunchParams;
+    use super::reader::SessionIdMode;
+
     // Composite Proxied id — the case that broke the bare-string lookup
     // in the pre-#1659 code (the harness half is `"claude"`, the
     // provider half is `"minimax"`; both must be present after the
     // typed boundary so `launch.rs` can read `.harness_id()`).
     let raw = "claude:minimax";
     let id = SpawnOptionId::from(raw);
-    assert_eq!(id.harness_id(), "claude");
-    assert_eq!(id.provider_id(), Some("minimax"));
-    assert_eq!(id.to_string(), raw);
 
-    // Round-trip through the spawn-options construction that hands the
-    // typed value to `LaunchParams`. This exercises the exact field
-    // shape `prepare_context` produces — a future change to that field
-    // shape that drops the typed value would fail to compile here.
-    let opts = SpawnOptions {
-        session_id: 0,
-        provider: Provider::Anthropic,
-        resume: None,
+    // Construction pin — the field shape mirrors `prepare_context`'s
+    // `LaunchParams { spawn_option_id, .. }` literal. If the field
+    // type reverts to `String` (or the field is renamed), this fails to
+    // compile and the regression is caught at build time, not by the
+    // assertions below.
+    let launch = LaunchParams {
         rows: 24,
         cols: 80,
         prefill: None,
-        node: None,
         explicit_model: None,
         explicit_effort: None,
         explicit_extra_args: None,
         explicit_timeout_seconds: None,
-        worktree_policy: WorktreePolicy::RespectMesh,
+        spawn_option_id: id.clone(),
+        node_mesh_id: 0,
+        registry_mesh_id: 0,
+        session_id_mode: SessionIdMode::None,
+        sandbox: false,
     };
-    // The launch-phase consumer reads `harness_id.harness_id()` for the
-    // application-default / per-Mesh override lookup (see launch.rs:
-    // `let harness_id_for_default = harness_id.harness_id();`). A
-    // composite id must hand the launcher the harness half cleanly; a
-    // future refactor that re-parses inside the launch phase would
-    // produce a duplicate parse we explicitly retired.
-    assert_eq!(opts.provider, Provider::Anthropic);
-    assert!(id.harness_id().starts_with("claude"));
+
+    // The launch-phase consumer reads `spawn_option_id.harness_id()`
+    // for the application-default / per-Mesh override lookup (see
+    // launch.rs: `let harness_id_for_default =
+    // spawn_option_id.harness_id();`). A composite id must hand the
+    // launcher the harness half cleanly; a Proxied row looks up the
+    // same default as its native harness row — the regression class
+    // this typed value prevents.
+    assert_eq!(launch.spawn_option_id.harness_id(), "claude");
+    assert_eq!(launch.spawn_option_id.provider_id(), Some("minimax"));
+    assert!(launch.spawn_option_id.is_proxied());
+    assert_eq!(launch.spawn_option_id.to_string(), raw);
 }

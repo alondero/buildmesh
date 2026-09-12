@@ -948,7 +948,7 @@ mod tests {
         let id = crate::agent::provider::SpawnOptionId::from("claude:weird:id");
         assert_eq!(id.harness_id(), "claude");
         assert_eq!(id.provider_id(), Some("weird:id"));
-        assert_eq!(id.as_str(), "claude:weird:id");
+        assert_eq!(id.to_string(), "claude:weird:id");
     }
 
     /// The resolver chain (`resolve_harness_provider`) splits a composite
