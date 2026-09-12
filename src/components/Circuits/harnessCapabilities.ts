@@ -328,6 +328,29 @@ const TERMINAL_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
+// Muse — Linux + macOS only; durable per-session JSONL reader wired
+// in #1708 (`services::transcript_reader::adapters::muse`). Issue #1709:
+// no native attention hook, but the backend session-log watcher supplies
+// the turn signal — mirrors `adapters::MUSE` (passive turn watcher true).
+const MUSE_CAPS: HarnessCapabilities = {
+  harness_id: 'muse',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  attention_capability: { kind: 'none' },
+  supports_passive_turn_watcher: true,
+  produces_readable_transcript: true,
+  supports_model_override: true,
+  supports_effort_override: false,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: { kind: 'none' },
+  // Order matches `MuseAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/muse.rs`: `[Linux, Macos]`.
+  available_on: ['linux', 'macos'],
+};
+
 /**
  * The harness-to-capability map. Mirrors the Rust inventory table
  * exactly — see `tests/unit/circuits-inspector-capabilities.test.ts`
@@ -345,15 +368,7 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   dsh: DSH_CAPS,
   commandcode: COMMANDCODE_CAPS,
   freebuff: FREEBUFF_CAPS,
-  muse: {
-    ...FREEBUFF_CAPS,
-    harness_id: 'muse',
-    supports_model_override: true,
-    // Issue #1709: no native hook, but the backend session-log watcher
-    // supplies the turn signal — mirrors `adapters::MUSE`.
-    supports_passive_turn_watcher: true,
-    available_on: ['linux', 'macos'],
-  },
+muse: MUSE_CAPS,
   terminal: TERMINAL_CAPS,
 };
 

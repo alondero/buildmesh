@@ -224,21 +224,33 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.effort_control.kind).toBe('none');
   });
 
-  // Muse — no native hook exists (issue #1709); the backend session-log
-  // watcher supplies the turn signal, so `requires_attention_hook` stays
-  // false while `supports_passive_turn_watcher` flips true.
-  it('Meta Muse matches the Rust inventory', () => {
+  // Muse — Linux + macOS only. Issue #1708 wired the durable per-session
+  // JSONL reader (`services::transcript_reader::adapters::muse`), so the
+  // Coordinator Node Digest hydrates and the archived-node resume picker
+  // surfaces muse rows (`produces_readable_transcript: true`). Issue #1709
+  // wired the passive session-log watcher (`supports_passive_turn_watcher:
+  // true`) since Muse exposes no native attention hook. Both invariants
+  // land here so a flip-back on either flag trips this test.
+  it('Muse matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.muse;
     expect(c.harness_id).toBe('muse');
+    expect(c.supports_resume).toBe(true);
+    expect(c.auto_resume_on_startup).toBe(true);
+    // Issue #1709 — passive turn watcher is wired.
     expect(c.supports_passive_turn_watcher).toBe(true);
     expect(c.requires_attention_hook).toBe(false);
     expect(c.attention_capability).toEqual({ kind: 'none' });
+    // Issue #1708 — transcript reader is wired.
+    expect(c.produces_readable_transcript).toBe(true);
     expect(c.supports_model_override).toBe(true);
     expect(c.supports_effort_override).toBe(false);
     expect(c.supports_extra_args).toBe(true);
     expect(c.supports_prefill).toBe(true);
-    expect(c.produces_readable_transcript).toBe(false);
+    expect(c.is_plain_terminal).toBe(false);
     expect(c.effort_control.kind).toBe('none');
+    // Order mirrors `MuseAdapter::available_on()` in Rust:
+    // `[Platform::Linux, Platform::Macos]`.
+    expect(c.available_on).toEqual(['linux', 'macos']);
   });
 
   // Terminal — plain shell; every override OFF. The issue #1362 review

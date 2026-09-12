@@ -479,12 +479,18 @@ mod tests {
         capabilities_for(&crate::agent::provider::adapters::COMMANDCODE)
     }
 
-    fn muse_caps() -> HarnessCapabilities {
-        capabilities_for(&crate::agent::provider::adapters::MUSE)
-    }
-
     fn freebuff_caps() -> HarnessCapabilities {
         capabilities_for(&crate::agent::provider::adapters::FREEBUFF)
+    }
+
+    fn muse_caps() -> HarnessCapabilities {
+        // Issue #1708: muse now produces a readable transcript
+        // (see `services::transcript_reader::adapters::muse::MuseAdapter`)
+        // — the descriptor must mirror that flip so the inventory test
+        // fails closed when the flag reverts. Issue #1709 (Muse passive
+        // turn watcher) flipped `supports_passive_turn_watcher` to true;
+        // both invariants land in the merged inventory pin below.
+        capabilities_for(&crate::agent::provider::adapters::MUSE)
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
@@ -726,30 +732,6 @@ mod tests {
             vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
         );
 
-        let muse = muse_caps();
-        assert_eq!(muse.harness_id, "muse");
-        assert!(muse.supports_resume);
-        assert!(muse.auto_resume_on_startup);
-        // Issue #1709: Muse exposes no native attention hook, so the turn
-        // signal comes from the backend-owned session-log watcher and
-        // `attention_capability` stays `None` (mirrors Command Code).
-        assert!(!muse.requires_attention_hook);
-        assert_eq!(muse.attention_capability, AttentionCapability::None);
-        assert!(muse.supports_passive_turn_watcher);
-        // Muse's durable session log is not a readable transcript the
-        // Coordinator can hydrate; the watcher reads run boundaries only.
-        assert!(!muse.produces_readable_transcript);
-        assert!(muse.supports_model_override);
-        assert!(!muse.supports_effort_override);
-        assert!(muse.supports_extra_args);
-        assert!(muse.supports_prefill);
-        assert!(!muse.is_plain_terminal);
-        assert_eq!(muse.effort_control, EffortControlKind::None);
-        assert_eq!(
-            muse.available_on,
-            vec!["linux".to_string(), "macos".to_string()]
-        );
-
         let freebuff = freebuff_caps();
         assert_eq!(freebuff.harness_id, "freebuff");
         assert!(freebuff.supports_resume);
@@ -765,6 +747,39 @@ mod tests {
         assert_eq!(
             freebuff.available_on,
             vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
+
+        // Issue #1708 — muse: durable per-session JSONL reader is wired
+        // (see `services::transcript_reader::adapters::muse`), so the
+        // transcript reader now hydrates the Coordinator Node Digest
+        // and the `resumable = supports_resume && produces_readable_transcript`
+        // conjunction in `provider_menu.rs:53` surfaces muse rows in the
+        // archived-node resume picker. Issue #1709: Muse has no native
+        // attention hook, but the backend session-log watcher supplies
+        // the turn signal, so `requires_attention_hook` stays false while
+        // `supports_passive_turn_watcher` flips true. Both invariants land
+        // here so a future flip-back on either flag trips this test.
+        let muse = muse_caps();
+        assert_eq!(muse.harness_id, "muse");
+        assert!(muse.supports_resume);
+        assert!(muse.auto_resume_on_startup);
+        assert!(!muse.requires_attention_hook);
+        assert_eq!(muse.attention_capability, AttentionCapability::None);
+        // Issue #1709 — passive turn watcher is wired.
+        assert!(muse.supports_passive_turn_watcher);
+        // Issue #1708 — transcript reader is wired.
+        assert!(muse.produces_readable_transcript);
+        assert!(muse.supports_model_override);
+        assert!(!muse.supports_effort_override);
+        assert!(muse.supports_extra_args);
+        assert!(muse.supports_prefill);
+        assert!(!muse.is_plain_terminal);
+        assert_eq!(muse.effort_control, EffortControlKind::None);
+        // Order matches `MuseAdapter::available_on()`:
+        // `&[Platform::Linux, Platform::Macos]`.
+        assert_eq!(
+            muse.available_on,
+            vec!["linux".to_string(), "macos".to_string()]
         );
     }
 
@@ -788,6 +803,7 @@ mod tests {
             commandcode_caps(),
             muse_caps(),
             freebuff_caps(),
+            muse_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -825,6 +841,7 @@ mod tests {
             &crate::agent::provider::adapters::COMMANDCODE,
             &crate::agent::provider::adapters::MUSE,
             &crate::agent::provider::adapters::FREEBUFF,
+            &crate::agent::provider::adapters::MUSE,
         ] {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;

@@ -5,7 +5,7 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Seven harness formats are supported, selected by [`TranscriptFormat`]:
+//! Eight harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
@@ -13,7 +13,10 @@
 //! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
 //! (issue #1281), Command Code's
 //! `~/.commandcode/projects/<encoded-cwd>/<session>.jsonl` (issues #1407,
-//! #1500), and OpenCode's local `opencode.db` SQLite store (issue #1296).
+//! #1500), Muse Code's
+//! `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` (issue
+//! #1708, indexed by `~/.local/share/muse/session-index.db`), and
+//! OpenCode's local `opencode.db` SQLite store (issue #1296).
 //! All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the Coordinator
 //! never learns which harness wrote the file.
 //!
@@ -89,6 +92,15 @@ pub enum TranscriptFormat {
     /// `chat_history.jsonl` (the per-message conversation log) and
     /// `updates.jsonl` (event-level telemetry). Issue #1281.
     Grok,
+    /// Muse Code (issue #1708) persists per-session JSONL at
+    /// `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`,
+    /// indexed by `~/.local/share/muse/session-index.db` (a SQLite
+    /// index with `sessions(session_id TEXT, session_log_path TEXT)`).
+    /// The adapter resolves the per-session path via the index then
+    /// parses the JSONL into the shared `Turn` / `ToolCall` shape — same
+    /// file-based pattern as AGY (issue #1283), not the database-
+    /// short-circuit pattern used by OpenCode (#1296).
+    Muse,
     /// OpenCode (issue #1296) stores all session messages in a single local
     /// SQLite database (`~/.local/share/opencode/opencode.db`), not in
     /// per-session JSONL files. The reader pulls messages by `session_id`
@@ -122,6 +134,7 @@ impl TranscriptFormat {
             "cursor" => TranscriptFormat::Cursor,
             "agy" => TranscriptFormat::Agy,
             "grok" => TranscriptFormat::Grok,
+            "muse" => TranscriptFormat::Muse,
             "opencode" => TranscriptFormat::OpenCode,
             _ => TranscriptFormat::ClaudeCode,
         }
@@ -293,6 +306,7 @@ fn adapter_id_for_format(format: TranscriptFormat) -> &'static str {
         TranscriptFormat::Cursor => "cursor",
         TranscriptFormat::CommandCode => "commandcode",
         TranscriptFormat::Grok => "grok",
+        TranscriptFormat::Muse => "muse",
         // OpenCode's adapter's `parse` is unreachable (the reader
         // short-circuits to `read_opencode_*` before `parse_transcript`
         // runs); routing through the registry still resolves correctly.
@@ -1747,6 +1761,91 @@ mod tests {
         assert_eq!(
             last_assistant_message.as_deref(),
             Some("Patch applied. The redirect now preserves the query string."),
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Muse transcript parser (issue #1708)
+    //
+    // The fixture covers the full on-disk shape: metadata/route_facts
+    // bootstrap (skipped), user_prompt_display (user turn),
+    // reasoning_committed (encrypted, MUST NOT surface — privacy rule),
+    // assistant_tool_calls_committed (tool call), output/tool_result
+    // batches (skipped), assistant_message_committed sharing message_id
+    // with the tool calls (coalesces), and an unknown payload_type
+    // (silently skipped). The end-to-end read_tail_from_file path is
+    // the contract test the reader's catalogue dispatch reaches for
+    // every other harness — same shape, same `fixture()` helper.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn muse_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("muse_transcript.jsonl"),
+            10,
+            TranscriptFormat::Muse,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("muse fixture should parse to an available tail, got {tail:?}");
+        };
+        // Fixture carries: user_prompt_display → task_started →
+        // reasoning_committed → assistant_tool_calls_committed (msg X)
+        // → output → tool_result_batch_committed → assistant_message_committed
+        // (msg X, coalesces into the same turn as the tool calls) →
+        // task_completed → user_prompt_display → unknown payload_type.
+        // Surviving turns:
+        //   1. user_prompt_display ("<REDACTED>")
+        //   2. assistant_message_committed ("<REDACTED>") — coalesced
+        //      with the tool_calls_committed that shares its message_id,
+        //      so the tool call lands on this turn.
+        //   3. user_prompt_display ("<REDACTED>")
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user"],
+            "turns: {turns:#?}"
+        );
+        // All real content is `<REDACTED>` (the fixture's privacy
+        // posture — the prose check in
+        // `adapters::muse::tests::redacted_fixture_carries_no_prompts_or_secrets`
+        // is the authoritative audit).
+        assert_eq!(turns[0].text, "<REDACTED>");
+        assert_eq!(turns[1].text, "<REDACTED>");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        // The `args` JSON string parses onto the shared `input` wire shape.
+        assert_eq!(
+            turns[1].tool_calls[0].input["file_path"],
+            "src/<REDACTED>.ts"
+        );
+        assert_eq!(turns[2].text, "<REDACTED>");
+        // `last_assistant_message` is the FULL final text regardless of
+        // the bounded turn window.
+        assert_eq!(last_assistant_message.as_deref(), Some("<REDACTED>"));
+    }
+
+    #[test]
+    fn muse_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("muse_transcript.jsonl"),
+            TranscriptFormat::Muse,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("<REDACTED>"),
+            "cheap digest must surface the same last assistant text as the full reader",
         );
     }
 
