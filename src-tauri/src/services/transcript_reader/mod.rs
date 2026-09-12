@@ -13,7 +13,10 @@
 //! `~/.grok/sessions/<urlencoded-cwd>/<id>/{chat_history.jsonl, updates.jsonl}`
 //! (issue #1281), Command Code's
 //! `~/.commandcode/projects/<encoded-cwd>/<session>.jsonl` (issues #1407,
-//! #1500), and OpenCode's local `opencode.db` SQLite store (issue #1296).
+//! #1500), Muse Code's
+//! `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` (issue
+//! #1708, indexed by `~/.local/share/muse/session-index.db`), and
+//! OpenCode's local `opencode.db` SQLite store (issue #1296).
 //! All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the Coordinator
 //! never learns which harness wrote the file.
 //!

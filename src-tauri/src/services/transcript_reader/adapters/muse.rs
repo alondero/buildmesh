@@ -149,13 +149,18 @@ pub(crate) fn muse_index_path_for(node_path: &str) -> Option<PathBuf> {
 /// `adapters/muse.rs::find_session`). `pub(crate)` so tests can drive it
 /// against a temp DB without touching `~/.local/share/muse`.
 ///
-/// The returned path is the guest-side path stored in the index (Linux
-/// absolute, e.g. `/home/alond/.local/share/muse/...`); on Windows the
-/// caller must wrap it in [`crate::env::to_host_path`] to read it from
-/// the host. The reader relies on `cli_dir_for_spawn` (called upstream
-/// from `locate`) to translate the *index* path; this helper returns the
-/// raw guest path the index stores for symmetry with the existing
-/// `find_session`.
+/// The returned path is host-readable: the helper wraps the raw guest
+/// path the index stores through [`crate::env::to_host_path`], mirroring
+/// `find_session` in `agent/provider/adapters/muse.rs::find_session`
+/// (the same translation runs on every row before `File::open`). On
+/// Linux and macOS this is the identity function; on a Windows+WSL host
+/// a Linux absolute row becomes a WSL UNC path (issue #1227 canonical
+/// `\\wsl.localhost\\<distro>\\home\\...` form, or the
+/// `\\wsl$\\<distro>\\home\\...` legacy form) so the reader
+/// reaches the WSL filesystem rather than a non-existent Windows path.
+/// The reader still relies on `cli_dir_for_spawn` (called upstream
+/// from `locate`) to translate the *index* path itself; this helper owns
+/// the result-path translation that the index row carries.
 pub(crate) fn muse_locator_in(index_db: &Path, session_id: &str) -> Option<PathBuf> {
     let connection = Connection::open_with_flags(index_db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     if connection
@@ -177,7 +182,12 @@ pub(crate) fn muse_locator_in(index_db: &Path, session_id: &str) -> Option<PathB
     if path.is_empty() {
         return None;
     }
-    Some(PathBuf::from(path))
+    // Host-translate the guest-side row (mirrors `find_session` in
+    // `agent/provider/adapters/muse.rs`, which runs the same conversion
+    // on every row before `File::open`). Identity on Linux/macOS; on
+    // Windows+WSL a `/home/...` row becomes `\wsl$\...` so the
+    // subsequent `path.exists()` / `File::open` reaches the WSL FS.
+    Some(PathBuf::from(env::to_host_path(&path)))
 }
 
 /// Pull Muse `tool_calls` (`[{name, args, call_id, id}]`) into the
@@ -285,6 +295,18 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
                 // non-empty — pure task-lifecycle `started` events
                 // (`payload_type=runtime.session.task`) are filtered by the
                 // outer guard above and never reach this arm.
+                //
+                // Known limitation: a session that emits BOTH `started`
+                // with a prompt AND a separate `user_prompt_display` for
+                // the same prompt produces two identical user turns (no
+                // dedup). The Muse releases observed on this branch emit
+                // either-or (a bare `started` first, then a
+                // `user_prompt_display`, never both carrying the same
+                // prompt), so the parser treats the two events as
+                // mutually exclusive. A future Muse release that breaks
+                // the invariant would surface duplicates here — the fix
+                // is a per-session dedup keyed on the prompt text, not
+                // a same-line drop.
                 let Some(prompt) = event.get("prompt").and_then(|p| p.as_str()) else {
                     continue;
                 };
@@ -700,11 +722,13 @@ mod tests {
             )
             .unwrap();
 
+        let expected_raw =
+            "/home/test/.local/share/muse/sessions/2026/09/12/<id>/session.jsonl";
         assert_eq!(
             muse_locator_in(&database, "01a0a000-0000-7000-8000-000000000001"),
-            Some(std::path::PathBuf::from(
-                "/home/test/.local/share/muse/sessions/2026/09/12/<id>/session.jsonl"
-            ))
+            Some(std::path::PathBuf::from(env::to_host_path(expected_raw))),
+            r#"host-translated path matches the index row: identity on \
+             Linux/macOS, \\wsl$\(distro)\... on Windows+WSL"#,
         );
         assert!(muse_locator_in(&database, "01a0a000-0000-7000-8000-000000000002").is_none());
         assert!(muse_locator_in(&database, "unknown-id").is_none());
