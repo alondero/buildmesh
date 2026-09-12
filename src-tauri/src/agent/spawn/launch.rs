@@ -9,6 +9,7 @@ use super::process::{sandbox_spawn, spawn_child};
 use super::provision::ProvisionedWorkspace;
 use super::reader::{open_pty_pair, SessionIdMode, SpawnTimer};
 use super::wire::emit_provider_error;
+use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
 
 /// PTY size, cascade overrides, and command-construction knobs.
@@ -32,9 +33,12 @@ pub(super) struct LaunchParams {
     /// (and a future process-level watchdog can consume it without
     /// re-deriving from the AST).
     pub explicit_timeout_seconds: Option<u32>,
-    /// Composite spawn-option id (`node.provider`), used as the harness
-    /// map key for application defaults and per-mesh overrides.
-    pub harness_id: String,
+    /// Composite spawn-option id (`node.provider`) typed once at the
+    /// entry seam (issue #1659 item 1). The application-defaults map and
+    /// the per-Mesh override map are both keyed by the harness half
+    /// (`SpawnOptionId::harness_id`) so a Proxied row like `"claude:minimax"`
+    /// looks up the same default as its native `"claude"` row.
+    pub harness_id: SpawnOptionId,
     /// `AgentNode.mesh_id` — lookup key for `get_mesh_harness_overrides`.
     pub node_mesh_id: i64,
     /// Mesh id resolved from the node path, stored on the process
@@ -129,10 +133,10 @@ pub(super) async fn launch_process(
     // keyed by the harness *profile* id (the half before the first `:`),
     // so a raw lookup would miss every Proxied spawn — failing AC #12
     // ("Native and Proxied Provider Spawn Options consume the same
-    // application-default layer"). Split the composite id through
-    // `parse_spawn_option_id` before both lookups so native and Proxied
-    // rows hit the same map key.
-    let (harness_id_for_default, _) = crate::agent::provider::parse_spawn_option_id(&harness_id);
+    // application-default layer"). Read the harness half off the typed
+    // `SpawnOptionId` (parsed once at the entry seam, issue #1659 item 1)
+    // so native and Proxied rows hit the same map key.
+    let harness_id_for_default = harness_id.harness_id();
     let mesh_override = crate::db::get_mesh_harness_overrides(node_mesh_id)
         .ok()
         .flatten()

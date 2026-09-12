@@ -1261,10 +1261,10 @@ mod tests {
 
     /// Pin the **Proxied Provider** path (issue #1148 AC #12: "Native and
     /// Proxied Provider Spawn Options consume the same application-default
-    /// layer"). The spawn seam calls `parse_spawn_option_id` on
-    /// `node.provider` so a composite id `"claude:minimax"` looks up the
-    /// application default under its harness half `"claude"`. This test
-    /// drives the resolver with inputs that mirror what
+    /// layer"). The spawn seam parses `node.provider` via
+    /// `SpawnOptionId::from_str` so a composite id `"claude:minimax"` looks
+    /// up the application default under its harness half `"claude"`. This
+    /// test drives the resolver with inputs that mirror what
     /// `spawn_agent_inner` produces for a Proxied row: the harness's
     /// application default feeds through, and the harness's capability
     /// descriptor applies the same mask as the native row.

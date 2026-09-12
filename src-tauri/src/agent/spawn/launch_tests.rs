@@ -1,5 +1,6 @@
 use super::launch::LaunchParams;
 use super::reader::SessionIdMode;
+use crate::agent::provider::SpawnOptionId;
 
 /// Construction pin: these knobs belong to launch, not provision.
 #[test]
@@ -17,7 +18,10 @@ fn launch_params_carry_pty_size_and_cascade_overrides() {
         // it). Pin the field here so a future refactor that drops
         // it fails compilation.
         explicit_timeout_seconds: Some(1800),
-        harness_id: "anthropic".into(),
+        // `harness_id` is the typed `SpawnOptionId` — issue #1659 item 1
+        // moved the parse to the entry seam so the launch phase never
+        // touches the raw `"<harness>:<provider>"` string.
+        harness_id: SpawnOptionId::from("anthropic"),
         node_mesh_id: 1,
         registry_mesh_id: 1,
         session_id_mode: SessionIdMode::None,

@@ -193,27 +193,110 @@ pub struct UiMeta {
     pub icon: String,
 }
 
-/// Split a Spawn Option id into `(harness_id, Option<provider_id>)`.
+/// Parsed **Spawn Option** composite id (issue #575, ADR-0016 §6).
 ///
-/// The composite id is `<harness>` for a native option and
-/// `<harness>:<provider>` for a Proxied Provider option (ADR-0016 §6,
-/// issue #575). The separator is the first `:` so a provider id
-/// containing `:` (theoretical today, but the id is the user-chosen
-/// `ProviderAccount.id`) is preserved intact on the right side.
+/// The wire shape is `<harness>` for a native option and `<harness>:<provider>`
+/// for a Proxied Provider option. The separator is the first `:` so a
+/// provider id containing `:` (theoretical today, but the id is the
+/// user-chosen `ProviderAccount.id`) is preserved intact on the right side.
 ///
-/// A bare id (no `:`) yields `(id, None)` — a native Spawn Option that
-/// launches its harness directly. A composite id yields
-/// `(before_colon, Some(after_colon))` — the executor comes from the
-/// harness part, the credentials + endpoint from the provider part.
+/// A bare id (no `:`) yields a `SpawnOptionId { harness_id, provider_id:
+/// None }` — a native Spawn Option that launches its harness directly. A
+/// composite id yields `provider_id: Some(after_first_colon)` — the executor
+/// comes from the harness part, the credentials + endpoint from the
+/// provider part.
 ///
-/// Pure (no globals / no I/O) — the canonical place to ask "is this a
-/// native or proxied spawn, and what's the executor vs the creds?". All
-/// spawn-resolver call sites route through here so the parsing rule
-/// lives in one place.
-pub fn parse_spawn_option_id(id: &str) -> (&str, Option<&str>) {
-    match id.split_once(':') {
-        Some((harness, provider)) => (harness, Some(provider)),
-        None => (id, None),
+/// `FromStr` is infallible: every `&str` is a valid `SpawnOptionId`. All
+/// spawn-resolver entry points parse this value **once** at the entry seam
+/// (orchestrator, autopilot/compat, preferences/compat, preferences/
+/// resolver, services/agent_node, etc.) and thread the typed value through
+/// the downstream phases. Done when `rg "parse_spawn_option_id"` returns
+/// only this `FromStr` impl and zero free-function call sites (issue
+/// #1659 item 1).
+///
+/// **Backend-only.** The wire type `ProviderInfo.id` (generated to
+/// `src/types/generated/ProviderInfo.ts`) and the DB column
+/// `agent_nodes.provider` continue to hold the raw composite string;
+/// the entry seam is the parse boundary. Adding `#[ts_rs::TS]` here
+/// would force a generated TS type that the frontend never consumes and
+/// risks drifting the parser from the wire shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnOptionId {
+    pub harness_id: String,
+    pub provider_id: Option<String>,
+}
+
+impl SpawnOptionId {
+    pub const fn new(harness_id: String, provider_id: Option<String>) -> Self {
+        Self {
+            harness_id,
+            provider_id,
+        }
+    }
+
+    /// Re-serialise back to the wire-shape composite string. The inverse of
+    /// `FromStr` — `SpawnOptionId::from(s).as_str() == s` for every `s`
+    /// (pinned by `spawn_option_id_round_trips_via_display`).
+    pub fn as_str(&self) -> String {
+        match &self.provider_id {
+            Some(p) => format!("{}:{}", self.harness_id, p),
+            None => self.harness_id.clone(),
+        }
+    }
+
+    pub fn is_proxied(&self) -> bool {
+        self.provider_id.is_some()
+    }
+
+    pub fn harness_id(&self) -> &str {
+        &self.harness_id
+    }
+
+    pub fn provider_id(&self) -> Option<&str> {
+        self.provider_id.as_deref()
+    }
+}
+
+impl std::str::FromStr for SpawnOptionId {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.split_once(':') {
+            Some((harness, provider)) => Ok(SpawnOptionId {
+                harness_id: harness.to_string(),
+                provider_id: Some(provider.to_string()),
+            }),
+            None => Ok(SpawnOptionId {
+                harness_id: s.to_string(),
+                provider_id: None,
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for SpawnOptionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.provider_id {
+            Some(p) => write!(formatter, "{}:{}", self.harness_id, p),
+            None => formatter.write_str(&self.harness_id),
+        }
+    }
+}
+
+impl From<&str> for SpawnOptionId {
+    fn from(value: &str) -> Self {
+        // Inlined: avoids an extra Result-unwrap and matches the original
+        // `parse_spawn_option_id`'s "always succeeds" contract.
+        match value.split_once(':') {
+            Some((harness, provider)) => SpawnOptionId {
+                harness_id: harness.to_string(),
+                provider_id: Some(provider.to_string()),
+            },
+            None => SpawnOptionId {
+                harness_id: value.to_string(),
+                provider_id: None,
+            },
+        }
     }
 }
 
@@ -248,8 +331,8 @@ pub fn parse_spawn_option_id(id: &str) -> (&str, Option<&str>) {
 /// `id` is the composite spawn-option identifier, encoded as `<harness_id>`
 /// for native and `<harness_id>:<provider_id>` for proxied (ADR-0016 §6).
 /// The frontend hands it back to `spawn_agent` / `create_issue_node` /
-/// `create_pr_node` unchanged; the backend's resolver splits on the first
-/// `:` via `parse_spawn_option_id` to get `(executor, creds)`.
+/// `create_pr_node` unchanged; the backend's resolver parses it once at the
+/// entry seam via [`SpawnOptionId::from_str`] to get `(executor, creds)`.
 ///
 /// `resumable` is the backend-derived answer to "can this option resume an
 /// archived/discovered session in-place?" — derived from the resolved

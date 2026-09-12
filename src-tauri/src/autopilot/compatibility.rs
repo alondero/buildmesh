@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::agent::capabilities::{capabilities_for, HarnessCapabilities};
-use crate::agent::provider::parse_spawn_option_id;
+use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
 
 // ---------------------------------------------------------------------------
@@ -202,8 +202,8 @@ pub fn resolve_autopilot_spawn_option(
         .or_else(|| non_empty(mesh_default_provider).map(str::to_string))
         .or_else(|| non_empty(app_default_provider).map(str::to_string))
         .unwrap_or_else(|| "claude".to_string());
-    let (harness_id, _provider_id) = parse_spawn_option_id(&spawn_option);
-    let harness_id_string = harness_id.to_string();
+    let id = SpawnOptionId::from(spawn_option.as_str());
+    let harness_id_string = id.harness_id().to_string();
     ResolvedAutopilotSpawnOption {
         spawn_option,
         harness_id: harness_id_string,
