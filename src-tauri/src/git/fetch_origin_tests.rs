@@ -45,16 +45,17 @@ fn set_local_origin(host_path: &Path, origin_path: &Path) {
 
 // ── Issue #213 acceptance criteria ─────────────────────────────────────────
 
-/// Acceptance criterion (issue #213, retargeted 2026-07-17): "Pulling is
-/// skipped if the parent directory has uncommitted changes" — the PULL,
-/// not the fetch. A dirty working tree must still fetch (a fetch never
-/// touches the working tree, and the remote-tracking ref it updates is
-/// what worktree nodes are cut from), then skip the fast-forward and
-/// report `FetchedButDirty`. Pre-2026-07-17 the dirty gate sat before
-/// the fetch, so a mesh whose root checkout stayed dirty never freshened
-/// `refs/remotes/*` on ANY path and new nodes went stale without bound.
+/// Acceptance criterion (issue #213, retargeted 2026-07-17 and 2026-09): the
+/// PULL, not the fetch, is what a dirty parent skips — and since ADR 0033 only
+/// a *clobbering* local change skips it. This test dirties `README.md`, the
+/// very file the incoming commit rewrites, so it is a genuine blocker: the
+/// fetch must still run (a fetch never touches the working tree, and the
+/// remote-tracking ref it updates is what worktree nodes are cut from), the
+/// fast-forward must be skipped, and the outcome must name the path. The
+/// sibling `fetch_origin_fast_forwards_over_non_overlapping_dirty_edits` covers
+/// the case where the local change is elsewhere and the pull *does* run.
 #[test]
-fn fetch_origin_fetches_but_skips_pull_when_parent_dirty() {
+fn fetch_origin_fetches_but_skips_pull_when_local_change_would_be_overwritten() {
     let td = TestDir::new("autosync_dirty");
     let parent = td.path();
     let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
@@ -96,14 +97,19 @@ fn fetch_origin_fetches_but_skips_pull_when_parent_dirty() {
     repo.reference("refs/remotes/origin/main", v1, true, "test rewind")
         .unwrap();
 
-    // Dirty the tree: modify the tracked file WITHOUT committing.
+    // Dirty the tree: modify the tracked file WITHOUT committing. It is the
+    // same file the upstream commit rewrites, so the ff would clobber it.
     std::fs::write(parent.join("README.md"), "edited-not-committed\n").unwrap();
 
     let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     assert_eq!(
         outcome,
-        Ok(FetchOutcome::FetchedButDirty { new_commits: 1 }),
-        "a dirty parent must still fetch, then skip only the ff-pull"
+        Ok(FetchOutcome::FetchedButDirty {
+            new_commits: 1,
+            blocking_paths: vec!["README.md".to_string()],
+        }),
+        "a clobbering local change must still fetch, then skip only the ff-pull \
+         and name the blocking path"
     );
 
     // The fetch must have advanced the remote-tracking ref (this is what
@@ -119,6 +125,82 @@ fn fetch_origin_fetches_but_skips_pull_when_parent_dirty() {
     assert_eq!(
         content, "edited-not-committed\n",
         "the skipped pull must not touch the dirty working tree"
+    );
+}
+
+/// ADR 0033 — the over-strict-gate regression. A parent checkout with
+/// uncommitted changes the incoming commits do *not* touch (here: an edit to
+/// `notes.txt` plus an untracked file) must NOT block the fast-forward.
+/// `git pull --ff-only` preserves both, so the sync must report `Synced` and
+/// move the branch, exactly as it would on a clean tree. Before the fix any
+/// non-ignored change skipped the pull, which is why meshes with untracked
+/// build artifacts or unrelated edits never fast-forwarded.
+#[test]
+fn fetch_origin_fast_forwards_over_non_overlapping_dirty_edits() {
+    let td = TestDir::new("autosync_nonoverlap");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .expect("git init --bare failed");
+    assert!(status.success());
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n"), ("notes.txt", "n1\n")]);
+    set_local_origin(parent, &origin_dir);
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push failed");
+    assert!(status.success());
+    // Upstream advances by touching README.md only.
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push (v2) failed");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .expect("git reset failed");
+    assert!(status.success());
+    let v1 = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.reference("refs/remotes/origin/main", v1, true, "test rewind")
+        .unwrap();
+
+    // Non-overlapping dirt: an edit to a file upstream never touches, plus an
+    // untracked scratch file. Neither can be clobbered by the ff.
+    std::fs::write(parent.join("notes.txt"), "local-edit\n").unwrap();
+    std::fs::write(parent.join("scratch-untracked.txt"), "x\n").unwrap();
+
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "non-overlapping local changes must not block the fast-forward"
+    );
+
+    // The incoming commit applied, and the local work survived untouched.
+    assert_eq!(
+        std::fs::read_to_string(parent.join("README.md")).unwrap(),
+        "v2\n",
+        "ff-pull must move the branch and apply the upstream change"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent.join("notes.txt")).unwrap(),
+        "local-edit\n",
+        "the ff-pull must preserve the local edit in an untouched file"
+    );
+    assert!(
+        parent.join("scratch-untracked.txt").exists(),
+        "the ff-pull must not remove untracked files it does not touch"
     );
 }
 
@@ -660,7 +742,11 @@ fn fetch_outcome_advanced_ref_table() {
     // commits, and the fetch that preceded it moved the remote-tracking
     // refs — the warm pool must refresh onto the new SHA just as it does
     // for the diverged case.
-    assert!(FetchedButDirty { new_commits: 1 }.advanced_ref());
+    assert!(FetchedButDirty {
+        new_commits: 1,
+        blocking_paths: vec!["README.md".into()]
+    }
+    .advanced_ref());
     assert!(!UpToDate.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
 }
@@ -679,7 +765,11 @@ fn sync_outcome_advanced_ref_table() {
         reason: "x".into()
     }
     .advanced_ref());
-    assert!(FetchedButDirty { new_commits: 1 }.advanced_ref());
+    assert!(FetchedButDirty {
+        new_commits: 1,
+        blocking_paths: vec!["README.md".into()]
+    }
+    .advanced_ref());
     assert!(!UpToDate.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
     assert!(!FetchFailed {

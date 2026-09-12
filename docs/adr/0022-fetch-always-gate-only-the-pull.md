@@ -69,6 +69,13 @@ Two production incidents on 2026-07-17 exposed compounding freshness holes:
   worker has already paid it). A dirty mesh's manual Sync reports
   "Fetched N new commits; fast-forward skipped: working tree has uncommitted
   changes" instead of a plain skip — slightly noisier, deliberately honest.
-- **Unchanged:** The pull is still never attempted on a dirty tree (ADR
-  0001's actual data-safety concern), still `--ff-only --no-rebase`, and the
-  sync still never blocks a spawn.
+- **Unchanged:** The pull is still never attempted when it would overwrite
+  local work, still `--ff-only --no-rebase`, and the sync still never blocks a
+  spawn.
+- **Refined by ADR 0033** (2026-09): the pull gate this ADR left in place was
+  still the coarse "is the working tree dirty?" predicate, which skipped the
+  fast-forward for local changes the incoming commits never touch (unrelated
+  edits, untracked files). ADR 0033 replaces it with the precise set of paths
+  the pull would clobber — exactly git's own condition. `FetchedButDirty` now
+  carries `blocking_paths`, and its message names them instead of the blanket
+  "working tree has uncommitted changes".
