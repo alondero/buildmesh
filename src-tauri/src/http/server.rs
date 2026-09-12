@@ -1,7 +1,10 @@
 //! Bind, accept, TLS, and the per-connection transport loop.
 //!
 //! `handle_connection` parses the request head, enforces the Host guard, reads
-//! the body per the matched route's policy, then calls [`crate::http::router::dispatch`].
+//! the body per the matched route's policy, then calls
+//! [`crate::http::router::dispatch_matched`] (the server already called
+//! [`crate::http::router::match_route`] to size the body read, so dispatch
+//! reuses that match instead of scanning the table a second time).
 //! The only remaining special branch is WebSocket upgrade.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -19,8 +22,8 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 use crate::http::request;
 use crate::http::router::{
-    self, content_length, match_route, BodyPolicy, DispatchResult, ParsedRequest, Upgrade,
-    MAX_HEADER_BYTES, REQUEST_HEAD_TIMEOUT,
+    content_length, dispatch_matched, match_route, BodyPolicy, DispatchResult, ParsedRequest,
+    Upgrade, MAX_HEADER_BYTES, REQUEST_HEAD_TIMEOUT,
 };
 use crate::http::state::{self, LoopbackSkeleton, RealizedBind};
 use crate::http::stream::MaybeTls;
@@ -480,7 +483,7 @@ pub(crate) async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         ids: (None, None),
     };
 
-    match router::dispatch(req).await {
+    match dispatch_matched(req, matched).await {
         DispatchResult::Http(response) => {
             let _ = request::write_response(&mut lines, &response).await;
         }

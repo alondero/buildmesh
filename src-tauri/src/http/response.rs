@@ -35,8 +35,12 @@ impl Response {
     }
 
     /// `{"error":"..."}` JSON error envelope used by every 4xx/5xx JSON path.
+    /// Uses `serde_json` so the body round-trips through a JSON parser even
+    /// when `msg` contains characters that aren't safe to hand-escape:
+    /// backslashes, control bytes, lone surrogates, or raw Windows paths
+    /// like `C:\Users\alondero\src\buildmesh`.
     pub fn json_error(status: impl Into<String>, msg: &str) -> Self {
-        let body = format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\""));
+        let body = serde_json::json!({ "error": msg }).to_string();
         Self::json(status, body)
     }
 
@@ -137,6 +141,29 @@ mod tests {
         let bytes = Response::json_error("400 Bad Request", r#"say "hi""#).encode();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains(r#"{"error":"say \"hi\""}"#));
+    }
+
+    #[test]
+    fn json_error_handles_windows_path_with_backslashes() {
+        // Hand-rolled `replace('"', "\\\"")` would emit `{"error":"C:\Users\…"}`
+        // which the client parser rejects as an invalid escape sequence.
+        let path = r"C:\Users\alondero\src\buildmesh";
+        let bytes = Response::json_error("500 Internal Server Error", path).encode();
+        let text = String::from_utf8(bytes).unwrap();
+        let body = text.split("\r\n\r\n").nth(1).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).expect("body must round-trip through serde_json");
+        assert_eq!(parsed["error"], path);
+    }
+
+    #[test]
+    fn json_error_handles_newlines_and_tabs() {
+        let bytes =
+            Response::json_error("400 Bad Request", "line1\nline2\tend").encode();
+        let text = String::from_utf8(bytes).unwrap();
+        let body = text.split("\r\n\r\n").nth(1).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["error"], "line1\nline2\tend");
     }
 
     #[test]

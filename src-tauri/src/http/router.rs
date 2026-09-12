@@ -30,6 +30,12 @@ const MAX_DEBUG_BODY_CHARS: usize = 512;
 /// the head and (when the route asks) the body; handlers never see the stream.
 #[derive(Debug, Clone)]
 pub struct ParsedRequest {
+    /// HTTP method on the request line. Read by the dispatcher for route
+    /// matching; kept on the public type because the test seam
+    /// ([`ParsedRequest::test_get`] / [`ParsedRequest::test_post`]) needs to
+    /// populate it for handler assertions, even though production callers
+    /// (server-side) only forward `req` after `match_route` already used it.
+    #[allow(dead_code)] // test-seam field: production callers never read it directly
     pub method: String,
     /// Path without the query string.
     pub path: String,
@@ -143,7 +149,13 @@ impl RouteMatch {
                 suffix,
             } => path_two_segment_ids(path, prefix, mid, suffix).map(|(a, b)| (Some(a), Some(b))),
             RouteMatch::Under(base) => {
-                (path == *base || path.starts_with(&format!("{base}/"))).then_some((None, None))
+                // Avoid the `format!("{base}/")` allocation per request — slice
+                // checks are sufficient: `path.starts_with(base)` plus the next
+                // byte being `/` matches the same set without heap.
+                (path == *base
+                    || (path.starts_with(base)
+                        && path[base.len()..].starts_with('/')))
+                .then_some((None, None))
             }
             RouteMatch::Prefix(p) => path.starts_with(p).then_some((None, None)),
             RouteMatch::Any => Some((None, None)),
@@ -333,18 +345,27 @@ pub(crate) fn match_route(method: &str, path: &str) -> MatchedRoute {
 }
 
 /// Dispatch a parsed request. Tests call this directly — no sockets.
-pub async fn dispatch(mut req: ParsedRequest) -> DispatchResult {
+/// The server uses [`dispatch_matched`] so it can reuse the
+/// [`BodyPolicy`] it already resolved to size the body read; this public
+/// entry exists for the test seam (tests construct a `ParsedRequest`
+/// directly and need to round-trip without first calling `match_route`).
+#[allow(dead_code)] // only invoked by tests in this module
+pub async fn dispatch(req: ParsedRequest) -> DispatchResult {
     let matched = match_route(&req.method, &req.path);
+    dispatch_matched(req, matched).await
+}
+
+/// Dispatch using a route the caller already matched. The server uses this
+/// after `match_route` resolves the [`BodyPolicy`] it needs to size the
+/// request-body read; re-matching inside dispatch would scan the 38-route
+/// table a second time per connection.
+pub(crate) async fn dispatch_matched(mut req: ParsedRequest, matched: MatchedRoute) -> DispatchResult {
     req.ids = matched.ids;
 
     if let Some(required) = matched.scope.required() {
         if let Some(denied) = auth::deny_response(auth::authorize(&req.headers, required)) {
             return DispatchResult::Http(denied);
         }
-    }
-
-    if matched.scope == RouteScope::AdminCatchAll {
-        return DispatchResult::Http(admin_catchall(&req));
     }
 
     run_handler(matched.handler, &req).await
