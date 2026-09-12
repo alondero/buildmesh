@@ -136,14 +136,40 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   const [savingStepSlots, setSavingStepSlots] = useState(false);
 
   // Step-slot budget (the `N` in "all N of this circuit's step slots are
-  // busy"). The floor is blueprint-specific and the ceiling is shared;
-  // both mirror the Rust model so the control only offers values the
-  // backend keeps.
+  // busy"). The floor is blueprint-specific and the ceiling shared; both
+  // mirror the Rust model. Held locally, seeded from the persisted row, so
+  // a selection reflects immediately and the command's clamped value can be
+  // adopted without refetching the run ledger (#1736 review).
+  const [stepSlots, setStepSlots] = useState(circuit.concurrency_limit);
   const minSlots = minStepSlots(initial.blueprint);
-  const stepSlotOptions = useMemo(
-    () => Array.from({ length: MAX_STEP_SLOTS - minSlots + 1 }, (_, i) => minSlots + i),
-    [minSlots]
-  );
+  // A row can sit outside the current floor/ceiling — a review circuit
+  // persisted before the 2-slot floor existed, or an imported graph. Keep
+  // the persisted value in the option list: a controlled <select> whose
+  // value matches no option makes the DOM fall back to the first option
+  // instead, which both misreports the budget and swallows clicks on that
+  // option (React only fires onChange when the DOM value actually changes).
+  const stepSlotOptions = useMemo(() => {
+    const persisted = circuit.concurrency_limit;
+    const inRange = Array.from(
+      { length: MAX_STEP_SLOTS - minSlots + 1 },
+      (_, i) => minSlots + i
+    );
+    return inRange.includes(persisted)
+      ? inRange
+      : [...inRange, persisted].sort((a, b) => a - b);
+  }, [minSlots, circuit.concurrency_limit]);
+  const stepSlotLabel = (n: number) =>
+    n < minSlots
+      ? `${n} (below minimum)`
+      : n > MAX_STEP_SLOTS
+        ? `${n} (above maximum)`
+        : `${n}`;
+
+  // Follow the parent when it refetches (graph save, live run event): the
+  // editor stays a pure function of its props.
+  useEffect(() => {
+    setStepSlots(circuit.concurrency_limit);
+  }, [circuit.concurrency_limit]);
 
   // Default observed run: newest active one, else newest overall.
   useEffect(() => {
@@ -498,14 +524,19 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   };
 
   const handleStepSlotsChange = async (limit: number) => {
+    const previous = stepSlots;
+    // Optimistic: the controlled select must not snap back mid-flight.
+    setStepSlots(limit);
     setSavingStepSlots(true);
     setEditorError(null);
     try {
-      await updateCircuitConcurrencyLimit(circuit.id, limit);
-      // Refetch so the control reflects the backend's clamped value.
-      onSaved?.();
+      // The command returns the persisted row, clamped to the blueprint's
+      // floor/ceiling, so adopt it directly — no run-ledger refetch.
+      const updated = await updateCircuitConcurrencyLimit(circuit.id, limit);
+      setStepSlots(updated.concurrency_limit);
     } catch (err) {
       console.error('Failed to update circuit step slots:', err);
+      setStepSlots(previous);
       setEditorError(formatError(err));
     } finally {
       setSavingStepSlots(false);
@@ -588,14 +619,14 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           <select
             id="editor-step-slots"
             data-testid="editor-step-slots"
-            value={circuit.concurrency_limit}
+            value={stepSlots}
             disabled={savingStepSlots}
             onChange={(e) => void handleStepSlotsChange(Number(e.target.value))}
             className="px-1.5 py-0.5 rounded-md bg-text-muted/10 text-text-primary text-xs disabled:opacity-40"
           >
             {stepSlotOptions.map((n) => (
               <option key={n} value={n}>
-                {n}
+                {stepSlotLabel(n)}
               </option>
             ))}
           </select>

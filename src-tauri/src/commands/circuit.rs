@@ -321,9 +321,10 @@ pub fn update_circuit_concurrency_limit(
     let circuit = crate::db::get_autopilot_circuit(circuit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
+    // Legacy-aware: a graph persisted before the `blueprint` discriminator
+    // existed is classified by shape, matching the canvas's `parseGraph`.
     let blueprint = CircuitGraph::from_json(&circuit.graph_json)
-        .ok()
-        .and_then(|graph| graph.blueprint)
+        .map(|graph| graph.effective_blueprint())
         .unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
     let clamped = blueprint.clamp_concurrency_limit(concurrency_limit);
     crate::db::set_autopilot_circuit_concurrency_limit(circuit_id, clamped).map_err(|e| {
@@ -339,9 +340,13 @@ pub fn update_circuit_concurrency_limit(
         circuit_id,
         clamped
     );
-    crate::db::get_autopilot_circuit(circuit_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("circuit {} does not exist", circuit_id))
+    // Reuse the row already read: the UPDATE changes only `concurrency_limit`
+    // (the accessor also stamps `updated_at`, which this control does not
+    // surface), so re-querying the whole row would buy nothing.
+    Ok(AutopilotCircuit {
+        concurrency_limit: clamped,
+        ..circuit
+    })
 }
 
 fn retire_cancelled_agents_with(
