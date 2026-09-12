@@ -833,4 +833,101 @@ mod tests {
             CLAUDE_BACKEND_ENV_VARS
         );
     }
+
+    // ----- SpawnOptionId contract pins (issue #1659) ---------------------
+    //
+    // Five pure pins against the typed value's FromStr + Display + accessor
+    // contract. A future refactor that breaks round-trip, drops the first `:`
+    // split, or diverges the typed value from the wire shape (the raw
+    // `<harness>` / `<harness>:<provider>` string) trips one of these and
+    // surfaces the regression at review time rather than at a user's
+    // misrouted spawn.
+
+    /// Bare ids parse as native — no `provider_id`, `is_proxied() == false`,
+    /// `as_str()` returns the harness unchanged.
+    #[test]
+    fn spawn_option_id_from_str_bare_id_yields_native() {
+        let id = SpawnOptionId::from("claude");
+        assert_eq!(id.harness_id(), "claude");
+        assert_eq!(id.provider_id(), None);
+        assert!(!id.is_proxied());
+        assert_eq!(id.as_str(), "claude");
+    }
+
+    /// Composite ids split on the first `:` and tag `is_proxied()`.
+    #[test]
+    fn spawn_option_id_from_str_composite_yields_proxied() {
+        let id = SpawnOptionId::from("claude:minimax");
+        assert_eq!(id.harness_id(), "claude");
+        assert_eq!(id.provider_id(), Some("minimax"));
+        assert!(id.is_proxied());
+        assert_eq!(id.as_str(), "claude:minimax");
+    }
+
+    /// A provider id that itself contains `:` is preserved intact on the
+    /// right side — the split is on the FIRST `:` only, never the last.
+    /// (User-chosen `ProviderAccount.id`; the `BUILTIN_HARNESS_IDS` whitelist
+    /// guarantees the harness half has no colon today, but the contract
+    /// holds regardless of what the right side contains.)
+    #[test]
+    fn spawn_option_id_keeps_provider_part_intact_on_duplicate_colons() {
+        let id = SpawnOptionId::from("claude:weird:id");
+        assert_eq!(id.harness_id(), "claude");
+        assert_eq!(id.provider_id(), Some("weird:id"));
+        assert_eq!(id.as_str(), "claude:weird:id");
+    }
+
+    /// `FromStr` and `Display` are mutual inverses for every input — the
+    /// composite-id wire shape survives a round trip through the typed
+    /// value. `spawn_option_id_round_trips_via_display` is the regression
+    /// pin a future refactor would trip if either side drifted.
+    #[test]
+    fn spawn_option_id_round_trips_via_display() {
+        for raw in [
+            "claude",
+            "claude:minimax",
+            "codex:openrouter",
+            "anthropic",
+            "claude:weird:id",
+        ] {
+            let id = SpawnOptionId::from(raw);
+            let rendered = id.to_string();
+            assert_eq!(
+                rendered, raw,
+                "Display({:?}) = {:?} — the typed value drifted from the wire shape",
+                raw, rendered,
+            );
+            let parsed = SpawnOptionId::from(rendered.as_str());
+            assert_eq!(
+                parsed, id,
+                "FromStr ∘ Display({:?}) != original — round trip lost information",
+                raw,
+            );
+        }
+    }
+
+    /// The legacy `anthropic` executor id (one of the `BUILTIN_HARNESS_IDS`
+    /// entries the resolver shim still recognises, see ADR-0016 §6) parses
+    /// identically to any other bare harness id — bare, no provider, not
+    /// proxied. The pre-#1659 split-on-`:` parser had the same contract;
+    /// this pins it on the typed value so a future change that started
+    /// treating `anthropic` as a Proxied id (e.g. by requiring a provider
+    /// half) trips here.
+    #[test]
+    fn spawn_option_id_legacy_anthropic_executor_id_yields_native() {
+        let id = SpawnOptionId::from("anthropic");
+        assert_eq!(id.harness_id(), "anthropic");
+        assert_eq!(id.provider_id(), None);
+        assert!(!id.is_proxied());
+        // `BUILTIN_HARNESS_IDS` is the source of truth for legacy executor
+        // ids — the test below is a structural pin that a future change to
+        // the whitelist (e.g. removing `"anthropic"`) doesn't silently
+        // desync the typed value.
+        assert!(
+            BUILTIN_HARNESS_IDS.contains(&id.harness_id()),
+            "Legacy executor id {:?} must remain in BUILTIN_HARNESS_IDS so the \
+             resolver shim continues to recognise it (ADR-0016 §6).",
+            id.harness_id(),
+        );
+    }
 }

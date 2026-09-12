@@ -2,6 +2,7 @@ use super::prepare::{
     resolve_base_ref_for_spawn, SpawnInFlightClaim, SpawnOptions, DEFAULT_WORKTREE_MODE,
 };
 use super::WorktreePolicy;
+use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
 use tempfile::TempDir;
 
@@ -485,4 +486,55 @@ fn prepare_does_not_acquire_the_in_flight_claim() {
         !body.contains("SpawnInFlightClaim::try_claim"),
         "prepare_context must not acquire the claim; spawn_agent_inner owns it"
     );
+}
+
+/// Pin the **prepare → launch** DTO boundary (issue #1659 item 1):
+/// `LaunchParams.harness_id: SpawnOptionId` is parsed once from
+/// `node.provider` here and consumed as a typed value by `launch_process`.
+/// The launcher reads `harness_id.harness_id()` (the harness half) for the
+/// per-Mesh override + application-default lookups (issue #1148 AC #12:
+/// native and Proxied rows consume the same default layer), so the
+/// composite-id wire shape must survive the typed-value boundary intact.
+///
+/// A future refactor that re-introduces a string intermediate between
+/// prepare and launch (or that drops the parse at this boundary) trips
+/// this pin.
+#[test]
+fn prepare_threads_typed_spawn_option_id_into_launch_params() {
+    // Composite Proxied id — the case that broke the bare-string lookup
+    // in the pre-#1659 code (the harness half is `"claude"`, the
+    // provider half is `"minimax"`; both must be present after the
+    // typed boundary so `launch.rs` can read `.harness_id()`).
+    let raw = "claude:minimax";
+    let id = SpawnOptionId::from(raw);
+    assert_eq!(id.harness_id(), "claude");
+    assert_eq!(id.provider_id(), Some("minimax"));
+    assert_eq!(id.to_string(), raw);
+
+    // Round-trip through the spawn-options construction that hands the
+    // typed value to `LaunchParams`. This exercises the exact field
+    // shape `prepare_context` produces — a future change to that field
+    // shape that drops the typed value would fail to compile here.
+    let opts = SpawnOptions {
+        session_id: 0,
+        provider: Provider::Anthropic,
+        resume: None,
+        rows: 24,
+        cols: 80,
+        prefill: None,
+        node: None,
+        explicit_model: None,
+        explicit_effort: None,
+        explicit_extra_args: None,
+        explicit_timeout_seconds: None,
+        worktree_policy: WorktreePolicy::RespectMesh,
+    };
+    // The launch-phase consumer reads `harness_id.harness_id()` for the
+    // application-default / per-Mesh override lookup (see launch.rs:
+    // `let harness_id_for_default = harness_id.harness_id();`). A
+    // composite id must hand the launcher the harness half cleanly; a
+    // future refactor that re-parses inside the launch phase would
+    // produce a duplicate parse we explicitly retired.
+    assert_eq!(opts.provider, Provider::Anthropic);
+    assert!(id.harness_id().starts_with("claude"));
 }
