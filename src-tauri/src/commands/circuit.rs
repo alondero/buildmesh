@@ -311,14 +311,37 @@ pub fn update_circuit_graph(circuit_id: i64, graph_json: String) -> Result<(), S
 /// shared ceiling are enforced by
 /// [`CircuitBlueprintKind::clamp_concurrency_limit`], so the IPC boundary
 /// stays a dumb router. The persisted row is returned so the caller sees
-/// the clamped value; the worker wakes so a raised budget admits queued
-/// steps on the next tick.
+/// the clamped value.
 #[command]
 pub fn update_circuit_concurrency_limit(
     circuit_id: i64,
     concurrency_limit: i64,
 ) -> Result<AutopilotCircuit, String> {
-    let circuit = crate::db::get_autopilot_circuit(circuit_id)
+    // Three-phase discipline (CLAUDE.md hard rule): all DB writes under the
+    // writer mutex, then drop the guard before the worker wake signal.
+    let updated = {
+        let mut db = crate::db::write_conn();
+        update_circuit_concurrency_limit_locked(&mut db, circuit_id, concurrency_limit)?
+    };
+    crate::services::circuit_worker::wake_circuit_worker();
+    tracing::info!(
+        "circuits: concurrency_limit for circuit {} set to {}",
+        circuit_id,
+        updated.concurrency_limit
+    );
+    Ok(updated)
+}
+
+/// Per-test isolated variant of [`update_circuit_concurrency_limit`]
+/// (issue #1691). Takes an explicit `&mut Connection` so parallel tests can
+/// each operate against their own in-memory DB. Does NOT wake the circuit
+/// worker — the caller must drop the writer guard first.
+pub fn update_circuit_concurrency_limit_locked(
+    conn: &mut rusqlite::Connection,
+    circuit_id: i64,
+    concurrency_limit: i64,
+) -> Result<AutopilotCircuit, String> {
+    let circuit = crate::db::circuit::get_autopilot_circuit_inner(conn, circuit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
     // Legacy-aware: a graph persisted before the `blueprint` discriminator
@@ -327,19 +350,14 @@ pub fn update_circuit_concurrency_limit(
         .map(|graph| graph.effective_blueprint())
         .unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
     let clamped = blueprint.clamp_concurrency_limit(concurrency_limit);
-    crate::db::set_autopilot_circuit_concurrency_limit(circuit_id, clamped).map_err(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            format!("circuit {} does not exist", circuit_id)
-        } else {
-            e.to_string()
-        }
-    })?;
-    crate::services::circuit_worker::wake_circuit_worker();
-    tracing::info!(
-        "circuits: concurrency_limit for circuit {} set to {}",
-        circuit_id,
-        clamped
-    );
+    crate::db::circuit::set_autopilot_circuit_concurrency_limit_inner(conn, circuit_id, clamped)
+        .map_err(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                format!("circuit {} does not exist", circuit_id)
+            } else {
+                e.to_string()
+            }
+        })?;
     // Reuse the row already read: the UPDATE changes only `concurrency_limit`
     // (the accessor also stamps `updated_at`, which this control does not
     // surface), so re-querying the whole row would buy nothing.
