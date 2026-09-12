@@ -70,7 +70,13 @@ impl AgentProvider for MuseAdapter {
         false
     }
     fn produces_readable_transcript(&self) -> bool {
-        false
+        // Issue #1708: the muse reader
+        // (`services::transcript_reader::adapters::muse::MuseAdapter`) is
+        // wired, so muse nodes now hydrate the Coordinator Node Digest's
+        // rich layer AND surface in the archived-node resume picker
+        // (the `resumable = supports_resume && produces_readable_transcript`
+        // conjunction in `provider_menu.rs:53`).
+        true
     }
     fn supports_model_override(&self) -> bool {
         true

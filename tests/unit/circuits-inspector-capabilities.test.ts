@@ -224,6 +224,30 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.effort_control.kind).toBe('none');
   });
 
+  // Muse (issue #1708) — durable per-session JSONL reader is wired,
+  // so the Coordinator Node Digest hydrates and the archived-node
+  // resume picker surfaces muse rows. The pin catches a flip-back to
+  // `produces_readable_transcript: false`.
+  it('Muse matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.muse;
+    expect(c.harness_id).toBe('muse');
+    expect(c.supports_resume).toBe(true);
+    expect(c.auto_resume_on_startup).toBe(true);
+    expect(c.supports_passive_turn_watcher).toBe(false);
+    expect(c.requires_attention_hook).toBe(false);
+    expect(c.attention_capability).toEqual({ kind: 'none' });
+    expect(c.produces_readable_transcript).toBe(true);
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(false);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.is_plain_terminal).toBe(false);
+    expect(c.effort_control.kind).toBe('none');
+    // Order mirrors `MuseAdapter::available_on()` in Rust:
+    // `[Platform::Linux, Platform::Macos]`.
+    expect(c.available_on).toEqual(['linux', 'macos']);
+  });
+
   // Terminal — plain shell; every override OFF. The issue #1362 review
   // caveat: splicing synthetic flags into a user's interactive shell
   // session is a footgun, hence `supports_extra_args: false`.

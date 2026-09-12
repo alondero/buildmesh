@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use super::adapters::{
     AgyAdapter, ClaudeCodeAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter, GrokAdapter,
-    OpenCodeAdapter,
+    MuseAdapter, OpenCodeAdapter,
 };
 use super::types::Parsed;
 
@@ -136,9 +136,10 @@ static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
 static CURSOR_ADAPTER: CursorAdapter = CursorAdapter;
 static COMMANDCODE_ADAPTER: CommandCodeAdapter = CommandCodeAdapter;
 static GROK_ADAPTER: GrokAdapter = GrokAdapter;
+static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
 static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
 
-static ADAPTERS: [&'static dyn TranscriptAdapter; 7] = [
+static ADAPTERS: [&'static dyn TranscriptAdapter; 8] = [
     // Claude Code is the default format for any harness id that doesn't have
     // a registered adapter (mirrors `TranscriptFormat::for_harness`'s default
     // arm). Listed first so a future "explicit claude-code harness id" maps
@@ -151,6 +152,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 7] = [
     &CURSOR_ADAPTER,
     &COMMANDCODE_ADAPTER,
     &GROK_ADAPTER,
+    &MUSE_ADAPTER,
     &OPENCODE_ADAPTER,
 ];
 
