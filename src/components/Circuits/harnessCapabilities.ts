@@ -345,7 +345,15 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   dsh: DSH_CAPS,
   commandcode: COMMANDCODE_CAPS,
   freebuff: FREEBUFF_CAPS,
-  muse: { ...FREEBUFF_CAPS, harness_id: 'muse', supports_model_override: true, available_on: ['linux', 'macos'] },
+  muse: {
+    ...FREEBUFF_CAPS,
+    harness_id: 'muse',
+    supports_model_override: true,
+    // Issue #1709: no native hook, but the backend session-log watcher
+    // supplies the turn signal — mirrors `adapters::MUSE`.
+    supports_passive_turn_watcher: true,
+    available_on: ['linux', 'macos'],
+  },
   terminal: TERMINAL_CAPS,
 };
 

@@ -42,7 +42,8 @@ The table's Buildmesh claims are grounded in each corresponding [adapter](../../
 | Grok | Stop, idle/task notifications, prompt submission, failures/cancellation, and `ask_user_question` pre/post/failure | High when the native HTTP hook is provisioned and the runtime token is presented; callbacks from another process are rejected. |
 | Kimi Code | Native 0.27 hooks for Stop/failure/interruption, permissions, prompt submission, question/plan pre/post/failure, and terminal background-task notifications | High on native Kimi Code 0.27+; background questions are correlated by task id, their early PostToolUse is not treated as resumed work, and terminal completion lands in Ready. Python `kimi-cli` is a separate unsupported product. |
 | Command Code | Passive transcript watcher and existing lifecycle classifier | Medium completion confidence; no native question observer is claimed without a verified delivery fixture. |
-| MiniMax Code, Muse, Freebuff, DeepSeek Harness, Terminal | Explicit capability gaps remain | No guessed native hook is installed. These harnesses need a validated plugin, MSP/log, profile, or protocol integration before Buildmesh can promise parity. |
+| Meta Muse | Passive watcher over the durable `session.jsonl` run boundaries (issue #1709) | Medium completion confidence; `--disable-approval` makes a permission signal impossible by construction, and no question observer is claimed. |
+| MiniMax Code, Freebuff, DeepSeek Harness, Terminal | Explicit capability gaps remain | No guessed native hook is installed. These harnesses need a validated plugin, MSP/log, profile, or protocol integration before Buildmesh can promise parity. |
 | Dynamic/proxied entries | Resolve to the concrete adapter selected at spawn | A custom executable/name inherits a contract only when it actually implements that adapter's verified protocol. |
 
 Every accepted callback now passes through the shared attention route, records provider event/session/health metadata, fences stale turn/session ids, and updates both desktop and mobile lifecycle transports. Per-node ordering state retains multiple outstanding questions, preserves Kimi background questions across new prompts, and prevents delayed callbacks from reviving terminal nodes. Structured question/permission marks disarm the output-based autoclear safety net; only generic degraded marks use that heuristic.
@@ -84,6 +85,14 @@ The same guide warns that Stop is a gate: another hook can cause a continuation 
 ### Command Code
 
 Native `Stop` and `SessionStart` use nested command-hook groups in `.commandcode/settings.json` or the global equivalent. Omit `matcher` for these lifecycle events: a matcher prevents them firing. Empty stdout with exit zero is neutral. Existing transcript watching is still a real completion path; introducing native hooks requires deduplication and must not discard successful live callbacks when a transcript fallback is missing. This is documented contract evidence only; this change does not provision Command Code native hooks. [Command Code hooks](https://commandcode.ai/docs/hooks), [mods lifecycle](https://commandcode.ai/docs/mods)
+
+### Muse
+
+Muse 1.1.1 has no interactive hook registration: `muse --help` exposes no hook/event flag and there is no workspace or global hook config file (search of `~/.config/muse`, the feature-config cache, and the runtime dir found none). `muse schema generate-json-schema` proves the agent loop *does* carry the lifecycle vocabulary — `turn/started`, `turn/completed` (`terminal: completed|failed|cancelled`), `approval/{requested,resolved,updated}`, `userInput/{requested,settled}` — but those are served only on the separate `muse serve` stdio MSP plane, not by the interactive TUI Buildmesh PTY-spawns.
+
+The interactive TUI does append run boundaries to its durable log at `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`: a `runtime.session` record with `payload.kind == "run"` and `event.kind` of `started` or `terminal`. The watcher (`services/muse_watcher.rs`) tails that file, resolving the path through the same `session-index.db` the adapter's session recovery uses, and publishes each terminal as a Node Turn. Task-level records also carry `completed`/`failed`/`cancelled` event kinds and are deliberately not treated as run boundaries.
+
+Buildmesh launches Muse with `--disable-approval`. Across every retained `approval_disabled` session log there were **zero** `approval/requested` records (all observed approval requests came from `security_mode == "normal"` interactive sessions), so `PermissionRequested` is impossible by construction and is not classified. Full findings and the schema/payload inventory: [muse-attention-signals.md](../research/muse-attention-signals.md).
 
 ### Remaining harnesses
 
