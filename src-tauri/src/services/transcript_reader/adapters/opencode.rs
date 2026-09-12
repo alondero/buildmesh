@@ -308,7 +308,7 @@ pub(crate) fn read_opencode_tail(
         Err(reason) => return TranscriptTail::unavailable(reason),
     };
     let row_budget = effective_tail(tail).saturating_mul(OPENCODE_TURN_TO_MESSAGE_FACTOR);
-    let Some(messages) = read_opencode_messages(&db_path, &session_id, row_budget) else {
+    let Some(messages) = read_opencode_messages(&db_path, session_id, row_budget) else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };
     read_opencode_tail_from_messages(&messages, tail)
@@ -328,7 +328,7 @@ pub(crate) fn read_opencode_digest(
         Ok(pair) => pair,
         Err(reason) => return TranscriptTail::unavailable(reason),
     };
-    let Some(messages) = read_opencode_messages(&db_path, &session_id, OPENCODE_DIGEST_WINDOW)
+    let Some(messages) = read_opencode_messages(&db_path, session_id, OPENCODE_DIGEST_WINDOW)
     else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };

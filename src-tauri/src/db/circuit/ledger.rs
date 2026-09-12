@@ -406,7 +406,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     let run_ids: Vec<i64> = runs_by_circuit.values().flatten().map(|run| run.id).collect();
     let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> = std::collections::HashMap::new();
     if !run_ids.is_empty() {
-        let placeholders = std::iter::repeat("?").take(run_ids.len()).collect::<Vec<_>>().join(",");
+        let placeholders = std::iter::repeat_n("?", run_ids.len()).collect::<Vec<_>>().join(",");
         let mut step_stmt = db.prepare(&format!(
             "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                     outcome, error_message, started_at, completed_at \

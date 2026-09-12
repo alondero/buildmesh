@@ -816,8 +816,8 @@ impl CircuitGraph {
         }
         let before_edges = self.edges.len();
         self.edges.retain(|edge| {
-            !(edge.from == "review_classifier" && edge.to == "review_exhausted")
-                && !(edge.from == "review_retry"
+            !(edge.from == "review_classifier" && edge.to == "review_exhausted"
+                || edge.from == "review_retry"
                     && edge.to == "complete"
                     && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Failed))
         });

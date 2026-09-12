@@ -66,6 +66,8 @@ Using the user-authorized temporary Chrome session through Playwright CLI 0.1.19
 
 The rendered page displayed **Monthly Limit, 39%, Resets on Sep 30**. Combined with the deployed calculation inspected above, this confirms that this account uses Studio's bundled tier allowance of 70; the authenticated browser endpoint does not eliminate the plan-table dependency. The recommended CLI-authenticated integration remains sufficient for this account without adding browser-session authentication. The optional grant should still be accepted if the alpha API supplies it in future, but its presence must not be assumed.
 
+The organization path is an explicit implementation assumption backed by the deployed Studio JavaScript rather than a live organization-account observation: Studio floors `quantity`, requires at least one seat for the base-tier multiplication, and lets a positive `monthlyCreditsGranted` override the seat-derived base through `max(grant, tier total)`. Buildmesh preserves those precedence rules and tests fractional grants, fractional quantities, and the grant-plus-seat case. An authenticated organization response should revalidate this if Command Code changes the alpha contract.
+
 ### Integration recommendation
 
 The owning backend is `src-tauri/src/services/usage.rs`; `src/components/AppSettings/UsageRender.tsx` already renders generic usage windows with percentages and reset information. An additional `UsageWindow` labeled `Monthly` can use the existing wire type.
