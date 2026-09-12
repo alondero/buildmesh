@@ -33,8 +33,8 @@ import type { HarnessCapabilities } from "./HarnessCapabilities";
  * `id` is the composite spawn-option identifier, encoded as `<harness_id>`
  * for native and `<harness_id>:<provider_id>` for proxied (ADR-0016 §6).
  * The frontend hands it back to `spawn_agent` / `create_issue_node` /
- * `create_pr_node` unchanged; the backend's resolver splits on the first
- * `:` via `parse_spawn_option_id` to get `(executor, creds)`.
+ * `create_pr_node` unchanged; the backend's resolver parses it once at the
+ * entry seam via [`SpawnOptionId::from_str`] to get `(executor, creds)`.
  *
  * `resumable` is the backend-derived answer to "can this option resume an
  * archived/discovered session in-place?" — derived from the resolved

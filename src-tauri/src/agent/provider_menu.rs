@@ -563,9 +563,10 @@ mod tests {
     // 2. `order_providers` ranks by `harness_id` so a Proxied child
     //    clusters under its native harness header, not at the bottom of
     //    the stored order.
-    // 3. `parse_spawn_option_id` splits a composite id on the first `:`
-    //    so the resolver chain can pick the executor from the harness
-    //    part and the credentials from the provider part.
+    // 3. `SpawnOptionId::from_str` parses a composite id once at the
+    //    entry seam, splitting on the first `:` so the resolver chain
+    //    can pick the executor from the harness part and the credentials
+    //    from the provider part (issue #1659 item 1).
 
     /// The native row for a harness profile has `provider_id = None`,
     /// `is_proxied = false`, and `group_key == harness_id == id`. A
@@ -914,29 +915,29 @@ mod tests {
         );
     }
 
-    // ----- parse_spawn_option_id resolver (issue #575) ------------------
+    // ----- SpawnOptionId resolver (issue #575 → #1659) ------------------
     //
     // The composite id format `<harness>` (native) or `<harness>:<provider>`
-    // (proxied) is split on the first `:` by the resolver chain
-    // (`preferences::resolve_harness_provider` and
-    // `preferences::resolve_provider_env`). A provider id containing `:`
-    // (a theoretical edge case — the id is user-chosen) is preserved
-    // intact on the right side.
+    // (proxied) is parsed once at the entry seam into
+    // [`crate::agent::provider::SpawnOptionId`]. A provider id containing
+    // `:` (a theoretical edge case — the id is user-chosen) is preserved
+    // intact on the right side. The tests below pin the parse contract so
+    // a future refactor that drops the first-`:` split trips review.
 
     #[test]
     fn parse_spawn_option_id_splits_bare_into_native() {
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude");
-        assert_eq!(harness, "claude");
-        assert!(provider.is_none());
+        let id = crate::agent::provider::SpawnOptionId::from("claude");
+        assert_eq!(id.harness_id(), "claude");
+        assert!(id.provider_id().is_none());
+        assert!(!id.is_proxied());
     }
 
     #[test]
     fn parse_spawn_option_id_splits_composite_into_harness_and_provider() {
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude:minimax");
-        assert_eq!(harness, "claude");
-        assert_eq!(provider, Some("minimax"));
+        let id = crate::agent::provider::SpawnOptionId::from("claude:minimax");
+        assert_eq!(id.harness_id(), "claude");
+        assert_eq!(id.provider_id(), Some("minimax"));
+        assert!(id.is_proxied());
     }
 
     #[test]
@@ -944,10 +945,10 @@ mod tests {
         // A provider id with its own `:` (theoretical today, but the
         // id is user-chosen so we can't rule it out) lands entirely in
         // the provider slot. The first `:` is the split, not the last.
-        let (harness, provider) =
-            crate::agent::provider::parse_spawn_option_id("claude:weird:id");
-        assert_eq!(harness, "claude");
-        assert_eq!(provider, Some("weird:id"));
+        let id = crate::agent::provider::SpawnOptionId::from("claude:weird:id");
+        assert_eq!(id.harness_id(), "claude");
+        assert_eq!(id.provider_id(), Some("weird:id"));
+        assert_eq!(id.to_string(), "claude:weird:id");
     }
 
     /// The resolver chain (`resolve_harness_provider`) splits a composite
@@ -956,7 +957,7 @@ mod tests {
     /// (Claude Code), not to a nonexistent `claude:minimax` Provider.
     /// The composite-id path is exercised through
     /// `Provider::from_db_str` in `models::tests`; the split logic
-    /// itself is the `parse_spawn_option_id` test above. Here we pin
+    /// itself is the `SpawnOptionId` test above. Here we pin
     /// the post-#538 legacy fallback for a bare `minimax` id so a
     /// pre-migration archived node still resolves correctly.
     #[test]
