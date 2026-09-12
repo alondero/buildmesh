@@ -348,9 +348,7 @@ fn attention_hook_refuses_to_overwrite_malformed_user_file() {
     std::fs::write(&path, malformed).unwrap();
 
     let result = inject_attention_hook(temp.path());
-    let err = result
-        .err()
-        .expect("provision must refuse a malformed existing file");
+    let err = result.expect_err("provision must refuse a malformed existing file");
     assert!(
         err.contains("malformed"),
         "Err message must explain the refusal; got {err}"
