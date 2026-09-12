@@ -320,10 +320,13 @@ function ProbePanelContent() {
             title="Close panel"
             aria-label="Close panel"
           >
-            {/* Lucide `panel-right-close` — reads as "collapse the dock"
-                rather than "dismiss a dialog". With the rail gone the close
-                fully hides the inspector; the palette, the title-bar Usage
-                action, and contextual entries reopen it (issue #1375). */}
+            {/* Lucide `panel-right-close` — chevron points right, toward the
+                edge the right-side dock collapses into. (The previous path
+                `m10 9-3 3 3 3` was `panel-right-open`'s left-pointing
+                chevron — the reopen affordance, not the close one.) With
+                the rail gone the close fully hides the inspector; the
+                palette, the title-bar Usage action, and contextual entries
+                reopen it (issue #1375). */}
             <svg
               width="14"
               height="14"
@@ -336,7 +339,7 @@ function ProbePanelContent() {
             >
               <rect width="18" height="18" x="3" y="3" rx="2" />
               <path d="M15 3v18" />
-              <path d="m10 9-3 3 3 3" />
+              <path d="m8 9 3 3-3 3" />
             </svg>
           </button>
         </div>
