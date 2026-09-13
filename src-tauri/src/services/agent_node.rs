@@ -16,6 +16,18 @@ pub enum AgentNodeError {
     /// `Archived` / `Suspended`). The wrapped string is the user-
     /// facing reason.
     Status(String),
+    /// The referenced `mesh_id` did not exist when this operation
+    /// required it. Surfaced as a typed sentinel so callers can map
+    /// to a precise HTTP status (the `/api/nodes/create` route uses
+    /// this for its 400 "Mesh not found" response) instead of
+    /// pattern-matching on a wrapped `String`. A regression that
+    /// leaks `rusqlite::Error::QueryReturnedNoRows` past this
+    /// boundary would surface as a 500 instead of a 400.
+    ///
+    /// Review-round-2 fix: replaces the prior string sentinel
+    /// `"mesh not found"` carried inside `Status(String)`, which was
+    /// brittle stringly-typed control flow.
+    MeshNotFound(i64),
     /// A backend orchestrator call (`spawn_agent_inner` today, but
     /// the variant is intentionally generic so future downstream
     /// calls share the path) failed. The wrapped string is the
@@ -29,6 +41,7 @@ impl std::fmt::Display for AgentNodeError {
         match self {
             AgentNodeError::Db(e) => write!(f, "{}", e),
             AgentNodeError::Status(e) => write!(f, "{}", e),
+            AgentNodeError::MeshNotFound(mesh_id) => write!(f, "mesh {mesh_id} not found"),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
@@ -57,7 +70,13 @@ impl From<rusqlite::Error> for AgentNodeError {
 /// entry point is [`create_with_source_pr_fork`], which is the only function
 /// that should ever pass `Some(_)` for these fields. Pinning test lives in
 /// `services::agent_node::tests` (issue #448).
-#[allow(clippy::too_many_arguments)]
+///
+/// **Issue #1658 step 5:** every live caller now reaches the create
+/// sequence via [`create_blocking`], the shared runner. `create` is
+/// retained for the structural `source_pr = Some(_)` boundary assert
+/// test coverage (`create_rejects_source_pr_some` et al.); `#[allow]`
+/// keeps the dead-code lint quiet.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn create(
     mesh_id: i64,
     path: &str,
@@ -179,7 +198,136 @@ pub fn create_with_source_pr_fork(
     Ok(node)
 }
 
-/// Like `create`, but sets the initial status to [`SessionStatus::Pending`]
+/// Single shared "create a fresh node" runner used by BOTH Tauri commands
+/// (`commands::agent::{spawn_issue_agent, spawn_handover_agent, create_issue_node}`,
+/// `commands::agent_node::create_agent_node`) and HTTP routes
+/// (`http::routes::nodes::create`). Folds the mesh-lookup +
+/// optional-branch-resolution + node-create sequence into one helper so
+/// every entry point has the exact same shape (issue #1658 step 5).
+///
+/// Mirrors the `*_blocking` convention established by
+/// [`regenerate_load_blocking`] / [`regenerate_apply_blocking`] /
+/// [`regenerate_reload_blocking`] (see also `regenerate_agent_node`):
+/// pure sync, returns [`AgentNodeError`], the caller wraps a single
+/// `crate::commands::run_blocking` around the call. The offload
+/// boundary stays explicit at every entry point.
+///
+/// # Arguments
+///
+/// * `mesh_id` — the mesh to scope the new node under. A missing
+///   mesh id surfaces as `AgentNodeError::Status("mesh not found")`
+///   — the route maps that exact sentinel to its 400 response.
+/// * `provider` — the harness id to persist verbatim. The legacy
+///   `provider.unwrap_or("anthropic")` fallback lives in
+///   [`create_with_source_pr_fork`] (issue #538 default), so a `None`
+///   here writes `"anthropic"` to the row. Callers that want the
+///   mesh-level / app-wide default chain resolve
+///   beforehand (`preferences::resolve_default_provider`) and pass
+///   the resolved string in.
+/// * `branch_override` — `Some(branch)` short-circuits the
+///   `git::get_default_branch_blocking` lookup. The mobile route
+///   uses `"main"` verbatim; desktop paths that already resolved
+///   the branch via the async wrapper pass `Some(resolved)`. `None`
+///   resolves through `commands::git::get_default_branch_blocking`
+///   (with `"main"` fallback on open failure).
+/// * `source_issue` / `name_override` / `use_worktree_override` —
+///   forwarded unchanged to the underlying create family. PR-spawn
+///   fields stay `None` (callers reach for
+///   `create_pending_with_source_pr_fork` directly for that flow).
+/// * `pending` — `true` lands the row in
+///   [`SessionStatus::Pending`] via
+///   [`create_pending_with_source_pr_fork`] (the desktop
+///   two-stage stage-1 path); `false` lands in Idle via
+///   [`create_with_source_pr_fork`].
+///
+/// # Why a `pending` parameter instead of two helpers?
+///
+/// The branch resolution + mesh lookup are identical between the
+/// Idle and Pending paths. Splitting into `create_blocking` and
+/// `create_pending_blocking` would duplicate those two steps.
+/// `pending` is a one-bit switch on the final delegation and is
+/// checked once at the bottom of the function.
+#[allow(clippy::too_many_arguments)]
+pub fn create_blocking(
+    mesh_id: i64,
+    provider: Option<&str>,
+    branch_override: Option<&str>,
+    source_issue: Option<i64>,
+    name_override: Option<&str>,
+    use_worktree_override: Option<bool>,
+    pending: bool,
+) -> Result<AgentNode, AgentNodeError> {
+    // 1. Mesh lookup. Map the missing-row case to the typed
+    //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
+    //    can match on `Err(_)` patterns instead of inspecting a
+    //    `String` payload. Other DB errors propagate as
+    //    `AgentNodeError::Db` via the `From<rusqlite::Error>` impl above.
+    let mesh = match db::get_mesh_by_id(mesh_id) {
+        Ok(m) => m,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AgentNodeError::MeshNotFound(mesh_id));
+        }
+        Err(e) => return Err(AgentNodeError::Db(e)),
+    };
+
+    // 2. Branch resolution. `Some(b)` short-circuits the git lookup entirely
+    //    (the mobile route pins "main"; Tauri commands that already resolved
+    //    via the async wrapper reuse their result). `None` falls through to
+    //    the canonical sync helper, with `"main"` as the open-failure fallback
+    //    — matching `commands::git::get_default_branch`'s infallible contract.
+    let branch = match branch_override {
+        Some(b) if !b.is_empty() => b.to_string(),
+        _ => crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+            .unwrap_or_else(|_| "main".to_string()),
+    };
+
+    // 3. Delegate to the existing create family. The fork-source and
+    //    SHA-pinning fields stay `None` here (non-PR spawn callers); the
+    //    PR-spawn entry point is `create_pending_with_source_pr_fork`
+    //    directly, intentionally not folded into this runner (out of
+    //    scope for #1658 step 5).
+    //
+    //    **Review-round-2 fix** (the previous delegation dropped
+    //    `use_worktree_override` on `pending = true` because
+    //    `create_pending_with_source_pr_fork` is hardcoded to forward
+    //    `None`). We call the private
+    //    `create_pending_with_source_pr_fork_and_worktree` directly
+    //    (same-module access; in scope) so the override rides through
+    //    both paths. A circuit-worker caller passing
+    //    `use_worktree_override = Some(false)` now sees its override
+    //    honored on the Pending path, not silently swallowed.
+    if pending {
+        create_pending_with_source_pr_fork_and_worktree(
+            mesh_id,
+            &mesh.path,
+            &branch,
+            provider,
+            source_issue,
+            None, // source_pr
+            None, // source_pr_pinned_sha
+            name_override,
+            None, // head_repo_owner
+            None, // head_repo_clone_url
+            use_worktree_override,
+        )
+    } else {
+        create_with_source_pr_fork(
+            mesh_id,
+            &mesh.path,
+            &branch,
+            provider,
+            source_issue,
+            None, // source_pr
+            None, // source_pr_pinned_sha
+            use_worktree_override,
+            name_override,
+            None, // head_repo_owner
+            None, // head_repo_clone_url
+        )
+    }
+}
+
+/// Like [`create_with_source_pr_fork`], but sets the initial status to [`SessionStatus::Pending`]
 /// so the frontend can distinguish "node row exists, stage-2 not yet
 /// started" from "node row exists, agent is idle and ready to re-spawn".
 ///
@@ -190,7 +338,12 @@ pub fn create_with_source_pr_fork(
 /// fields follow the same contract as [`create`]: `source_pr` and
 /// `source_pr_pinned_sha` must be `None` here; the PR-spawn entry point
 /// is [`create_pending_with_source_pr_fork`] (issue #448).
-#[allow(clippy::too_many_arguments)]
+///
+/// **Issue #1658 step 5:** every live caller now reaches the Pending-status
+/// path through [`create_blocking`] with `pending: true`. `create_pending`
+/// is retained for the structural `source_pr = Some(_)` boundary assert
+/// test coverage; `#[allow]` keeps the dead-code lint quiet.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn create_pending(
     mesh_id: i64,
     path: &str,
@@ -1158,6 +1311,252 @@ mod tests {
             Some("deadbeef"),
             None,
             None,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `create_blocking` (issue #1658 step 5) — single shared runner used by
+    // Tauri commands and HTTP routes to fold the mesh-lookup +
+    // branch-resolution + node-create sequence into one helper. Every test
+    // here is a regression pin against a feature drop: a future refactor
+    // that loses a `branch_override` short-circuit, the Pending-status
+    // branch, or the "mesh not found" sentinel fails review by failing these
+    // tests first.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn create_blocking_with_branch_override_matches_legacy_create_row() {
+        // The headline equivalence pin: when `branch_override = Some("main")`,
+        // `create_blocking` must produce a row identical to today's
+        // `services::agent_node::create(mesh_id, &mesh.path, "main", provider, ...)`
+        // would have produced. The four entry points that migrate to
+        // `create_blocking` (issue #1658 step 5) depend on this byte-identical
+        // row, so a regression that drops the explicit branch, or mangles the
+        // provider column, fails the assertion rather than silently regressing
+        // the mobile/desktop row shape.
+        let mesh_id = fresh_mesh();
+
+        let explicit_branch_row = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            None,
+            false, /* pending */
+        )
+        .expect("create_blocking with explicit branch must succeed");
+
+        let legacy_row = create(
+            mesh_id,
+            "/tmp/buildmesh_invariant_test",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("legacy create must succeed for the same inputs");
+
+        assert_eq!(
+            explicit_branch_row.branch, legacy_row.branch,
+            "explicit branch_override must reach the persisted row identically"
+        );
+        assert_eq!(
+            explicit_branch_row.provider, legacy_row.provider,
+            "provider must round-trip identically between helper and legacy create"
+        );
+        assert_eq!(
+            explicit_branch_row.mesh_id, legacy_row.mesh_id,
+            "mesh_id must match"
+        );
+        assert_eq!(
+            explicit_branch_row.status, legacy_row.status,
+            "Idle status must be preserved when pending=false"
+        );
+    }
+
+    #[test]
+    fn create_blocking_with_pending_true_returns_pending_status() {
+        // `create_issue_node` (the desktop two-stage stage-1) and the
+        // HTTP mobile route diverge on initial status: Pending vs Idle.
+        // `pending: true` must land the row in Pending so the frontend
+        // can distinguish "stage-1-done, awaiting background spawn"
+        // from "ready-to-resume idle". Without this pin, a future
+        // refactor that flattens the helper to always-Idle would
+        // silently break the desktop flow.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            Some(123), /* source_issue */
+            Some("gh123-test-slug"),
+            None,
+            true, /* pending */
+        )
+        .expect("create_blocking with pending=true must succeed");
+
+        assert_eq!(
+            node.status,
+            SessionStatus::Pending,
+            "pending=true must leave the row in Pending"
+        );
+        assert_eq!(
+            node.source_issue,
+            Some(123),
+            "source_issue must round-trip through the helper"
+        );
+        assert_eq!(
+            node.source_pr, None,
+            "non-PR spawn must persist source_pr=None (mirrors legacy create)"
+        );
+    }
+
+    #[test]
+    fn create_blocking_returns_mesh_not_found_for_unknown_mesh_id() {
+        // Initialise the per-test DB up front — without this, the
+        // unknown-id lookup fails on "database not initialized"
+        // instead of surfacing the intended `QueryReturnedNoRows`,
+        // which masks the sentinel we're trying to pin.
+        crate::db::test_support::ensure_db_for_tests();
+        // The HTTP route (`http::routes::nodes::create`) maps the
+        // typed `AgentNodeError::MeshNotFound(_)` variant to its
+        // "400 Bad Request — Mesh not found" response. A regression
+        // that loses the mapping — falling back to a raw
+        // `AgentNodeError::Db(rusqlite::Error::QueryReturnedNoRows)` —
+        // would surface as "500 Internal Server Error" on the SPA
+        // even though the user typo'd a mesh id.
+        let err = create_blocking(
+            /* mesh_id */ -1, /* not in the per-test DB */
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            None,
+            false, /* pending */
+        )
+        .expect_err("create_blocking on unknown mesh_id must return Err");
+
+        match err {
+            AgentNodeError::MeshNotFound(mesh_id) => assert_eq!(
+                mesh_id, -1,
+                "the variant must carry the rejected mesh id so the route can include it in any log"
+            ),
+            other => panic!(
+                "create_blocking on unknown mesh_id must return MeshNotFound(-1), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn create_blocking_with_branch_override_none_resolves_via_git() {
+        // **Review-round-2 pin** (Finding #3): the prior test suite
+        // exercised `branch_override = Some("main")` exclusively.
+        // The `None` fallback path (which calls
+        // `commands::git::get_default_branch_blocking`) was never
+        // tested. Pin it: the helper must resolve the branch through
+        // the canonical sync helper when no override is supplied,
+        // landing on `"main"` because the per-test mesh path
+        // (`/tmp/buildmesh_invariant_test_<id>`) doesn't exist as a
+        // git repo and `get_default_branch_blocking` falls back.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            /* branch_override = */ None,
+            None,
+            None,
+            None,
+            false, /* pending */
+        )
+        .expect("create_blocking with branch_override=None must succeed");
+
+        assert_eq!(
+            node.branch, "main",
+            "branch_override=None must fall back to get_default_branch_blocking's \
+             open-failure default (\"main\"); the per-test mesh has no git repo, so \
+             the open-failure branch fires"
+        );
+    }
+
+    #[test]
+    fn create_blocking_propagates_use_worktree_override_on_idle_path() {
+        // **Review-round-2 pin** (Finding #1+#3): the prior test
+        // suite never exercised `use_worktree_override = Some(_)`.
+        // Idle path (`pending = false`) delegates to
+        // `create_with_source_pr_fork`, which forwards the override.
+        // Pinned here so a future refactor that drops the argument
+        // (silently swallowing the caller intent) fails this test
+        // before shipping.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            /* use_worktree_override = */ Some(false),
+            false, /* pending */
+        )
+        .expect("create_blocking on idle path must succeed");
+
+        // `create_with_source_pr_fork` writes `use_worktree` only if
+        // `session_name` is non-empty AND the override is not None.
+        // `Some(false)` writes `false` (Root Node shape — `worktree_name = None`).
+        assert_eq!(
+            node.use_worktree, false,
+            "use_worktree_override=Some(false) must persist as use_worktree=false on the row"
+        );
+        assert_eq!(
+            node.worktree_name, None,
+            "use_worktree=false on a fresh mesh must produce a Root Node (no worktree_name)"
+        );
+    }
+
+    #[test]
+    fn create_blocking_propagates_use_worktree_override_on_pending_path() {
+        // **Review-round-2 pin** (Finding #1+#3): the symmetric
+        // path on `pending = true`. The original PR delegated through
+        // `create_pending_with_source_pr_fork`, which drops the
+        // override (`use_worktree_override = None` is hardcoded into
+        // its inner call). The fix delegates directly to
+        // `create_pending_with_source_pr_fork_and_worktree`, which
+        // DOES forward the override. Pin BOTH paths so a future
+        // refactor that re-introduces the asymmetric drop fails this
+        // test.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            /* use_worktree_override = */ Some(false),
+            true, /* pending */
+        )
+        .expect("create_blocking on pending path must succeed");
+
+        assert_eq!(
+            node.use_worktree, false,
+            "use_worktree_override=Some(false) must persist as use_worktree=false \
+             on the Pending row too — Finding #1's regression"
+        );
+        assert_eq!(
+            node.status,
+            SessionStatus::Pending,
+            "pending=true must still land in Pending on the override-forwarding path"
+        );
+        assert_eq!(
+            node.worktree_name, None,
+            "use_worktree=false on a fresh mesh must produce a Root Node even on Pending rows"
         );
     }
 

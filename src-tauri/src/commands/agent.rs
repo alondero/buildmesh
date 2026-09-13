@@ -222,18 +222,35 @@ async fn spawn_new_agent_impl(
     let branch = crate::commands::git::get_default_branch(mesh.path.clone())
         .await;
 
-    let node = crate::services::agent_node::create(
-        mesh.id,
-        &mesh.path,
-        &branch,
-        Some(&effective_provider),
-        source_issue,
-        None,
-        None,
-        None,
-        initial_name.as_deref(),
+    // Issue #1658 step 5 — fold the mesh-lookup + branch + create dance into
+    // `services::agent_node::create_blocking`, the single shared runner used
+    // by both this helper and `http::routes::nodes::create`. We've already
+    // awaited `branch` and resolved the provider here, so we hand both into
+    // the helper as `branch_override = Some(&branch)` /
+    // `provider = Some(&effective_provider)` — the helper does the mesh
+    // lookup internally (its `Status("mesh not found")` sentinel surfaces
+    // here as a `String` error like the old inline `map_err` did).
+    let mesh_id = mesh.id;
+    let branch_str = branch.clone();
+    let effective_provider_str = effective_provider.clone();
+    let node = crate::commands::run_blocking(
+        "spawn_new_agent_impl_create",
+        move || {
+            crate::services::agent_node::create_blocking(
+                mesh_id,
+                Some(&effective_provider_str),
+                Some(&branch_str),
+                source_issue,
+                // Move `initial_name` into the closure so `as_deref()`
+                // borrows from an owned `'static` `Option<String>`.
+                initial_name.as_deref(),
+                None,
+                false, // pending — Idle matches the prior create(...) semantics
+            )
+            .map_err(|e| e.to_string())
+        },
     )
-    .map_err(|e| e.to_string())?;
+    .await?;
 
     let outcome = spawn_with_intent(
         app,
@@ -376,20 +393,29 @@ pub fn create_issue_node(
         mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
-    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
-        .unwrap_or_else(|_| "main".to_string());
-
-    let node = crate::services::agent_node::create_pending(
+    // Issue #1658 step 5 — the mesh-lookup + branch + create_pending trio
+    // is now a single shared runner. `pending: true` lands the row in
+    // [`SessionStatus::Pending`] (the desktop two-stage stage-1 contract).
+    //
+    // Review-round-2 simplification (Finding #5): the previous
+    // version computed `branch` here and forwarded `Some(&branch)`
+    // to the helper, duplicating the helper's own
+    // `get_default_branch_blocking` resolution. `branch` was a
+    // single-use local. Passing `branch_override = None` lets the
+    // helper own the resolution — one git lookup per call instead
+    // of two — and `branch` becomes dead code that's been
+    // removed.
+    let node = crate::services::agent_node::create_blocking(
         mesh.id,
-        &mesh.path,
-        &branch,
         Some(&effective_provider),
+        /* branch_override = */ None,
         Some(issue_number),
-        None,
-        None,
         Some(&initial_name),
+        None, // use_worktree_override — falls back to mesh default
+        true,  // pending — Pending matches the prior create_pending(...) semantics
     )
     .map_err(|e| e.to_string())?;
+
 
     let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
     let app_for_spawn = app.clone();
