@@ -325,7 +325,12 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
       return nodeChangedFiles(diff.nodeId);
     }
     return getGitStatus(diff.rootPath);
-  }, [diff.source, diff.nodeId, diff.rootPath, drawerVersion]);
+    // `drawerVersion` is intentionally NOT a dep: it's never read here.
+    // The refetch on Stage/Revert is driven by the parent passing
+    // `refreshKey={drawerVersion}` to this overlay, which re-mounts the
+    // drawer subtree (issue #1374). Re-keying the callback on
+    // `drawerVersion` would just churn its identity for nothing.
+  }, [diff.source, diff.nodeId, diff.rootPath]);
 
   // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
   // body re-fetches the new file's diff via the existing `fetchDiff`

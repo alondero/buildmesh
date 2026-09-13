@@ -397,9 +397,10 @@ export function AgentTerminal({ nodeId, focusOnAttach = true, focusRequest = 0 }
       scrollDisposableRef.current = null;
       terminalManager.detach(nodeId);
     };
-  // Focus intent and the active node are read after async attachment; keyboard
-  // tab selection must not lose focus when the terminal finishes mounting.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Effect deps are intentionally `[nodeId]` only — every other value the
+    // body reads is either a ref, a state setter, or a module singleton.
+    // Re-keying on `node.status` would tear the DOM element out and back in
+    // on every attention flip (see the comment above).
   }, [nodeId]);
 
   // Auto-spawn the agent for a freshly created (idle) node. Separated from the

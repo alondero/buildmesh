@@ -51,6 +51,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const [focusRequest, setFocusRequest] = useState(0);
   const memberIds = memberIdsProp ?? [nodeId];
   const memberIdKey = memberIds.join(',');
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `memberIdKey` is the stable serialization of `memberIds`; keying the memo on the joined string instead of the array reference gives "stable identity when contents are equal" semantics. Re-keying on the raw `memberIds` would hand a new array reference to every consumer on every render and defeat the purpose of this memo.
   const stableMemberIds = useMemo(() => memberIds, [memberIdKey]);
   const members = useAgentNodeStore(useShallow(s => stableMemberIds
     .map(id => s.nodesById[id])

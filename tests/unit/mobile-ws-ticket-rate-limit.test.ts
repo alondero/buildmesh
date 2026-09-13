@@ -97,8 +97,8 @@ describe("WS ticket 429 back-off (issue #552)", () => {
     } catch (e) {
       caught = e;
     }
-    expect(fetchMock).toHaveBeenCalledTimes(2), "must retry exactly once, never loop";
-    expect(sleepFn).toHaveBeenCalledTimes(1), "must wait exactly once between attempts";
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleepFn).toHaveBeenCalledTimes(1);
     expect(caught).toBeInstanceOf(ApiError);
     expect((caught as ApiError).status).toBe(429);
     // The message is the toast text the SPA surfaces — pin it so a UI
@@ -141,7 +141,7 @@ describe("WS ticket 429 back-off (issue #552)", () => {
     } catch (e) {
       caught = e;
     }
-    expect(fetchMock).toHaveBeenCalledTimes(1), "non-429 must not retry";
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(sleepFn).not.toHaveBeenCalled();
     expect((caught as ApiError).status).toBe(500);
   });

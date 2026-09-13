@@ -59,6 +59,12 @@ function openTerminalLink(_event: MouseEvent, uri: string): void {
 }
 
 function measureAndFit(inst: TerminalInstance): void {
+  // xterm.js exposes `_core._charSizeService` as an internal API for
+  // re-measuring glyph widths — needed for Unicode 11+ alignment so
+  // emoji output doesn't shear box-drawing borders (issue #602). It's
+  // intentionally undocumented and not in the public types; the typed
+  // alternative is to call `measure()` from a separately-vendored
+  // service that re-exports the same hook.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
   charSizeService?.measure();
@@ -365,8 +371,7 @@ export class TerminalRegistry {
       // attached terminals; everything else uses xterm's DOM renderer —
       // see WebglRendererPool.ts and loadWebglRenderer.ts.
 
-      let instance: TerminalInstance;
-      instance = {
+      const instance: TerminalInstance = {
         term,
         fitAddon,
         serializeAddon,

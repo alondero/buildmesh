@@ -98,6 +98,28 @@ export function HarnessOrderList({
   // harnesses themselves — reordering them would re-order the *provider
   // half* of an arbitrary pairing, which is meaningless. Terminal is
   // pinned last by the backend and isn't user-orderable.
+  // Issue #727 — register KeyboardSensor alongside the default
+  // PointerSensor so the harness-reorder drag handle is operable from
+  // the keyboard. `sortableKeyboardCoordinates` (from `@dnd-kit/sortable`)
+  // walks the active row across siblings on ArrowUp/Down — the generic
+  // defaultCoordinateGetter would translate freely, which doesn't fit a
+  // vertical list. Space picks up the focused handle, Enter picks it
+  // up too, Arrow keys move, Escape drops the item back where it
+  // started. No options on PointerSensor — matches the dnd-kit default
+  // sensor set so existing pointer behaviour is unchanged.
+  //
+  // Issue #1542 — `useSensors`/`useSensor` must run on every render of
+  // this component, including when `rows.length < 2`. Moving the early
+  // return AFTER the hooks keeps the hook order stable across the
+  // rows-length boundary (the rule of hooks is per-component-instance;
+  // an instance whose `rows.length` toggles past the threshold would
+  // otherwise add the sensors on a later render and trigger the
+  // "Rendered more hooks than during the previous render" crash).
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
   const rows = providers.filter(p => !p.is_proxied && p.id !== 'terminal');
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
@@ -108,20 +130,6 @@ export function HarnessOrderList({
     const next = reorderIds(rows.map(p => p.id), active.id as string, over.id as string);
     onReorder(next);
   };
-
-  // Issue #727 — register KeyboardSensor alongside the default
-  // PointerSensor so the harness-reorder drag handle is operable from
-  // the keyboard. `sortableKeyboardCoordinates` (from `@dnd-kit/sortable`)
-  // walks the active row across siblings on ArrowUp/Down — the generic
-  // defaultCoordinateGetter would translate freely, which doesn't fit a
-  // vertical list. Space picks up the focused handle, Enter picks it
-  // up too, Arrow keys move, Escape drops the item back where it
-  // started. No options on PointerSensor — matches the dnd-kit default
-  // sensor set so existing pointer behaviour is unchanged.
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
 
   return (
     <DndContext sensors={sensors} onDragEnd={handleDragEnd}>

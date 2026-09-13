@@ -183,8 +183,16 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   const activeIndexRef = useRef(activeIndex);
   activeIndexRef.current = activeIndex;
 
+  // Track open-vs-closed as a boolean so the layout-effect deps list
+  // stays a static expression (the rule otherwise complains about
+  // "complex expression in the dependency array"). The body reads the
+  // same boolean so deps and body agree — no need for a disable to
+  // reconcile "deps list `contextMenuOpen`" with "body reads full
+  // `contextMenu`".
+  const contextMenuOpen = contextMenu !== null;
+
   useEffect(() => {
-    if (!contextMenu) return;
+    if (!contextMenuOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       // WAI-ARIA menu contract: keystrokes only apply while focus is
       // inside the menu. The document-level listener would otherwise
@@ -288,7 +296,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [contextMenu, getParentMenuItems]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the body reads `closeContextMenu` and `regenSubmenu` (Zustand / hook callbacks with stable identity). Adding them to deps would re-bind the document listener on every render that recreates the Zustand selectors, which `getParentMenuItems` is part of — and `getParentMenuItems` is the only value here that genuinely needs to be a dep (it captures the active submenu list).
+  }, [contextMenuOpen, getParentMenuItems]);
 
   // Issue #776 — viewport clamping. Runs after the menu mounts so we
   // can read its rendered size; pushes the position back into state if
@@ -343,11 +352,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // (not `useEffect` + setTimeout) — fires synchronously after commit
   // so subsequent arrow-key presses don't race a deferred focus call.
   useLayoutEffect(() => {
-    if (!contextMenu) return;
+    if (!contextMenuOpen) return;
     setActiveIndex(0);
     const parentItems = getParentMenuItems();
     if (parentItems[0]) focusWithoutScroll(parentItems[0]);
-  }, [contextMenu !== null, getParentMenuItems]);
+  }, [contextMenuOpen, getParentMenuItems]);
 
   return (
     <div

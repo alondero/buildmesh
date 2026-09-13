@@ -66,6 +66,7 @@ export function useResizeWidth(ref: RefObject<HTMLElement | null>): number {
     // across renders, so `[ref]` would be a one-shot. A consumer can
     // unmount/remount the host (conditional render, Suspense,
     // StrictMode double-invoke) and we'd miss the swap without this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `ref` is a `RefObject` whose `.current` is the actual mutable target; we deliberately key on `.current` (above comment) so the ResizeObserver re-attaches if the host swaps the ref. Listing `ref` itself wouldn't work either because the `RefObject` identity is stable.
   }, [ref.current]);
 
   return width;

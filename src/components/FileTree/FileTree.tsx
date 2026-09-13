@@ -140,8 +140,16 @@ export function FileTree({
   // relative to the repo root. Key the map by the relative path and reconcile
   // each node by stripping rootPath, so changed files are badged correctly.
   // Declared before `handleKeyDown` so the keyboard handler's closure can
-  // read it on every render without tripping the TDZ (issue #728).
-  const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
+  // read it on every render without tripping the TDZ (issue #728). Wrapped
+  // in `useMemo` keyed on `gitFiles` so the downstream `useCallback` (line
+  // 335) sees a stable reference; otherwise the inline construction makes
+  // the deps list change on every render (issue #1542 — `exhaustive-deps`
+  // would warn and any consumer re-running on identity churn would defeat
+  // `gitFiles` deduplication in `pathInvalidatedCache.ts`).
+  const gitStatusMap = useMemo(
+    () => new Map(gitFiles.map((s) => [normalizePath(s.path), s.status])),
+    [gitFiles],
+  );
 
   const handleFileClick = useCallback(
     async (path: string, relPath: string, isChanged: boolean) => {

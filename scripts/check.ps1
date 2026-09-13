@@ -155,6 +155,52 @@ function Invoke-TsBuild {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'build' }
 }
 
+function Invoke-Lint {
+  # Issue #1542 — enforced ESLint + React Hooks gate. Runs the
+  # flat-config `eslint .` (everything except the excluded paths
+  # declared in eslint.config.js — generated bindings, dist output,
+  # docs, the .claude working dir, the lint-fixtures the verifier
+  # checks separately). The fixture gate (`npm run lint:fixtures`) is
+  # the inverse — it MUST trip the two rules on the two intentional
+  # violation fixtures, proving the rules are live.
+  #
+  # Issues #1542 + #1257: the same `--pool` rationale applies as in
+  # the vitest blocks — disable PowerShell-5.1 NativeCommandError so
+  # eslint's stderr passes through as text rather than becoming a
+  # terminating error, then trust $LASTEXITCODE for pass/fail.
+  Write-Host '== lint (eslint .) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npm run lint
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'lint' }
+}
+
+function Invoke-LintFixtures {
+  # Companion to Invoke-Lint: this is the proof that the React Hooks
+  # rules actually fire on real violations. The script runs ESLint
+  # against the two fixtures in `tests/lint-fixtures/` (which the
+  # production config excludes from `npm run lint`) and asserts each
+  # one trips its target rule. CI fails if a future rule tweak
+  # accidentally turns the React Hooks plugin off.
+  Write-Host '== lint fixtures (rules-of-hooks, exhaustive-deps) ==' -ForegroundColor Cyan
+  Push-Location $repo
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npm run lint:fixtures
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'lint-fixtures' }
+}
+
 function Invoke-BundleBudget {
   # Issue #1568 — gate the desktop initial JS/CSS bundles against the
   # documented budget (scripts/bundle-budget.json). Must run AFTER
@@ -224,19 +270,29 @@ try {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'agent-diff' }
 } finally { Pop-Location }
 
-# Static-docs block: README drift gate + its test suite. Both are
-# docs concerns — a stale README has no bearing on a Rust build, so
-# the bare-rust target skips this block entirely. Grouped together
-# so a red build makes it clear which check failed.
+# Static-docs / infra-test block: README drift gate + its test suite +
+# the lint-fixtures verifier's test suite. All are agent-infra
+# concerns — a stale README or a silently-broken lint-fixtures gate
+# has no bearing on a Rust build, so the bare-rust target skips this
+# block entirely. Grouped together so a red build makes it clear
+# which check failed.
 if ($Target -in @('unit', 'integration', 'all', 'all-ts')) {
   & npm run test:readme
   if ($LASTEXITCODE -ne 0) { $script:failed += 'readme-tests' }
+  & npm run test:lint
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'lint-tests' }
   Invoke-ReadmeDrift
 }
 
 # Build before Rust so embedded mobile assets reflect the current source.
 if ($Target -in @('all', 'all-ts')) { Invoke-TsBuild }
 if ($Target -eq 'rust') { Ensure-MobileBuilt }
+# Issue #1542 — lint runs alongside the rest of the TS gates. We
+# invoke both the main gate (`npm run lint`, which must pass) and the
+# fixture verifier (`npm run lint:fixtures`, which must FAIL on real
+# violations — proves the rules are live).
+if ($Target -in @('unit', 'integration', 'all', 'all-ts')) { Invoke-Lint }
+if ($Target -in @('unit', 'integration', 'all', 'all-ts')) { Invoke-LintFixtures }
 if ($Target -in @('unit', 'all', 'all-ts')) { Invoke-Unit }
 # Issue #1257 — integration must run in the default green bar (`all`)
 # as well as `integration` and `all-ts`, otherwise a developer who only
