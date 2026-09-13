@@ -16,6 +16,18 @@ pub enum AgentNodeError {
     /// `Archived` / `Suspended`). The wrapped string is the user-
     /// facing reason.
     Status(String),
+    /// The referenced `mesh_id` did not exist when this operation
+    /// required it. Surfaced as a typed sentinel so callers can map
+    /// to a precise HTTP status (the `/api/nodes/create` route uses
+    /// this for its 400 "Mesh not found" response) instead of
+    /// pattern-matching on a wrapped `String`. A regression that
+    /// leaks `rusqlite::Error::QueryReturnedNoRows` past this
+    /// boundary would surface as a 500 instead of a 400.
+    ///
+    /// Review-round-2 fix: replaces the prior string sentinel
+    /// `"mesh not found"` carried inside `Status(String)`, which was
+    /// brittle stringly-typed control flow.
+    MeshNotFound(i64),
     /// A backend orchestrator call (`spawn_agent_inner` today, but
     /// the variant is intentionally generic so future downstream
     /// calls share the path) failed. The wrapped string is the
@@ -29,6 +41,7 @@ impl std::fmt::Display for AgentNodeError {
         match self {
             AgentNodeError::Db(e) => write!(f, "{}", e),
             AgentNodeError::Status(e) => write!(f, "{}", e),
+            AgentNodeError::MeshNotFound(mesh_id) => write!(f, "mesh {mesh_id} not found"),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
@@ -244,14 +257,15 @@ pub fn create_blocking(
     use_worktree_override: Option<bool>,
     pending: bool,
 ) -> Result<AgentNode, AgentNodeError> {
-    // 1. Mesh lookup. Map the missing-row case to the `Status("mesh not found")`
-    //    sentinel so the route can surface a clean 400 without inspecting the
-    //    underlying `rusqlite::Error` variant. Other DB errors propagate as
+    // 1. Mesh lookup. Map the missing-row case to the typed
+    //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
+    //    can match on `Err(_)` patterns instead of inspecting a
+    //    `String` payload. Other DB errors propagate as
     //    `AgentNodeError::Db` via the `From<rusqlite::Error>` impl above.
     let mesh = match db::get_mesh_by_id(mesh_id) {
         Ok(m) => m,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
-            return Err(AgentNodeError::Status("mesh not found".to_string()));
+            return Err(AgentNodeError::MeshNotFound(mesh_id));
         }
         Err(e) => return Err(AgentNodeError::Db(e)),
     };
@@ -272,8 +286,18 @@ pub fn create_blocking(
     //    PR-spawn entry point is `create_pending_with_source_pr_fork`
     //    directly, intentionally not folded into this runner (out of
     //    scope for #1658 step 5).
+    //
+    //    **Review-round-2 fix** (the previous delegation dropped
+    //    `use_worktree_override` on `pending = true` because
+    //    `create_pending_with_source_pr_fork` is hardcoded to forward
+    //    `None`). We call the private
+    //    `create_pending_with_source_pr_fork_and_worktree` directly
+    //    (same-module access; in scope) so the override rides through
+    //    both paths. A circuit-worker caller passing
+    //    `use_worktree_override = Some(false)` now sees its override
+    //    honored on the Pending path, not silently swallowed.
     if pending {
-        create_pending_with_source_pr_fork(
+        create_pending_with_source_pr_fork_and_worktree(
             mesh_id,
             &mesh.path,
             &branch,
@@ -284,6 +308,7 @@ pub fn create_blocking(
             name_override,
             None, // head_repo_owner
             None, // head_repo_clone_url
+            use_worktree_override,
         )
     } else {
         create_with_source_pr_fork(
@@ -1398,12 +1423,13 @@ mod tests {
         // instead of surfacing the intended `QueryReturnedNoRows`,
         // which masks the sentinel we're trying to pin.
         crate::db::test_support::ensure_db_for_tests();
-        // The HTTP route (`http::routes::nodes::create`) maps this exact
-        // sentinel to its "400 Bad Request — Mesh not found" response.
-        // A regression that loses the mapping — falling back to a raw
+        // The HTTP route (`http::routes::nodes::create`) maps the
+        // typed `AgentNodeError::MeshNotFound(_)` variant to its
+        // "400 Bad Request — Mesh not found" response. A regression
+        // that loses the mapping — falling back to a raw
         // `AgentNodeError::Db(rusqlite::Error::QueryReturnedNoRows)` —
-        // would surface as "500 Internal Server Error" on the SPA even
-        // though the user typo'd a mesh id.
+        // would surface as "500 Internal Server Error" on the SPA
+        // even though the user typo'd a mesh id.
         let err = create_blocking(
             /* mesh_id */ -1, /* not in the per-test DB */
             Some("anthropic"),
@@ -1416,15 +1442,122 @@ mod tests {
         .expect_err("create_blocking on unknown mesh_id must return Err");
 
         match err {
-            AgentNodeError::Status(msg) => assert_eq!(
-                msg, "mesh not found",
-                "the route's 400 mapping depends on this exact sentinel"
+            AgentNodeError::MeshNotFound(mesh_id) => assert_eq!(
+                mesh_id, -1,
+                "the variant must carry the rejected mesh id so the route can include it in any log"
             ),
             other => panic!(
-                "create_blocking on unknown mesh_id must return Status(\"mesh not found\"), got {:?}",
+                "create_blocking on unknown mesh_id must return MeshNotFound(-1), got {:?}",
                 other
             ),
         }
+    }
+
+    #[test]
+    fn create_blocking_with_branch_override_none_resolves_via_git() {
+        // **Review-round-2 pin** (Finding #3): the prior test suite
+        // exercised `branch_override = Some("main")` exclusively.
+        // The `None` fallback path (which calls
+        // `commands::git::get_default_branch_blocking`) was never
+        // tested. Pin it: the helper must resolve the branch through
+        // the canonical sync helper when no override is supplied,
+        // landing on `"main"` because the per-test mesh path
+        // (`/tmp/buildmesh_invariant_test_<id>`) doesn't exist as a
+        // git repo and `get_default_branch_blocking` falls back.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            /* branch_override = */ None,
+            None,
+            None,
+            None,
+            false, /* pending */
+        )
+        .expect("create_blocking with branch_override=None must succeed");
+
+        assert_eq!(
+            node.branch, "main",
+            "branch_override=None must fall back to get_default_branch_blocking's \
+             open-failure default (\"main\"); the per-test mesh has no git repo, so \
+             the open-failure branch fires"
+        );
+    }
+
+    #[test]
+    fn create_blocking_propagates_use_worktree_override_on_idle_path() {
+        // **Review-round-2 pin** (Finding #1+#3): the prior test
+        // suite never exercised `use_worktree_override = Some(_)`.
+        // Idle path (`pending = false`) delegates to
+        // `create_with_source_pr_fork`, which forwards the override.
+        // Pinned here so a future refactor that drops the argument
+        // (silently swallowing the caller intent) fails this test
+        // before shipping.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            /* use_worktree_override = */ Some(false),
+            false, /* pending */
+        )
+        .expect("create_blocking on idle path must succeed");
+
+        // `create_with_source_pr_fork` writes `use_worktree` only if
+        // `session_name` is non-empty AND the override is not None.
+        // `Some(false)` writes `false` (Root Node shape — `worktree_name = None`).
+        assert_eq!(
+            node.use_worktree, false,
+            "use_worktree_override=Some(false) must persist as use_worktree=false on the row"
+        );
+        assert_eq!(
+            node.worktree_name, None,
+            "use_worktree=false on a fresh mesh must produce a Root Node (no worktree_name)"
+        );
+    }
+
+    #[test]
+    fn create_blocking_propagates_use_worktree_override_on_pending_path() {
+        // **Review-round-2 pin** (Finding #1+#3): the symmetric
+        // path on `pending = true`. The original PR delegated through
+        // `create_pending_with_source_pr_fork`, which drops the
+        // override (`use_worktree_override = None` is hardcoded into
+        // its inner call). The fix delegates directly to
+        // `create_pending_with_source_pr_fork_and_worktree`, which
+        // DOES forward the override. Pin BOTH paths so a future
+        // refactor that re-introduces the asymmetric drop fails this
+        // test.
+        let mesh_id = fresh_mesh();
+
+        let node = create_blocking(
+            mesh_id,
+            Some("anthropic"),
+            Some("main"),
+            None,
+            None,
+            /* use_worktree_override = */ Some(false),
+            true, /* pending */
+        )
+        .expect("create_blocking on pending path must succeed");
+
+        assert_eq!(
+            node.use_worktree, false,
+            "use_worktree_override=Some(false) must persist as use_worktree=false \
+             on the Pending row too — Finding #1's regression"
+        );
+        assert_eq!(
+            node.status,
+            SessionStatus::Pending,
+            "pending=true must still land in Pending on the override-forwarding path"
+        );
+        assert_eq!(
+            node.worktree_name, None,
+            "use_worktree=false on a fresh mesh must produce a Root Node even on Pending rows"
+        );
     }
 
     // -----------------------------------------------------------------------

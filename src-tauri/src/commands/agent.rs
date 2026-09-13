@@ -393,24 +393,29 @@ pub fn create_issue_node(
         mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
-    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
-        .unwrap_or_else(|_| "main".to_string());
-
     // Issue #1658 step 5 — the mesh-lookup + branch + create_pending trio
     // is now a single shared runner. `pending: true` lands the row in
-    // [`SessionStatus::Pending`] (the desktop two-stage stage-1 contract);
-    // `branch_override = Some(&branch)` short-circuits the helper's own
-    // `get_default_branch_blocking` since we already resolved it here.
+    // [`SessionStatus::Pending`] (the desktop two-stage stage-1 contract).
+    //
+    // Review-round-2 simplification (Finding #5): the previous
+    // version computed `branch` here and forwarded `Some(&branch)`
+    // to the helper, duplicating the helper's own
+    // `get_default_branch_blocking` resolution. `branch` was a
+    // single-use local. Passing `branch_override = None` lets the
+    // helper own the resolution — one git lookup per call instead
+    // of two — and `branch` becomes dead code that's been
+    // removed.
     let node = crate::services::agent_node::create_blocking(
         mesh.id,
         Some(&effective_provider),
-        Some(&branch),
+        /* branch_override = */ None,
         Some(issue_number),
         Some(&initial_name),
         None, // use_worktree_override — falls back to mesh default
         true,  // pending — Pending matches the prior create_pending(...) semantics
     )
     .map_err(|e| e.to_string())?;
+
 
     let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
     let app_for_spawn = app.clone();

@@ -54,20 +54,28 @@ pub async fn create(req: &ParsedRequest) -> Response {
         // Issue #1658 step 5 — the mesh-lookup + branch-resolution +
         // node-create trio is now a single shared runner; the helper
         // resolves `mesh.path` and the `"main"` branch internally, and
-        // surfaces a clean `AgentNodeError::Status("mesh not found")`
-        // sentinel for unknown mesh ids (mapped to a 400 below). The
+        // surfaces the typed `AgentNodeError::MeshNotFound(mesh_id)`
+        // variant on an unknown mesh id (mapped to a 400 below). The
         // post-spawn `run_blocking` reload survives untouched so the
         // response body still carries the post-spawn row state.
-        crate::services::agent_node::create_blocking(
-            mesh_id,
-            Some(provider.as_str()),
-            Some("main"),
+        //
+        // Review-round-2 fix: the prior string sentinel `"mesh not
+        // found"` was stringly-typed brittle control flow;
+        // `map_err` here tags the typed variant with its mesh id so
+        // the outer match arm compares the discriminator rather than
+        // the string body.
+        crate::services::agent_node::create_blocking(mesh_id, Some(provider.as_str()), Some("main"),
             None, // source_issue
             None, // name_override — none on this route
             None, // use_worktree_override — falls back to mesh default
             false, // pending — Idle matches the prior create(...) semantics
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| match e {
+            crate::services::agent_node::AgentNodeError::MeshNotFound(_) => {
+                "mesh not found".to_string()
+            }
+            other => other.to_string(),
+        })
     })
     .await
     {

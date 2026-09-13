@@ -63,9 +63,19 @@ const FORBIDDEN_ASYNC = [
   // refactor kept the orchestrator as `regenerate`). The fix below
   // matches the real orchestrator. Regression fixture at
   // async-command-blocking.test.ts:481 pins this case.
+  //
+  // Issue #1658 round-2 fix: the original regex matched only
+  // `services::agent_node::create(`. The unified entry point
+  // introduced by issue #1658 step 5 is
+  // `services::agent_node::create_blocking(` (the canonical name);
+  // `services::agent_node::create(` is now a `#[allow(dead_code)]`
+  // retained-with-asserts wrapper. A future caller that bypasses
+  // `run_blocking` and invokes either name on a Tokio worker must
+  // still fail this AST linter, so the regex matches
+  // `create(?:_blocking)?` — both the wrapper and the new helper.
   {
     kind: 'services::agent_node::create',
-    re: /\bservices::agent_node::create\s*\(/g,
+    re: /\bservices::agent_node::create(?:_blocking)?\s*\(/g,
   },
   {
     kind: 'services::agent_node::delete',
@@ -582,6 +592,26 @@ pub async fn write_settings() -> Result<(), String> {
 #[command]
 pub async fn create_agent_node() -> Result<AgentNode, String> {
     services::agent_node::create(1, &path, &branch, None, None, None, None, None, None)
+        .map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual([
+      'services::agent_node::create',
+    ]);
+  });
+
+  // Issue #1658 round-2 fix (Finding #2): the AST linter regex
+  // was updated to also match `services::agent_node::create_blocking(`.
+  // A future caller that bypasses `run_blocking` and invokes the
+  // new canonical helper on a Tokio worker must still trip this
+  // guard. Pin the positive case here so the regex update itself
+  // is regression-protected.
+  it('flags an unwrapped services::agent_node::create_blocking (positive, issue #1658 round-2)', () => {
+    const src = `
+#[command]
+pub async fn spawn_fresh_agent_blocking() -> Result<AgentNode, String> {
+    services::agent_node::create_blocking(1, Some("anthropic"), Some("main"), None, None, None, false)
         .map_err(|e| e.to_string())
 }
 `;
