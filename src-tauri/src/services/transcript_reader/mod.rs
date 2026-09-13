@@ -53,6 +53,128 @@ pub use types::{ToolCall, TranscriptTail, Turn, UnavailableReason};
 // same `pub(crate)` visibility so `coordinator::enrichment::assistant_report`
 // can return it via `crate::services::transcript_reader::AssistantReport`.
 pub(crate) use types::AssistantReport;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeTurnCompletion {
+    pub turn_id: String,
+    pub completed_at_ms: i64,
+}
+
+pub(crate) struct NativeTurnSnapshot {
+    pub completion: NativeTurnCompletion,
+    path: PathBuf,
+    length: u64,
+    modified: std::time::SystemTime,
+}
+
+impl NativeTurnSnapshot {
+    /// This is a short-lived read-stability check, not a durable report ID.
+    pub(crate) fn is_current(&self) -> bool {
+        fs::metadata(&self.path).is_ok_and(|metadata|
+            metadata.len() == self.length && metadata.modified().ok() == Some(self.modified))
+    }
+}
+
+pub(crate) fn read_native_turn_completion(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+) -> Option<NativeTurnSnapshot> {
+    let path = locate_transcript(format, session_id?, node_path)?;
+    native_turn_snapshot_from_file(&path, format)
+}
+
+fn native_turn_snapshot_from_file(path: &Path, format: TranscriptFormat) -> Option<NativeTurnSnapshot> {
+    let metadata = fs::metadata(path).ok()?;
+    let snapshot = NativeTurnSnapshot {
+        completion: native_turn_completion_from_file(path, format)?,
+        path: path.to_path_buf(), length: metadata.len(), modified: metadata.modified().ok()?,
+    };
+    snapshot.is_current().then_some(snapshot)
+}
+
+fn native_turn_completion_from_file(path: &Path, format: TranscriptFormat) -> Option<NativeTurnCompletion> {
+    let mut file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let start = size.saturating_sub(256 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut reader = BufReader::new(file.take(size - start));
+    if start > 0 {
+        reader.read_until(b'\n', &mut Vec::new()).ok()?;
+    }
+    let mut lines = String::new();
+    reader.read_to_string(&mut lines).ok()?;
+    // A partially published next record may start a new turn.
+    if !lines.ends_with('\n') && !lines.rsplit('\n').next()?.trim().is_empty() { return None; }
+    adapter::dispatch(adapter_id_for_format(format))?.completed_turn(&lines)
+}
+
+#[cfg(test)]
+mod native_completion_tests {
+    use super::*;
+
+    #[test]
+    fn codex_completion_replays_missed_hook_and_rejects_later_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        // Envelope shape captured from the stalled run 122; no task prose is
+        // needed to establish the native lifecycle transition.
+        let completed = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[]}}\n",
+            "{\"timestamp\":\"2026-09-13T18:27:33.252Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}\n",
+        );
+        fs::write(&path, completed).unwrap();
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), Some(NativeTurnCompletion {
+            turn_id: "turn-1".into(), completed_at_ms: 1789324053252,
+        }));
+        for noise in ["\n \t\n", "old damaged record\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"old\"},\"timestamp\":\"bad\"}\n"] {
+            fs::write(&path, format!("{noise}{completed}\n \t")).unwrap();
+            assert!(native_turn_completion_from_file(&path, TranscriptFormat::Codex).is_some(),
+                "historical damage and blank lines must not discard a later explicit completion");
+        }
+        for suffix in [
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-2\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\"}}\n",
+            "{\"type\":\"event_msg\"",
+            "malformed\n",
+        ] {
+            fs::write(&path, format!("{completed}{suffix}")).unwrap();
+            assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), None, "{suffix}");
+        }
+        fs::write(&path, completed.replace("task_complete", "item_completed")).unwrap();
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), None);
+        fs::write(&path, completed.replacen("turn-1", "other-turn", 1)).unwrap();
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), None);
+        fs::write(&path, completed.replace("2026-09-13T18:27:33.252Z", "invalid")).unwrap();
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), None);
+    }
+
+    #[test]
+    fn native_completion_bounds_large_rollouts_and_ignores_unsupported_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let tail = "{\"timestamp\":\"2026-09-13T18:27:33.252Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n";
+        fs::write(&path, format!("{}\n{tail}", "é".repeat(200_000))).unwrap();
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex).unwrap().turn_id, "turn-1");
+        assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::ClaudeCode), None);
+        let snapshot = native_turn_snapshot_from_file(&path, TranscriptFormat::Codex).unwrap();
+        assert!(snapshot.is_current());
+        fs::File::options().write(true).open(&path).unwrap().set_times(
+            fs::FileTimes::new().set_modified(snapshot.modified + std::time::Duration::from_secs(1))).unwrap();
+        assert!(!snapshot.is_current(), "same-length rewrites must invalidate the observation too");
+        let snapshot = native_turn_snapshot_from_file(&path, TranscriptFormat::Codex).unwrap();
+        fs::write(&path, format!("{tail}{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\"}}}}\n")).unwrap();
+        assert!(!snapshot.is_current(), "new transcript activity invalidates the observation without reparsing it");
+        assert!(native_turn_snapshot_from_file(&path, TranscriptFormat::Codex).is_none());
+        fs::remove_file(&path).unwrap();
+        assert!(!snapshot.is_current());
+    }
+}
 // Internal helpers used by the reader's own entry points below (NOT
 // re-exported — external callers reach the seam directly via the
 // adapter modules, issue #1661 step 10).
@@ -540,12 +662,12 @@ fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> 
 // than Coordinator dialogue. They are deliberately omitted from `Turn.text`;
 // tool invocations remain available through the shared `ToolCall` shape.
 
-/// The meaningful activity in one Command Code `message` envelope.
-///
-/// This narrow classifier is shared with the passive lifecycle watcher so its
-/// definition of a real user/assistant turn cannot drift from the transcript
-/// reader's. In particular, thinking/reasoning-only and tool-result records
-/// are deliberately absent.
+// The meaningful activity in one Command Code `message` envelope.
+//
+// This narrow classifier is shared with the passive lifecycle watcher so its
+// definition of a real user/assistant turn cannot drift from the transcript
+// reader's. In particular, thinking/reasoning-only and tool-result records
+// are deliberately absent.
 // `CommandCodeMessageActivity`, `commandcode_message_activity`,
 // `contains_tool_result`, `parse_commandcode_turns` moved to
 // `adapters::commandcode` (issue #1661 step 3).

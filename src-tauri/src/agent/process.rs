@@ -40,6 +40,8 @@ pub struct AgentProcess {
     /// [`AgentProcessRegistry::write_bytes`].
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     input_version: std::sync::atomic::AtomicU64,
+    last_submit_ms: std::sync::atomic::AtomicI64,
+    retired: AtomicBool,
     input_buffer_len: std::sync::atomic::AtomicUsize,
     input_bracketed_paste: AtomicBool,
     /// Handle to the dedicated writer thread. `kill_session` joins it
@@ -247,6 +249,8 @@ impl AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
             input_version: std::sync::atomic::AtomicU64::new(0),
+            last_submit_ms: std::sync::atomic::AtomicI64::new(0),
+            retired: AtomicBool::new(false),
             input_buffer_len: std::sync::atomic::AtomicUsize::new(0),
             input_bracketed_paste: AtomicBool::new(false),
             writer_handle: Mutex::new(writer_handle),
@@ -279,17 +283,20 @@ impl AgentProcess {
 
     fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<Option<InputStamp>, std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
+        if self.retired.load(Ordering::SeqCst) { return Err(std::sync::mpsc::TrySendError::Disconnected(data)); }
         let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
         if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
         let current_len = self.input_buffer_len.load(Ordering::Relaxed);
         let current_bracketed_paste = self.input_bracketed_paste.load(Ordering::Relaxed);
         let (next_len, next_bracketed_paste) =
             input_buffer_state_after(current_len, current_bracketed_paste, &data);
+        let submits = !next_bracketed_paste && (data.contains(&b'\r') || data.contains(&b'\n'));
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
         let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
+        if submits { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
         self.input_buffer_len.store(next_len, Ordering::Relaxed);
         self.input_bracketed_paste.store(next_bracketed_paste, Ordering::Relaxed);
         Ok(Some(InputStamp { generation: self.generation, version }))
@@ -433,6 +440,27 @@ impl AgentProcessRegistry {
         self.get(&session_id).and_then(|agent| agent.input_stamp()).map(InputStamp::encode)
     }
 
+    /// Commit a recovered lifecycle fact while input cannot change. The
+    /// caller must acquire SQLite before entering this per-agent guard, so
+    /// database contention holds no PTY locks. The callback only performs the
+    /// conditional mutation; global registry locks never span SQLite work.
+    pub(crate) fn commit_recovered_turn(
+        &self, session_id: i64, expected: &str, completed_at_ms: i64,
+        commit: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let Some(expected) = InputStamp::decode(expected) else { return Ok(false); };
+        let Some(agent) = self.get(&session_id) else { return Ok(false); };
+        let _guard = agent.writer_tx.lock().unwrap();
+        if expected != (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
+            || agent.input_buffer_len.load(Ordering::Relaxed) != 0
+            || agent.input_bracketed_paste.load(Ordering::Relaxed)
+            || agent.last_submit_ms.load(Ordering::Relaxed) >= completed_at_ms
+            || agent.retired.load(Ordering::SeqCst)
+            || !agent.reader_alive.load(Ordering::SeqCst)
+        { return Ok(false); }
+        commit()
+    }
+
     /// Compare and enqueue under the same writer lock as ordinary keystrokes.
     /// A partial draft invalidates a continuation even before Enter is pressed.
     pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
@@ -471,7 +499,19 @@ impl AgentProcessRegistry {
     pub fn insert(&self, session_id: i64, mut agent: AgentProcess) -> u64 {
         let generation = NEXT_PROCESS_GENERATION.fetch_add(1, Ordering::Relaxed);
         agent.generation = generation;
-        let previous = self.inner.insert(session_id, Arc::new(agent));
+        let agent = Arc::new(agent);
+        let previous = loop {
+            let previous = self.get(&session_id);
+            // Retire under the old agent's input guard BEFORE publishing its
+            // replacement. A cloned old Arc can never recover a later turn.
+            // The compare-and-replace retries concurrent inserts, without
+            // keeping the global map locked while waiting for an agent.
+            let guard = previous.as_ref().map(|old| old.writer_tx.lock().unwrap());
+            if let Some(old) = previous.as_ref() { old.retired.store(true, Ordering::SeqCst); }
+            let replaced = self.inner.replace_if_current(session_id, previous.as_ref(), agent.clone());
+            drop(guard);
+            if replaced { break previous; }
+        };
         if let Some(prev) = previous {
             prev.deliberate_kill.store(true, Ordering::SeqCst);
             teardown_incarnation(session_id, &prev, JoinPolicy::Both, false);
@@ -483,6 +523,10 @@ impl AgentProcessRegistry {
     /// A replacement spawn under the same session id keeps its entry
     /// (issue #1531).
     fn remove_if_current(&self, session_id: i64, generation: u64) -> Option<Arc<AgentProcess>> {
+        let agent = self.get(&session_id)?;
+        if agent.generation != generation { return None; }
+        let _guard = agent.writer_tx.lock().unwrap();
+        agent.retired.store(true, Ordering::SeqCst);
         self.inner
             .remove_if(&session_id, |agent| agent.generation == generation)
     }
@@ -556,7 +600,8 @@ impl AgentProcessRegistry {
     /// unregistering here drops the terminal's subscription and the new
     /// reader buffers bytes the viewport never sees.
     pub fn kill_session(&self, session_id: i64) {
-        if let Some(agent) = self.inner.remove(&session_id) {
+        while let Some(current) = self.get(&session_id) {
+            let Some(agent) = self.remove_if_current(session_id, current.generation) else { continue; };
             // Flag the teardown as deliberate BEFORE closing anything,
             // so the reader thread — EOFed by the master drop below —
             // is guaranteed to observe the flag when its epilogue runs.
@@ -823,6 +868,91 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    #[test]
+    fn recovered_turn_database_work_does_not_lock_other_sessions() {
+        let registry = Arc::new(AgentProcessRegistry::new());
+        let id = -930_004;
+        insert_trivial_agent(&registry, id);
+        let other = -930_005;
+        insert_trivial_agent(&registry, other);
+        let (other_tx, other_rx) = std::sync::mpsc::sync_channel(8);
+        *registry.get(&other).unwrap().writer_tx.lock().unwrap() = Some(other_tx);
+        let input = registry.input_stamp(id).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (lookup_tx, lookup_rx) = std::sync::mpsc::channel();
+        let recovery_registry = registry.clone();
+        let recovery = std::thread::spawn(move || recovery_registry.commit_recovered_turn(id, &input, i64::MAX, || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(true)
+        }).unwrap());
+        entered_rx.recv().unwrap();
+        let lookup_registry = registry.clone();
+        let lookup = std::thread::spawn(move || {
+            let found = lookup_registry.get(&other).is_some();
+            let written = lookup_registry.write_bytes(other, b"still responsive\r").is_ok();
+            lookup_tx.send(found && written).unwrap();
+        });
+        let responsive = lookup_rx.recv_timeout(std::time::Duration::from_secs(1));
+        // Release even on failure so the regression reports a failure rather
+        // than leaving blocked worker threads behind.
+        release_tx.send(()).unwrap();
+        assert!(recovery.join().unwrap());
+        lookup.join().unwrap();
+        registry.kill_session(id);
+        registry.kill_session(other);
+        assert!(responsive.unwrap(), "another session must remain accessible while SQLite is busy");
+        assert_eq!(other_rx.recv().unwrap(), b"still responsive\r");
+    }
+
+    #[test]
+    fn recovered_turn_commits_only_for_the_observed_process_input_and_lifecycle() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_003;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE agent_nodes (id INTEGER PRIMARY KEY, status TEXT,
+            session_started_at INTEGER, status_changed_at TEXT);
+            INSERT INTO agent_nodes VALUES (-930003, 'running', 1, '2026-09-13T18:25:20Z');").unwrap();
+        let lifecycle = "1:2026-09-13T18:25:20Z";
+        let input = registry.input_stamp(id).unwrap();
+        let agent = registry.get(&id).unwrap();
+        let completed_at = chrono::Utc::now().timestamp_millis() - 1000;
+        let commit = || crate::db::complete_agent_turn_if_current_inner(&conn, id, lifecycle).map_err(|e| e.to_string());
+        assert!(registry.commit_recovered_turn(id, &input, completed_at, || {
+            assert!(agent.writer_tx.try_lock().is_err(), "input stays fenced through the DB commit");
+            commit()
+        }).unwrap());
+        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "ready");
+
+        // A lifecycle change after observation must win even when the new
+        // state is also Running. Comparing only status would accept it.
+        conn.execute_batch("UPDATE agent_nodes SET status='running', status_changed_at='2026-09-13T18:30:00Z'").unwrap();
+        assert!(!registry.commit_recovered_turn(id, &input, completed_at, commit).unwrap());
+        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "running");
+
+        registry.write_bytes(id, b"draft").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"draft");
+        assert!(registry.input_stamp(id).is_none());
+        assert!(!registry.commit_recovered_turn(id, &input, completed_at, || panic!("draft must prevent mutation")).unwrap());
+        registry.write_bytes(id, b"\r").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"\r");
+        let after_submit = registry.input_stamp(id).unwrap();
+        assert!(!registry.commit_recovered_turn(id, &after_submit, completed_at,
+            || panic!("even a prompt submitted before observation supersedes old native completion")).unwrap());
+        assert!(!registry.commit_recovered_turn(id, &input, i64::MAX,
+            || panic!("a changed input version must prevent mutation")).unwrap());
+        insert_trivial_agent(&registry, id);
+        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
+            || panic!("a replacement process cannot consume its predecessor's completion")).unwrap());
+        registry.kill_session(id);
+        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
+            || panic!("a dead process cannot publish completion")).unwrap());
+    }
 
     #[test]
     fn circuit_continuation_cannot_append_to_or_submit_a_user_draft() {

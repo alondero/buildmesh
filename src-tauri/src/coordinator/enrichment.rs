@@ -26,6 +26,14 @@ fn transcript_dir(node: &AgentNode) -> String {
     env::node_working_path(node).spawn_path
 }
 
+pub(crate) fn native_turn_completion(node: &AgentNode) -> Option<transcript_reader::NativeTurnSnapshot> {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    if !adapter.produces_readable_transcript() { return None; }
+    transcript_reader::read_native_turn_completion(
+        TranscriptFormat::for_harness(adapter.id()), node.cli_session_id.as_deref(), &transcript_dir(node),
+    )
+}
+
 /// Read a node's transcript tail, gated on its provider's capability. A provider
 /// that produces no readable transcript degrades to `Unsupported` *without*
 /// touching the filesystem — the same degrade-and-flag rule the digest applies,

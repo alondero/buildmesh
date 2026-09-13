@@ -1523,6 +1523,19 @@ fn classify_step_turn(
     if !yielded {
         return None;
     }
+    // Attaching review after a clean turn does not require historical PTY
+    // buffering or a supported transcript. This applies only to the initial
+    // source handoff; feedback gates must still prove a fresh response.
+    if initial_review_handoff(view, node_id) && review_turn_is_complete(view, node_id, agent_node.status)
+        && view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")).is_none()
+    {
+        let output = crate::coordinator::enrichment::assistant_report(&agent_node)
+            .map(|report| report.text)
+            .unwrap_or_else(|| "Source agent finished its turn; no assistant report is available. Review the source working directory.".into());
+        if observed_stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
+            || input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
+        return Some(ClassifiedTurn { agent_node_id, classification: Some(evaluator::Classification::Completed), output, continuation: None });
+    }
     // Do not open a transcript, clone/scrub the PTY tail, or hit the regex
     // cleaner unless this gate/attempt has fresh output, needs its one
     // post-restart recovery probe, or is due for the bounded backend retry.
@@ -1611,6 +1624,12 @@ fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
                 target_node_id.as_deref() == Some("$source"),
         _ => false,
     }
+}
+
+fn initial_review_handoff(view: &RunView, node_id: &str) -> bool {
+    awaits_review_turn(view, node_id)
+        && !view.has_upstream_node_of_kind(node_id, |kind| matches!(kind,
+            CircuitNodeKind::InjectPty { .. } | CircuitNodeKind::SpawnAgentNode { .. }))
 }
 
 fn review_turn_is_complete(view: &RunView, node_id: &str, status: SessionStatus) -> bool {
@@ -2340,6 +2359,27 @@ fn quiet_turn_is_current(
     before == after && should_check_quiet_turn(is_alive, quiet_ms, status)
 }
 
+fn native_completion_is_current(
+    completion: &crate::services::transcript_reader::NativeTurnCompletion,
+    lifecycle_stamp: Option<&str>,
+) -> bool {
+    lifecycle_stamp.is_some_and(|stamp| db::agent_turn_stamp_precedes(stamp, completion.completed_at_ms))
+}
+
+/// Recheck all observations at publication, including native turn evidence:
+/// an unchanged assistant report does not exclude a newly submitted prompt.
+fn recover_native_turn(
+    completion: Option<crate::services::transcript_reader::NativeTurnCompletion>,
+    lifecycle_stamp: Option<&str>,
+    still_current: impl FnOnce(&crate::services::transcript_reader::NativeTurnCompletion) -> bool,
+    publish: impl FnOnce(),
+) -> bool {
+    let Some(completion) = completion.filter(|c| native_completion_is_current(c, lifecycle_stamp)) else { return false; };
+    if !still_current(&completion) { return false; }
+    publish();
+    true
+}
+
 fn recover_quiet_turn(
     output: &str,
     classify: impl FnOnce(&str) -> Option<crate::autopilot::evaluator::Classification>,
@@ -2394,6 +2434,41 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             let Ok(node) = db::get_agent_node_by_id(agent_node_id) else {
                 continue;
             };
+            use crate::autopilot::evaluator;
+            // Native completion is independent of PTY animation/quietness and
+            // classifier availability. Probe it even when a Stop hook was lost.
+            let native_key = format!("native-turn:{}", active.run.id);
+            if let Some(generation) = (node.status == SessionStatus::Running
+                && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id))
+                .then(|| evaluator::begin_circuit_wait_probe(agent_node_id, &native_key)).flatten()
+            {
+                evaluator::note_circuit_probe(agent_node_id, &native_key, generation);
+                let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
+                let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
+                // A draft/paste is not an unchanged empty prompt. Native
+                // recovery waits until it has a usable input ownership stamp.
+                let (Some(stamp), Some(input)) = (stamp, input) else { continue; };
+                let snapshot = crate::coordinator::enrichment::native_turn_completion(&node);
+                let completion = snapshot.as_ref().map(|snapshot| snapshot.completion.clone());
+                let completed_at_ms = completion.as_ref().map(|c| c.completed_at_ms).unwrap_or_default();
+                if recover_native_turn(completion, Some(&stamp), |_| {
+                    let Ok(current) = db::get_agent_node_by_id(agent_node_id) else { return false; };
+                    current.status == SessionStatus::Running
+                        && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
+                        && Some(&stamp) == db::agent_turn_stamp(agent_node_id).ok().flatten().as_ref()
+                        && Some(&input) == crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id).as_ref()
+                        && current.cli_session_id == node.cli_session_id
+                        && snapshot.as_ref().is_some_and(|snapshot| snapshot.is_current())
+                }, || {
+                    crate::node_turn::recover_ready(agent_node_id, app,
+                        crate::agent::session_lifecycle::HookSignalDetail {
+                            provider: Some(node.provider.clone()),
+                            provider_event: Some("transcript:turn_complete".into()),
+                            provider_session_id: node.cli_session_id.clone(),
+                            ..Default::default()
+                        }, &stamp, &input, completed_at_ms);
+                }) { continue; }
+            }
             let quiet_ms = crate::autopilot::evaluator::millis_since_last_output(agent_node_id);
             if !should_check_quiet_turn(
                 crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
@@ -2402,7 +2477,6 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             ) {
                 continue;
             }
-            use crate::autopilot::evaluator;
             // Unknown/background evidence is retried at most once per minute,
             // including when a transcript changes without any PTY output.
             if evaluator::millis_since_last_evaluation(agent_node_id)
@@ -2686,6 +2760,78 @@ mod tests {
                 agent_node_id: None, attempt: 1, outcome: None, error: None,
             }],
         }
+    }
+
+    #[test]
+    fn watchdog_native_completion_recovers_without_quiet_or_classifier_but_fences_old_turns() {
+        let completion = crate::services::transcript_reader::NativeTurnCompletion {
+            turn_id: "turn-1".into(), completed_at_ms: 1789324053252,
+        };
+        let published = std::cell::Cell::new(0);
+        let stamp = "1789321859469:2026-09-13T18:25:20.569845100+00:00";
+        assert!(recover_native_turn(Some(completion.clone()), Some(stamp), |_| true, || published.set(published.get() + 1)));
+        assert_eq!(published.get(), 1);
+        for invalid in [None, Some("invalid"),
+            Some("1789324054000:2026-09-13T18:25:20Z"),
+            Some("1789321859469:2026-09-13T18:27:34Z")] {
+            assert!(!recover_native_turn(Some(completion.clone()), invalid,
+                |_| panic!("old or uncorrelated completion"), || panic!("must not publish")));
+        }
+        assert!(!recover_native_turn(Some(completion), Some(stamp), |_| false,
+            || panic!("input, lifecycle, or transcript changed during observation")));
+        assert!(!recover_native_turn(None, Some(stamp), |_| panic!("no evidence"), || panic!("no completion")));
+    }
+
+    #[test]
+    fn review_handoff_completed_before_attachment_without_transcript() {
+        init_temp_db_at("review-no-transcript");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let mesh = db::create_mesh("review-no-transcript", path).unwrap();
+        let node = db::create_agent_node(mesh.id, "Finished source", path, "work",
+            crate::models::EnvType::Windows, "terminal", None, None, None, None, false, None, None, None).unwrap();
+        let mut view = RunView { run_id: 85, graph: CircuitGraph::agent_review(None, None, 3),
+            state: RunState::Pending, context: CircuitContext::new(), steps: vec![] };
+        view.context.set("source.agent_id", node.id.to_string());
+        view.context.set("source.review_preset", "1");
+        advance(&mut view, &CircuitEvent::Triggered);
+        let capacity = crate::autopilot::circuit::stepper::Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
+        advance(&mut view, &CircuitEvent::Tick(capacity));
+        crate::autopilot::evaluator::register_circuit(node.id);
+        for status in ["ready", "completed"] {
+            db::write_conn().execute("UPDATE agent_nodes SET status=?2 WHERE id=?1", rusqlite::params![node.id, status]).unwrap();
+            let turn = classify_step_turn(&active_run(85), &view, "await_source")
+                .expect("a completed source must hand off without transcript or pre-attachment PTY history");
+            assert_eq!(turn.classification, Some(crate::autopilot::evaluator::Classification::Completed));
+        }
+        let mut after_feedback = view.clone();
+        after_feedback.context.set(&format!("agent.{}.previous_report_revision", node.id), "previous-turn");
+        assert!(classify_step_turn(&active_run(85), &after_feedback, "await_source").is_none(),
+            "an injected prompt still requires a fresh report");
+        let mut permission = view.clone();
+        db::write_conn().execute("UPDATE agent_nodes SET status='awaiting_input' WHERE id=?1", [node.id]).unwrap();
+        assert!(classify_step_turn(&active_run(85), &permission, "await_source").is_none(),
+            "missing evidence must not authorize a permission request");
+        permission.state = RunState::Cancelled;
+        db::write_conn().execute("UPDATE agent_nodes SET status='completed' WHERE id=?1", [node.id]).unwrap();
+        assert!(classify_step_turn(&active_run(85), &permission, "await_source").is_none());
+        let mut renamed = view.clone();
+        renamed.graph.nodes.iter_mut().find(|node| node.id == "await_source").unwrap().id = "handoff".into();
+        for edge in &mut renamed.graph.edges {
+            if edge.from == "await_source" { edge.from = "handoff".into(); }
+            if edge.to == "await_source" { edge.to = "handoff".into(); }
+        }
+        renamed.steps.iter_mut().find(|step| step.node_id == "await_source").unwrap().node_id = "handoff".into();
+        assert!(classify_step_turn(&active_run(85), &renamed, "handoff").is_some(),
+            "initial handoff depends on graph role rather than a template's node ID");
+        assert!(!initial_review_handoff(&view, "await_fixes"));
+        let turn = classify_step_turn(&active_run(85), &view, "await_source").unwrap();
+        advance(&mut view, &CircuitEvent::TurnClassified { node_id: "await_source".into(),
+            classification: turn.classification, output: Some(turn.output) });
+        let scheduled = advance(&mut view, &CircuitEvent::Tick(capacity));
+        assert!(scheduled.effects.iter().any(|e| matches!(e,
+            crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+        crate::autopilot::evaluator::unregister(node.id);
     }
 
     #[test]
@@ -3487,7 +3633,7 @@ mod tests {
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "77");
         assert_eq!(
-            observed_agent_for_step(&step, &graph, &[step.clone()], context.source_agent_id()),
+            observed_agent_for_step(&step, &graph, std::slice::from_ref(&step), context.source_agent_id()),
             Some(77),
             "borrowed source bindings must remain visible to lifecycle observation"
         );

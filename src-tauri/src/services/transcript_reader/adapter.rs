@@ -71,6 +71,12 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// match the file-based shape.
     fn line_has_assistant_text(&self, line: &str) -> bool;
 
+    /// Explicit completion of the latest turn, when the harness records it.
+    /// Prose and terminal silence are not lifecycle evidence.
+    fn completed_turn(&self, _lines: &str) -> Option<super::NativeTurnCompletion> {
+        None
+    }
+
     /// Per-harness hook classification. The attention route calls this
     /// first; `Some(classified)` short-circuits to that decision, `None`
     /// falls through to the shared post-processing gates (transcript

@@ -844,6 +844,26 @@ pub fn on_turn_completed(
     if !sink.write_status_unless_in(node_id, SessionStatus::Ready, FORBIDDEN_HOOK_TRANSITION)? {
         return Ok(false);
     }
+    emit_turn_completed(sink, node_id, detail);
+    Ok(true)
+}
+
+pub(crate) fn recover_turn_completed(
+    sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail,
+    stamp: &str, input: &str, completed_at_ms: i64,
+) -> Result<bool, String> {
+    let committed = {
+        // Acquire SQLite before the per-agent input guard. Waiting for the
+        // writer must never freeze registry access or terminal keystrokes.
+        let conn = db::write_conn();
+        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, input, completed_at_ms,
+            || db::complete_agent_turn_if_current_inner(&conn, node_id, stamp).map_err(|error| error.to_string()))?
+    };
+    if committed { emit_turn_completed(sink, node_id, detail); }
+    Ok(committed)
+}
+
+fn emit_turn_completed(sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail) {
     sink.disarm_attention_autoclear(node_id);
     sink.emit_attention_cleared(node_id);
     let detail = HookSignalDetail { semantic_turn: None, ..detail.clone() };
@@ -855,7 +875,6 @@ pub fn on_turn_completed(
         "turn finished — agent is ready for another prompt",
     ));
     tracing::info!("Node {node_id} finished its turn (Ready)");
-    Ok(true)
 }
 
 /// A turn ended but background work is still running (false yield, issue
