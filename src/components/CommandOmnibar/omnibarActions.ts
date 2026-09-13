@@ -211,12 +211,20 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // The Probe's GitHub tabs read their mesh from `meshStore`, so an item
     // belonging to a mesh other than the currently selected one must
     // select its mesh first — otherwise the user lands on the tab showing
-    // a DIFFERENT mesh's issues (issue #1411 review).
+    // a DIFFERENT mesh's issues (issue #1411 review). A stale per-tab pin
+    // would keep winning over the fresh selection, so the target tab's
+    // pin is cleared first — same rationale the `probe-in-mesh:` branch
+    // above uses.
     const [, meshPart, numberPart] = id.split(':');
     const meshId = Number(meshPart);
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
+    if (id.startsWith('issue:')) {
+      useUIStore.getState().clearProbeContextPin('issues');
+    } else {
+      useUIStore.getState().clearProbeContextPin('pulls');
+    }
     const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
     useMeshStore.getState().selectMesh(mesh.id);
     if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
