@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "planUsage": {
+    "limit": "40000",
+    "totalSpend": "23222",
+    "includedSpend": "23222",
+    "bonusSpend": "0",
+    "remaining": "16778",
+    "totalPercentUsed": "58.055"
+  },
+  "spendLimitUsage": {
+    "individualLimit": "5000",
+    "individualUsed": "1250",
+    "individualRemaining": "3750"
+  },
+  "billingCycleStart": "1751328000000",
+  "billingCycleEnd": "1754006400000"
+}
