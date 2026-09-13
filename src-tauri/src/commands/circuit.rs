@@ -740,6 +740,38 @@ pub fn list_circuit_runs(
 // Human-in-the-loop (#1207): graceful pause/resume + collaborator approval.
 // ---------------------------------------------------------------------------
 
+/// Start a bounded follow-up on the retained work. Resuming the source uses
+/// the same lifecycle lease as Archive, so cleanup and process launch cannot
+/// own the agent concurrently.
+#[command]
+pub async fn continue_circuit_review(app: AppHandle, run_id: i64, max_rounds: i32) -> Result<i64, String> {
+    let source_id = crate::commands::run_blocking("review_recovery_source", move || {
+        crate::db::circuit::recovery::review_recovery_source(run_id, max_rounds)
+    }).await?;
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
+        use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};
+        crate::agent::spawn::spawn_with_intent(&app,
+            SpawnRequest::new(source_id, SpawnIntent::Resume { cause: ResumeCause::Explicit }, Default::default())
+                .with_lifecycle_lease()).await.map_err(|error|
+                    format!("Could not resume the implementation agent: {error}. Open the agent to resolve this, or recover from the PR branch and start a new review."))?;
+        if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
+            return Err("The implementation agent is still being stopped or resumed. Try Continue review again in a moment.".into());
+        }
+    }
+    let (next_id, state) = crate::commands::run_blocking("continue_failed_review", move || {
+        let next_id = crate::db::circuit::recovery::continue_failed_review(run_id, max_rounds)?;
+        let state = crate::db::get_circuit_run(next_id).map_err(|e| e.to_string())?
+            .map(|run| run.state).unwrap_or_else(|| "pending".into());
+        Ok((next_id, state))
+    }).await?;
+    crate::autopilot::evaluator::register_circuit(source_id);
+    crate::services::circuit_worker::wake_circuit_worker();
+    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
+        run_id: next_id, state,
+    });
+    Ok(next_id)
+}
+
 /// Gracefully pause one active run: the graph stops advancing while the
 /// current steps finish. Idempotent-friendly (pausing a paused run is a
 /// no-op error only if the run isn't active).

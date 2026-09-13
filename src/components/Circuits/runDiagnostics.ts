@@ -40,6 +40,7 @@ export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 export interface ReviewCircuitMetadata {
   verdictNodeId: string;
   retryNodeIds: readonly string[];
+  supportsContinuation?: boolean;
 }
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
@@ -69,6 +70,7 @@ export function circuitGraphFacts(
         ? null
         : {
             verdictNodeId: verdict.id,
+            ...(graph.blueprint === 'issue_driven_autopilot_review' ? { supportsContinuation: true } : {}),
             retryNodeIds: graph.nodes
               .filter((node) => node.type.type === 'retry_limit')
               .map((node) => node.id),
@@ -102,9 +104,17 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
       }
     : {
         label: exhausted ? 'Review limit reached' : 'Review needs attention',
-        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. Continue the implementation agent, or resume its saved session from Archive. Address the latest findings, then request a fresh review. If the old session is unavailable, recover from the PR branch.`,
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit) ? 'Inspect the latest findings. If the work is ready, continue with one more review on the same worktree. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
         needsAttention: true,
       };
+}
+
+export function canContinueReview(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null): boolean {
+  if (detail.run.state !== 'failed' || reviewCircuit === null) return false;
+  const context = parseRunContext(detail.run.context_json);
+  const supported = reviewCircuit.supportsContinuation || context['source.review_preset'] === '1' || Boolean(context['recovery.from_run_id']);
+  return Boolean(supported && detail.steps.some((s) => s.node_id === reviewCircuit.verdictNodeId)
+    && (detail.run.source_agent_node_id !== null || detail.steps.some((s) => s.node_id === 'implementer' && s.agent_node_id !== null)));
 }
 
 /** A run needs a user's attention before the circuit can make progress. */

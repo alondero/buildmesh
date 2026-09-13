@@ -1347,7 +1347,7 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
         let mut progress = None;
         let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
-            ("Approval required; this run will expire after 60 minutes without approval.".to_string(), APPROVAL_WAIT_MS)
+            ("Waiting for your approval. This gate does not expire while you are away.".to_string(), APPROVAL_WAIT_MS)
         } else if let Some(id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
             let probe = format!("run:{}:wait:{}:{}", view.run_id, step.node_id, step.attempt);
             let Some(generation) = crate::autopilot::evaluator::begin_circuit_wait_probe(id, &probe) else { continue; };
@@ -1599,7 +1599,7 @@ fn classify_step_turn(
 }
 
 fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
-    if view.context.get("source.review_preset") != Some("1") {
+    if view.context.get("source.review_preset") != Some("1") && view.context.get("recovery.from_run_id").is_none() {
         return false;
     }
     match view.graph.node(node_id).map(|n| &n.kind) {
@@ -2718,6 +2718,10 @@ mod tests {
         view.graph.nodes.iter_mut().find(|n| n.id == "await_fixes").unwrap().kind =
             CircuitNodeKind::LlmTurnClassifier { target_node_id: Some("$source".into()) };
         assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::Ready, report, |_| None), Some(Classification::Completed));
+        view.context.set("source.review_preset", "0");
+        view.context.set("recovery.from_run_id", "84");
+        assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::Ready, report, |_| None), Some(Classification::Completed));
+        assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::Completed, report, |_| None), Some(Classification::Completed));
     }
 
     #[test]

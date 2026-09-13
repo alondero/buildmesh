@@ -239,6 +239,87 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
 }
 
 #[test]
+fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
+    use super::circuit::recovery::review_recovery_inner;
+    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use crate::autopilot::circuit::{context::CircuitContext, model::CircuitNodeKind};
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "recovery", "/tmp/recovery").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
+    assert!(review_recovery_inner(&conn, old, 1).unwrap_err().contains("Only failed"));
+    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
+        error: Some(Some("Latest findings".into())), agent_node_id: None, attempt: 3, fresh_attempt: false,
+    }]).unwrap();
+    let history = get_circuit_run_inner(&conn, old).unwrap().unwrap();
+    let steps = list_circuit_run_steps_inner(&conn, old).unwrap();
+    assert!(review_recovery_inner(&conn, old, 0).is_err());
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    assert_eq!(plan.source_id, source.id);
+    let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    assert_eq!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap(), next, "double clicks reuse the active follow-up");
+    let new_run = get_circuit_run_inner(&conn, next).unwrap().unwrap();
+    assert_eq!(new_run.state, "pending");
+    assert_eq!(new_run.source_agent_node_id, Some(source.id));
+    let ctx = CircuitContext::from_json(&new_run.context_json).unwrap();
+    assert_eq!(ctx.get("recovery.from_run_id"), Some(old.to_string().as_str()));
+    assert_eq!(ctx.get("retry.max_retries"), Some("1"));
+    assert_eq!(get_circuit_run_inner(&conn, old).unwrap().unwrap(), history);
+    assert_eq!(list_circuit_run_steps_inner(&conn, old).unwrap(), steps);
+    let graph = CircuitGraph::from_json(&get_autopilot_circuit_inner(&conn, new_run.circuit_id).unwrap().unwrap().graph_json).unwrap();
+    assert!(matches!(&graph.node("reviewer").unwrap().kind, CircuitNodeKind::SpawnAgentNode { provider: Some(p), .. } if p == "codex"));
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &graph.node("reviewer").unwrap().kind {
+        assert!(prompt.contains("{{source.output}}"));
+        assert!(prompt.contains("{{retry.attempt}} of {{retry.max_retries}}"));
+    }
+    assert!(matches!(&graph.node("retry").unwrap().kind, CircuitNodeKind::RetryLimit { max_retries: 1 }));
+    assert!(cancel_circuit_run_locked(&mut conn, next).unwrap().is_empty(), "cancellation never owns the borrowed implementation agent");
+    assert_eq!(get_agent_node_by_id_inner(&conn, source.id).unwrap().branch, source.branch);
+}
+
+#[test]
+fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
+    use super::circuit::recovery::review_recovery_inner;
+    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use crate::autopilot::circuit::{context::CircuitContext, model::CircuitNodeKind};
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "pr-recovery", "/tmp/pr-recovery").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
+    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &graph.to_json().unwrap()).unwrap();
+    let old = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:7", r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7","node.reviewer.output":"OLD REPORT"}"#).unwrap();
+    assert!(review_recovery_inner(&conn, old, 1).is_err());
+    let op = |node_id: &str, agent_node_id| CircuitStepOp { node_id: node_id.into(), status: "completed".into(), outcome: Some(Some("working".into())), error: None, agent_node_id, attempt: 3, fresh_attempt: false };
+    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[op("implementer", Some(source.id)), op("review_classifier", None)]).unwrap();
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &plan.graph.node("reviewer").unwrap().kind {
+        assert!(prompt.contains("https://github.com/test/repo/pull/7"));
+    } else { panic!("missing reviewer"); }
+    if let CircuitNodeKind::InjectPty { prompt, target_node_id } = &plan.graph.node("feedback").unwrap().kind {
+        assert_eq!(target_node_id.as_deref(), Some("$source"));
+        assert!(prompt.contains("update the PR"));
+        let mut context = CircuitContext::new();
+        context.set("node.reviewer.output", "NEW REPORT");
+        assert!(context.resolve(prompt).contains("NEW REPORT"));
+        assert!(!prompt.contains("OLD REPORT"));
+    } else { panic!("missing feedback"); }
+    let cleanup = claim_circuit_agent_cleanup_inner(&conn, source.id).unwrap().unwrap();
+    assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap_err().contains("still being stopped"));
+    assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 0);
+    release_circuit_agent_cleanup_inner(&conn, source.id, &cleanup).unwrap();
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    assert_eq!(get_circuit_run_inner(&conn, next).unwrap().unwrap().state, "pending");
+    assert!(claim_circuit_agent_cleanup_inner(&conn, source.id).unwrap().is_none(), "new borrower fences subsequent cleanup");
+}
+
+#[test]
 fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "node-workflow-mesh", "/tmp/node-workflow").unwrap();

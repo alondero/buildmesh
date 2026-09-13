@@ -15,6 +15,7 @@
 pub mod ledger;
 pub mod queue;
 pub mod leases;
+pub mod recovery;
 
 pub use ledger::*;
 pub use queue::*;

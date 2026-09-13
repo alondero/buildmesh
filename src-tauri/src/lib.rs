@@ -556,6 +556,7 @@ pub fn run() {
             commands::circuit::list_circuit_runs,
             commands::circuit::pause_circuit_run,
             commands::circuit::resume_circuit_run,
+            commands::circuit::continue_circuit_review,
             commands::circuit::approve_circuit_step,
             // Build/Run
             commands::build_run::build_run,
