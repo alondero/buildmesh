@@ -16,7 +16,6 @@ import ArchivedNodesScreen from "../../src/mobile/screens/ArchivedNodesScreen";
 import CreatePrSheet from "../../src/mobile/screens/CreatePrSheet";
 import {
   clearStoredToken,
-  rememberToken,
   readStoredToken,
   type AgentNode,
   type ArchivedAgentNode,
@@ -103,7 +102,7 @@ function AuthRecoveryHarness({
 function renderWithRecovery(
   screenFactory: (onAuthFailed: () => void) => ReactNode,
 ) {
-  rememberToken("expired-device-token");
+  localStorage.setItem("buildmesh_token", "expired-device-token");
   return render(<AuthRecoveryHarness>{screenFactory}</AuthRecoveryHarness>);
 }
 

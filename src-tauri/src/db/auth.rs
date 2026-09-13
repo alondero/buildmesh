@@ -1,6 +1,6 @@
 //! Coordinator and device-session auth persistence (ADR-0008, issue #502).
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::models::DeviceSession;
 
@@ -41,7 +41,7 @@ pub fn get_or_create_root_token_inner(conn: &Connection) -> SqlResult<String> {
 /// Lock-free core so the HTTP auth layer (`http::auth`, issue #500) and the
 /// `/api/session` login endpoint can be unit-tested against an in-memory
 /// connection — mirroring the coordinator validators' `_inner` pattern. Only the
-/// `_inner` form exists: every caller (`resolve_role`, `login_device_session`)
+/// `_inner` form exists: callers hold the DB lock before validation.
 /// already holds the DB lock. The root token is still stored cleartext (hashing
 /// deferred to the Keychain slice, #495); an empty presented token never matches
 /// an absent stored value.
@@ -64,9 +64,12 @@ pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bo
     // LLVM cannot optimise the comparison into a short-circuit under our
     // `lto = "thin"` release profile. The Choice → bool conversion is
     // `From<Choice> for bool` and is itself constant-time.
-    Ok(stored.is_some_and(|s| bool::from(
-        subtle::ConstantTimeEq::ct_eq(s.as_bytes(), token.as_bytes()),
-    )))
+    Ok(stored.is_some_and(|s| {
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            s.as_bytes(),
+            token.as_bytes(),
+        ))
+    }))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -209,9 +212,10 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
     // `validate_root_token_inner` for the rationale.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(bool::from(
-            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
-        )),
+        Some(stored) => Ok(bool::from(subtle::ConstantTimeEq::ct_eq(
+            stored.as_bytes(),
+            hash_token(token).as_bytes(),
+        ))),
         None => Ok(false),
     }
 }
@@ -244,7 +248,10 @@ pub fn set_coordinator_drive_enabled(enabled: bool) -> SqlResult<()> {
 pub fn set_coordinator_drive_enabled_inner(conn: &Connection, enabled: bool) -> SqlResult<()> {
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-        params![COORDINATOR_DRIVE_ENABLED_KEY, if enabled { "1" } else { "0" }],
+        params![
+            COORDINATOR_DRIVE_ENABLED_KEY,
+            if enabled { "1" } else { "0" }
+        ],
     )?;
     Ok(())
 }
@@ -297,9 +304,10 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
     // Constant-time compare via `subtle::ConstantTimeEq` (issue #1240); see
     // `validate_root_token_inner` for the rationale.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(bool::from(
-            subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash_token(token).as_bytes()),
-        )),
+        Some(stored) => Ok(bool::from(subtle::ConstantTimeEq::ct_eq(
+            stored.as_bytes(),
+            hash_token(token).as_bytes(),
+        ))),
         None => Ok(false),
     }
 }
@@ -318,7 +326,7 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
 /// the row id with the *raw* token (handed to the client exactly once, then only
 /// ever re-presented by the client). `label` is a human-friendly name derived
 /// from the client's `User-Agent`; `ip` is the peer address at pairing. Only the
-/// `_inner` form exists — pairing always happens inside `login_device_session`,
+/// `_inner` form exists — pairing holds the writer lock in its HTTP command,
 /// which already holds the lock.
 pub fn pair_device_session_inner(
     conn: &Connection,
@@ -338,7 +346,7 @@ pub fn pair_device_session_inner(
 /// here — which is exactly what makes the next request fail auth. An empty token
 /// never matches. Only the `_inner` form exists: the auth layer
 /// (`http::auth::resolve_role`) already locks the DB once and passes the
-/// connection through, and `login_device_session` calls it under its own lock.
+/// connection through.
 pub fn validate_device_token_inner(conn: &Connection, token: &str) -> SqlResult<Option<i64>> {
     if token.is_empty() {
         return Ok(None);
@@ -406,45 +414,6 @@ pub fn revoke_device_session(id: i64) -> SqlResult<bool> {
 pub fn revoke_device_session_inner(conn: &Connection, id: i64) -> SqlResult<bool> {
     let affected = conn.execute("DELETE FROM device_sessions WHERE id = ?1", params![id])?;
     Ok(affected > 0)
-}
-
-/// The `POST /api/session` decision (issue #502), resolving what cookie to set:
-///
-/// - presented token is an **existing device token** → *refresh*: bump the
-///   device's activity (new IP for roaming) and hand the same token back, so a
-///   re-launching phone keeps its identity instead of accumulating a new device
-///   row on every load;
-/// - presented token is the **root token** (the pairing secret from the desktop
-///   QR) → *pair*: mint a brand-new device session and return its token, which
-///   the client then persists in place of the root token;
-/// - anything else → `None` (the caller answers 401).
-///
-/// Returns the effective `(device_id, raw_token)` to set as the `bm_session`
-/// cookie. Checking the device token first means a paired client re-presenting
-/// its device token never spuriously mints a second device.
-pub fn login_device_session(
-    presented: &str,
-    label: Option<&str>,
-    ip: Option<&str>,
-) -> SqlResult<Option<(i64, String)>> {
-    let db = write_conn();
-    login_device_session_inner(&db, presented, label, ip)
-}
-
-pub fn login_device_session_inner(
-    conn: &Connection,
-    presented: &str,
-    label: Option<&str>,
-    ip: Option<&str>,
-) -> SqlResult<Option<(i64, String)>> {
-    if let Some(id) = validate_device_token_inner(conn, presented)? {
-        touch_device_session_inner(conn, id, ip)?;
-        return Ok(Some((id, presented.to_string())));
-    }
-    if validate_root_token_inner(conn, presented)? {
-        return Ok(Some(pair_device_session_inner(conn, label, ip)?));
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

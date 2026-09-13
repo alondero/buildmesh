@@ -110,7 +110,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 - **Accounts & Usage panel**: per-provider quota tracking for the providers that expose a usage endpoint.
 
 ### Power features
-- **Remote access**: expose the mesh over the local network via a root token. WebSocket PTY relay streams any terminal to a phone or another machine. Port fallback (1992→1993→1994) means a port conflict never blocks a session.
+- **Remote access**: pair a phone over HTTPS with a single-use QR code or pairing code. The browser remembers its device session and reconnects automatically; revoke individual phones in Authorized Devices. Disabling LAN access closes active remote connections. WebSocket PTY relay streams terminals to your phone, with port fallback (1992→1993→1994).
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 

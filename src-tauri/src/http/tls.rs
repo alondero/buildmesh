@@ -1,49 +1,8 @@
-//! Self-signed TLS for the opt-in LAN/VPN exposure path (issue #501).
-//!
-//! When the server is exposed beyond loopback, the externally-reachable
-//! interfaces serve HTTPS/WSS with a self-signed certificate generated here.
-//! Loopback stays plain HTTP so the local attention webhook keeps working
-//! (see `http::bind_specs`).
-//!
-//! ## Trust-anchor stability (issue #1527)
-//!
-//! The chain has two pieces with very different lifecycles, so their
-//! persistence paths are split behind a single seam:
-//!
-//! - **Root CA** (`ca.der`, `ca.key.der`, `root_gen`) — created **once**
-//!   the first time the user enables LAN exposure, then **never re-minted**
-//!   on subsequent IP/SAN changes. This is the cert the phone installs as a
-//!   trusted root; rotating it forces a re-trust on every phone, which is
-//!   the user-visible bug #1527 fixes. Rotation is opt-in via the explicit
-//!   [`reset_trusted_certificates`] action (or after validated unrecoverable
-//!   corruption — see [`RootKeyPair::load`]).
-//! - **Leaf** (`cert.der`, `key.der`, `sans.txt`) — re-minted whenever the
-//!   set of reachable interface IPs changes (DHCP, VPN, new subnet), so a
-//!   client connecting to the new IP still gets a SAN match. The leaf is
-//!   signed by the stable root, so the phone keeps trusting it without
-//!   re-installing.
-//!
-//! The leaf write is **atomic** across all three files (cert + key + SAN
-//! sidecar): each file is written to a `*.new` sibling first, then
-//! atomically renamed into place via [`std::fs::rename`]. A crash mid-
-//! rotation either leaves the old leaf OR the new leaf — never a mixed
-//! file (cert bytes from the new leaf + key bytes from the old one).
-//!
-//! ## What gets rotated and when
-//!
-//! | Trigger | Root | Leaf |
-//! |---|---|---|
-//! | First enable (no persisted files) | created | issued |
-//! | Interface IP set changes | **kept** | re-issued, atomic write |
-//! | Interface IP set shrinks (extra stale SAN) | kept | kept |
-//! | `reset_trusted_certificates()` | re-minted, `root_gen++` | re-issued |
-//! | `ca.der` missing or empty | re-minted, `root_gen++` | re-issued |
-//! | `ca.key.der` missing (pre-#713 install) | re-minted, `root_gen++` | re-issued |
-//!
-//! Crypto provider: `ring`, selected explicitly via `builder_with_provider` so
-//! the server never depends on a process-default `CryptoProvider` (the tree has
-//! no aws-lc-rs; see Cargo.toml).
-
+//! TLS identity for opt-in LAN/VPN access. The phone trusts a stable root CA;
+//! interface changes renew only the server leaf. The identity store publishes
+//! a validated, owner-only generation through one atomic pointer. Legacy flat
+//! files are migrated on first use; explicit reset rotates the trust anchor.
+//! All multi-file writes below run inside an unpublished staging directory.
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -56,6 +15,17 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest, Sha256};
 use tokio_rustls::TlsAcceptor;
+
+mod identity;
+
+/// Resolve one immutable generation before reading related certificate files.
+pub fn identity_dir(dir: &Path) -> io::Result<std::path::PathBuf> {
+    identity::current_dir(dir)
+}
+
+pub(crate) fn protect_private_directory(dir: &Path) -> io::Result<()> {
+    identity::protect(dir, true)
+}
 
 /// A self-signed certificate and its private key, both DER-encoded.
 pub struct SelfSignedCert {
@@ -286,11 +256,12 @@ impl RootKeyPair {
                 "root CA or key bytes are empty on disk",
             ));
         }
-        let cached_key = KeyPair::try_from(key_der.as_slice()).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("ca.key.der: {e}"))
-        })?;
+        let cached_key = KeyPair::try_from(key_der.as_slice())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("ca.key.der: {e}")))?;
         let root_params = build_root_ca_params().map_err(io::Error::other)?;
-        let cached_cert = root_params.self_signed(&cached_key).map_err(io::Error::other)?;
+        let cached_cert = root_params
+            .self_signed(&cached_key)
+            .map_err(io::Error::other)?;
         Ok(Self {
             cert_der,
             key_der,
@@ -299,25 +270,14 @@ impl RootKeyPair {
         })
     }
 
-    /// Mint a fresh root CA, persist it atomically, and return the loaded
-    /// handle. Bumps `root_gen` so a reset-via-corruption path is still
-    /// visible to the UI.
-    ///
-    /// The persistence is staged via [`atomic_write_root`] — `ca.der` and
-    /// `ca.key.der` are written to `*.new` siblings first, then each
-    /// `rename`d into place. `std::fs::rename` with an existing destination
-    /// is atomic on POSIX (`rename(2)`) and Windows
-    /// (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING` since Rust 1.5), so a
-    /// crash mid-swap either leaves the old root OR the new root — never
-    /// a `ca.der` from one root paired with `ca.key.der` from another.
-    /// The latter would be silent install corruption on the phone (the
-    /// `ca.der` the user installed wouldn't match the key that signed the
-    /// leaf the server serves next).
+    /// Create a root in the staging directory and advance its generation.
     fn create(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let root_params = build_root_ca_params().map_err(io::Error::other)?;
         let cached_key = KeyPair::generate().map_err(io::Error::other)?;
-        let cached_cert = root_params.self_signed(&cached_key).map_err(io::Error::other)?;
+        let cached_cert = root_params
+            .self_signed(&cached_key)
+            .map_err(io::Error::other)?;
         let cert_der = cached_cert.der().as_ref().to_vec();
         let key_der = cached_key.serialize_der();
         atomic_write_root(dir, &cert_der, &key_der)?;
@@ -357,24 +317,7 @@ const ROOT_GEN: &str = "root_gen";
 // `load_or_renew_leaf` cleans up before the next write.
 const TMP_SUFFIX: &str = ".new";
 
-/// Atomic root swap: write `ca.der.new` and `ca.key.der.new`, then
-/// `rename` each into place. Same atomicity story as
-/// [`atomic_write_leaf`]: each `rename` is atomic on its own (POSIX
-/// `rename(2)`, Windows `MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`).
-/// A crash mid-swap leaves the old root OR the new root — never `ca.der`
-/// from one root paired with `ca.key.der` from another (which would be a
-/// silent install failure on the phone: the installed cert wouldn't
-/// match the key that signs the leaf the server serves next).
-///
-/// Crash window for the pair is narrower than the leaf trio (two files,
-/// not three): a kill between the first and second `rename` leaves
-/// `ca.der` new, `ca.key.der` old. `RootKeyPair::load` rejects any
-/// missing file, so the next `load_or_renew_leaf` falls through to
-/// `RootKeyPair::create` and re-mints — the worst a mid-swap crash can
-/// do is one wasted root mint on next startup. The user never sees a TLS
-/// handshake that fails because the on-disk root doesn't sign the
-/// served leaf, because the half-written root is detected at load time,
-/// before any listener binds.
+/// Write root files in an unpublished staging directory.
 fn atomic_write_root(dir: &Path, cert_der: &[u8], key_der: &[u8]) -> io::Result<()> {
     use std::fs;
     // Best-effort cleanup of leftovers from a prior crash. Failure is
@@ -391,25 +334,11 @@ fn atomic_write_root(dir: &Path, cert_der: &[u8], key_der: &[u8]) -> io::Result<
         dir.join(format!("{CA_CERT}{TMP_SUFFIX}")),
         dir.join(CA_CERT),
     )?;
-    fs::rename(
-        dir.join(format!("{CA_KEY}{TMP_SUFFIX}")),
-        dir.join(CA_KEY),
-    )?;
+    fs::rename(dir.join(format!("{CA_KEY}{TMP_SUFFIX}")), dir.join(CA_KEY))?;
     Ok(())
 }
 
-/// Atomic leaf swap: write `cert.der.new`, `key.der.new`, `sans.txt.new`,
-/// then `rename` each into place. `std::fs::rename` with an existing
-/// destination is atomic on POSIX (`rename(2)`) and Windows
-/// (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING` since Rust 1.5).
-///
-/// Crash window: a kill between the first and second `rename` leaves the
-/// disk with `cert.der` new, `key.der` old, `sans.txt` old. `load_or_renew_leaf`
-/// treats any missing file (or any leftover `*.new` from a previous crash)
-/// as "incomplete leaf → reissue", so the worst a mid-swap crash can do is
-/// one wasted leaf mint on next startup. The user never sees a TLS
-/// handshake that fails because cert bytes don't match key bytes — the
-/// incomplete leaf is detected at load time, before any listener binds.
+/// Write leaf files in an unpublished staging directory.
 fn atomic_write_leaf(dir: &Path, leaf: &SelfSignedCert, sans: &[String]) -> io::Result<()> {
     use std::fs;
     // Best-effort cleanup of leftovers from a prior crash. Failure is
@@ -420,7 +349,10 @@ fn atomic_write_leaf(dir: &Path, leaf: &SelfSignedCert, sans: &[String]) -> io::
 
     fs::write(dir.join(format!("{LEAF_CERT}{TMP_SUFFIX}")), &leaf.cert_der)?;
     fs::write(dir.join(format!("{LEAF_KEY}{TMP_SUFFIX}")), &leaf.key_der)?;
-    fs::write(dir.join(format!("{LEAF_SANS}{TMP_SUFFIX}")), sans.join("\n"))?;
+    fs::write(
+        dir.join(format!("{LEAF_SANS}{TMP_SUFFIX}")),
+        sans.join("\n"),
+    )?;
     // All three writes committed → swap. Each `rename` is atomic on its
     // own; the trio is not atomic across them (see the doc comment for
     // the crash-recovery rationale).
@@ -473,6 +405,10 @@ fn bump_root_generation(dir: &Path) -> io::Result<u64> {
 /// interface set still passes (an extra stale SAN is harmless), so only a
 /// *new* interface IP forces a leaf renewal.
 pub fn load_or_renew_leaf(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<CertChain> {
+    identity::load(dir, interface_ips, false)
+}
+
+fn load_staged(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<CertChain> {
     std::fs::create_dir_all(dir)?;
     // Track whether the root was *just* minted (vs. loaded from disk). A
     // fresh root has a NEW keypair that didn't sign the on-disk leaf —
@@ -529,30 +465,14 @@ pub fn load_or_renew_leaf(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<Ce
     })
 }
 
-/// Explicit root rotation. Wipes all persisted TLS state — root cert, root
-/// key, leaf cert, leaf key, SAN sidecar, plus any staged `*.new` siblings
-/// — so the next [`load_or_renew_leaf`] call would mint a fresh root.
-/// Issues a fresh leaf for `interface_ips` against the new root and
-/// persists it atomically before returning, so `cert.der` is never
-/// missing on disk after a successful reset (otherwise the next
-/// `cert_status` call would fail with `NotFound` and the QR modal's
-/// "Re-install" affordance would silently disappear — issue #1527).
-///
-/// Returns the new generation so the caller can log it / re-bind live
-/// listeners with the new chain.
-///
-/// Missing files are not an error (idempotent reset). A reset on an
-/// already-empty `tls/` directory still bumps the generation counter
-/// (which is monotonic across resets — see the `ROOT_GEN` skip below).
-///
-/// `interface_ips` is the set the just-minted leaf covers — typically
-/// the cache the bind path holds (`http::local_interface_ips()`), or
-/// `&[]` when LAN exposure is off. The caller MUST follow up with
-/// `http::clear_cached_acceptor()` + `http::reapply_binding().await` so
-/// the live `TlsAcceptor` matches the on-disk chain (the cache is keyed
-/// by `interface_san_key`, which is unchanged after a reset, so the
-/// cache would happily hand back the pre-reset acceptor otherwise).
+/// Publish a fresh complete identity, retaining the old generation until
+/// publication succeeds. The caller clears the acceptor cache and rebinds.
 pub fn reset_trusted_certificates(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<u64> {
+    identity::load(dir, interface_ips, true)?;
+    Ok(read_root_generation(&identity_dir(dir)?))
+}
+
+fn reset_staged(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<u64> {
     std::fs::create_dir_all(dir)?;
     // Concatenate once into owned `String`s so the array is a single type
     // (`&[&str]` with `format!()` would mix `&str` and `&String` and force
@@ -720,12 +640,9 @@ pub fn cert_fingerprint(cert_der: &[u8]) -> String {
 /// it so the user's Windows username (embedded in `%APPDATA%\<user>\...`)
 /// never crosses the LAN.
 ///
-/// Race note: between the two `std::fs::read` calls a concurrent LAN toggle
-/// could `load_or_renew_leaf` a fresh pair on another thread, returning
-/// fingerprints that don't chain. We accept the race — the openssl test
-/// `leaf_cert_chains_to_root_cert` proves *generation* integrity, not read
-/// integrity, and the window is dominated by user-initiated events.
+/// Resolve the immutable generation once so all fields describe one identity.
 pub fn cert_status(dir: &Path) -> io::Result<CertChainStatus> {
+    let dir = identity_dir(dir)?;
     let ca_der = std::fs::read(dir.join("ca.der"))?;
     let leaf_der = std::fs::read(dir.join("cert.der"))?;
     Ok(CertChainStatus {
@@ -736,7 +653,7 @@ pub fn cert_status(dir: &Path) -> io::Result<CertChainStatus> {
         // Window end from `build_params` (line ~111): pinned to 2035-01-01 so
         // a persisted cert stays valid for years without regen.
         valid_until: "2035-01-01 00:00:00".to_string(),
-        root_generation: read_root_generation(dir),
+        root_generation: read_root_generation(&dir),
     })
 }
 
@@ -784,7 +701,10 @@ mod tests {
             .iter()
             .filter(|s| matches!(s, SanType::IpAddress(ip) if *ip == link_local))
             .count();
-        assert_eq!(lan_count, 1, "duplicate LAN IP must collapse to a single SAN");
+        assert_eq!(
+            lan_count, 1,
+            "duplicate LAN IP must collapse to a single SAN"
+        );
         assert_eq!(
             link_local_count, 0,
             "link-local IPs are never bound (see http::bind_specs) and are the most \
@@ -881,9 +801,24 @@ mod tests {
 
         // Read the on-disk bytes directly so we don't accidentally compare
         // re-issued-but-byte-identical copies.
-        let ca_after = std::fs::read(dir.path().join("ca.der")).expect("ca.der");
-        let ca_key_after = std::fs::read(dir.path().join("ca.key.der")).expect("ca.key.der");
-        let leaf_after = std::fs::read(dir.path().join("cert.der")).expect("cert.der");
+        let ca_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der"),
+        )
+        .expect("ca.der");
+        let ca_key_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+        )
+        .expect("ca.key.der");
+        let leaf_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der"),
+        )
+        .expect("cert.der");
         assert_eq!(
             ca_after, first.root_cert_der,
             "leaf renewal must NOT rotate ca.der (root CA bytes are stable)"
@@ -956,9 +891,8 @@ mod tests {
             .expect("status after first mint")
             .root_generation;
 
-        let new_gen =
-            crate::http::tls::reset_trusted_certificates(dir.path(), &[lan])
-                .expect("reset_trusted_certificates");
+        let new_gen = crate::http::tls::reset_trusted_certificates(dir.path(), &[lan])
+            .expect("reset_trusted_certificates");
 
         assert!(
             new_gen > first_gen,
@@ -981,10 +915,24 @@ mod tests {
         // freshly-minted root. Read the persisted bytes directly (not
         // the just-loaded-into-RAM chain) so a test that secretly
         // re-mints the leaf would still fail.
-        let ca_after = std::fs::read(dir.path().join("ca.der")).expect("ca.der after reset");
-        let leaf_after = std::fs::read(dir.path().join("cert.der")).expect("cert.der after reset");
-        let key_after = std::fs::read(dir.path().join("ca.key.der"))
-            .expect("ca.key.der after reset");
+        let ca_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der"),
+        )
+        .expect("ca.der after reset");
+        let leaf_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der"),
+        )
+        .expect("cert.der after reset");
+        let key_after = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+        )
+        .expect("ca.key.der after reset");
         assert_ne!(
             ca_after, first.root_cert_der,
             "reset must produce a fresh root cert (different bytes)"
@@ -1043,13 +991,19 @@ mod tests {
         let lan: IpAddr = "192.168.1.10".parse().unwrap();
 
         // Establish a clean baseline.
-        let first = load_or_generate(dir.path(), &[lan]).expect("baseline");
+        let first = load_staged(dir.path(), &[lan]).expect("legacy baseline");
         // Simulate a partial swap: leave cert.der.new on disk as if the
         // first `write` succeeded, the second never did. The new bytes
         // must NOT match the live cert.der (we want to prove the
         // recovery path actually replaces them).
         let bogus_cert = vec![0u8; 64];
-        std::fs::write(dir.path().join("cert.der.new"), &bogus_cert).unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der.new"),
+            &bogus_cert,
+        )
+        .unwrap();
 
         // Recovery path: next call sees the .new sibling, treats the
         // leaf as incomplete, reissues, and swaps atomically.
@@ -1068,12 +1022,20 @@ mod tests {
         // The bogus .new sibling must be cleaned up by the recovery —
         // if it's still there, the next swap will race against it.
         assert!(
-            !dir.path().join("cert.der.new").exists(),
+            !crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der.new")
+                .exists(),
             "recovery must sweep the leftover staged cert.der.new"
         );
         // And the live cert.der must be the new leaf, not the bogus
         // partial bytes.
-        let live = std::fs::read(dir.path().join("cert.der")).expect("cert.der");
+        let live = std::fs::read(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der"),
+        )
+        .expect("cert.der");
         assert_eq!(
             live, second.leaf.cert_der,
             "recovery must leave cert.der matching the freshly-issued leaf"
@@ -1095,20 +1057,29 @@ mod tests {
         let lan: IpAddr = "192.168.1.10".parse().unwrap();
 
         // Establish a baseline root on disk.
-        let first = load_or_generate(dir.path(), &[lan]).expect("baseline");
+        let first = load_staged(dir.path(), &[lan]).expect("legacy baseline");
         // Simulate a partial root swap: leave ca.der.new on disk as if
         // the first write succeeded and the rename never ran. The
         // bogus bytes must NOT match the live ca.der — we want to
         // prove the recovery path replaces them.
         let bogus_cert = vec![0u8; 64];
-        std::fs::write(dir.path().join("ca.der.new"), &bogus_cert).unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der.new"),
+            &bogus_cert,
+        )
+        .unwrap();
 
         // Recovery: next load_or_generate sees the .new sibling,
         // RootKeyPair::load returns Err (still loads the live ca.der,
         // but the next create path sweeps the sibling).
         let second = load_or_generate(dir.path(), &[lan]).expect("recovery");
         assert!(
-            !dir.path().join("ca.der.new").exists(),
+            !crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der.new")
+                .exists(),
             "recovery must sweep the leftover staged ca.der.new"
         );
         assert_eq!(
@@ -1131,7 +1102,12 @@ mod tests {
         // Seed: pretend we already have a fresh chain on disk.
         let _first = load_or_generate(dir.path(), &[lan]).expect("seed");
         // Simulate pre-#713: delete only the root key.
-        std::fs::remove_file(dir.path().join("ca.key.der")).unwrap();
+        std::fs::remove_file(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+        )
+        .unwrap();
 
         // Recovery: load_or_generate sees the missing file, mints a
         // fresh root, writes both ca.der and ca.key.der, and reissues
@@ -1226,12 +1202,18 @@ mod tests {
     #[test]
     fn generate_produces_non_empty_der() {
         let chain = generate(&[]).unwrap();
-        assert!(!chain.root_cert_der.is_empty(), "root cert must be non-empty");
+        assert!(
+            !chain.root_cert_der.is_empty(),
+            "root cert must be non-empty"
+        );
         // Issue #713: root key is now part of CertChain — sign the iOS
         // .mobileconfig with it. An empty key would fail the CMS sign
         // handshake with `KeyParseError`, so we pin non-empty here.
         assert!(!chain.root_key_der.is_empty(), "root key must be non-empty");
-        assert!(!chain.leaf.cert_der.is_empty(), "leaf cert must be non-empty");
+        assert!(
+            !chain.leaf.cert_der.is_empty(),
+            "leaf cert must be non-empty"
+        );
         assert!(!chain.leaf.key_der.is_empty(), "leaf key must be non-empty");
     }
 
@@ -1278,7 +1260,12 @@ mod tests {
         let _first = load_or_generate(dir.path(), &[]).unwrap();
         // Simulate a pre-#713 install by deleting `ca.key.der` but leaving
         // `ca.der`, `cert.der`, `key.der`, `sans.txt` intact.
-        std::fs::remove_file(dir.path().join("ca.key.der")).unwrap();
+        std::fs::remove_file(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+        )
+        .unwrap();
         let second = load_or_generate(dir.path(), &[]).unwrap();
         // The persisted `ca.der` was rejected → fresh chain → root keypair
         // rotated (different bytes from the first call). The migration
@@ -1290,7 +1277,10 @@ mod tests {
         );
         // The new `ca.key.der` must now exist on disk for the next call.
         assert!(
-            dir.path().join("ca.key.der").exists(),
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der")
+                .exists(),
             "load_or_generate must write ca.key.der after migrating"
         );
         // A subsequent call must round-trip without regenerating again.
@@ -1307,14 +1297,23 @@ mod tests {
         let first = load_or_generate(dir.path(), &[ip_a]).unwrap();
         // Same interface set → reuse the persisted cert.
         let same = load_or_generate(dir.path(), &[ip_a]).unwrap();
-        assert_eq!(first.leaf.cert_der, same.leaf.cert_der, "unchanged interface set reuses the cert");
+        assert_eq!(
+            first.leaf.cert_der, same.leaf.cert_der,
+            "unchanged interface set reuses the cert"
+        );
         // A shrunk set (only loopback now) still passes — an extra stale SAN is harmless.
         let shrunk = load_or_generate(dir.path(), &[]).unwrap();
-        assert_eq!(first.leaf.cert_der, shrunk.leaf.cert_der, "a covered (subset) request reuses the cert");
+        assert_eq!(
+            first.leaf.cert_der, shrunk.leaf.cert_der,
+            "a covered (subset) request reuses the cert"
+        );
         // A new interface IP the persisted cert doesn't cover → regenerate, or a
         // phone connecting to the new IP would hit a SAN/name mismatch.
         let changed = load_or_generate(dir.path(), &[ip_b]).unwrap();
-        assert_ne!(first.leaf.cert_der, changed.leaf.cert_der, "a new interface IP forces regeneration");
+        assert_ne!(
+            first.leaf.cert_der, changed.leaf.cert_der,
+            "a new interface IP forces regeneration"
+        );
     }
 
     /// Regression pin for the root+leaf PKI: the root cert MUST declare
@@ -1329,11 +1328,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("root.der"), &chain.root_cert_der).unwrap();
         let output = std::process::Command::new("openssl")
-            .args(["x509", "-inform", "DER", "-in", dir.path().join("root.der").to_str().unwrap(),
-                   "-noout", "-ext", "basicConstraints"])
+            .args([
+                "x509",
+                "-inform",
+                "DER",
+                "-in",
+                dir.path().join("root.der").to_str().unwrap(),
+                "-noout",
+                "-ext",
+                "basicConstraints",
+            ])
             .output()
             .expect("openssl must be on PATH");
-        assert!(output.status.success(), "openssl failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "openssl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("CA:TRUE"),
@@ -1538,7 +1549,11 @@ mod tests {
             "cert_fingerprint output must match openssl's colon-separated uppercase hex"
         );
         // 32 bytes × 2 hex chars + 31 colons = 95 chars.
-        assert_eq!(got.len(), 95, "SHA-256 fingerprint must be 95 chars (32 bytes colon-separated)");
+        assert_eq!(
+            got.len(),
+            95,
+            "SHA-256 fingerprint must be 95 chars (32 bytes colon-separated)"
+        );
     }
 
     /// `cert_status` on a freshly generated chain populates all four fields.
@@ -1644,8 +1659,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // cert_status reads `ca.der` and `cert.der` — write both, not just the
         // leaf (cert_status computes BOTH fingerprints).
-        std::fs::write(dir.path().join("ca.der"), &chain.root_cert_der).unwrap();
-        std::fs::write(dir.path().join("cert.der"), &chain.leaf.cert_der).unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der"),
+            &chain.root_cert_der,
+        )
+        .unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("cert.der"),
+            &chain.leaf.cert_der,
+        )
+        .unwrap();
 
         let status = crate::http::tls::cert_status(dir.path()).unwrap();
 
@@ -1657,9 +1684,16 @@ mod tests {
         let issuer_out = std::process::Command::new("openssl")
             .args([
                 "x509",
-                "-inform", "DER",
-                "-in", dir.path().join("cert.der").to_str().unwrap(),
-                "-noout", "-issuer",
+                "-inform",
+                "DER",
+                "-in",
+                crate::http::tls::identity_dir(dir.path())
+                    .unwrap()
+                    .join("cert.der")
+                    .to_str()
+                    .unwrap(),
+                "-noout",
+                "-issuer",
             ])
             .output()
             .expect("openssl must be on PATH");
@@ -1678,9 +1712,16 @@ mod tests {
         let dates_out = std::process::Command::new("openssl")
             .args([
                 "x509",
-                "-inform", "DER",
-                "-in", dir.path().join("cert.der").to_str().unwrap(),
-                "-noout", "-dates",
+                "-inform",
+                "DER",
+                "-in",
+                crate::http::tls::identity_dir(dir.path())
+                    .unwrap()
+                    .join("cert.der")
+                    .to_str()
+                    .unwrap(),
+                "-noout",
+                "-dates",
             ])
             .output()
             .expect("openssl must be on PATH");

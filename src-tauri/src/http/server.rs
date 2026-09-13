@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use tauri::{Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::WebSocketStream;
 
 use crate::http::request;
 use crate::http::router::{
@@ -62,11 +62,18 @@ pub async fn reapply_binding() {
 }
 
 async fn apply_binding(port_offset: u16) {
+    // Serialize the setting snapshot, identity load, and listener replacement.
+    // Otherwise an older enable can finish after a newer disable.
+    static BINDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _binding = BINDING.lock().await;
     state::store_port_offset(port_offset);
     let start = state::HTTP_PORT_START + port_offset;
     let end = state::HTTP_PORT_END + port_offset;
 
     let lan_enabled = crate::db::lan_exposure_enabled().unwrap_or(false);
+    if !lan_enabled {
+        crate::http::pairing::invalidate();
+    }
     let interface_ips: Vec<IpAddr> = if lan_enabled {
         state::refresh_local_interface_ips()
     } else {
@@ -100,7 +107,10 @@ async fn apply_binding(port_offset: u16) {
             None => {
                 if lan_enabled {
                     if let Err(e) = crate::db::set_lan_exposure_enabled(false) {
-                        tracing::warn!("Failed to revert LAN exposure flag after bind failure: {}", e);
+                        tracing::warn!(
+                            "Failed to revert LAN exposure flag after bind failure: {}",
+                            e
+                        );
                     }
                 }
                 state::realized_binds_store().write().clear();
@@ -110,7 +120,10 @@ async fn apply_binding(port_offset: u16) {
         };
     state::store_resolved_http_port(skeleton_port);
     if let Some(app) = state::app_handle() {
-        let _ = app.emit("remote-access-port", serde_json::json!({ "port": skeleton_port }));
+        let _ = app.emit(
+            "remote-access-port",
+            serde_json::json!({ "port": skeleton_port }),
+        );
     }
 
     let interface_realized = if let Some(acceptor) = acceptor {
@@ -143,7 +156,11 @@ async fn apply_binding(port_offset: u16) {
     } else {
         "loopback only"
     };
-    tracing::info!("HTTP server listening on port {} ({})", skeleton_port, scope);
+    tracing::info!(
+        "HTTP server listening on port {} ({})",
+        skeleton_port,
+        scope
+    );
 }
 
 fn realized_binds_from_specs(specs: &[BindSpec], bound_indices: &[usize]) -> Vec<RealizedBind> {
@@ -156,7 +173,11 @@ fn realized_binds_from_specs(specs: &[BindSpec], bound_indices: &[usize]) -> Vec
         .collect()
 }
 
-pub fn bind_specs(port: u16, interface_ips: &[IpAddr], acceptor: Option<&TlsAcceptor>) -> Vec<BindSpec> {
+pub fn bind_specs(
+    port: u16,
+    interface_ips: &[IpAddr],
+    acceptor: Option<&TlsAcceptor>,
+) -> Vec<BindSpec> {
     let mut specs = vec![
         BindSpec {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -204,29 +225,27 @@ async fn get_or_build_acceptor(interface_ips: &[IpAddr]) -> std::io::Result<Opti
     if wanted_key.is_empty() {
         return Ok(None);
     }
-    {
-        let guard = acceptor_cache().lock();
-        if let Some((cached_key, cached_acceptor)) = guard.as_ref() {
-            if cached_key == &wanted_key {
-                return Ok(Some(cached_acceptor.clone()));
-            }
-        }
-    }
     let ips = interface_ips.to_vec();
     let acceptor = tokio::task::spawn_blocking(move || -> std::io::Result<TlsAcceptor> {
-        let app = state::app_handle().ok_or_else(|| {
-            std::io::Error::other("app handle not set; cannot locate cert dir")
-        })?;
+        let mut guard = acceptor_cache().lock();
+        if let Some((cached_key, cached_acceptor)) = guard.as_ref() {
+            if cached_key == &wanted_key {
+                return Ok(cached_acceptor.clone());
+            }
+        }
+        let app = state::app_handle()
+            .ok_or_else(|| std::io::Error::other("app handle not set; cannot locate cert dir"))?;
         let dir: PathBuf = app
             .path()
             .app_data_dir()
             .map_err(std::io::Error::other)?
             .join("tls");
-        tls::acceptor(&dir, &ips)
+        let acceptor = tls::acceptor(&dir, &ips)?;
+        *guard = Some((wanted_key, acceptor.clone()));
+        Ok(acceptor)
     })
     .await
     .map_err(|e| std::io::Error::other(format!("TLS build task panicked: {}", e)))??;
-    *acceptor_cache().lock() = Some((wanted_key, acceptor.clone()));
     Ok(Some(acceptor))
 }
 
@@ -236,28 +255,34 @@ fn spawn_accept_loop(
     mut shutdown: watch::Receiver<bool>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+        let websocket_capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
         loop {
             tokio::select! {
+                biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
                     }
                 }
+                _ = connections.join_next(), if !connections.is_empty() => {}
                 res = listener.accept() => match res {
                     Ok((tcp, addr)) => {
-                        tracing::debug!("HTTP connection from {}", addr);
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
+                            drop(tcp);
+                            continue;
+                        };
                         let tls = tls.clone();
-                        tauri::async_runtime::spawn(async move {
+                        let websocket_capacity = websocket_capacity.clone();
+                        connections.spawn(async move {
                             match tls {
-                                Some(acceptor) => match acceptor.accept(tcp).await {
-                                    Ok(s) => {
-                                        handle_connection(MaybeTls::Tls(Box::new(s)), addr).await;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!("TLS handshake from {} failed: {}", addr, e);
-                                    }
+                                Some(acceptor) => if let Ok(Ok(s)) = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5), acceptor.accept(tcp)
+                                ).await {
+                                    handle_admitted_connection(MaybeTls::Tls(Box::new(s)), addr, Some((permit, websocket_capacity))).await;
                                 },
-                                None => handle_connection(MaybeTls::Plain(tcp), addr).await,
+                                None => handle_admitted_connection(MaybeTls::Plain(tcp), addr, Some((permit, websocket_capacity))).await,
                             }
                         });
                     }
@@ -265,6 +290,10 @@ fn spawn_accept_loop(
                 }
             }
         }
+        // The listener owns TLS, HTTP, and WebSocket work for its generation.
+        // Abort drops sockets even when a peer never sends another frame.
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
     })
 }
 
@@ -390,32 +419,46 @@ async fn ws_upgrade(
     Some(WebSocketStream::from_raw_socket(stream, Role::Server, None).await)
 }
 
+#[cfg(test)]
 pub(crate) async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
+    handle_admitted_connection(stream, addr, None).await;
+}
+
+async fn handle_admitted_connection(
+    stream: MaybeTls,
+    addr: SocketAddr,
+    mut admission: Option<(
+        tokio::sync::OwnedSemaphorePermit,
+        std::sync::Arc<tokio::sync::Semaphore>,
+    )>,
+) {
     let secure = stream.is_tls();
     let mut lines = tokio::io::BufStream::new(stream);
 
     let head = match tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
+        let mut head_reader = (&mut lines).take((MAX_HEADER_BYTES + 1) as u64);
         let mut request_line = String::new();
-        match lines.read_line(&mut request_line).await {
+        match head_reader.read_line(&mut request_line).await {
             Ok(0) | Err(_) => return None,
             Ok(_) => {}
         }
 
         let mut headers = String::new();
         while !headers.ends_with("\r\n\r\n") {
-            match lines.read_line(&mut headers).await {
+            match head_reader.read_line(&mut headers).await {
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(_) => break,
             }
-            if headers.len() > MAX_HEADER_BYTES {
+            if headers.len() + request_line.len() > MAX_HEADER_BYTES {
                 return Some((request_line, headers, true));
             }
             if headers.trim().is_empty() {
                 break;
             }
         }
-        Some((request_line, headers, false))
+        let overflow = headers.len() + request_line.len() > MAX_HEADER_BYTES;
+        Some((request_line, headers, overflow))
     })
     .await
     {
@@ -430,10 +473,7 @@ pub(crate) async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     }
 
     let request_line = request_line.trim().to_string();
-    let parts: Vec<String> = request_line
-        .split_whitespace()
-        .map(String::from)
-        .collect();
+    let parts: Vec<String> = request_line.split_whitespace().map(String::from).collect();
     if parts.len() < 2 {
         return;
     }
@@ -483,26 +523,71 @@ pub(crate) async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         ids: (None, None),
     };
 
+    // Subscribe before authorization so revocation between ticket consumption
+    // and WebSocket subscription cannot leave an already-revoked phone live.
+    let mut revocations = crate::http::revocation::subscribe();
     match dispatch_matched(req, matched).await {
         DispatchResult::Http(response) => {
             let _ = request::write_response(&mut lines, &response).await;
         }
         DispatchResult::Upgrade(kind) => {
-            let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
-                return;
+            let device_id = match &kind {
+                Upgrade::Events { device_id } | Upgrade::Terminal { device_id, .. } => *device_id,
             };
-            match kind {
-                Upgrade::Events { device_id } => {
-                    tracing::info!("/ws/events client connected");
-                    tauri::async_runtime::spawn(ws::handle_events_ws_connection(
-                        ws_stream, device_id,
-                    ));
+            if let Some(id) = device_id {
+                match crate::http::auth::device_session_is_active(id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                        return;
+                    }
+                    Err(()) => {
+                        let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                        return;
+                    }
                 }
-                Upgrade::Terminal { node_id, device_id } => {
-                    tracing::info!("WebSocket connected for node {}", node_id);
-                    tauri::async_runtime::spawn(ws::handle_ws_connection(
-                        ws_stream, node_id, device_id,
-                    ));
+            }
+            let _websocket_permit = if let Some((_, capacity)) = &admission {
+                match capacity.clone().try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        let _ =
+                            request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            drop(admission.take());
+            let connection = async {
+                let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
+                    return;
+                };
+                match kind {
+                    Upgrade::Events { device_id } => {
+                        tracing::info!("/ws/events client connected");
+                        ws::handle_events_ws_connection(ws_stream, device_id).await;
+                    }
+                    Upgrade::Terminal { node_id, device_id } => {
+                        tracing::info!("WebSocket connected for node {}", node_id);
+                        ws::handle_ws_connection(ws_stream, node_id, device_id).await;
+                    }
+                }
+            };
+            tokio::pin!(connection);
+            loop {
+                tokio::select! {
+                    biased;
+                    signal = revocations.recv(), if device_id.is_some() => {
+                        match signal {
+                            Ok(id) if Some(id) == device_id => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            _ => {}
+                        }
+                    }
+                    _ = &mut connection => break,
                 }
             }
         }
@@ -515,6 +600,126 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
 
+    #[tokio::test]
+    async fn stalled_tls_is_bounded_times_out_and_shutdown_drains_connections() {
+        let chain = tls::generate(&[]).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown, rx) = watch::channel(false);
+        let task = spawn_accept_loop(listener, Some(tls::acceptor_from(&chain.leaf).unwrap()), rx);
+        let mut stalled = Vec::new();
+        for _ in 0..64 {
+            stalled.push(TcpStream::connect(addr).await.unwrap());
+        }
+        let mut overload = TcpStream::connect(addr).await.unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), overload.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        // TLS, not the 30-second HTTP-head deadline, must close stalled clients.
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(6),
+                stalled[0].read(&mut byte)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            0
+        );
+        let mut fresh = TcpStream::connect(addr).await.unwrap();
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), fresh.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(matches!(closed, Ok(0) | Err(_)));
+    }
+
+    #[tokio::test]
+    async fn listener_shutdown_closes_root_and_device_websockets_but_not_other_listeners() {
+        use crate::http::ws_ticket::{self, WsTarget};
+        use futures_util::StreamExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown, rx) = watch::channel(false);
+        let task = spawn_accept_loop(listener, None, rx);
+        let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_addr = other.local_addr().unwrap();
+        let (other_shutdown, other_rx) = watch::channel(false);
+        let other_task = spawn_accept_loop(other, None, other_rx);
+        let target = WsTarget {
+            surface: "events".into(),
+            node_id: None,
+        };
+        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let device_id = {
+            let conn = crate::db::write_conn();
+            crate::db::pair_device_session_inner(&conn, None, None)
+                .unwrap()
+                .0
+        };
+        let mut clients = Vec::new();
+        let receivers_before = crate::http::events::receiver_count();
+        for device in [None, Some(device_id)] {
+            let ticket = ws_ticket::mint(device, target.clone());
+            let (client, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events?ticket={ticket}"))
+                    .await
+                    .unwrap();
+            clients.push(client);
+        }
+        let ticket = ws_ticket::mint(None, target);
+        let (mut other_client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{other_addr}/ws/events?ticket={ticket}"
+        ))
+        .await
+        .unwrap();
+        // The HTTP 101 response can arrive before the handler has subscribed
+        // to the broadcast channel. Wait for all three handlers before emitting
+        // the assertion event; otherwise this test occasionally loses it.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while crate::http::events::receiver_count() < receivers_before + 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("event websocket handlers did not subscribe");
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        for mut client in clients {
+            let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                .await
+                .unwrap();
+            assert!(matches!(
+                closed,
+                None | Some(Err(_)) | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+            ));
+        }
+        crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {
+            session_id: 77,
+        });
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), other_client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(live.is_text());
+        other_shutdown.send(true).unwrap();
+        other_task.await.unwrap();
+        crate::db::revoke_device_session(device_id).unwrap();
+    }
+
     async fn raw_status(method: &str, path: &str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -523,9 +728,8 @@ mod tests {
             handle_connection(MaybeTls::Plain(stream), peer).await;
         });
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
-        );
+        let request =
+            format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut buf = vec![0u8; 1024];
         let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
@@ -539,6 +743,29 @@ mod tests {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn revoked_device_cannot_open_an_already_minted_websocket_ticket() {
+        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let id = {
+            let conn = crate::db::write_conn();
+            crate::db::pair_device_session_inner(&conn, None, None)
+                .unwrap()
+                .0
+        };
+        let ticket = crate::http::ws_ticket::mint(
+            Some(id),
+            crate::http::ws_ticket::WsTarget {
+                surface: "events".into(),
+                node_id: None,
+            },
+        );
+        crate::db::revoke_device_session(id).unwrap();
+        assert_eq!(
+            raw_status("GET", &format!("/ws/events?ticket={ticket}")).await,
+            401
+        );
     }
 
     #[tokio::test]
@@ -773,15 +1000,23 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_build_acceptor_short_circuits_on_empty_san_key() {
-        let result = get_or_build_acceptor(&[]).await.expect("empty list is a no-op");
-        assert!(result.is_none(), "empty interface set must yield no acceptor");
+        let result = get_or_build_acceptor(&[])
+            .await
+            .expect("empty list is a no-op");
+        assert!(
+            result.is_none(),
+            "empty interface set must yield no acceptor"
+        );
         let result = get_or_build_acceptor(&[
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ])
         .await
         .expect("loopback-only is a no-op");
-        assert!(result.is_none(), "loopback-only interface set must yield no acceptor");
+        assert!(
+            result.is_none(),
+            "loopback-only interface set must yield no acceptor"
+        );
     }
 
     #[test]
@@ -799,7 +1034,11 @@ mod tests {
     fn bind_specs_lan_keeps_loopback_plain_and_adds_interface_tls() {
         let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
         let acceptor = test_acceptor();
-        let specs = bind_specs(1992, &[IpAddr::V4(Ipv4Addr::LOCALHOST), lan_ip], Some(&acceptor));
+        let specs = bind_specs(
+            1992,
+            &[IpAddr::V4(Ipv4Addr::LOCALHOST), lan_ip],
+            Some(&acceptor),
+        );
         assert_eq!(specs.len(), 3);
         let loopback_plain = specs
             .iter()
@@ -816,7 +1055,9 @@ mod tests {
         let acceptor = test_acceptor();
         let specs = bind_specs(1992, &[], Some(&acceptor));
         assert_eq!(specs.len(), 2);
-        assert!(specs.iter().all(|s| s.addr.ip().is_loopback() && s.tls.is_none()));
+        assert!(specs
+            .iter()
+            .all(|s| s.addr.ip().is_loopback() && s.tls.is_none()));
     }
 
     #[test]
@@ -833,7 +1074,9 @@ mod tests {
         let tls_iface: Vec<_> = specs.iter().filter(|s| s.tls.is_some()).collect();
         assert_eq!(tls_iface.len(), 1);
         assert_eq!(tls_iface[0].addr.ip(), routable);
-        assert!(!specs.iter().any(|s| s.addr.ip() == v6_link_local || s.addr.ip() == v4_link_local));
+        assert!(!specs
+            .iter()
+            .any(|s| s.addr.ip() == v6_link_local || s.addr.ip() == v4_link_local));
     }
 
     #[test]
@@ -920,7 +1163,9 @@ mod tests {
         let interface_ips = state::refresh_local_interface_ips();
         let acceptor = test_acceptor();
         let specs = bind_specs(1992, &interface_ips, Some(&acceptor));
-        assert!(specs.iter().any(|s| s.tls.is_some() && s.addr.ip() == vpn_ip));
+        assert!(specs
+            .iter()
+            .any(|s| s.tls.is_some() && s.addr.ip() == vpn_ip));
     }
 
     #[test]
@@ -945,10 +1190,7 @@ mod tests {
                 node_id: Some(123),
             },
         );
-        assert_eq!(
-            ws_status(&format!("/ws/events?ticket={ticket}")).await,
-            403
-        );
+        assert_eq!(ws_status(&format!("/ws/events?ticket={ticket}")).await, 403);
     }
 
     #[tokio::test]
