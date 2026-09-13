@@ -50,35 +50,31 @@ pub async fn create(req: &ParsedRequest) -> Response {
 
     let mesh_id = parsed.mesh_id;
     let provider = parsed.provider;
-    let mesh = match crate::commands::run_blocking("http_create_node_mesh", move || {
-        db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())
-    })
-    .await
-    {
-        Ok(m) => m,
-        Err(_) => {
-            return Response::json_error("400 Bad Request", "Mesh not found");
-        }
-    };
-
-    let mesh_path = mesh.path.clone();
     let node = match crate::commands::run_blocking("http_create_node", move || {
-        crate::services::agent_node::create(
+        // Issue #1658 step 5 — the mesh-lookup + branch-resolution +
+        // node-create trio is now a single shared runner; the helper
+        // resolves `mesh.path` and the `"main"` branch internally, and
+        // surfaces a clean `AgentNodeError::Status("mesh not found")`
+        // sentinel for unknown mesh ids (mapped to a 400 below). The
+        // post-spawn `run_blocking` reload survives untouched so the
+        // response body still carries the post-spawn row state.
+        crate::services::agent_node::create_blocking(
             mesh_id,
-            &mesh_path,
-            "main",
             Some(provider.as_str()),
+            Some("main"),
             None, // source_issue
-            None, // source_pr — generic mobile spawn, not PR-spawn (issue #450)
-            None, // source_pr_pinned_sha — generic mobile spawn, no pin (issue #444)
-            None, // use_worktree_override — None falls back to mesh default
-            None, // name_override — none supplied on this route
+            None, // name_override — none on this route
+            None, // use_worktree_override — falls back to mesh default
+            false, // pending — Idle matches the prior create(...) semantics
         )
         .map_err(|e| e.to_string())
     })
     .await
     {
         Ok(n) => n,
+        Err(message) if message == "mesh not found" => {
+            return Response::json_error("400 Bad Request", "Mesh not found");
+        }
         Err(e) => {
             return Response::json_error(
                 "500 Internal Server Error",

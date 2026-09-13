@@ -31,7 +31,7 @@ pub struct WorktreeCleanupFailedPayload {
 pub async fn create_agent_node(
     mesh_id: i64,
     _name: String,
-    path: String,
+    #[allow(unused)] path: String,
     branch: String,
     provider: Option<String>,
     use_worktree: Option<bool>,
@@ -39,19 +39,29 @@ pub async fn create_agent_node(
     // Tauri command surface has no PR-spawn plumbing; PR flows go via
     // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
     // this is the call site to grow.
+    //
     // Offload: create locks SQLite, touches the filesystem, and may run
     // git worktree operations (issue #1380).
+    //
+    // Issue #1658 step 5 — the mesh-lookup + branch + create dance now
+    // flows through `services::agent_node::create_blocking`, the single
+    // shared runner used by both this command and `http::routes::nodes::create`.
+    // `path` is accepted on the IPC surface (deserialization contract)
+    // but unused — the helper derives `mesh.path` itself from the mesh
+    // row it loads. `branch_override = Some(&branch)` short-circuits the
+    // helper's `get_default_branch_blocking` since the IPC caller
+    // already supplied the branch. The legacy
+    // `provider.unwrap_or("anthropic")` fallback (issue #538 default)
+    // is preserved inside `create_with_source_pr_fork`.
     crate::commands::run_blocking("create_agent_node", move || {
-        services::agent_node::create(
+        services::agent_node::create_blocking(
             mesh_id,
-            &path,
-            &branch,
             provider.as_deref(),
+            Some(&branch),
             None, // source_issue
-            None, // source_pr — non-PR spawn (issue #450)
-            None, // source_pr_pinned_sha — non-PR spawn (issue #444)
-            use_worktree,
             None, // name_override — Tauri surface doesn't accept one
+            use_worktree,
+            false, // pending — Idle matches the prior create(...) semantics
         )
         .map_err(|e| {
             tracing::error!("create_agent_node failed: {}", e);
