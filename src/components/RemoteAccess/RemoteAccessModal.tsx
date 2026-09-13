@@ -44,7 +44,7 @@ const ACKED_ROOT_GENERATION_KEY = 'buildmesh.ackedRootGeneration';
 export function buildRemoteAccessUrl(
   status: NetworkStatus,
   fallbackIp: string,
-  rootToken: string,
+  pairingTicket: string,
 ): { url: string; host: string; reachable: boolean } {
   // A realized IPv6 bind renders bracketed (`[::1]:port`); IPv4 never does.
   const isIpv4 = (b: { address: string }) => !b.address.includes('[');
@@ -61,20 +61,23 @@ export function buildRemoteAccessUrl(
   if (bind) {
     const scheme = bind.tls ? 'https' : 'http';
     return {
-      url: `${scheme}://${bind.address}/?token=${rootToken}`,
+      url: `${scheme}://${bind.address}/#pair=${encodeURIComponent(pairingTicket)}`,
       host: bind.address,
       reachable: true,
     };
   }
   const host = `${fallbackIp}:${status.port}`;
   return {
-    url: `http://${host}/?token=${rootToken}`,
+    url: `http://${host}/#pair=${encodeURIComponent(pairingTicket)}`,
     host,
     reachable: false,
   };
 }
 
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
+  const [pairingTicket, setPairingTicket] = useState('');
+  const [invitationVersion, setInvitationVersion] = useState(0);
+  const [expired, setExpired] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [host, setHost] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
@@ -155,8 +158,8 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // and we warn rather than rely on it. `getCertChainStatus` failure is
         // silently swallowed (`.catch(() => null)`) — the modal still works,
         // we just won't show the fingerprint.
-        const [rootToken, status, localIp, cert] = await Promise.all([
-          api.getRootToken(),
+        const [ticket, status, localIp, cert] = await Promise.all([
+          api.createPairingTicket(),
           api.getNetworkStatus(),
           api.getLocalIp().catch(() => '192.168.1.x'),
           api.getCertChainStatus().catch(() => null),
@@ -172,8 +175,10 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
           status,
           localIp,
-          rootToken,
+          ticket,
         );
+        setPairingTicket(ticket);
+        setExpired(false);
         setHost(displayHost);
         setUnreachable(!reachable);
         setCertStatus(cert);
@@ -288,7 +293,13 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
       }
     };
     init();
-  }, []);
+  }, [invitationVersion]);
+
+  useEffect(() => {
+    if (!pairingTicket) return;
+    const timer = setTimeout(() => setExpired(true), 300_000);
+    return () => clearTimeout(timer);
+  }, [pairingTicket]);
 
   // Issue #1251: clear the copy-feedback timer on unmount so a late
   // `setCertPathCopied(false)` cannot land on an unmounted tree (e.g.
@@ -617,11 +628,23 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 data-testid="remote-access-connect-qr"
                 className="flex flex-col items-center"
               >
-                <img
+                {!expired && <img
                   src={qrDataUrl}
                   alt="QR Code to connect"
                   className="w-96 h-96 rounded-md border border-border-subtle"
-                />
+                />}
+                <p className="mt-2 text-sm text-text-secondary">
+                  {expired ? 'Pairing code expired.' : 'Scan once to pair this phone. This code works once and expires in 5 minutes.'}
+                </p>
+                {!expired && <details className="mt-2 text-sm text-text-secondary">
+                  <summary>Pair manually</summary>
+                  <p>Open the address below on your phone and paste this pairing code:</p>
+                  <code className="break-all select-all">{pairingTicket}</code>
+                </details>}
+                <button className="mt-2 text-sm text-accent" onClick={() => {
+                  setExpired(true);
+                  setInvitationVersion(v => v + 1);
+                }}>New pairing code</button>
                 <div className="mt-2 text-base text-text-secondary font-medium font-mono">
                   {host}
                 </div>

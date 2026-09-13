@@ -31,7 +31,10 @@ fn pair_then_validate_roundtrips_to_the_same_id() {
     let conn = db();
     let (id, token) =
         db::pair_device_session_inner(&conn, Some("Safari on iPhone"), Some("10.0.0.5")).unwrap();
-    assert_eq!(db::validate_device_token_inner(&conn, &token).unwrap(), Some(id));
+    assert_eq!(
+        db::validate_device_token_inner(&conn, &token).unwrap(),
+        Some(id)
+    );
 }
 
 #[test]
@@ -63,7 +66,10 @@ fn revoke_deletes_the_row_so_the_token_stops_validating() {
     let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
     assert!(db::revoke_device_session_inner(&conn, id).unwrap());
     // The whole point of #502: a revoked token must immediately fail auth.
-    assert_eq!(db::validate_device_token_inner(&conn, &token).unwrap(), None);
+    assert_eq!(
+        db::validate_device_token_inner(&conn, &token).unwrap(),
+        None
+    );
     // Revoking an already-gone id reports nothing was removed.
     assert!(!db::revoke_device_session_inner(&conn, id).unwrap());
 }
@@ -71,8 +77,7 @@ fn revoke_deletes_the_row_so_the_token_stops_validating() {
 #[test]
 fn list_returns_metadata_without_the_hash() {
     let conn = db();
-    let (id, _) =
-        db::pair_device_session_inner(&conn, Some("Pixel"), Some("192.168.1.9")).unwrap();
+    let (id, _) = db::pair_device_session_inner(&conn, Some("Pixel"), Some("192.168.1.9")).unwrap();
     let devices = db::list_device_sessions_inner(&conn).unwrap();
     assert_eq!(devices.len(), 1);
     let d = &devices[0];
@@ -99,57 +104,4 @@ fn touch_is_a_noop_for_an_unknown_id() {
     // No row with id 999 — must not error (the row may have just been revoked).
     db::touch_device_session_inner(&conn, 999, Some("1.2.3.4")).unwrap();
     assert!(db::list_device_sessions_inner(&conn).unwrap().is_empty());
-}
-
-#[test]
-fn login_with_root_token_pairs_a_new_device() {
-    let conn = db();
-    let root = db::get_or_create_root_token_inner(&conn).unwrap();
-    let (id, token) =
-        db::login_device_session_inner(&conn, &root, Some("iPhone"), Some("10.0.0.2"))
-            .unwrap()
-            .expect("root token must pair a device");
-    // The returned token is a fresh device token, not the root token.
-    assert_ne!(token, root);
-    assert_eq!(db::validate_device_token_inner(&conn, &token).unwrap(), Some(id));
-    assert_eq!(db::list_device_sessions_inner(&conn).unwrap().len(), 1);
-}
-
-#[test]
-fn login_with_existing_device_token_refreshes_without_minting_a_second_device() {
-    // A re-launching phone re-presents its device token; it must keep its
-    // identity, not accumulate a new row each time.
-    let conn = db();
-    let root = db::get_or_create_root_token_inner(&conn).unwrap();
-    let (id, device_token) =
-        db::login_device_session_inner(&conn, &root, None, Some("10.0.0.2"))
-            .unwrap()
-            .unwrap();
-
-    let (again_id, again_token) =
-        db::login_device_session_inner(&conn, &device_token, None, Some("172.16.9.9"))
-            .unwrap()
-            .expect("a known device token must refresh");
-    assert_eq!(again_id, id, "same device id on refresh");
-    assert_eq!(again_token, device_token, "same token handed back");
-    assert_eq!(
-        db::list_device_sessions_inner(&conn).unwrap().len(),
-        1,
-        "refresh must not create a second device"
-    );
-    // Roaming IP was recorded.
-    assert_eq!(
-        db::list_device_sessions_inner(&conn).unwrap()[0].last_ip.as_deref(),
-        Some("172.16.9.9")
-    );
-}
-
-#[test]
-fn login_with_an_unknown_token_is_rejected() {
-    let conn = db();
-    db::get_or_create_root_token_inner(&conn).unwrap();
-    assert_eq!(
-        db::login_device_session_inner(&conn, "bogus", None, None).unwrap(),
-        None
-    );
 }

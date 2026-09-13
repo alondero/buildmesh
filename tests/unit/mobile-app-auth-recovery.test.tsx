@@ -2,7 +2,6 @@ import { act, createElement } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import App from "../../src/mobile/App";
-import { rememberToken } from "../../src/mobile/api";
 
 const appState = vi.hoisted(() => ({
   authFailed: null as (() => void) | null,
@@ -106,7 +105,8 @@ vi.mock("../../src/mobile/screens/CreatePrSheet", () => ({
 describe("mobile App auth recovery", () => {
   beforeEach(() => {
     localStorage.clear();
-    rememberToken("device-token");
+    localStorage.setItem("buildmesh_token", "device-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     appState.authFailed = null;
     appState.connect = null;
     appState.openIssues = null;
@@ -116,6 +116,7 @@ describe("mobile App auth recovery", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     localStorage.clear();
     vi.restoreAllMocks();
   });
@@ -140,6 +141,7 @@ describe("mobile App auth recovery", () => {
     render(<App />);
     await screen.findByTestId("mock-node-list");
     const callback = appState.authFailed;
+    removeItem.mockClear();
     expect(callback).toBeTruthy();
 
     act(() => callback!());
@@ -180,6 +182,7 @@ describe("mobile App auth recovery", () => {
     render(<App />);
     await screen.findByTestId("mock-node-list");
     const oldAuthFailed = appState.authFailed;
+    removeItem.mockClear();
     expect(oldAuthFailed).toBeTruthy();
 
     act(() => oldAuthFailed!());

@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import "./styles.css";
-import { AgentNode, Mesh, clearStoredToken, readStoredToken } from "./api";
+import { AgentNode, Mesh, clearStoredToken, restoreSession } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
 import { ScreenLoading } from "./ui";
@@ -45,19 +45,22 @@ export function parentOf(s: Screen): Screen {
 }
 
 export default function App() {
-  // Bootstrap (issue #500): a fresh `?token=` load has NO cookie yet — the
-  // token must be exchanged for one via POST /api/session — so route through
-  // Connect, which performs that login then calls onConnected. With a stored
-  // token (returning user) land on the list optimistically: a still-valid
-  // cookie just works, and an expired one trips handleAuthFailed → Connect.
-  const initial: Screen = (() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("token")) return { kind: "connect" };
-    if (readStoredToken()) return { kind: "list" };
-    return { kind: "connect" };
-  })();
-
-  const [screen, setScreen] = useState<Screen>(initial);
+  const [screen, setScreen] = useState<Screen>({ kind: "connect" });
+  const pairingOnLoad = useRef(new URLSearchParams(window.location.hash.slice(1)).has("pair"));
+  const [booting, setBooting] = useState(!pairingOnLoad.current);
+  const bootstrapRef = useRef<Promise<boolean> | null>(null);
+  useEffect(() => {
+    if (pairingOnLoad.current) return;
+    let active = true;
+    // Old QR links are deliberately not exchanged as root credentials.
+    window.history.replaceState(null, "", window.location.pathname);
+    bootstrapRef.current ??= restoreSession();
+    void bootstrapRef.current.then(ok => {
+      if (active && ok) setScreen({ kind: "list" });
+    }).catch(() => { /* Connect offers an explicit retry while offline. */ })
+      .finally(() => { if (active) setBooting(false); });
+    return () => { active = false; };
+  }, []);
   const [offline, setOffline] = useState(false);
   // Remount key for NodeList: "Try again" bumps it to force an immediate
   // refetch instead of waiting out the 5-second poll.
@@ -163,6 +166,8 @@ export default function App() {
     setAuthNotice(null);
     setScreen({ kind: "list" });
   }, []);
+
+  if (booting) return <ScreenLoading />;
 
   return (
     <>

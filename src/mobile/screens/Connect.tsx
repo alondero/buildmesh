@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { login, readStoredToken, rememberToken } from "../api";
+import { login, restoreSession, clearStoredToken } from "../api";
 
 type Props = {
   onConnected: () => void;
@@ -12,63 +12,59 @@ export default function Connect({ onConnected, notice }: Props) {
   const [tokenInput, setTokenInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const stored = readStoredToken();
+  const mounted = useRef(true);
+  const inFlight = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
-  // If the page was opened with `?token=` (initial QR code scan), read the
-  // token from the URL via JS, exchange it for the bm_session cookie, then
-  // strip it from the URL (issue #500 — the token is never sent to the server
-  // as a query param it validates). The shell loaded publicly to run this code.
-  //
-  // The `consumedTokenRef` guard (issue #1260) makes the side-effect
-  // idempotent across React StrictMode's simulated remount in development:
-  // refs persist across the simulated unmount/remount cycle, while the
-  // replaceState below ALSO strips the token from window.location.search,
-  // so either barrier is sufficient in a well-behaved environment — both
-  // together make a single POST /api/session per page load guaranteed even
-  // if the URL ever survives between the two effect runs (older React
-  // versions, browser quirks, future changes).
+  // Scrub the fragment before exchanging it; guard StrictMode's effect replay.
   const consumedTokenRef = useRef(false);
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get("token");
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const urlToken = params.get("pair");
     if (!urlToken) return;
     if (consumedTokenRef.current) return;
     consumedTokenRef.current = true;
     // Drop the token from the address bar regardless of outcome — it should
     // never linger in history.
-    params.delete("token");
-    const rest = params.toString();
     window.history.replaceState(
       null,
       "",
-      window.location.pathname + (rest ? "?" + rest : ""),
+      window.location.pathname,
     );
+    setTokenInput(urlToken);
     connectWith(urlToken);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- empty deps on purpose: the QR-token / paste-token dance is a one-shot on screen mount. Re-running on `connectWith` / `params` would re-fire the exchange on every parent render and waste the HttpOnly cookie.
   }, []);
 
-  // Exchange the token for the HttpOnly session cookie via POST /api/session.
-  // A bad token reports inline (no dead-end on a raw 401 page); an unreachable
+  // Exchange the invitation for an HttpOnly session cookie via POST /api/pair.
+  // An invalid invitation reports inline; an unreachable
   // app throws and we show the network hint.
   const connectWith = async (token: string) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
-      const deviceToken = await login(token);
-      if (!deviceToken) {
-        setError("Invalid token — re-scan the QR code from the desktop app.");
+      const paired = await login(token);
+      if (!mounted.current) return;
+      if (!paired) {
+        setError("Pairing code expired or already used. Get a new code from the desktop app.");
         setBusy(false);
         return;
       }
-      // Persist the per-device token the server returned (issue #502), not the
-      // root token we may have pasted — this device is now revocable on its own.
-      rememberToken(deviceToken);
+      clearStoredToken();
       onConnected();
     } catch {
+      if (!mounted.current) return;
       setError(
         "Can't reach the desktop app. Is Buildmesh running and on the same network?",
       );
       setBusy(false);
+    } finally {
+      inFlight.current = false;
     }
   };
 
@@ -76,7 +72,7 @@ export default function Connect({ onConnected, notice }: Props) {
     e.preventDefault();
     const token = tokenInput.trim();
     if (!token) {
-      setError("Enter a token");
+      setError("Enter a pairing code");
       return;
     }
     connectWith(token);
@@ -124,7 +120,8 @@ export default function Connect({ onConnected, notice }: Props) {
           lineHeight: 1.5,
         }}
       >
-        Scan the QR code from your desktop app, or paste the token below.
+        Scan the QR code from your desktop app, or paste a pairing code below.
+        This browser stays paired until you revoke it or clear its site data.
       </p>
 
       {notice && (
@@ -154,12 +151,13 @@ export default function Connect({ onConnected, notice }: Props) {
         }}
       >
         <input
-          type="text"
+          type="password"
           inputMode="text"
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
-          placeholder="paste token"
+          placeholder="Paste pairing code"
+          autoComplete="off"
           value={tokenInput}
           onChange={(e) => {
             setTokenInput(e.target.value);
@@ -187,17 +185,31 @@ export default function Connect({ onConnected, notice }: Props) {
         </button>
       </form>
 
-      {stored && (
         <button
-          onClick={() => connectWith(stored)}
+          onClick={async () => {
+            if (inFlight.current) return;
+            inFlight.current = true;
+            setBusy(true);
+            setError(null);
+            try {
+              const restored = await restoreSession();
+              if (!mounted.current) return;
+              if (restored) onConnected();
+              else setError("This browser is not paired. Scan a new code from the desktop app.");
+            } catch {
+              if (mounted.current) setError("Can't reach the desktop app. Check your connection and try again.");
+            } finally {
+              inFlight.current = false;
+              if (mounted.current) setBusy(false);
+            }
+          }}
           disabled={busy}
           data-testid="use-saved"
           className="btn-ghost"
           style={{ marginTop: 12 }}
         >
-          Use saved session
+          Reconnect paired phone
         </button>
-      )}
     </main>
   );
 }

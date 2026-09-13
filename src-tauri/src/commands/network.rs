@@ -151,6 +151,7 @@ pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, S
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("tls");
+    let dir = crate::http::tls::identity_dir(&dir).map_err(|e| e.to_string())?;
     let status = crate::http::tls::cert_status(&dir).map_err(|e| e.to_string())?;
     Ok(CertChainStatus {
         root_fingerprint_sha256: status.root_fingerprint_sha256,
@@ -355,8 +356,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
-        let b64 = get_root_cert_mobileconfig_inner(dir.path())
-            .expect("get_root_cert_mobileconfig");
+        let b64 = get_root_cert_mobileconfig_inner(dir.path()).expect("get_root_cert_mobileconfig");
         let signed = base64::engine::general_purpose::STANDARD
             .decode(&b64)
             .expect("base64");
@@ -371,9 +371,12 @@ mod tests {
             .args([
                 "cms",
                 "-verify",
-                "-inform", "DER",
-                "-in", signed_path.to_str().unwrap(),
-                "-CAfile", root_pem_path.to_str().unwrap(),
+                "-inform",
+                "DER",
+                "-in",
+                signed_path.to_str().unwrap(),
+                "-CAfile",
+                root_pem_path.to_str().unwrap(),
                 "-noverify",
             ])
             .output()

@@ -1,179 +1,116 @@
-/**
- * Connect screen: token → cookie login (issue #500).
- *
- * The token is exchanged for an HttpOnly bm_session cookie via POST
- * /api/session (Authorization: Bearer) — never a ?token= URL. A bad token
- * reports inline; a successful login stores the token and calls onConnected.
- */
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Connect from "../../src/mobile/screens/Connect";
+import { restoreSession } from "../../src/mobile/api";
 
-// A 2xx login returns the persistent device token in the body (issue #502); the
-// client stores THAT, not the token it presented.
-function mockFetchStatus(status: number, body: unknown = { token: "device-tok" }) {
-  const fn = vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-  });
-  vi.stubGlobal("fetch", fn);
-  return fn;
-}
+function response(status: number) { return new Response(null, { status }); }
 
-describe("Connect", () => {
+describe("durable mobile pairing", () => {
   beforeEach(() => {
     localStorage.clear();
+    window.history.replaceState(null, "", "/");
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("exchanges a fragment once under StrictMode and never persists a secret in JS storage", async () => {
+    window.history.replaceState(null, "", "/#pair=single-use-code");
+    const fetchMock = vi.fn().mockImplementation(() => {
+      expect(window.location.hash).toBe("");
+      return Promise.resolve(response(204));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onConnected = vi.fn();
+    render(<React.StrictMode><Connect onConnected={onConnected} /></React.StrictMode>);
+    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/pair", {
+      method: "POST", headers: { Authorization: "Bearer single-use-code" }, credentials: "include",
+    });
+    expect(localStorage.length).toBe(0);
+    expect(window.location.search).toBe("");
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("shows an inline error on an invalid token and does not store it", async () => {
-    const fetchMock = mockFetchStatus(401);
+  it("pairs by manual paste and clears a legacy saved credential", async () => {
+    localStorage.setItem("buildmesh_token", "old-secret");
+    const fetchMock = vi.fn().mockResolvedValue(response(204));
+    vi.stubGlobal("fetch", fetchMock);
     const onConnected = vi.fn();
     render(<Connect onConnected={onConnected} />);
-
-    await userEvent.type(screen.getByTestId("token-input"), "deadbeef");
+    await userEvent.type(screen.getByTestId("token-input"), "manual-code");
     await userEvent.click(screen.getByTestId("connect-submit"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("connect-error").textContent).toMatch(
-        /invalid token/i,
-      );
-    });
-    // Login posts the token in the Authorization header to /api/session —
-    // never as a ?token= query param (issue #500).
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/session",
-      expect.objectContaining({
-        method: "POST",
-        credentials: "include",
-        headers: { Authorization: "Bearer deadbeef" },
-      }),
-    );
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
     expect(localStorage.getItem("buildmesh_token")).toBeNull();
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer manual-code");
+  });
+
+  it("explains expired or consumed invitations without storing them", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(401)));
+    const onConnected = vi.fn();
+    render(<Connect onConnected={onConnected} />);
+    await userEvent.type(screen.getByTestId("token-input"), "used-code");
+    await userEvent.click(screen.getByTestId("connect-submit"));
+    expect(await screen.findByText(/code expired or already used/i)).toBeTruthy();
     expect(onConnected).not.toHaveBeenCalled();
+    expect(localStorage.length).toBe(0);
   });
 
-  it("shows a reachability error when the desktop app is down", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network")));
+  it("keeps manual input retryable when offline", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("offline")).mockResolvedValue(response(204));
+    vi.stubGlobal("fetch", fetchMock);
+    const onConnected = vi.fn();
+    render(<Connect onConnected={onConnected} />);
+    await userEvent.type(screen.getByTestId("token-input"), "retry-code");
+    await userEvent.click(screen.getByTestId("connect-submit"));
+    expect(await screen.findByText(/can't reach the desktop app/i)).toBeTruthy();
+    await userEvent.click(screen.getByTestId("connect-submit"));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+  });
+
+  it("requires a code before submitting", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     render(<Connect onConnected={vi.fn()} />);
-
-    await userEvent.type(screen.getByTestId("token-input"), "deadbeef");
     await userEvent.click(screen.getByTestId("connect-submit"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("connect-error").textContent).toMatch(
-        /can't reach the desktop app/i,
-      );
-    });
-  });
-
-  it("stores the device token from the server and connects after login", async () => {
-    mockFetchStatus(200, { token: "device-tok" });
-    const onConnected = vi.fn();
-    render(<Connect onConnected={onConnected} />);
-
-    await userEvent.type(screen.getByTestId("token-input"), "cafef00d");
-    await userEvent.click(screen.getByTestId("connect-submit"));
-
-    await waitFor(() => {
-      // The server-issued device token is persisted, not the pasted token.
-      expect(localStorage.getItem("buildmesh_token")).toBe("device-tok");
-    });
-    expect(onConnected).toHaveBeenCalled();
-  });
-
-  it("treats a 200 with no token in the body as a failed login (never stores the pasted token)", async () => {
-    // Guards the #502 regression: a body without a token must NOT downgrade to
-    // persisting the presented (possibly root) token.
-    mockFetchStatus(200, {});
-    const onConnected = vi.fn();
-    render(<Connect onConnected={onConnected} />);
-
-    await userEvent.type(screen.getByTestId("token-input"), "root-paste");
-    await userEvent.click(screen.getByTestId("connect-submit"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("connect-error").textContent).toMatch(/invalid token/i);
-    });
-    expect(localStorage.getItem("buildmesh_token")).toBeNull();
-    expect(onConnected).not.toHaveBeenCalled();
-  });
-
-  it("persists the device token the server returns, not the pasted token", async () => {
-    // Issue #502: pairing returns a per-device token; the phone stores that
-    // (revocable on its own) in place of the root token it pasted.
-    const fn = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ token: "dev-tok-123" }),
-    });
-    vi.stubGlobal("fetch", fn);
-    const onConnected = vi.fn();
-    render(<Connect onConnected={onConnected} />);
-
-    await userEvent.type(screen.getByTestId("token-input"), "root-paste");
-    await userEvent.click(screen.getByTestId("connect-submit"));
-
-    await waitFor(() => {
-      expect(localStorage.getItem("buildmesh_token")).toBe("dev-tok-123");
-    });
-    expect(onConnected).toHaveBeenCalled();
-  });
-
-  it("requires a token before submitting", async () => {
-    const fetchMock = mockFetchStatus(200);
-    render(<Connect onConnected={vi.fn()} />);
-
-    await userEvent.click(screen.getByTestId("connect-submit"));
-
-    expect(screen.getByTestId("connect-error").textContent).toMatch(
-      /enter a token/i,
-    );
+    expect(screen.getByText("Enter a pairing code")).toBeTruthy();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("renders the notice explaining why the user landed here", () => {
-    mockFetchStatus(200);
-    render(<Connect onConnected={vi.fn()} notice="Connection expired" />);
-    expect(screen.getByTestId("connect-notice").textContent).toBe(
-      "Connection expired",
-    );
+  it("restores a paired browser with its cookie alone", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(204));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await restoreSession()).toBe(true);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/session", {
+      method: "POST", credentials: "include", headers: undefined,
+    });
   });
 
-  it("POSTs /api/session exactly once when mounted under StrictMode with ?token=", async () => {
-    // Issue #1260: React StrictMode double-invokes the mount effect in dev,
-    // so an unguarded `connectWith(urlToken)` runs twice and mints two rows in
-    // pair_device_session_inner. The guard ref `consumedTokenRef` makes the
-    // side-effect idempotent across the simulated remount. The existing
-    // replaceState URL strip ALSO masks the second invocation in jsdom and
-    // most browsers today; the guard is defense-in-depth against the case
-    // where the URL survives (older React, browser quirks, future changes).
-    const fetchMock = mockFetchStatus(200, { token: "device-tok" });
-    const onConnected = vi.fn();
-    window.history.replaceState(null, "", "/?token=abc123");
+  it("migrates an existing device credential once and removes localStorage", async () => {
+    localStorage.setItem("buildmesh_token", "legacy-device");
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(401)).mockResolvedValueOnce(response(204));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await restoreSession()).toBe(true);
+    expect(fetchMock.mock.calls[1]).toEqual(["/api/session", {
+      method: "POST", credentials: "include", headers: { Authorization: "Bearer legacy-device" },
+    }]);
+    expect(localStorage.getItem("buildmesh_token")).toBeNull();
+  });
 
-    render(
-      <React.StrictMode>
-        <Connect onConnected={onConnected} />
-      </React.StrictMode>,
-    );
+  it("removes a revoked legacy credential, but preserves it across network failure", async () => {
+    localStorage.setItem("buildmesh_token", "legacy-device");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    await expect(restoreSession()).rejects.toThrow();
+    expect(localStorage.getItem("buildmesh_token")).toBe("legacy-device");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(401)));
+    expect(await restoreSession()).toBe(false);
+    expect(localStorage.getItem("buildmesh_token")).toBeNull();
+  });
 
-    await waitFor(() => {
-      expect(onConnected).toHaveBeenCalledTimes(1);
-    });
-    // Exactly one POST — the StrictMode double-mount must not double-fire.
-    expect(
-      fetchMock.mock.calls.filter(
-        ([url]: [unknown]) => url === "/api/session",
-      ),
-    ).toHaveLength(1);
-    // Token was stripped from the address bar on first effect.
-    expect(window.location.search).not.toContain("token=");
+  it("does not exchange legacy root-token QR URLs", () => {
+    window.history.replaceState(null, "", "/?token=old-root");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Connect onConnected={vi.fn()} />);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

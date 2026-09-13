@@ -54,12 +54,7 @@ pub async fn install(_req: &ParsedRequest) -> Response {
         .map(crate::http::state::port_profile_label)
         .unwrap_or("custom");
     match install_cert_der(&dir) {
-        Ok(bytes) => Response::bytes(
-            "200 OK",
-            "application/x-x509-ca-cert",
-            bytes,
-        )
-        .with_header(
+        Ok(bytes) => Response::bytes("200 OK", "application/x-x509-ca-cert", bytes).with_header(
             "Content-Disposition",
             format!("attachment; filename=\"buildmesh-{profile}-root-ca.der\""),
         ),
@@ -111,6 +106,7 @@ pub fn status_json(dir: &Path) -> Result<String, String> {
 ///
 /// Errors propagate `String` for the dispatcher's 503 path.
 pub fn install_cert_der(dir: &Path) -> Result<Vec<u8>, String> {
+    let dir = crate::http::tls::identity_dir(dir).map_err(|e| e.to_string())?;
     let bytes = std::fs::read(dir.join("ca.der")).map_err(|e| e.to_string())?;
     if bytes.is_empty() {
         return Err(format!(

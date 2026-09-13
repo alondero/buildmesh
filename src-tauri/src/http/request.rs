@@ -144,9 +144,9 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
     None
 }
 
-/// `Set-Cookie` line attached to a successful `POST /api/session` login (issue
+/// Cookie value attached to a successful `POST /api/pair` or `/api/session` login (issue
 /// #500), which is the sole place the session cookie is now minted. HttpOnly so
-/// JS can't read it; SameSite=Lax for the cross-origin POSTs we don't make;
+/// JS can't read it; SameSite=Strict for the cross-origin POSTs we don't make;
 /// Path=/ so it travels with API calls and the WebSocket-ticket request.
 ///
 /// `secure` adds the `Secure` attribute (issue #553) so the device-token cookie
@@ -156,9 +156,9 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
 /// `Secure` cookie would be silently dropped and break login. The caller passes
 /// `MaybeTls::is_tls()` — ground truth, since the server terminates TLS itself
 /// (loopback → `Plain`, LAN interfaces → `Tls`).
-pub fn session_cookie_header(token: &str, secure: bool) -> String {
+pub fn session_cookie_value(token: &str, secure: bool) -> String {
     format!(
-        "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/{}",
+        "bm_session={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000{}",
         token,
         if secure { "; Secure" } else { "" }
     )
@@ -359,10 +359,18 @@ mod tests {
         let id = "session_8a979720-1cb0-408c-b29c-9f0f68f2982b";
         assert_eq!(parse_session_id_for_provider("kimi", id), Some(id.into()));
         assert_eq!(parse_session_id_for_provider("anthropic", id), None);
-        for invalid in ["session_", "session_--flag", "session_$(whoami)", "session_8a979720-1cb0-408c-b29c-9f0f68f2982b/x"] {
+        for invalid in [
+            "session_",
+            "session_--flag",
+            "session_$(whoami)",
+            "session_8a979720-1cb0-408c-b29c-9f0f68f2982b/x",
+        ] {
             assert_eq!(parse_session_id_for_provider("kimi", invalid), None);
         }
-        assert_eq!(parse_session_id_for_provider("kimi", "8a979720-1cb0-408c-b29c-9f0f68f2982b"), Some("8a979720-1cb0-408c-b29c-9f0f68f2982b".into()));
+        assert_eq!(
+            parse_session_id_for_provider("kimi", "8a979720-1cb0-408c-b29c-9f0f68f2982b"),
+            Some("8a979720-1cb0-408c-b29c-9f0f68f2982b".into())
+        );
     }
 
     #[test]
@@ -658,12 +666,12 @@ mod tests {
     }
 
     #[test]
-    fn session_cookie_header_is_set_cookie() {
-        let header = session_cookie_header("deadbeef", false);
-        assert!(header.starts_with("Set-Cookie: bm_session=deadbeef"));
-        assert!(header.contains("HttpOnly"));
-        assert!(header.contains("SameSite=Lax"));
-        assert!(header.contains("Path=/"));
+    fn session_cookie_value_contains_cookie_attributes() {
+        let value = session_cookie_value("deadbeef", false);
+        assert_eq!(value.split(';').next(), Some("bm_session=deadbeef"));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("SameSite=Strict"));
+        assert!(value.contains("Path=/"));
     }
 
     #[test]
@@ -671,20 +679,20 @@ mod tests {
         // The loopback listener is always plain HTTP (issue #501); a `Secure`
         // cookie there would be silently dropped by the browser, breaking the
         // local login. So a non-TLS request must NOT get `Secure`.
-        let header = session_cookie_header("deadbeef", false);
-        assert!(!header.contains("Secure"), "got: {header}");
+        let value = session_cookie_value("deadbeef", false);
+        assert!(!value.contains("Secure"), "got: {value}");
     }
 
     #[test]
     fn session_cookie_sets_secure_over_tls() {
         // Over the LAN HTTPS path the device-token cookie must be `Secure` so it
         // can never be replayed over plaintext (issue #553).
-        let header = session_cookie_header("deadbeef", true);
-        assert!(header.contains("; Secure"), "got: {header}");
+        let value = session_cookie_value("deadbeef", true);
+        assert!(value.contains("; Secure"), "got: {value}");
         // The other hardening attributes survive alongside it.
-        assert!(header.contains("HttpOnly"));
-        assert!(header.contains("SameSite=Lax"));
-        assert!(header.contains("Path=/"));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("SameSite=Strict"));
+        assert!(value.contains("Path=/"));
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub(crate) async fn handle_events_ws_connection(
     let mut rx = super::events::subscribe();
     let mut revocations = super::revocation::subscribe();
 
-    let push_task = tauri::async_runtime::spawn(async move {
+    let push = async move {
         loop {
             match rx.recv().await {
                 Ok(msg) => {
@@ -73,10 +73,12 @@ pub(crate) async fn handle_events_ws_connection(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    };
+    tokio::pin!(push);
 
     loop {
         tokio::select! {
+            _ = &mut push => break,
             msg = read.next() => {
                 match msg {
                     Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
@@ -91,7 +93,6 @@ pub(crate) async fn handle_events_ws_connection(
             }
         }
     }
-    push_task.abort();
     tracing::debug!("/ws/events client disconnected");
 }
 
@@ -153,7 +154,7 @@ pub(crate) async fn handle_ws_connection(
         }
     }
 
-    let write_task = tauri::async_runtime::spawn(async move {
+    let output = async move {
         loop {
             match rx.recv().await {
                 Ok(data) => {
@@ -192,12 +193,14 @@ pub(crate) async fn handle_ws_connection(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    };
+    tokio::pin!(output);
 
     // `revocations` was subscribed before the snapshot send above so a revoke
     // landing mid-stream closes this socket immediately (issue #502).
     loop {
         tokio::select! {
+            _ = &mut output => break,
             msg = read.next() => {
                 match msg {
                     Some(Ok(tungstenite::Message::Text(text))) => {
@@ -242,7 +245,6 @@ pub(crate) async fn handle_ws_connection(
         }
     }
 
-    write_task.abort();
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
@@ -461,7 +463,10 @@ pub fn ensure_pty_channel(node_id: i64) {
     let mut locked = nodes.write();
     locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        NodeChannel { sender: tx, history: VecDeque::new() }
+        NodeChannel {
+            sender: tx,
+            history: VecDeque::new(),
+        }
     });
 }
 
@@ -470,7 +475,10 @@ pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let mut locked = nodes.write();
     let channel = locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        NodeChannel { sender: tx, history: VecDeque::new() }
+        NodeChannel {
+            sender: tx,
+            history: VecDeque::new(),
+        }
     });
     channel.sender.subscribe()
 }
@@ -880,7 +888,10 @@ mod tests {
             }
         }
         fn failing() -> Self {
-            Self { should_fail: true, ..Self::new() }
+            Self {
+                should_fail: true,
+                ..Self::new()
+            }
         }
     }
 
@@ -1133,7 +1144,10 @@ mod tests {
     #[test]
     fn parse_resize_returns_none_for_non_resize_messages() {
         // Not a resize message at all → caller forwards as input.
-        assert_eq!(parse_resize_message(r#"{"type":"keystroke","data":"x"}"#), None);
+        assert_eq!(
+            parse_resize_message(r#"{"type":"keystroke","data":"x"}"#),
+            None
+        );
         // No `type` field at all.
         assert_eq!(parse_resize_message(r#"{"cols":80,"rows":24}"#), None);
         // Non-JSON text input.

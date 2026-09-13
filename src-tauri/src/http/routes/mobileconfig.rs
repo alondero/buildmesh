@@ -54,7 +54,8 @@ use base64::Engine;
 const OUTER_PAYLOAD_IDENTIFIER: &str = "com.buildmesh.dev.profile";
 const INNER_PAYLOAD_IDENTIFIER: &str = "com.buildmesh.dev.profile.rootca";
 const OUTER_PAYLOAD_DISPLAY_NAME: &str = "Buildmesh Dev Root CA";
-const OUTER_PAYLOAD_DESCRIPTION: &str = "Installs the Buildmesh Dev Root CA used by this device's LAN-exposed HTTPS server.";
+const OUTER_PAYLOAD_DESCRIPTION: &str =
+    "Installs the Buildmesh Dev Root CA used by this device's LAN-exposed HTTPS server.";
 const INNER_PAYLOAD_DISPLAY_NAME: &str = "Buildmesh Dev Root CA";
 const INNER_PAYLOAD_DESCRIPTION: &str = "Trusted root CA for the Buildmesh Dev TLS chain.";
 const INNER_PAYLOAD_CERT_FILENAME: &str = "ca.cer";
@@ -144,27 +145,21 @@ pub fn sign_mobileconfig(
     // signer key PEM. `tempfile::tempdir` is in the dep tree via the
     // existing dev-dep; using the non-dev `tempfile` is a deliberate
     // addition (Cargo.toml). All three are deleted on drop.
-    let dir = tempfile::tempdir()
-        .map_err(|e| format!("create tempdir for openssl cms -sign: {e}"))?;
+    let dir =
+        tempfile::tempdir().map_err(|e| format!("create tempdir for openssl cms -sign: {e}"))?;
+    crate::http::tls::protect_private_directory(dir.path()).map_err(|e| e.to_string())?;
     let unsigned_path = dir.path().join("unsigned.plist");
     let signed_path = dir.path().join("signed.mobileconfig");
     let cert_pem_path = dir.path().join("signer.pem");
     let key_pem_path = dir.path().join("signer.key.pem");
 
-    std::fs::write(&unsigned_path, payload)
-        .map_err(|e| format!("write unsigned plist: {e}"))?;
-    std::fs::write(
-        &cert_pem_path,
-        der_to_pem("CERTIFICATE", cert_der),
-    )
-    .map_err(|e| format!("write signer cert PEM: {e}"))?;
+    std::fs::write(&unsigned_path, payload).map_err(|e| format!("write unsigned plist: {e}"))?;
+    std::fs::write(&cert_pem_path, der_to_pem("CERTIFICATE", cert_der))
+        .map_err(|e| format!("write signer cert PEM: {e}"))?;
     // PKCS#8 DER → `-----BEGIN PRIVATE KEY-----` (NOT `RSA PRIVATE KEY`,
     // which would require a PKCS#1 PEM and `openssl pkcs8` conversion).
-    std::fs::write(
-        &key_pem_path,
-        der_to_pem("PRIVATE KEY", key_pkcs8_der),
-    )
-    .map_err(|e| format!("write signer key PEM: {e}"))?;
+    std::fs::write(&key_pem_path, der_to_pem("PRIVATE KEY", key_pkcs8_der))
+        .map_err(|e| format!("write signer key PEM: {e}"))?;
 
     let output = std::process::Command::new("openssl")
         .args([
@@ -201,8 +196,7 @@ pub fn sign_mobileconfig(
 /// `ca.key.der` (the on-disk root key) into the PEM form `openssl cms
 /// -sign -signer/-inkey` expects.
 fn der_to_pem(label: &str, der: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut b64 = String::with_capacity(der.len().div_ceil(3) * 4);
     for chunk in der.chunks(3) {
         let b0 = chunk[0];
@@ -247,6 +241,7 @@ fn der_to_pem(label: &str, der: &[u8]) -> String {
 /// surface a useful message (the existing `get_root_cert_der` tests pin
 /// the "empty ca.der" error shape for the same reason).
 pub fn build_signed_mobileconfig_b64(dir: &Path) -> Result<String, String> {
+    let dir = crate::http::tls::identity_dir(dir).map_err(|e| e.to_string())?;
     let cert_der = std::fs::read(dir.join("ca.der"))
         .map_err(|e| format!("read {}: {e}", dir.join("ca.der").display()))?;
     let key_der = std::fs::read(dir.join("ca.key.der"))
@@ -326,17 +321,17 @@ mod tests {
         // sweep — empty input keeps the key/structure assertions readable.
         let xml = build_unsigned_xml(b"");
         let must_contain = [
-            "com.apple.security.root",       // inner PayloadType
-            "Configuration",                 // outer PayloadType
+            "com.apple.security.root", // inner PayloadType
+            "Configuration",           // outer PayloadType
             "PayloadCertificateFileName",
-            INNER_PAYLOAD_CERT_FILENAME,    // cert filename (.cer)
+            INNER_PAYLOAD_CERT_FILENAME, // cert filename (.cer)
             "PayloadIdentifier",
-            INNER_PAYLOAD_IDENTIFIER,        // inner id
-            OUTER_PAYLOAD_IDENTIFIER,        // outer id
+            INNER_PAYLOAD_IDENTIFIER, // inner id
+            OUTER_PAYLOAD_IDENTIFIER, // outer id
             "PayloadUUID",
             "PayloadDisplayName",
             "PayloadContent",
-            "<data></data>",                 // empty base64 = empty PayloadContent
+            "<data></data>", // empty base64 = empty PayloadContent
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"",
         ];
         for needle in must_contain {
@@ -362,8 +357,12 @@ mod tests {
         let chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
 
         let unsigned_xml = build_unsigned_xml(&chain.root_cert_der);
-        let signed = sign_mobileconfig(&chain.root_cert_der, &chain.root_key_der, unsigned_xml.as_bytes())
-            .expect("sign_mobileconfig");
+        let signed = sign_mobileconfig(
+            &chain.root_cert_der,
+            &chain.root_key_der,
+            unsigned_xml.as_bytes(),
+        )
+        .expect("sign_mobileconfig");
 
         // Self-signed root — `-noverify` skips the chain check (iOS does the
         // same for a not-yet-trusted root) but still validates the SignedData
@@ -375,7 +374,11 @@ mod tests {
         // `http/tls.rs::leaf_cert_chains_to_root_cert`) is specific to
         // *chain verification*; `-verify -CAfile` for *signer verification*
         // accepts DER in OpenSSL 3.x. Use PEM to be safe across versions.
-        std::fs::write(&root_pem_path, der_to_pem("CERTIFICATE", &chain.root_cert_der)).unwrap();
+        std::fs::write(
+            &root_pem_path,
+            der_to_pem("CERTIFICATE", &chain.root_cert_der),
+        )
+        .unwrap();
 
         // Verify WITHOUT `-content` — the SignedData was produced with
         // `-nodetach`, so the inner plist is encapsulated inside the CMS
@@ -386,9 +389,12 @@ mod tests {
             .args([
                 "cms",
                 "-verify",
-                "-inform", "DER",
-                "-in", signed_path.to_str().unwrap(),
-                "-CAfile", root_pem_path.to_str().unwrap(),
+                "-inform",
+                "DER",
+                "-in",
+                signed_path.to_str().unwrap(),
+                "-CAfile",
+                root_pem_path.to_str().unwrap(),
                 "-noverify",
             ])
             .output()
@@ -428,7 +434,11 @@ mod tests {
         // this test first landed was passing `-CAfile` to a path we hadn't
         // written yet — openssl's `fopen` returned ENOENT and surfaced as a
         // confusing `error:02001002:system library:fopen:No such file`).
-        std::fs::write(&root_pem_path, der_to_pem("CERTIFICATE", &chain.root_cert_der)).unwrap();
+        std::fs::write(
+            &root_pem_path,
+            der_to_pem("CERTIFICATE", &chain.root_cert_der),
+        )
+        .unwrap();
 
         // The unsigned plist is the inner content — recover it by running
         // `openssl cms -verify -out unsigned.mobileconfig` (writes the
@@ -440,11 +450,15 @@ mod tests {
             .args([
                 "cms",
                 "-verify",
-                "-inform", "DER",
-                "-in", signed_path.to_str().unwrap(),
-                "-CAfile", root_pem_path.to_str().unwrap(),
+                "-inform",
+                "DER",
+                "-in",
+                signed_path.to_str().unwrap(),
+                "-CAfile",
+                root_pem_path.to_str().unwrap(),
                 "-noverify",
-                "-out", unsigned_path.to_str().unwrap(),
+                "-out",
+                unsigned_path.to_str().unwrap(),
             ])
             .output()
             .expect("openssl cms -verify");
@@ -466,7 +480,8 @@ mod tests {
         let recovered_bytes = std::fs::read(&unsigned_path).expect("recovered unsigned plist");
         let recovered_normalised: String =
             String::from_utf8_lossy(&recovered_bytes).replace("\r\n", "\n");
-        let expected_cert_b64 = base64::engine::general_purpose::STANDARD.encode(&chain.root_cert_der);
+        let expected_cert_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&chain.root_cert_der);
         let must_contain = [
             expected_cert_b64.as_str(),
             "com.apple.security.root",
@@ -495,7 +510,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No `load_or_generate` call → no `ca.der`, no `ca.key.der`.
         let result = build_signed_mobileconfig_b64(dir.path());
-        assert!(result.is_err(), "missing ca.der must error, not return an empty QR payload");
+        assert!(
+            result.is_err(),
+            "missing ca.der must error, not return an empty QR payload"
+        );
     }
 
     /// Pre-#713 install: `ca.der` is present (the user has toggled LAN
@@ -508,7 +526,12 @@ mod tests {
     fn build_signed_mobileconfig_b64_errors_when_root_key_missing() {
         let dir = tempfile::tempdir().unwrap();
         let _chain = crate::http::tls::load_or_renew_leaf(dir.path(), &[]).unwrap();
-        std::fs::remove_file(dir.path().join("ca.key.der")).unwrap();
+        std::fs::remove_file(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+        )
+        .unwrap();
         let result = build_signed_mobileconfig_b64(dir.path());
         assert!(
             result.is_err(),
@@ -525,8 +548,20 @@ mod tests {
     #[test]
     fn build_signed_mobileconfig_b64_errors_when_ca_empty() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ca.der"), b"").unwrap();
-        std::fs::write(dir.path().join("ca.key.der"), b"some-non-empty-key").unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.der"),
+            b"",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::http::tls::identity_dir(dir.path())
+                .unwrap()
+                .join("ca.key.der"),
+            b"some-non-empty-key",
+        )
+        .unwrap();
         let result = build_signed_mobileconfig_b64(dir.path());
         assert!(
             result.is_err(),
@@ -544,11 +579,12 @@ mod tests {
         assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
         assert!(pem.ends_with("-----END CERTIFICATE-----\n"));
         // 200 bytes → 268 chars of base64 → 4 wrapped lines of 64 + 1 of 12.
-        let body: Vec<&str> = pem
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect();
-        assert_eq!(body.len(), 5, "expected 4 full + 1 short line; got: {body:?}");
+        let body: Vec<&str> = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        assert_eq!(
+            body.len(),
+            5,
+            "expected 4 full + 1 short line; got: {body:?}"
+        );
         for line in &body[..4] {
             assert_eq!(line.len(), 64, "full lines must be 64 chars; got {line:?}");
         }

@@ -18,9 +18,9 @@ mod node_turn;
 mod preferences;
 pub mod process_util;
 mod pty;
+mod review_contract;
 pub mod sandbox;
 pub mod secret_scrubber;
-mod review_contract;
 mod services;
 mod session_capture;
 mod session_naming;
@@ -497,6 +497,7 @@ pub fn run() {
             commands::coordinator::generate_coordinator_drive_token,
             // Authorized devices (issue #502)
             commands::devices::list_device_sessions,
+            commands::devices::create_pairing_ticket,
             commands::devices::revoke_device_session,
             // Network exposure (issue #501)
             commands::network::get_network_status,

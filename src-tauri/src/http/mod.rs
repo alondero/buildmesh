@@ -14,6 +14,7 @@ pub mod auth;
 pub mod events;
 pub mod interface_rank;
 pub mod interface_watcher;
+pub mod pairing;
 pub mod rate_limit;
 pub mod request;
 pub mod response;
@@ -32,7 +33,7 @@ pub use stream::MaybeTls;
 #[allow(unused_imports)] // public API + ts-rs exports used outside this module
 pub use state::{
     current_http_port, fulfill_snapshot, port_offset, port_profile_label, realized_binds,
-    HTTP_PORT_DEFAULT, RealizedBind, SerializeTerminalRequestPayload,
+    RealizedBind, SerializeTerminalRequestPayload, HTTP_PORT_DEFAULT,
 };
 
 pub(crate) use state::{

@@ -45,6 +45,11 @@ pub fn subscribe() -> broadcast::Receiver<EventMsg> {
     channel().subscribe()
 }
 
+#[cfg(test)]
+pub(crate) fn receiver_count() -> usize {
+    channel().receiver_count()
+}
+
 /// Fire-and-forget — if no receivers, the send returns Err which we ignore.
 pub fn emit(msg: EventMsg) {
     let _ = channel().send(msg);
@@ -70,8 +75,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_serialises_as_tagged_json() {
-        let json =
-            serde_json::to_string(&EventMsg::AttentionCleared { session_id: 42 }).unwrap();
+        let json = serde_json::to_string(&EventMsg::AttentionCleared { session_id: 42 }).unwrap();
         assert!(json.contains(r#""type":"attention-cleared""#));
         assert!(json.contains(r#""session_id":42"#));
     }

@@ -52,6 +52,10 @@ pub enum AuthOutcome {
     Unauthorized,
     /// A valid credential of the wrong role → `403 Forbidden`.
     Forbidden,
+    /// A credential was presented, but the database reader pool was
+    /// temporarily exhausted. This is a server availability failure, not a
+    /// revoked credential, so callers must return 503 rather than 401.
+    Unavailable,
 }
 
 /// Resolve the role proven by a request's headers. A request carrying no cookie
@@ -61,14 +65,19 @@ pub enum AuthOutcome {
 /// locks the DB once and delegates to [`resolve_role_inner`], the single
 /// resolution implementation the unit tests also drive against a seeded
 /// connection — so there is no production/test logic to keep in lockstep.
+#[allow(dead_code)]
 pub fn resolve_role(headers: &str) -> Option<Role> {
+    resolve_role_result(headers).ok().flatten()
+}
+
+fn resolve_role_result(headers: &str) -> Result<Option<Role>, ()> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
     {
-        return None;
+        return Ok(None);
     }
-    let conn = db::try_read_conn().ok()?;
-    resolve_role_inner(&conn, headers)
+    let conn = db::try_read_conn().map_err(|_| ())?;
+    Ok(resolve_role_inner(&conn, headers))
 }
 
 /// The credential → [`Role`] resolution, checked in priority order against a
@@ -122,14 +131,33 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
 /// to stamp `last_active` and to bind a minted WS ticket to the device, so a
 /// later revocation can find and kick that device's live socket. Mirrors
 /// [`resolve_role`]'s DB-free fast path for unauthenticated probes.
+#[allow(dead_code)]
 pub fn resolve_device_session(headers: &str) -> Option<i64> {
+    resolve_device_session_result(headers).ok().flatten()
+}
+
+/// Resolve a device id while preserving reader-pool failures for HTTP callers.
+/// Returning `None` for both "root credential" and "pool unavailable" would
+/// silently mint an unrevocable root-bound WebSocket ticket for a device.
+pub fn resolve_device_session_result(headers: &str) -> Result<Option<i64>, ()> {
     if request::extract_token_from_cookies(headers).is_none()
         && request::bearer_token(headers).is_none()
     {
-        return None;
+        return Ok(None);
     }
-    let conn = db::try_read_conn().ok()?;
-    resolve_device_session_inner(&conn, headers)
+    let conn = db::try_read_conn().map_err(|_| ())?;
+    Ok(resolve_device_session_inner(&conn, headers))
+}
+
+/// A WebSocket invitation cannot outlive revocation of its issuing device.
+pub(crate) fn device_session_is_active(id: i64) -> Result<bool, ()> {
+    let conn = db::try_read_conn().map_err(|_| ())?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM device_sessions WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(|_| ())
 }
 
 fn resolve_device_session_inner(conn: &Connection, headers: &str) -> Option<i64> {
@@ -160,10 +188,14 @@ fn satisfies(role: Role, required: RequiredScope) -> bool {
     )
 }
 
-/// Authorize a request for a required scope. `None` resolved → `Unauthorized`
-/// (401); a role that doesn't satisfy the scope → `Forbidden` (403).
+/// Authorize a request for a required scope. Missing/invalid credentials map to
+/// `Unauthorized` (401), a wrong surface to `Forbidden` (403), and a temporary
+/// reader-pool failure to `Unavailable` (503).
 pub fn authorize(headers: &str, required: RequiredScope) -> AuthOutcome {
-    outcome(resolve_role(headers), required)
+    match resolve_role_result(headers) {
+        Ok(role) => outcome(role, required),
+        Err(()) => AuthOutcome::Unavailable,
+    }
 }
 
 fn outcome(role: Option<Role>, required: RequiredScope) -> AuthOutcome {
@@ -181,6 +213,7 @@ pub fn deny_response(outcome: AuthOutcome) -> Option<Response> {
         AuthOutcome::Ok(_) => None,
         AuthOutcome::Unauthorized => Some(Response::empty("401 Unauthorized")),
         AuthOutcome::Forbidden => Some(Response::empty("403 Forbidden")),
+        AuthOutcome::Unavailable => Some(Response::empty("503 Service Unavailable")),
     }
 }
 
@@ -220,20 +253,14 @@ mod tests {
     fn root_token_bearer_resolves_admin() {
         let conn = seeded_db();
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
-        assert_eq!(
-            resolve_role_inner(&conn, &bearer(&root)),
-            Some(Role::Admin)
-        );
+        assert_eq!(resolve_role_inner(&conn, &bearer(&root)), Some(Role::Admin));
     }
 
     #[test]
     fn root_token_cookie_resolves_admin() {
         let conn = seeded_db();
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
-        assert_eq!(
-            resolve_role_inner(&conn, &cookie(&root)),
-            Some(Role::Admin)
-        );
+        assert_eq!(resolve_role_inner(&conn, &cookie(&root)), Some(Role::Admin));
     }
 
     #[test]
@@ -241,14 +268,20 @@ mod tests {
         // A paired device's token is an Admin-surface credential (issue #502).
         let conn = seeded_db();
         let (_, token) = db::pair_device_session_inner(&conn, Some("iPhone"), None).unwrap();
-        assert_eq!(resolve_role_inner(&conn, &bearer(&token)), Some(Role::Admin));
+        assert_eq!(
+            resolve_role_inner(&conn, &bearer(&token)),
+            Some(Role::Admin)
+        );
     }
 
     #[test]
     fn device_token_cookie_resolves_admin() {
         let conn = seeded_db();
         let (_, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
-        assert_eq!(resolve_role_inner(&conn, &cookie(&token)), Some(Role::Admin));
+        assert_eq!(
+            resolve_role_inner(&conn, &cookie(&token)),
+            Some(Role::Admin)
+        );
     }
 
     #[test]
@@ -260,17 +293,32 @@ mod tests {
         db::revoke_device_session_inner(&conn, id).unwrap();
         assert_eq!(resolve_role_inner(&conn, &bearer(&token)), None);
         assert_eq!(
-            outcome(resolve_role_inner(&conn, &bearer(&token)), RequiredScope::Admin),
+            outcome(
+                resolve_role_inner(&conn, &bearer(&token)),
+                RequiredScope::Admin
+            ),
             AuthOutcome::Unauthorized
         );
+    }
+
+    #[test]
+    fn unavailable_database_is_not_reported_as_revoked_credentials() {
+        let response = deny_response(AuthOutcome::Unavailable).unwrap();
+        assert_eq!(response.status_code(), 503);
     }
 
     #[test]
     fn resolve_device_session_recovers_the_id_for_a_device_but_not_the_root_token() {
         let conn = seeded_db();
         let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
-        assert_eq!(resolve_device_session_inner(&conn, &bearer(&token)), Some(id));
-        assert_eq!(resolve_device_session_inner(&conn, &cookie(&token)), Some(id));
+        assert_eq!(
+            resolve_device_session_inner(&conn, &bearer(&token)),
+            Some(id)
+        );
+        assert_eq!(
+            resolve_device_session_inner(&conn, &cookie(&token)),
+            Some(id)
+        );
         // The root token authenticates as Admin but owns no device row.
         let root = db::get_or_create_root_token_inner(&conn).unwrap();
         assert_eq!(resolve_device_session_inner(&conn, &bearer(&root)), None);

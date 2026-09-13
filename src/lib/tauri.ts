@@ -1140,6 +1140,9 @@ export const getLocalIp = () =>
 export const getRootToken = () =>
   _invoke<string>('get_root_token');
 
+export const createPairingTicket = () =>
+  _invoke<string>('create_pairing_ticket');
+
 // Cert status (issue #635). The QR modal surfaces the server's current root
 // fingerprint so a user whose installed root CA is stale can see the mismatch
 // and re-install. Only the desktop reads `cert_path` (the HTTP route omits it

@@ -70,9 +70,9 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
         exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }],
       }),
       '192.168.1.10',
-      'root-tok',
+      'pairing-code',
     );
-    expect(result.url).toBe('https://192.168.1.10:1992/?token=root-tok');
+    expect(result.url).toBe('https://192.168.1.10:1992/#pair=pairing-code');
     expect(result.host).toBe('192.168.1.10:1992');
     expect(result.reachable).toBe(true);
   });
@@ -86,7 +86,7 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
       '192.168.1.10',
       't',
     );
-    expect(result.url).toBe('https://192.168.1.10:1994/?token=t');
+    expect(result.url).toBe('https://192.168.1.10:1994/#pair=t');
   });
 
   it('matches the scheme to a plain (non-TLS) realized bind', () => {
@@ -98,7 +98,7 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
       '192.168.1.10',
       't',
     );
-    expect(result.url).toBe('http://192.168.1.10:1992/?token=t');
+    expect(result.url).toBe('http://192.168.1.10:1992/#pair=t');
   });
 
   it('prefers an IPv4 TLS bind over an IPv6 one so the phone gets a reachable URL', () => {
@@ -116,7 +116,7 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
       '192.168.1.10',
       't',
     );
-    expect(result.url).toBe('https://192.168.1.10:1992/?token=t');
+    expect(result.url).toBe('https://192.168.1.10:1992/#pair=t');
     expect(result.host).toBe('192.168.1.10:1992');
   });
 
@@ -128,7 +128,7 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
       '192.168.1.10',
       't',
     );
-    expect(result.url).toBe('https://[2001:db8::1]:1992/?token=t');
+    expect(result.url).toBe('https://[2001:db8::1]:1992/#pair=t');
     expect(result.reachable).toBe(true);
   });
 
@@ -138,7 +138,7 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
       '192.168.1.50',
       't',
     );
-    expect(result.url).toBe('http://192.168.1.50:1992/?token=t');
+    expect(result.url).toBe('http://192.168.1.50:1992/#pair=t');
     expect(result.reachable).toBe(false);
   });
 });
@@ -179,8 +179,8 @@ describe('RemoteAccessModal', () => {
         : opts.mobileconfig;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
-        case 'get_root_token':
-          return Promise.resolve('root-tok');
+        case 'create_pairing_ticket':
+          return Promise.resolve('pairing-code');
         case 'get_local_ip':
           return Promise.resolve(localIp);
         case 'get_network_status':
@@ -212,7 +212,7 @@ describe('RemoteAccessModal', () => {
 
     await waitFor(() => expect(toDataURL).toHaveBeenCalled());
     expect(toDataURL.mock.calls[0][0]).toBe(
-      'https://192.168.1.10:1992/?token=root-tok',
+      'https://192.168.1.10:1992/#pair=pairing-code',
     );
     expect(await screen.findByText(/192\.168\.1\.10:1992/)).toBeTruthy();
   });
@@ -496,9 +496,9 @@ describe('RemoteAccessModal', () => {
     // is not deterministic).
     const payloads = toDataURL.mock.calls.map(c => c[0]);
     const connectPayload = payloads.find(
-      (p): p is string => typeof p === 'string' && p.includes('?token='),
+      (p): p is string => typeof p === 'string' && p.includes('#pair='),
     );
-    expect(connectPayload).toBe('https://192.168.1.10:1992/?token=root-tok');
+    expect(connectPayload).toBe('https://192.168.1.10:1992/#pair=pairing-code');
   });
 
   it('matches the Android install-QR scheme to the realized bind (http when LAN exposure is plain)', async () => {
@@ -662,7 +662,7 @@ describe('RemoteAccessModal', () => {
   //    re-introduce the warning).
 
   it('aborts the init effect when the modal unmounts before the IPC chain resolves', async () => {
-    // Defer `get_root_token` (the first IPC in the `Promise.all`) so the
+    // Defer `create_pairing_ticket` (the first IPC in the `Promise.all`) so the
     // modal cannot reach the `setHost` / `setQrDataUrl` setStates until
     // we explicitly resolve it. We unmount FIRST, then resolve — this is
     // the exact user flow the issue is filed against (open, immediately
@@ -675,7 +675,7 @@ describe('RemoteAccessModal', () => {
     });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
-        case 'get_root_token':
+        case 'create_pairing_ticket':
           return rootTokenPromise;
         case 'get_local_ip':
           return Promise.resolve('192.168.1.10');
@@ -703,7 +703,7 @@ describe('RemoteAccessModal', () => {
     // `setCertStatus`, `setInstallUrl`) and starts the QR-generation
     // chain. With the fix, the `signal.aborted` guard short-circuits
     // before any of that — `QRCode.toDataURL` is never called.
-    resolveRootToken('root-tok');
+    resolveRootToken('pairing-code');
 
     // Drain microtasks + the next macrotask so the `Promise.all` and
     // its `.then` continuations have a chance to run.
@@ -757,7 +757,8 @@ describe('RemoteAccessModal', () => {
     // The fix's `useEffect(() => () => clearTimeout(ref.current), [])`
     // cleanup runs during unmount and adds exactly one clearTimeout
     // call for the handle we just scheduled. The buggy code adds zero.
-    expect(clearCallsAfterUnmount).toBe(clearCallsBeforeUnmount + 1);
+    // Both the copy feedback and pairing expiry timers belong to the modal.
+    expect(clearCallsAfterUnmount).toBe(clearCallsBeforeUnmount + 2);
 
     // Wait past the 2s timeout so any uncancelled timer has fired.
     // (Real timers, not fake — the IPC chain and clipboard.writeText
@@ -805,8 +806,8 @@ describe('RemoteAccessModal', () => {
     let mobileconfigCalls = 0;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
-        case 'get_root_token':
-          return Promise.resolve('root-tok');
+        case 'create_pairing_ticket':
+          return Promise.resolve('pairing-code');
         case 'get_local_ip':
           return Promise.resolve('192.168.1.10');
         case 'get_network_status':
@@ -958,8 +959,8 @@ describe('RemoteAccessModal', () => {
     let certStatusCalls = 0;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
-        case 'get_root_token':
-          return Promise.resolve('root-tok');
+        case 'create_pairing_ticket':
+          return Promise.resolve('pairing-code');
         case 'get_local_ip':
           return Promise.resolve('192.168.1.10');
         case 'get_network_status':
