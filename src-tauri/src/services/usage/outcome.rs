@@ -31,6 +31,18 @@ use std::collections::HashSet;
 /// projection: the panel's branch order would let one win silently. This is
 /// the structural class of bug the seam prevents — see
 /// [`super::adapters::muse_code::missing`] for the pre-#1745 dead sentinel.
+///
+/// `#[allow(dead_code)]` silences `clippy::variant_size_differences` false
+/// positives for `NoCredential` and `ManagedExternally`: both are
+/// constructed in `into_usage_table_per_variant` (the table-test enforcing
+/// the projection across all 7 variants) and `NoCredential` is also
+/// constructed by the migration shim's `logged_in: false` arm
+/// (round-1 review: this is the structural fix for the Muse Code bug).
+/// `ManagedExternally` will be constructed in production by Anthropic
+/// after issue #1758 phase 2 migrates the bespoke `ManagedExternally` path
+/// from `meters: vec![UsageMeter::ManagedExternally]` to a direct
+/// `UsageOutcome::ManagedExternally { platform }` return.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum UsageOutcome {
     /// A real reading. Empty `windows` + `balance` + `meters` is valid (e.g.
@@ -71,23 +83,29 @@ pub(crate) enum UsageOutcome {
 /// input so the 401/403 arm is intentional rather than accidentally omitted —
 /// MiniMax's pre-#1745 omission (`fetch_usage` had no 401/403 arm) is the
 /// motivating example.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Default ordering ([`AuthPolicy::Rejected`] first via `#[default]`) matches
+/// the convention for keyed providers (ADR-0026 §2): 401/403 means the
+/// credential is gone/bad. The default is intentionally not used by adapters
+/// (every call site passes `AuthPolicy` explicitly), but the `Default` impl
+/// keeps the `clippy::derivable_impls` lint quiet and is harmless.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthPolicy {
     /// 401/403 means the credential is gone/bad (default for keyed providers
     /// that return `logged_out` on 401/403 today).
+    #[default]
     Rejected,
     /// 401/403 is indistinguishable from a missing credential for this
     /// provider. Used when the credential store and the API are decoupled
     /// (e.g. Muse Code: an OAuth token's absence cannot be distinguished from
     /// "API key configured" via HTTP status alone — the auth source is
     /// separate from the API key path).
+    // Constructed in the migration shim's `logged_in: false` arm
+    // (`From<ProviderUsage> for UsageOutcome`) and in the table-test
+    // `into_usage_table_per_variant`. Clippy can't see test construction
+    // as "production use" — the allow is a false-positive suppression.
+    #[allow(dead_code)]
     NoCredential,
-}
-
-impl Default for AuthPolicy {
-    fn default() -> Self {
-        AuthPolicy::Rejected
-    }
 }
 
 /// Migration shim for adapters that have not yet been ported to return
@@ -101,9 +119,15 @@ impl Default for AuthPolicy {
 ///   bypassed the no-credential affordance. With the shim, any legacy
 ///   adapter that constructs `logged_out()` lands in the gate's drop branch
 ///   exactly the way Grok and Agy's no-credential cases do.
-/// - `logged_in: true` → [`UsageOutcome::Reading`] (the success path;
-///   preserves `detail` if set, falling back to `error` so a legacy
-///   "API error" string keeps surfacing).
+/// - `logged_in: true, error: Some(..)` (the legacy `unavailable()` envelope —
+///   transport / non-2xx / parse failure with credential presumed present)
+///   → [`UsageOutcome::Unavailable`]. Round-1 review found the previous
+///   `logged_in: true` → [`UsageOutcome::Reading`] collapse silently lost
+///   the failure reason (the round-trip `ProviderUsage → UsageOutcome →
+///   ProviderUsage` set `error: None` in the projection). Mapping to
+///   `Unavailable` preserves it; the panel renders the red error copy
+///   and the gate keeps the row.
+/// - `logged_in: true` (success path) → [`UsageOutcome::Reading`].
 ///
 /// **Do not** rely on this for new code. It exists only so the seam
 /// compiles while adapters migrate.
@@ -114,27 +138,27 @@ impl From<ProviderUsage> for UsageOutcome {
                 hint: usage.error.unwrap_or_default(),
             };
         }
+        if usage.error.is_some() {
+            return UsageOutcome::Unavailable {
+                reason: usage.error.unwrap_or_default(),
+            };
+        }
         UsageOutcome::Reading {
             windows: usage.windows,
             balance: usage.balance,
             meters: usage.meters,
-            detail: usage.detail.or(usage.error),
+            detail: usage.detail,
         }
     }
 }
 
-/// Reverse shim for the legacy `*_usage()` functions in
-/// `crate::services::usage` that still return `ProviderUsage` while
-/// adapters migrate. Their bodies call the shared [`super::adapter::fetch_usage`]
-/// driver which now returns `UsageOutcome`; this lets the legacy
-/// functions preserve their `ProviderUsage` signature by projecting the
-/// outcome back through the seam. New code should return [`UsageOutcome`]
-/// directly.
-impl From<UsageOutcome> for ProviderUsage {
-    fn from(outcome: UsageOutcome) -> Self {
-        outcome.into_usage("")
-    }
-}
+// Reverse shim removed: `From<UsageOutcome> for ProviderUsage` cannot
+// know the provider id, so a `.into()` projection would mint a
+// `ProviderUsage` with an empty `provider` field — a wire invariant
+// violation (round-1 Non-Blocking #1). Legacy `*_usage()` functions
+// in `crate::services::usage` that still return `ProviderUsage` call
+// `.into_usage(provider_id)` directly on the outcome they receive
+// from `fetch_usage`. New code returns `UsageOutcome` directly.
 
 impl UsageOutcome {
     /// Project to the wire shape. The **only** place a [`ProviderUsage`] is
@@ -575,6 +599,62 @@ mod tests {
                 expected_keep,
                 "{name}"
             );
+        }
+    }
+
+    /// Round-1 review finding #2: the migration shim's previous
+    /// implementation collapsed `logged_in: true, error: Some(reason)`
+    /// (the legacy `unavailable()` envelope) into
+    /// `UsageOutcome::Reading { detail: error }`, silently losing the
+    /// failure reason (the round-trip `ProviderUsage → UsageOutcome →
+    /// ProviderUsage` set `error: None` in the projection). Pin the
+    /// shim's `Unavailable` branch so a future regression re-introducing
+    /// the silent loss is caught here.
+    #[test]
+    fn from_provider_usage_unavailable_envelope_preserves_error_as_unavailable_outcome() {
+        let usage = ProviderUsage {
+            provider: "codex".into(),
+            logged_in: true,
+            windows: vec![],
+            balance: None,
+            meters: vec![],
+            detail: None,
+            error: Some("API error 500: upstream down".into()),
+        };
+        let outcome: UsageOutcome = usage.into();
+        match outcome {
+            UsageOutcome::Unavailable { reason } => {
+                assert_eq!(reason, "API error 500: upstream down");
+            }
+            other => panic!(
+                "expected Unavailable outcome (round-1 review fix), got: {other:?}"
+            ),
+        }
+    }
+
+    /// Round-1 review finding #2 — symmetric: the shim's
+    /// `logged_in: false` arm classifies legacy `logged_out()`
+    /// envelopes as `NoCredential` so the gate drops the row (no
+    /// silent row-keeping for genuinely-no-credential providers).
+    #[test]
+    fn from_provider_usage_logged_out_envelope_classifies_as_no_credential() {
+        let usage = ProviderUsage {
+            provider: "grok".into(),
+            logged_in: false,
+            windows: vec![],
+            balance: None,
+            meters: vec![],
+            detail: None,
+            error: Some("Antigravity OAuth missing.".into()),
+        };
+        let outcome: UsageOutcome = usage.into();
+        match outcome {
+            UsageOutcome::NoCredential { hint } => {
+                assert_eq!(hint, "Antigravity OAuth missing.");
+            }
+            other => panic!(
+                "expected NoCredential outcome (round-1 review sanity check), got: {other:?}"
+            ),
         }
     }
 }

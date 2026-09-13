@@ -87,11 +87,6 @@ impl UsageIdentityFingerprint {
 /// - [`native_harness`](UsageAdapter::native_harness) is `Some(harness)` for
 ///   self-authenticating native meters (detection-gated card) and `None` for
 ///   keyed meters (card always visible; credential comes from `accounts`).
-/// - [`auth_policy`](UsageAdapter::auth_policy) classifies HTTP 401/403
-///   responses — defaults to [`AuthPolicy::Rejected`] (matches ADR-0026 §2
-///   for keyed providers). Adapters whose credential source cannot be
-///   distinguished from "no credential" via HTTP status alone override to
-///   [`AuthPolicy::NoCredential`].
 /// - [`fetch`](UsageAdapter::fetch) takes the effective account snapshot the
 ///   command already resolved — adapters never read preferences themselves —
 ///   and returns a [`UsageOutcome`]. The catalog projection
@@ -100,14 +95,6 @@ pub(crate) trait UsageAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn native_harness(&self) -> Option<&'static str> {
         None
-    }
-    /// How HTTP 401/403 should be classified. Default [`AuthPolicy::Rejected`]
-    /// matches keyed providers per ADR-0026 §2; adapters whose credential
-    /// store is decoupled from the API (e.g. Muse Code's OAuth token cannot
-    /// be distinguished from "API key configured" via HTTP status alone)
-    /// override to [`AuthPolicy::NoCredential`].
-    fn auth_policy(&self) -> AuthPolicy {
-        AuthPolicy::Rejected
     }
     /// Identify the account and authentication source used by `fetch`.
     /// Keyed adapters get account-aware caching automatically. Native adapters

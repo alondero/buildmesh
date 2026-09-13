@@ -1815,7 +1815,7 @@ fn opencode_live_request_at(
         },
         parse_opencode_billing_response,
     )
-    .into())
+    .into_usage("opencode"))
 }
 
 /// True when the live probe returned an HTTP 401 (the "refresh-on-the-
@@ -2318,7 +2318,7 @@ fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsag
         },
         parse_agy_models,
     )
-    .into())
+    .into_usage("agy"))
 }
 
 pub fn agy_usage() -> ProviderUsage {

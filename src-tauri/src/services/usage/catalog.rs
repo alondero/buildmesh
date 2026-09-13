@@ -14,7 +14,6 @@ use super::adapters::{
     FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter, OpenaiAdapter,
     OpencodeAdapter, OpenrouterAdapter,
 };
-use super::cache::UsageCache;
 use super::outcome::UsageOutcome;
 use super::types::ProviderUsage;
 use crate::preferences::ProviderAccount;
@@ -111,29 +110,6 @@ fn usage_with_outcome(usage: ProviderUsage, outcome: UsageOutcome) -> ProviderUs
     usage
 }
 
-/// Test-only seam: project the outcome through the catalog and return
-/// the wire triple. Mirrors the pre-#1745 `cached_or_fetch_with` signature
-/// so the test fixtures continue to assert on `ProviderUsage` fields.
-#[cfg(test)]
-fn cached_or_fetch_with(
-    cache: &UsageCache,
-    adapter: &dyn UsageAdapter,
-    force_refresh: bool,
-    accounts: &[ProviderAccount],
-) -> ProviderUsage {
-    let provider_id = adapter.id();
-    let identity = adapter.cache_identity(accounts);
-    if !force_refresh {
-        if let Some(cached) = cache.get(provider_id, &identity) {
-            return cached;
-        }
-    }
-    let outcome = adapter.fetch(accounts);
-    let result = outcome.into_usage(provider_id);
-    cache.set(provider_id, identity, result.clone());
-    result
-}
-
 /// Issue #1745: returns both the raw `UsageOutcome` (for the gate's
 /// keep/drop predicate in `commands::usage::assemble_meters`) and the
 /// projected `ProviderUsage` (the wire triple, unchanged). The catalog
@@ -167,30 +143,62 @@ pub(crate) fn cached_outcome_and_usage(
 
 /// Lossy best-effort: turn a cached `ProviderUsage` back into a
 /// `UsageOutcome` for the gate's predicate. The cache only stores the
-/// wire triple, so this only distinguishes `logged_in: false` (any
-/// no-credential / rejected variant — the gate's predicate gives the
-/// same drop-or-keep answer for both when `configured_keys` is set)
-/// from `logged_in: true` (everything else keeps). Once the cache is
-/// upgraded to store outcomes directly this function disappears.
+/// Issue #1745: collapses a cached wire triple back to a `UsageOutcome` for
+/// the gate's keep/drop predicate. The cache only stores the wire triple
+/// (`ProviderUsage`), so this is necessarily lossy — the wire triple
+/// cannot distinguish `NoCredential` from `Rejected` (both project to
+/// `logged_in: false, error: Some(hint)`), and cannot distinguish a
+/// genuine `Reading` from a `Reading { detail: error }` projection of
+/// a `Degraded { detail: error }` outcome.
+///
+/// Two post-#1745 round-1 review findings pinned the lossiness:
+/// - **Cache hit drops configured providers with rejected credentials** —
+///   when a keyed provider's prior fetch returned `logged_out()`
+///   (e.g. Kimi / MiniMax / DeepSeek on HTTP 401), the previous
+///   implementation collapsed to `NoCredential`, and the gate dropped
+///   the row even when `configured_keys` contained the provider id.
+///   Mapping to `Rejected` instead routes the cached hit through the
+///   gate's `configured_keys.contains(id)` predicate — the
+///   "Invalid API key" affordance stays visible until the next refresh.
+/// - **Migration shim erases `Unavailable` errors into `Reading`** —
+///   when an un-migrated adapter hit a transient failure, it
+///   constructed `unavailable()` (logged_in: true, error: Some(reason)).
+///   Collapsing to `Reading` set `error: None` in the projection and
+///   lost the failure reason. The `logged_in: true && error.is_some()`
+///   arm now maps to `Unavailable` so the reason is preserved.
+///
+/// Once the cache is upgraded to store outcomes directly (issue #1745
+/// follow-up), this function disappears.
 fn outcome_from_cached(usage: &ProviderUsage) -> UsageOutcome {
     if !usage.logged_in {
-        // No way to tell `NoCredential` from `Rejected` from the wire
-        // triple alone, so collapse to `NoCredential` (the more
-        // conservative variant — gate drops when no key is configured,
-        // keeps when configured, same as `Rejected`). If a fetch returned
-        // `Rejected` and the user just configured the key, the gate
-        // keeps the row; if the user later unconfigures, the next fetch
-        // will land as the proper outcome.
-        UsageOutcome::NoCredential {
+        // Map `logged_in: false` to `Rejected` (not `NoCredential`) so the
+        // gate's `configured_keys.contains(id)` predicate keeps the row
+        // when the user has a key configured. `NoCredential` would drop
+        // the row unconditionally — wrong for cached rejections. The
+        // trade-off: a cached `NoCredential` is reported as `Rejected`,
+        // but the gate's answer is identical (drop when unconfigured,
+        // keep when configured), so the user contract is preserved.
+        return UsageOutcome::Rejected {
             hint: usage.error.clone().unwrap_or_default(),
-        }
-    } else {
-        UsageOutcome::Reading {
-            windows: usage.windows.clone(),
-            balance: usage.balance.clone(),
-            meters: usage.meters.clone(),
-            detail: usage.detail.clone().or_else(|| usage.error.clone()),
-        }
+        };
+    }
+    if usage.error.is_some() {
+        // `logged_in: true` with an error string is an un-migrated
+        // adapter's `unavailable()` envelope — transport / non-2xx /
+        // parse failure with credential presumed present. The legacy
+        // shim used to collapse this into `Reading` and silently
+        // lose the reason (round-1 review finding). `Unavailable`
+        // preserves it; the panel renders the red error copy and
+        // the gate keeps the row.
+        return UsageOutcome::Unavailable {
+            reason: usage.error.clone().unwrap_or_default(),
+        };
+    }
+    UsageOutcome::Reading {
+        windows: usage.windows.clone(),
+        balance: usage.balance.clone(),
+        meters: usage.meters.clone(),
+        detail: usage.detail.clone(),
     }
 }
 #[cfg(test)]
@@ -198,7 +206,30 @@ mod tests {
     use super::*;
     use crate::preferences::BillingMode;
     use crate::services::usage::adapter::UsageIdentityFingerprint;
+    use crate::services::usage::cache::UsageCache;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test-only seam: project the outcome through the catalog and return
+    /// the wire triple. Mirrors the pre-#1745 `cached_or_fetch_with` signature
+    /// so the test fixtures continue to assert on `ProviderUsage` fields.
+    fn cached_or_fetch_with(
+        cache: &UsageCache,
+        adapter: &dyn UsageAdapter,
+        force_refresh: bool,
+        accounts: &[ProviderAccount],
+    ) -> ProviderUsage {
+        let provider_id = adapter.id();
+        let identity = adapter.cache_identity(accounts);
+        if !force_refresh {
+            if let Some(cached) = cache.get(provider_id, &identity) {
+                return cached;
+            }
+        }
+        let outcome = adapter.fetch(accounts);
+        let result = outcome.into_usage(provider_id);
+        cache.set(provider_id, identity, result.clone());
+        result
+    }
 
     fn account(id: &str, api_key: Option<&str>) -> ProviderAccount {
         ProviderAccount {
@@ -511,6 +542,65 @@ mod tests {
         ] {
             let adapter = dispatch(id).unwrap_or_else(|| panic!("missing adapter: {id}"));
             assert_eq!(adapter.id(), id, "dispatch({id}) returned wrong adapter");
+        }
+    }
+
+    /// Round-1 review finding #1: cache hit on a previously-fetched
+    /// `logged_out()` envelope (e.g. Kimi / MiniMax / DeepSeek on HTTP
+    /// 401) used to collapse to `UsageOutcome::NoCredential`, and the
+    /// gate dropped the row even when `configured_keys` contained the
+    /// provider id — silently hiding the "Invalid API key"
+    /// affordance. The fix maps the cached wire triple's
+    /// `logged_in: false` arm to `UsageOutcome::Rejected`, so the
+    /// gate's `configured_keys.contains(id)` predicate keeps the row.
+    /// Pin the table here so a future regression is caught at the
+    /// boundary (the gate consumer), not the gate itself.
+    #[test]
+    fn outcome_from_cached_rejected_keeps_configured_row() {
+        let cached = ProviderUsage {
+            provider: "kimi".into(),
+            logged_in: false,
+            windows: vec![],
+            balance: None,
+            meters: vec![],
+            detail: None,
+            error: Some("Invalid API key".into()),
+        };
+        let outcome = outcome_from_cached(&cached);
+        match outcome {
+            UsageOutcome::Rejected { hint } => {
+                assert_eq!(hint, "Invalid API key");
+            }
+            other => panic!(
+                "expected Rejected outcome (round-1 review fix), got: {other:?}"
+            ),
+        }
+    }
+
+    /// Round-1 review finding #2: a cached `unavailable()` envelope
+    /// (`logged_in: true, error: Some(reason)`) used to collapse to
+    /// `UsageOutcome::Reading { detail: error }`, silently losing the
+    /// failure reason. The fix maps to `UsageOutcome::Unavailable`
+    /// so the panel renders the red error copy.
+    #[test]
+    fn outcome_from_cached_unavailable_preserves_error_reason() {
+        let cached = ProviderUsage {
+            provider: "kimi".into(),
+            logged_in: true,
+            windows: vec![],
+            balance: None,
+            meters: vec![],
+            detail: None,
+            error: Some("API error 500: upstream down".into()),
+        };
+        let outcome = outcome_from_cached(&cached);
+        match outcome {
+            UsageOutcome::Unavailable { reason } => {
+                assert_eq!(reason, "API error 500: upstream down");
+            }
+            other => panic!(
+                "expected Unavailable outcome (round-1 review fix), got: {other:?}"
+            ),
         }
     }
 }

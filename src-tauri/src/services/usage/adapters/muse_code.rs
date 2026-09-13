@@ -1,7 +1,7 @@
 //! Account quota returned by the same key reconciliation endpoint as Muse /usage.
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
-use crate::services::usage::outcome::{AuthPolicy, UsageOutcome};
+use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageWindow;
 use serde::Deserialize;
 
@@ -14,14 +14,6 @@ impl UsageAdapter for MuseCodeAdapter {
     }
     fn native_harness(&self) -> Option<&'static str> {
         Some("muse")
-    }
-    /// Issue #1745: Muse Code's OAuth token cannot be distinguished from
-    /// "API key configured" via HTTP status alone — an HTTP 401/403 may
-    /// mean the OAuth token expired OR that the user only has an API key
-    /// (which the meter doesn't use). `AuthPolicy::NoCredential` collapses
-    /// both into a `NoCredential` outcome so the gate drops the row.
-    fn auth_policy(&self) -> AuthPolicy {
-        AuthPolicy::NoCredential
     }
     fn cache_identity(&self, _: &[ProviderAccount]) -> UsageIdentityFingerprint {
         let identity = credential().unwrap_or_else(|e| e);

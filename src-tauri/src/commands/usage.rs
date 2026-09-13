@@ -288,7 +288,8 @@ mod tests {
     /// Each entry's variant must match what `fetch` would have returned;
     /// the helpers below produce the matching outcome for each envelope
     /// shape used in this module's tests.
-    fn reading_outcome(provider: &str) -> UsageOutcome {
+    #[allow(dead_code)]
+    fn reading_outcome(_provider: &str) -> UsageOutcome {
         UsageOutcome::Reading {
             windows: Vec::new(),
             balance: None,
