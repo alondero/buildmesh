@@ -331,6 +331,13 @@ const subscriberExtras = new WeakMap<PathSubscriber, string[]>();
 // subscriber's `kind` field still narrows the SUBSCRIBER (so `sub.key` is
 // always defined inside a keyed handler); the lookup-side narrowing is
 // what this split fixes. Issue #355.
+//
+// `KeyedBusHandler<any>` is the variance-required type parameter: the
+// map holds handlers keyed by arbitrary `key` types (string, number,
+// tuple, branded ids, …) and the dispatch site uses `sub.key` to drive
+// the call. Narrowing to `unknown` here would force every consumer to
+// re-cast on registration.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const keyedBusHandlers = new Map<symbol, KeyedBusHandler<any>>();
 const callbackBusHandlers = new Map<symbol, CallbackBusHandler>();
 let listenerInstalled = false;
@@ -411,6 +418,7 @@ export function resetPathInvalidatedCacheForTests(): void {
  * between tests. Issue #355 split this from the callback variant so the
  * dispatch-side lookup is monomorphic (no union cast).
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- same variance rationale as `keyedBusHandlers` above; the bus accepts handlers keyed by any type, and `unknown` would force every registration site to cast its concrete key.
 function registerKeyedBusHandler(clientId: symbol, handler: KeyedBusHandler<any>): void {
   keyedBusHandlers.set(clientId, handler);
 }
@@ -632,7 +640,8 @@ function createInternalClient<K, V>(
             key,
             err instanceof Error ? err : new Error(String(err)),
           );
-          // eslint-disable-next-line no-console
+          // `console.warn` is in the eslint allow-list (see eslint.config.js);
+          // the no-console rule only flags `console.log` / `console.info`.
           console.warn(`${name}: fetch failed for key`, key, err);
           return null;
         });

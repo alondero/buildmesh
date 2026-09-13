@@ -312,7 +312,7 @@ export default function TerminalScreen({
       term.dispose(); // allow-dispose — mobile SPA owns this per-mount xterm; no TerminalManager here
       termRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the mobile SPA owns the per-mount terminal lifecycle (no TerminalManager singleton here). The effect re-keys only on `node.id`; re-running on every ref / store mutation would tear down and re-open the websocket for nothing.
   }, [node.id]);
 
   function handleAuthFailure() {

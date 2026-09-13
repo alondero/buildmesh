@@ -5,8 +5,9 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 **Implementation and review:** read `docs/agents/engineering.md` for testable design seams, scope-based checks, and evidence requirements. Start with the actual worktree/branch/status and the requested acceptance behavior.
 
 ## Commands
-- **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|all-ts|all]`. `all-ts` builds and tests the frontend; `all` also runs Rust. Both include agent checks. See the engineering contract for checks these targets do not cover.
+- **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|all-ts|all]`. `all-ts` builds and tests the frontend; `all` also runs Rust. Both include agent checks, ESLint, and the lint-fixtures verifier. See the engineering contract for checks these targets do not cover.
 - **Agent infrastructure:** `npm run test:agent`; `npm run check:agent -- --base <base-commit>` checks changed source against the shared hook rules, including committed work. Default base is HEAD for local edits.
+- **ESLint + React Hooks gate (issue #1542):** `npm run lint` runs the production flat config across `src/`, `tests/`, `mobile/`, and `scripts/`. `npm run lint:fixtures` runs ESLint against the two intentional-violation fixtures in `tests/lint-fixtures/` and asserts each one trips its target rule (the inverse of the main gate — proves the React Hooks rules are live). Both run as part of `scripts\check.ps1` and the GitHub Actions quality job.
 - Test: `npm test` (unit + integration) · `npm run test:e2e` (needs app on :1991) · `npm run test:ci` (all three)
 - Typecheck/build: `npm run build` (runs `tsc`, desktop `vite build`, then mobile `vite build --mode mobile`)
 - Rust: `cargo test` / `cargo clippy` (run inside `src-tauri/`)

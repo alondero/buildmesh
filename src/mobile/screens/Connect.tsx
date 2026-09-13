@@ -44,7 +44,7 @@ export default function Connect({ onConnected, notice }: Props) {
       window.location.pathname + (rest ? "?" + rest : ""),
     );
     connectWith(urlToken);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- empty deps on purpose: the QR-token / paste-token dance is a one-shot on screen mount. Re-running on `connectWith` / `params` would re-fire the exchange on every parent render and waste the HttpOnly cookie.
   }, []);
 
   // Exchange the token for the HttpOnly session cookie via POST /api/session.

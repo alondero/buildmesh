@@ -440,13 +440,18 @@ function App() {
       addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [addToast]);
+    // `addToast` is a module-level function that delegates to
+    // `useToastStore.getState().addToast` — stable across renders,
+    // so it doesn't belong in the dep array.
+  }, []);
 
   useEffect(() => {
     if (storeError) {
       addToast('System', storeError, 'error');
     }
-  }, [storeError, addToast]);
+    // `addToast` is a module-level function — see the provider-error
+    // listener effect above.
+  }, [storeError]);
 
   // Issue #1250 — extract init into a callback so the BootErrorPanel's
   // Retry button can re-run it without unmounting the whole App.
@@ -489,7 +494,7 @@ function App() {
         try {
           const resumed = await api.autoResumeAgentNodes();
           if (resumed.length > 0) {
-            console.log(`[App] Auto-resumed ${resumed.length} sessions`);
+            console.info(`[App] Auto-resumed ${resumed.length} sessions`);
           }
           // Recovery can update identity even when the subsequent launch fails.
           await fetchAgentNodes();

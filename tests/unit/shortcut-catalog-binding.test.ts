@@ -49,7 +49,7 @@ describe('App.tsx Tauri global-shortcut bindings map to SHORTCUT_CATALOG entries
   // `key:`-then-`action:` form, so platform-branched bindings aren't
   // missed.
   const entryMatches = appSource.matchAll(
-    /key:\s*'[A-Za-z0-9+\-]+',\s*action:\s*'([a-z][a-z0-9-]*)'/g,
+    /key:\s*'[A-Za-z0-9+-]+',\s*action:\s*'([a-z][a-z0-9-]*)'/g,
   );
   const wiredActions = new Set<string>();
   for (const m of entryMatches) wiredActions.add(m[1]);

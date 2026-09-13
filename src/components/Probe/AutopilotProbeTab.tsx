@@ -411,8 +411,12 @@ export function AutopilotProbeTab() {
   // Reset the SaveIndicator on mesh-switch so a stale "Save failed"
   // from the outgoing mesh doesn't bleed onto the incoming mesh's
   // form (same defensive pattern as `MeshPropertiesTab.tsx`).
+  // `saveStatus.reset()` is bound to the SaveIndicator hook instance,
+  // which is stable for the lifetime of the consumer — the rule can't
+  // see through the hook's return type, so the disable is justified.
   useEffect(() => {
     saveStatus.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMeshId, saveStatus.reset]);
 
   // Mesh-switch guard for in-flight saves (review finding #1 from

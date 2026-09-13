@@ -325,7 +325,11 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
       return nodeChangedFiles(diff.nodeId);
     }
     return getGitStatus(diff.rootPath);
-  }, [diff.source, diff.nodeId, diff.rootPath, drawerVersion]);
+    // `drawerVersion` is intentionally NOT a dep: the function reads the
+    // live value via `useDrawerRefreshCounter().bump()`'s effect (below)
+    // to force refetch when the user Stages/Reverts, so re-keying on it
+    // would create a feedback loop with the parent effect.
+  }, [diff.source, diff.nodeId, diff.rootPath]);
 
   // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
   // body re-fetches the new file's diff via the existing `fetchDiff`

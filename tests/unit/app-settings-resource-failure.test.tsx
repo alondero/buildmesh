@@ -718,7 +718,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     //    and surfaces an "Awaiting providers" message — never
     //    fabricates success with an empty providers list.
     const retryBody = hookSrc.match(
-      /const retryResource = useCallback[\s\S]+?\n  \);/,
+      /const retryResource = useCallback[\s\S]+?\n {2}\);/,
     )?.[0] ?? '';
     expect(retryBody).toMatch(/'pairings'/);
     expect(retryBody).toMatch(/Awaiting providers list/);

@@ -237,6 +237,7 @@ export function AgentNodeView() {
       unwatchAgentNode(activeNode.id).catch(console.error);
     };
   // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the body only reads `activeNode.id` and `activeNode.cli_session_id`; listing the whole `activeNode` would re-run the effect on every other field mutation (status flips, attention toggles) and tear down + re-install the watcher.
   }, [activeNode?.id, activeNode?.cli_session_id]);
 
   // Grid-mode invariant (ticket #986): the active node is always one of the
@@ -256,7 +257,7 @@ export function AgentNodeView() {
     if (activeNode) {
       terminalManager.fit(activeNode.id);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- effects re-key only on `activeNode?.id`. `terminalManager` is a module-level singleton (stable identity) and adding `activeNode` itself would re-fire on every status flip / attention toggle.
   }, [activeNode?.id]);
 
   // Escape exits Single mode. Issue #649 review: only `viewMode === 'single'`

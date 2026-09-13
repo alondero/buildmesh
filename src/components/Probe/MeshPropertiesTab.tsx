@@ -262,8 +262,12 @@ export function MeshPropertiesTab() {
   // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
   // bare useEffect that tracks `activeMeshId` is sufficient — the
   // hook's own reset() cancels the pending saved→idle timer cleanly.
+  // `saveStatus.reset()` is bound to the SaveIndicator hook instance,
+  // which is stable for the lifetime of the consumer — the rule can't
+  // see through the hook's return type, so the disable is justified.
   useEffect(() => {
     saveStatus.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMeshId, saveStatus.reset]);
 
   // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in

@@ -108,7 +108,6 @@ function mockBackendIpc() {
 // JSDOM doesn't ship matchMedia; some focus utilities query it. Polyfill
 // before vi.spyOn would have a function to spy on.
 if (typeof window.matchMedia !== 'function') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (window as any).matchMedia = (query: string) => ({
     matches: false,
     media: query,

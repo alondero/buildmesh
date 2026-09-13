@@ -183,6 +183,7 @@ export function useAriaMenu({
     };
     // The listener attachment is keyed only on `enabled` and `closeOnTab`.
     // `rootRef` and the state setters are stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `setActiveIndex` is a Zustand setter (stable identity across renders); adding it to the deps would re-bind the listener on every store mutation for no behavioral gain.
   }, [enabled, closeOnTab, rootRef, itemSelector, skipDisabled]);
 
   // Auto-focus the first menuitem on mount (WAI-ARIA menu contract).

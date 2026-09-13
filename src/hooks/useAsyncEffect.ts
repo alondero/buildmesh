@@ -63,5 +63,6 @@ export function useAsyncEffect(effect: AsyncEffectCallback, deps?: DependencyLis
       controller.abort();
       cleanup?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `useAsyncEffect` is the dynamic-deps wrapper around `useEffect`. The whole point of this hook is that callers pass their own deps array, so the rule cannot statically verify it. The "missing effect" warning is also intentional: `effect` is whatever the caller wrapped, and the dependency contract lives in their call site, not here.
   }, deps);
 }

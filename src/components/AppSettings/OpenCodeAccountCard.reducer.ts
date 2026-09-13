@@ -215,6 +215,12 @@ export function opencodeAccountReducer(state: State, action: Action): State {
         case 'error':
           return { kind: 'error', message: errorMessageFor(status) };
       }
+      // Issue #1542 — without this terminator, an unhandled `status.kind`
+      // (e.g. a new RFC 8628 status added without a case above) falls
+      // through into SIGNED_IN_FROM_TOKEN, silently corrupting state.
+      // Returning `state` is the safe no-op until the new kind gets its
+      // own branch.
+      return state;
     }
 
     case 'SIGNED_IN_FROM_TOKEN': {

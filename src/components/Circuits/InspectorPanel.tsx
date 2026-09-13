@@ -466,10 +466,17 @@ export function InspectorPanel(props: InspectorPanelProps) {
   // id is identical (review feedback round 2: a `props.node` dep
   // busts the memo on every keystroke because the canvas editor's
   // working copy mints a fresh React Flow node each render).
+  // Issue #1542 — exhaustive-deps disable placed directly above the
+  // deps array because `eslint-disable-next-line` suppresses the
+  // IMMEDIATELY NEXT line. The body only reads `props.node.id` and
+  // `props.graph`; listing the full `props.node` would re-run on every
+  // flow position change (xterm canvas resize, selection drag) and
+  // recompute reachability unnecessarily.
   const reachable = useMemo(
     () => (props.graph !== undefined && props.node !== null
       ? getReachableContext(props.node.id, props.graph)
       : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.graph, props.node?.id]
   );
 
