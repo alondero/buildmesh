@@ -53,10 +53,19 @@ export default [
       'playwright-report/**',
       'test-results/**',
       '.claude/**',
+      '.opencode/**',
+      // `.agents/` is a Claude-Code runtime dir (hooks, sessions, tasks,
+      // memory) — every entry is gitignored at the per-file level
+      // (`.agents/hooks.json`, `.agents/settings.local.json`, etc.) but
+      // the directory itself can hold symlinks to `.claude/skills` we
+      // don't want ESLint re-traversing.
+      '.agents/**',
+      '.vscode/**',
       'docs/**',
       // Tauri / Rust source tree — Rust has its own `cargo clippy` gate
       // (issue #1491) and a vendored Node plugin inside it should not
-      // be linted by the frontend ESLint config.
+      // be linted by the frontend ESLint config. Tracking issue for the
+      // intended Node pass lives in the tauri vendor plugin's repo.
       'src-tauri/**',
       // ts-rs output regenerated from `cargo test` (issue #359).
       'src/types/generated/**',
@@ -87,11 +96,26 @@ export default [
         ...globals.es2021,
       },
     },
+    // `useAsyncEffect` (src/hooks/useAsyncEffect.ts) is the repo's own
+    // wrapper around useEffect that takes a runtime abort signal. The
+    // React Hooks plugin only knows the built-in hooks by default;
+    // without `additionalHooks`, the ~25 files that call useAsyncEffect
+    // get no `exhaustive-deps` coverage at all. `useLayoutEffect` is
+    // already part of the plugin's built-in hook list, so it doesn't
+    // need to be added (listing it explicitly would be a no-op).
+    settings: {
+      reactHooks: {
+        additionalHooks: 'useAsyncEffect',
+      },
+    },
     rules: {
       // ---- React Hooks (the why-does-this-exist) ----------------------------
       'react-hooks/rules-of-hooks': 'error',
       // `exhaustive-deps` stays at warn until the audit closes — see
       // the file-level comment for context. Tighten to error after.
+      // Combined with `npm run lint -- --max-warnings 0` (see package.json),
+      // every newly-introduced violation still fails the gate even though
+      // the rule severity is "warn".
       'react-hooks/exhaustive-deps': 'warn',
 
       // ---- TypeScript safety ------------------------------------------------

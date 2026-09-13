@@ -132,9 +132,12 @@ export type Action =
     };
 
 /**
- * Pure reducer. Every transition is exhaustive over `Action.type` so a
- * `never`-style check at the bottom catches typos when an action variant is
- * added without a matching branch.
+ * Pure reducer. Every transition is exhaustive over `Action.type` — the
+ * function declares `: State` as its return, so when a new action variant
+ * is added without a matching case the missing return makes TypeScript
+ * fail the build. Runtime drift (a backend-driven variant the frontend
+ * doesn't yet know about) is handled at the per-case level; see the
+ * `errorMessageFor` default arm and the POLL_RESULT terminator above.
  */
 export function opencodeAccountReducer(state: State, action: Action): State {
   switch (action.type) {
@@ -389,6 +392,20 @@ function errorMessageFor(status: Exclude<
       return 'OpenCode sign-in was denied at the consent prompt.';
     case 'error':
       return `OpenCode OAuth failed: ${status.message}`;
+    default: {
+      // Issue #1542 review: a backend-driven union variant we don't know
+      // about yet would fall through and TypeScript would happily type
+      // `status` as `never` here — but at runtime the kind is real and
+      // the function returns `undefined`, which surfaces in the toast
+      // text. Same hazard as the POLL_RESULT terminator fix two switches
+      // up: the type system can't catch a brand-new variant the backend
+      // emits before the frontend is updated. Log loudly so backend
+      // drift is visible, and surface a generic message rather than
+      // swallowing the toast.
+      const unknown = status as { kind: string };
+      console.warn(`[OpenCodeAccountCard] Unhandled device-code status kind: ${unknown.kind}`);
+      return 'OpenCode sign-in failed. Please try again.';
+    }
   }
 }
 

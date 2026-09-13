@@ -15,7 +15,7 @@
     "check:agent": "node scripts/check-agent-diff.mjs",
     "check:readme": "node scripts/check-readme-drift.mjs",
     "check:bundle": "node scripts/check-bundle-size.mjs --dist dist",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "lint:fixtures": "node scripts/check-eslint-fixtures.mjs",
     "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs",
     "test:readme": "node --test tests/agent-infra/check-readme-drift.test.mjs",

@@ -325,10 +325,11 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
       return nodeChangedFiles(diff.nodeId);
     }
     return getGitStatus(diff.rootPath);
-    // `drawerVersion` is intentionally NOT a dep: the function reads the
-    // live value via `useDrawerRefreshCounter().bump()`'s effect (below)
-    // to force refetch when the user Stages/Reverts, so re-keying on it
-    // would create a feedback loop with the parent effect.
+    // `drawerVersion` is intentionally NOT a dep: it's never read here.
+    // The refetch on Stage/Revert is driven by the parent passing
+    // `refreshKey={drawerVersion}` to this overlay, which re-mounts the
+    // drawer subtree (issue #1374). Re-keying the callback on
+    // `drawerVersion` would just churn its identity for nothing.
   }, [diff.source, diff.nodeId, diff.rootPath]);
 
   // Jump-to-file: update `activeDiffFile` in the UI store so the overlay
