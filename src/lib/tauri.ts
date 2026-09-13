@@ -1,6 +1,11 @@
-import { invoke as _rawInvoke, Channel } from '@tauri-apps/api/core';
-import { logFrontend } from './frontendLog';
-import { shapeArgs } from './ipcShape';
+import { Channel } from '@tauri-apps/api/core';
+import { _invoke } from './tauri/_invoke';
+// Re-export every typed wrapper from the provider/harness facet (issue
+// #1656 Phase 2 — first facet). The new `getResolvedHarnessView` IPC
+// command lives here along with every other harness/provider wrapper.
+// Re-exporting keeps the existing 62 importers compiling unchanged while
+// new code can reach the resolver directly via `../lib/tauri/provider`.
+export * from './tauri/provider';
 import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
@@ -8,12 +13,9 @@ import type { AppPreferences } from '../types/generated/AppPreferences';
 import type { AutopilotMode } from '../types/generated/AutopilotMode';
 import type { AutopilotCompatibility } from '../types/generated/AutopilotCompatibility';
 import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
-import type { BillingBalance } from '../types/generated/BillingBalance';
-import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../types/generated/DeviceSession';
-import type { EnvType } from '../types/generated/EnvType';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
@@ -22,7 +24,6 @@ import type { FileDiff } from '../types/generated/FileDiff';
 import type { FileNode } from '../types/generated/FileNode';
 import type { FreeResult } from '../types/generated/FreeResult';
 import type { GitBranchStatus } from '../types/generated/GitBranchStatus';
-import type { HarnessConfigValue } from '../types/generated/HarnessConfigValue';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
 import type { GitRepoPruneInfo } from '../types/generated/GitRepoPruneInfo';
@@ -40,70 +41,22 @@ import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
-import type { ApiSurface } from '../types/generated/ApiSurface';
-import type { ModelTiers } from '../types/generated/ModelTiers';
-import type { ProviderAccount } from '../types/generated/ProviderAccount';
-import type { ProviderInfo } from '../types/generated/ProviderInfo';
-import type { ProviderPairing } from '../types/generated/ProviderPairing';
-import type { PairingVerification } from '../types/generated/PairingVerification';
-import type { ProviderMeters } from '../types/generated/ProviderMeters';
-import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RealizedBind } from '../types/generated/RealizedBind';
 import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { SpawnAgentRequest } from '../types/generated/SpawnAgentRequest';
-import type { UsageWindow } from '../types/generated/UsageWindow';
-import type { UsageAmount } from '../types/generated/UsageAmount';
-import type { UsageMeter } from '../types/generated/UsageMeter';
-import type { ObservedMuseSessionTelemetry } from '../types/generated/ObservedMuseSessionTelemetry';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
-import {
-  deleteDefaultProviderPromise,
-  getDefaultProviderPromise,
-  getProviderListPromise,
-  resetProviderCachesForTests,
-  setDefaultProviderPromise,
-  setProviderListPromise,
-} from './providerCache';
 
-/**
- * Central IPC chokepoint (issue #386). Every wrapper below calls through
- * `_invoke`, which delegates to Tauri's `invoke` and — on rejection —
- * forwards a single `frontendLog` entry (command name + sanitized arg
- * shape) and re-throws the original error. The re-throw preserves every
- * existing call-site behaviour (stores set error state, components show
- * toasts, the bridge still sees the original `Error` for `window.error` /
- * `unhandledrejection` plumbing). The arg shape is the sanitized form
- * produced by `ipcShape.shapeArgs` so PII (API keys) and unbounded
- * payloads (terminal scrollback) are never written to `buildmesh.log`.
- *
- * Tests stub `_rawInvoke` (the aliased Tauri binding) via
- * `vi.mock('@tauri-apps/api/core', …)` and mock `frontendLog.logFrontend`
- * to assert on the formatted shape — see `tests/unit/ipc-error-logging.test.ts`.
- */
-// Function declaration (not const) so it hoists — the wrappers below
-// reference `_invoke` and the function name is referenced before its
-// declaration in source order.
-const ERROR_TEXT_CAP = 200;
-
-async function _invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    // Only pass `args` when defined so the call shape matches the
-    // pre-wrapper `invoke('cmd')` form (some tests assert on
-    // argument count, e.g. `toHaveBeenCalledWith('list_meshes')`).
-    return args === undefined
-      ? await _rawInvoke<T>(cmd)
-      : await _rawInvoke<T>(cmd, args);
-  } catch (err) {
-    const shape = JSON.stringify(shapeArgs(args));
-    const raw = String(err);
-    const truncated = raw.length > ERROR_TEXT_CAP
-      ? raw.slice(0, ERROR_TEXT_CAP) + '…'
-      : raw;
-    logFrontend('error', `[IPC:${cmd}] args=${shape} — ${truncated}`);
-    throw err;
-  }
-}
+// `providerCache` import + `__resetProviderCachesForTests` test helper
+// moved to `./tauri/provider` (issue #1656 Phase 2 — first facet). The
+// facade re-exports it via the `export * from './tauri/provider'` line
+// above so existing tests continue to work.
+//
+// `_invoke` and the raw `invoke` import moved to `./tauri/_invoke` (issue
+// #1656 review) — the chokepoint is now the single allowed raw-invoke
+// site under `src/lib/tauri/`, and every wrapper in `tauri.ts` (this
+// file) routes through it just like the facets. The IPC seam test
+// (`tests/unit/tauri-ipc-seam.test.ts`) enforces the property.
 
 export type DiffLineType = 'context' | 'add' | 'remove';
 
@@ -195,18 +148,9 @@ export const updateMeshPositions = (updates: [number, number][]) =>
 export const updateMeshName = (meshId: number, name: string) =>
   _invoke('update_mesh_name', { meshId, name });
 
-// Provider-read memoisation lives in `providerCache.ts` so the global Vitest
-// fixture can reset it even when a test fully mocks this public IPC module.
-
-export const getDefaultProvider = (meshId: number): Promise<string> => {
-  let p = getDefaultProviderPromise(meshId);
-  if (!p) {
-    p = _invoke<string>('get_default_provider', { meshId });
-    p.catch(() => { deleteDefaultProviderPromise(meshId); });
-    setDefaultProviderPromise(meshId, p);
-  }
-  return p;
-};
+// (Provider / harness wrappers moved to `./tauri/provider` (issue #1656
+// Phase 2 — first facet). The `export * from './tauri/provider'` at the
+// top of this file keeps every existing consumer compiling unchanged.)
 
 // Mesh properties / configuration (issue #283)
 //
@@ -791,19 +735,8 @@ export const detectAiContext = (meshPath: string) =>
 export const createAiContextPortabilityPr = (meshId: number) =>
   _invoke<string>('create_ai_context_portability_pr', { meshId });
 
-export const listProviders = (): Promise<ProviderInfo[]> => {
-  let promise = getProviderListPromise();
-  if (!promise) {
-    promise = _invoke<ProviderInfo[]>('list_providers');
-    promise.catch(() => { setProviderListPromise(null); });
-    setProviderListPromise(promise);
-  }
-  return promise;
-};
-
-/** Provider UI metadata for the agent picker — generated from the Rust struct
- *  in `src-tauri/src/agent/provider/mod.rs` (issue #404). */
-export type { ProviderInfo };
+// (`listProviders` + `ProviderInfo` re-export moved to `./tauri/provider` —
+// see the `export * from './tauri/provider'` line near the top of this file.)
 
 // Agent Node Discovery — generated from the Rust struct (issue #359 + #490,
 // re-exported here per #404 so call sites that import from `../lib/tauri`
@@ -1062,236 +995,17 @@ export const exitApplication = () =>
 export const setAppWorktreeDirectory = (directory: string | null) =>
   _invoke('set_app_worktree_directory', { directory });
 
-// ── Application-level Agent Harness defaults (issue #1150 / #1148) ──────────
+// ── Application-level Agent Harness defaults + per-Mesh overrides + ────────
+//    proxied-provider pairings + usage meters (issue #1150 / #1148 / #1151 /
+//    ADR-0025 / #574 / #1680).
 //
-// Sparse map keyed by stable harness profile id (`"claude"`, `"codex"`,
-// `"agy"`, plus user-defined custom profiles). The backend validates each
-// write against the harness's capability descriptor — unknown harness ids,
-// effort values outside `effort_control.allowed`, and whitespace-only inputs
-// are rejected at the boundary. An empty post-validation value removes the
-// sparse map entry rather than storing `{model: null, effort: null}`.
-
-/** Upsert one harness's application default. Errors propagate verbatim from
- *  the backend (the parent surfaces them through the existing settings-error
- *  feedback loop). */
-export const setHarnessDefault = (
-  profileId: string,
-  value: HarnessConfigValue,
-) => _invoke('set_harness_default', { profileId, value });
-
-/** Remove one harness's application default. Idempotent — clearing an already-
- *  cleared harness is a no-op (so the UI's "Reset" affordance never errors). */
-export const clearHarnessDefault = (profileId: string) =>
-  _invoke('clear_harness_default', { profileId });
-
-// ── Per-Mesh harness overrides (issue #1151 / slice 2 of #1148) ─────────────
-//
-// Sparse map keyed by stable harness profile id, scoped to a single Mesh.
-// The cascade order at the spawn seam is now:
-//   explicit > mesh_override > mesh (legacy) > application > native
-// (the legacy `meshes.model` / `meshes.effort` columns remain physically
-// present for positional compatibility but are no longer read as active
-// configuration after the v33 migration). The Mesh Properties tab uses
-// these three commands for the per-harness override list — Add / Edit /
-// Reset-all affordances. The harness-id and effort-vocabulary rules are
-// shared with `setHarnessDefault` — the backend validates against the
-// harness's capability descriptor at the write boundary.
-
-/** Upsert one harness's Mesh override. An empty post-validation value
- *  removes the sparse map entry rather than storing `{model: null,
- *  effort: null}`. */
-export const upsertMeshHarnessOverride = (
-  meshId: number,
-  harnessId: string,
-  value: HarnessConfigValue,
-) => _invoke('upsert_mesh_harness_override', { meshId, harnessId, value });
-
-/** Remove one harness's Mesh override. Idempotent — clearing an already-
- *  cleared harness is a no-op so the UI's "Reset" affordance never errors. */
-export const removeMeshHarnessOverride = (meshId: number, harnessId: string) =>
-  _invoke('remove_mesh_harness_override', { meshId, harnessId });
-
-/** Reset every entry in the mesh's `harness_overrides` map — the secondary
- *  "Reset all" bulk action on the Mesh Properties tab. Idempotent on a
- *  mesh that has no overrides. Does NOT touch the application-level
- *  defaults map — the mesh simply inherits every application default. */
-export const clearMeshHarnessOverrides = (meshId: number) =>
-  _invoke('clear_mesh_harness_overrides', { meshId });
+// ALL of these wrappers now live in `./tauri/provider` (issue #1656 Phase 2 —
+// first facet). The `export * from './tauri/provider'` near the top of this
+// file keeps every existing consumer compiling unchanged. New code should
+// import directly from `./tauri/provider` so the import surfaces the domain.
 
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
-
-/** Persist the spawn-menu harness order (issue #573). `order` is the list of
- *  harness-row ids top-to-bottom; Terminal is filtered out backend-side and is
- *  always pinned last. Busts the cached provider list AFTER the write resolves
- *  (same reasoning as `upsertProviderAccount`) so the next `listProviders` reads
- *  the reordered menu. */
-export const setHarnessOrder = async (order: string[]) => {
-  try {
-    return await _invoke('set_harness_order', { order });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-/** Persist the **Proxied Provider** child order under one harness (issue #577).
- *  `providerIds` is the top-to-bottom list of `provider_id`s the user arranged
- *  via the drag list on the harness-config page. Cross-harness drag is
- *  disallowed at the UI layer (each `HarnessCard` is its own dnd-kit context),
- *  so the `harnessId` + `providerIds` pair is the entire scope. Backend-side
- *  unknown-account ids are silently dropped — the order seam would never
- *  render them anyway. Busts the cached provider list AFTER the write resolves
- *  so every spawn surface (sidebar, probe tabs, archived-resume, mobile)
- *  re-reads the reordered menu on the next read. */
-export const setProxiedProviderOrder = async (
-  harnessId: string,
-  providerIds: string[],
-) => {
-  try {
-    return await _invoke('set_proxied_provider_order', {
-      harnessId,
-      providerIds,
-    });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-// ── Model provider accounts (issue #537 / ADR-0025) ─────────────────────────
-//
-// Generated from `crate::preferences::{ProviderAccount, BillingMode}`.
-// Credentials + billing only; endpoint URL and model tiers live on pairings.
-export type { ProviderAccount, BillingMode, ModelTiers };
-
-/** Self-auth built-ins + keyed first-class / generics the user has added. */
-export const getProviderAccounts = () =>
-  _invoke<ProviderAccount[]>('get_provider_accounts');
-
-/** Keyed first-class catalog (MiniMax / Kimi / OpenRouter) for Add provider. */
-export const getKeyedFirstClassCatalog = () =>
-  _invoke<ProviderAccount[]>('get_keyed_first_class_catalog');
-
-export const upsertProviderAccount = async (account: ProviderAccount) => {
-  try {
-    return await _invoke('upsert_provider_account', { account });
-  } finally {
-    // ADR-0025: spawn visibility comes from stored pairings + the catalog,
-    // not from account-side pairing registration. Still bust the cache so
-    // the menu drops / shows the row on the next listProviders.
-    setProviderListPromise(null);
-  }
-};
-
-export const removeProviderAccount = async (id: string) => {
-  try {
-    return await _invoke('remove_provider_account', { id });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-// ── Proxied Provider pairings (ADR-0016 §4 / ADR-0025, issue #576) ──────────
-//
-// Stored pairings only. API key is global on the provider; base URL + model
-// tiers are per harness×provider pairing (edited on the Harnesses page).
-export type { ApiSurface, EnvType, ProviderPairing, PairingVerification };
-
-/** Stored pairings for proxiable accounts (spawn menu + harness config). */
-export const getProviderPairings = () =>
-  _invoke<ProviderPairing[]>('get_provider_pairings');
-
-export const getPairingVerifications = (envType: EnvType = 'windows') =>
-  _invoke<PairingVerification[]>('get_pairing_verifications', { envType });
-
-export const verifyProviderPairing = (
-  harnessId: string,
-  providerId: string,
-  envType: EnvType = 'windows',
-) => _invoke<PairingVerification>('verify_provider_pairing', { harnessId, providerId, envType });
-
-/** First-class attach defaults for a (harness, provider) pair, if compatible. */
-export const getPairingDefaults = (harnessId: string, providerId: string) =>
-  _invoke<ProviderPairing | null>('get_pairing_defaults', { harnessId, providerId });
-
-/** Providers offered by "Add proxied provider" for `harnessId`, surface-matched. */
-export const compatibleProvidersForHarness = (harnessId: string) =>
-  _invoke<ProviderAccount[]>('compatible_providers_for_harness', { harnessId });
-
-/** Attach a provider; client supplies base URL (+ Anthropic model tiers). */
-export const attachProxiedProvider = async (
-  harnessId: string,
-  providerId: string,
-  apiKey: string | null,
-  baseUrl: string | null,
-  modelTiers: ModelTiers | null,
-) => {
-  try {
-    return await _invoke('attach_proxied_provider', {
-      harnessId,
-      providerId,
-      apiKey,
-      baseUrl,
-      modelTiers,
-    });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-/** Edit base URL / model tiers on a stored pairing. */
-export const updateProviderPairing = async (
-  harnessId: string,
-  providerId: string,
-  baseUrl: string | null,
-  modelTiers: ModelTiers | null,
-) => {
-  try {
-    return await _invoke('update_provider_pairing', {
-      harnessId,
-      providerId,
-      baseUrl,
-      modelTiers,
-    });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-/** Detach a stored Proxied Provider pairing. */
-export const removeProviderPairing = async (
-  harnessId: string,
-  providerId: string,
-) => {
-  try {
-    return await _invoke('remove_provider_pairing', { harnessId, providerId });
-  } finally {
-    setProviderListPromise(null);
-  }
-};
-
-// ── Provider usage (Accounts & Usage panel) ────────────────────────────────
-//
-// Generated from `crate::services::usage::{ProviderUsage, UsageWindow}`
-// (issue #404). Rust uses `#[serde(rename = "...")]` + matching
-// `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
-// mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
-// the wire, the rest are snake_case.
-export type { UsageWindow, UsageAmount, UsageMeter, ProviderUsage, BillingBalance, ProviderMeters };
-
-/** The detection-gated Providers page rows: one entry per provider relevant to
- *  this host, each carrying its Usage Meters (or a "usage not tracked" marker).
- *  Reuses the `ProviderUsage` wire shape (issue #574). */
-export const getProviderMeters = (forceRefresh: boolean) =>
-  _invoke<ProviderMeters[]>('get_provider_meters', { forceRefresh });
-
-
-/** Observed MSP session telemetry for one Muse Agent Node (issue #1680).
- *  This is **not** a Usage Meter — token counts are local session facts,
- *  never remaining account quota. `null` when the node has no observations. */
-export type { ObservedMuseSessionTelemetry };
-export const MUSE_SESSION_TELEMETRY_EVENT = 'muse-session-telemetry';
-export const getMuseSessionTelemetry = (nodeId: number) =>
-  _invoke<ObservedMuseSessionTelemetry | null>('get_muse_session_telemetry', { nodeId });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //
@@ -1482,11 +1196,9 @@ export const getRootCertMobileconfig = () =>
 export const getAppIdentifier = () =>
   _invoke<string>('get_app_identifier');
 
-/** Test-only: clear the module-level provider caches between cases. Exported
- *  with a leading-underscore name so accidental production use is loud. */
-export function __resetProviderCachesForTests(): void {
-  resetProviderCachesForTests();
-}
+// (`__resetProviderCachesForTests` moved to `./tauri/provider` — issue #1656
+// Phase 2 — first facet. The `export * from './tauri/provider'` near the
+// top of this file re-exports it so existing tests continue to work.)
 
 // ── Autopilot Circuits (spec #1205 / walking skeleton #1206) ─────────────
 import type { AutopilotCircuit } from '../types/generated/AutopilotCircuit';

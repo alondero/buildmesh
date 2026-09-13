@@ -11,11 +11,13 @@
 //! | [`pairings`]       | Pairing resolution — stored-pairing lookups, attach-form defaults, ordering |
 //! | [`pairing_compat`] | Pairing compatibility matching — descriptor extractor, decision, predicate |
 //! | [`default_provider`] | Default-provider precedence resolver |
+//! | [`cascade`]        | Shared per-harness cascade (`explicit > mesh_override > mesh_legacy > application`) + capability mask — single source of truth for the resolver that the spawn path AND the IPC `get_resolved_harness_view` (issue #1656) both call |
 //!
 //! See the [module-level docs](super) for what concerns each top-level
 //! `preferences` submodule owns.
 
 pub mod accounts;
+pub mod cascade;
 pub mod catalog;
 pub mod default_provider;
 pub mod harness;
@@ -74,3 +76,15 @@ pub(crate) use pairing_compat::pairing_can_potentially_match;
 
 #[allow(unused_imports)]
 pub use default_provider::resolve_default_provider;
+
+// ----- Re-exports: cascade ------------------------------------------------
+//
+// Shared cascade helpers (issue #1656). Both the spawn pipeline
+// (`agent::capabilities::resolve_agent_config`) and the IPC resolver
+// (`commands::preferences::get_resolved_harness_view`) call into this
+// module so the cascade order lives in exactly one place.
+#[allow(unused_imports)]
+pub use cascade::{
+    apply_capability_mask, field_inputs, harness_config_str, resolve_field, CapabilityMaskForResolver,
+    HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
+};

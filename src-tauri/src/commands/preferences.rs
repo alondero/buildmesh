@@ -7,10 +7,16 @@
 //! worker, NOT the bounded tokio pool. Issue #1380 review point 4.
 
 use crate::preferences::{
-    self, AppPreferences, HarnessConfigValue, ModelTiers, PairingVerification, ProviderAccount,
-    ProviderPairing,
+    self, AppPreferences, CapabilityMaskForResolver, HarnessConfigField, HarnessConfigValue,
+    HarnessProfile, ModelTiers, PairingVerification, ProviderAccount, ProviderPairing,
+    ResolvedCascadeView,
 };
+use crate::preferences::resolver::cascade::{
+    apply_capability_mask, field_inputs, harness_config_str,
+};
+use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Emitter};
+use ts_rs::TS;
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
 /// a missing or malformed file yields `AppPreferences::default()`.
@@ -554,4 +560,424 @@ pub fn clear_harness_default(profile_id: String) -> Result<(), String> {
     let mut prefs = preferences::load()?;
     preferences::remove_harness_default(&mut prefs, &profile_id);
     preferences::save(prefs)
+}
+
+// ---------------------------------------------------------------------------
+// Resolved harness view (issue #1656)
+// ---------------------------------------------------------------------------
+//
+// Single IPC entry point that returns the full per-harness cascade — the
+// Settings modal and the spawn menu both consume this so the UI no longer
+// reconstructs the cascade client-side. The spawn path
+// (`agent::capabilities::resolve_agent_config`) computes the same value at
+// process launch; both call sites route through
+// `preferences::resolver::cascade` so the helper-level cascade tests
+// (`agent::capabilities::tests::resolver_cascade_*`) protect both.
+//
+// The IPC returns the UN-MASKED layer breakdown + the capability-masked
+// resolved value. The UI renders "inherited from application" / "overridden
+// by mesh" / "no value" hints from the layer breakdown; the resolved value
+// already passed the same capability mask the spawn path enforces.
+
+/// Per-harness cascade view returned by [`get_resolved_harness_view`].
+/// Carries the harness profile + the four-layer breakdown for both `model`
+/// and `effort` + the capability-masked resolved value.
+///
+/// **Generated** to `src/types/generated/ResolvedHarnessView.ts`. The IPC
+/// `cmd="get_resolved_harness_view"` is the wire-level mirror; the modal
+/// consumes this struct verbatim (no client-side merge).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ResolvedHarnessView.ts")]
+pub struct ResolvedHarnessView {
+    /// The harness profile id the view was computed for. The UI can use
+    /// this as a React `key` so a refreshed view re-keys the card without
+    /// leaking stale state.
+    pub harness_id: String,
+    /// Optional mesh id the view was computed against. `None` when the
+    /// caller asked for the application-level only view (no mesh override
+    /// layer). The settings modal passes `None`; the Mesh Properties tab
+    /// passes the active mesh id so the mesh_override + mesh_legacy layers
+    /// participate.
+    ///
+    /// `#[ts(as = "Option<i32>")]` mirrors the project convention (CLAUDE.md
+    /// hard rule: 64-bit ints need the annotation so TS sees `number`, not
+    /// `bigint`). Buildmesh DBs treat `mesh_id` as ROWID and JS already
+    /// loses precision past 2^53, so the `i32` ceiling is safe in practice.
+    /// ts-rs does NOT cross `as = "i32"` over `Option<T>` — the annotation
+    /// must name the wrapped type explicitly (matches every other
+    /// `Option<i64>` mesh_id in the repo, e.g. `pipeline.rs`,
+    /// `circuit/model.rs`, `telemetry.rs`, `ws_ticket.rs`).
+    #[ts(as = "Option<i32>")]
+    pub mesh_id: Option<i64>,
+    /// Resolved harness profile (built-in or stored user profile). `None`
+    /// when the id doesn't name a known harness — the UI surfaces this as
+    /// "unknown harness" rather than fabricating a profile.
+    pub resolved_profile: Option<HarnessProfile>,
+    /// Resolved executor id (matches [`Provider::adapter()`] for the
+    /// harness). `None` when the harness id isn't known — the resolver
+    /// does NOT fabricate a `Provider::from_db_str` default ("anthropic")
+    /// because that would mislead the UI into thinking we have a
+    /// concrete adapter for the unknown id. See the IPC command's
+    /// executor-resolution logic for the "known id but binary
+    /// detection fails" path (still `Some(...)`).
+    pub resolved_executor: Option<String>,
+    /// Harness capability descriptor (model override + effort control +
+    /// extra args + …). `None` when the harness is unknown — same
+    /// fallback shape as `resolved_profile`.
+    pub capabilities: Option<CapabilityMaskForResolver>,
+    /// Per-harness default from `AppPreferences.harness_defaults`. The
+    /// sparse map only carries an entry when the user explicitly set a
+    /// default; otherwise the layer is empty and the cascade falls through.
+    pub application_default: HarnessConfigValue,
+    /// Per-Mesh override from `meshes.harness_overrides[harness_id]`.
+    /// `None` when no mesh id was passed OR when the mesh has no override
+    /// for this harness (the sparse-map invariant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_override: Option<HarnessConfigValue>,
+    /// Per-Mesh legacy `meshes.model` / `meshes.effort` columns. `None` on
+    /// a healthy v33+ DB (the migration copied non-empty legacy values
+    /// into `mesh_override["claude"]`). Surfaced so a pre-v33 read shape
+    /// still resolves through the same IPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_legacy: Option<HarnessConfigValue>,
+    /// Cascade breakdown for the `model` field. Includes all four layers
+    /// plus the capability-masked resolved value.
+    pub model: ResolvedCascadeView,
+    /// Cascade breakdown for the `effort` field. Same shape as `model`.
+    pub effort: ResolvedCascadeView,
+}
+
+/// Compute the resolved harness view for one profile id (issue #1656).
+/// Pure of side effects — reads `AppPreferences` + the optional mesh's
+/// `harness_overrides` + the optional mesh's legacy `model`/`effort`
+/// columns + the harness profile / capability catalog.
+///
+/// `mesh_id == None` skips the per-Mesh layers so the IPC can be called
+/// from the App Settings modal without an active mesh context.
+#[command]
+pub fn get_resolved_harness_view(
+    harness_id: String,
+    mesh_id: Option<i64>,
+) -> Result<ResolvedHarnessView, String> {
+    let trimmed = harness_id.trim();
+    if trimmed.is_empty() {
+        return Err("harness_id must be a non-empty string".to_string());
+    }
+    let harness_id = trimmed.to_string();
+
+    // Application layer (always present, may be `EMPTY_DEFAULT`).
+    let prefs = preferences::load()?;
+    let application_default = prefs
+        .harness_defaults
+        .get(&harness_id)
+        .cloned()
+        .unwrap_or_default();
+
+    // Per-Mesh layers — only fetched when a mesh_id was supplied.
+    let (mesh_override, mesh_legacy) = match mesh_id {
+        Some(id) => read_mesh_layers(id, &harness_id)?,
+        None => (None, None),
+    };
+
+    // Harness profile + capabilities + executor (canonical resolver path).
+    //
+    // `resolved_executor` is `None` only when the harness id is unknown
+    // (no built-in adapter, no stored HarnessProfile). For KNOWN
+    // harnesses, we resolve through the executor unconditionally —
+    // `resolved_harness_profile` requires a binary-detection step that
+    // can be `None` even for a known id (e.g. on a test machine without
+    // the harness installed). Tying the executor to the binary-detection
+    // outcome would understate the resolver's contract.
+    let resolved_profile = preferences::resolved_harness_profile(&harness_id);
+    let capabilities = preferences::harness_capabilities_for(&harness_id);
+    let resolved_executor = capabilities
+        .as_ref()
+        .map(|_| {
+            preferences::resolve_harness_provider(&harness_id)
+                .adapter()
+                .id()
+                .to_string()
+        });
+
+    // Capability mask descriptor — same fields the spawn pipeline reads.
+    let mask_descriptor = capabilities
+        .as_ref()
+        .map(|caps| CapabilityMaskForResolver {
+            supports_model_override: caps.supports_model_override,
+            effort_control: caps.effort_control.clone(),
+        });
+
+    // Build the per-field cascade + apply the capability mask.
+    let model = build_cascade_view(
+        HarnessConfigField::Model,
+        None,
+        mesh_override.as_ref(),
+        mesh_legacy.as_ref(),
+        &application_default,
+        mask_descriptor.as_ref(),
+    );
+    let effort = build_cascade_view(
+        HarnessConfigField::Effort,
+        None,
+        mesh_override.as_ref(),
+        mesh_legacy.as_ref(),
+        &application_default,
+        mask_descriptor.as_ref(),
+    );
+
+    Ok(ResolvedHarnessView {
+        harness_id,
+        mesh_id,
+        resolved_profile,
+        resolved_executor,
+        capabilities: mask_descriptor,
+        application_default,
+        mesh_override,
+        mesh_legacy,
+        model,
+        effort,
+    })
+}
+
+/// Read the two per-Mesh layers (override map entry + legacy
+/// `meshes.model`/`meshes.effort` columns). Both are `None` for a fresh
+/// Mesh that has never set an override; legacy columns are `None` on a
+/// healthy v33+ DB.
+fn read_mesh_layers(
+    mesh_id: i64,
+    harness_id: &str,
+) -> Result<(Option<HarnessConfigValue>, Option<HarnessConfigValue>), String> {
+    let row = match crate::db::get_mesh_by_id(mesh_id) {
+        Ok(r) => r,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok((None, None)),
+        Err(e) => return Err(format!("failed to load mesh {mesh_id}: {e}")),
+    };
+    let mesh_override = row.harness_overrides.get(harness_id).cloned();
+    // Legacy columns are inert post-v33 (the migration copied non-empty
+    // values into `mesh_override["claude"]`). Surface them only when the
+    // migration hasn't run on this row, so a stale read shape still
+    // produces a correct cascade.
+    let legacy = HarnessConfigValue {
+        model: row.model.clone(),
+        effort: row.effort.clone(),
+    };
+    let mesh_legacy = if legacy.model.is_some() || legacy.effort.is_some() {
+        Some(legacy)
+    } else {
+        None
+    };
+    Ok((mesh_override, mesh_legacy))
+}
+
+/// Build one cascade view (model or effort) from the four layers + apply
+/// the capability mask. Pulled out so the two fields share one code path.
+fn build_cascade_view(
+    field: HarnessConfigField,
+    explicit: Option<&HarnessConfigValue>,
+    mesh_override: Option<&HarnessConfigValue>,
+    mesh_legacy: Option<&HarnessConfigValue>,
+    application: &HarnessConfigValue,
+    mask: Option<&CapabilityMaskForResolver>,
+) -> ResolvedCascadeView {
+    let layer_str = |src: Option<&HarnessConfigValue>| -> Option<String> {
+        src.and_then(|v| harness_config_str(v, field))
+    };
+    let view = ResolvedCascadeView::for_field(field_inputs(
+        explicit
+            .and_then(|v| harness_config_str(v, field))
+            .as_deref(),
+        layer_str(mesh_override).as_deref(),
+        layer_str(mesh_legacy).as_deref(),
+        harness_config_str(application, field).as_deref(),
+    ));
+    match mask {
+        Some(m) => apply_capability_mask(view, field_name(field), m),
+        // Unknown harness → no capability mask; return the un-masked
+        // cascade so the UI displays "no value" rather than fabricating
+        // one. The `resolved_profile == None` arm in the caller surfaces
+        // the unknown-harness state for the modal to render.
+        None => view,
+    }
+}
+
+/// String field name passed to [`apply_capability_mask`]. Mirrors the
+/// mask's discriminator so the mask can pick the right gate.
+fn field_name(field: HarnessConfigField) -> &'static str {
+    match field {
+        HarnessConfigField::Model => "model",
+        HarnessConfigField::Effort => "effort",
+    }
+}
+
+#[cfg(test)]
+mod resolved_view_tests {
+    //! Cascade pin tests for [`get_resolved_harness_view`] (issue #1656).
+    //!
+    //! The spawn pipeline (`agent::capabilities::resolve_agent_config`) and
+    //! the IPC resolver view share the same cascade helper
+    //! (`preferences::resolver::resolve_field`); the helper-level cascade
+    //! tests in `agent::capabilities::tests` already gate both call sites.
+    //! The tests below pin the IPC-specific shape:
+    //!
+    //! * `mesh_override > application` precedence (issue #1151 layer 2).
+    //! * Capability mask drops unsupported fields on the resolved value.
+    //! * Unknown harness id returns `resolved_profile = None` rather than
+    //!   silently falling back through the resolver (issue #1148 AC #5).
+    //! * Empty input is rejected (matches the validator pattern).
+
+    use super::*;
+    use crate::agent::capabilities::EffortControlKind;
+    use crate::preferences::resolver::{
+        apply_capability_mask as cascade_apply_capability_mask, field_inputs as cascade_field_inputs,
+    };
+
+    #[test]
+    fn application_default_wins_when_no_mesh_override() {
+        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
+            None, None, None, Some("opus-4"),
+        ));
+        assert_eq!(view.resolved.as_deref(), Some("opus-4"));
+        assert_eq!(view.layers.application.as_deref(), Some("opus-4"));
+    }
+
+    #[test]
+    fn mesh_override_beats_application_default() {
+        // The IPC builder stitches mesh_override above application in
+        // `build_cascade_view`; pin that ordering here so a future refactor
+        // can't silently drop layer-2 precedence.
+        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
+            None,
+            Some("claude-mesh-override"),
+            None,
+            Some("opus-app-default"),
+        ));
+        assert_eq!(view.resolved.as_deref(), Some("claude-mesh-override"));
+        assert_eq!(
+            view.layers.mesh_override.as_deref(),
+            Some("claude-mesh-override")
+        );
+        assert_eq!(view.layers.application.as_deref(), Some("opus-app-default"));
+    }
+
+    #[test]
+    fn capability_mask_drops_unsupported_model_on_resolved_value() {
+        // Mirror of `capability_mask_drops_model_when_unsupported` from
+        // `preferences::resolver::cascade::tests` — the same helper backs
+        // both the spawn path and the IPC, so this is a redundant-but-
+        // useful pin at the IPC layer.
+        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
+            None, None, None, Some("opus-4"),
+        ));
+        let caps = CapabilityMaskForResolver {
+            supports_model_override: false,
+            effort_control: EffortControlKind::None,
+        };
+        let masked = cascade_apply_capability_mask(view, "model", &caps);
+        assert_eq!(masked.resolved, None);
+        // The un-masked layer breakdown is preserved so the UI can still
+        // render "configured but not applied" hints.
+        assert_eq!(masked.layers.application.as_deref(), Some("opus-4"));
+    }
+
+    #[test]
+    fn unknown_harness_id_is_handled_in_resolver_layer() {
+        // `resolved_harness_profile` returns `None` for unknown ids
+        // (mirrors `is_known_harness_id == false`); pin the contract.
+        let profile = preferences::resolved_harness_profile("__definitely-not-a-real-id__");
+        assert!(
+            profile.is_none(),
+            "unknown harness id must not fabricate a profile"
+        );
+        let caps = preferences::harness_capabilities_for("__definitely-not-a-real-id__");
+        assert!(
+            caps.is_none(),
+            "unknown harness id must not surface a capability descriptor"
+        );
+    }
+
+    #[test]
+    fn unknown_harness_id_returns_none_executor_via_ipc() {
+        // End-to-end pin: invoking the IPC with an unknown harness id
+        // returns a view with `resolved_profile: None`,
+        // `resolved_executor: None`, and `capabilities: None`. The IPC
+        // must NOT fabricate an executor from `Provider::from_db_str`'s
+        // Anthropic default — the UI relies on these `None`s to render
+        // "unknown harness" instead of pretending to have one.
+        let tmp = std::env::temp_dir().join(format!(
+            "buildmesh-resolved-view-unknown-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        crate::preferences::init_for_tests(tmp);
+        let view = get_resolved_harness_view(
+            "__definitely-not-a-real-id__".to_string(),
+            None,
+        )
+        .expect("IPC must succeed even for an unknown harness id");
+        assert!(
+            view.resolved_profile.is_none(),
+            "unknown harness id must not fabricate a profile"
+        );
+        assert!(
+            view.capabilities.is_none(),
+            "unknown harness id must not surface capabilities"
+        );
+        assert_eq!(
+            view.resolved_executor, None,
+            "unknown harness id must not fabricate an executor (would mislead the UI)"
+        );
+        crate::preferences::reset_for_tests();
+    }
+
+    #[test]
+    fn empty_harness_id_is_rejected_at_the_command_boundary() {
+        // Pin the validation contract: an empty / whitespace harness id is
+        // rejected with a clear error rather than silently resolving to
+        // the Anthropic fallback.
+        let result = get_resolved_harness_view("   ".to_string(), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("non-empty"));
+    }
+
+    #[test]
+    fn known_harness_id_resolves_to_known_profile() {
+        // Round-trip a built-in id through the resolver and confirm the
+        // shape of the returned `ResolvedHarnessView` — executor matches
+        // the adapter id, capabilities carry `supports_model_override`
+        // (the Anthropic harness supports it).
+        //
+        // `resolved_harness_profile` does binary detection on the host
+        // (issue #535); on a test machine without the harness binaries
+        // installed the profile may be `None`. We don't pin that here —
+        // the executor + capability descriptors are what the UI consumes,
+        // and both come from the pure resolver (no host I/O).
+        //
+        // The preferences module must be initialised before any resolver
+        // call reads from disk — `init_for_tests` sets up a tempdir so the
+        // test never touches the user's real `preferences.json`.
+        let tmp = std::env::temp_dir().join(format!(
+            "buildmesh-resolved-view-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        crate::preferences::init_for_tests(tmp);
+        let view = get_resolved_harness_view("claude".to_string(), None)
+            .expect("'claude' is a known built-in harness id");
+        assert_eq!(view.harness_id, "claude");
+        // `resolved_executor` is `Some("anthropic")` for the 'claude'
+        // built-in — the harness is known so the resolver resolves
+        // through the canonical Anthropic adapter. (`Option<String>`,
+        // not String, so unknown harnesses surface `None` rather than
+        // fabricating an executor — see the IPC command's docstring.)
+        assert_eq!(view.resolved_executor.as_deref(), Some("anthropic"));
+        let caps = view.capabilities.expect("built-in caps must be present");
+        assert!(
+            caps.supports_model_override,
+            "anthropic harness must report model override support"
+        );
+        crate::preferences::reset_for_tests();
+    }
 }
