@@ -28,11 +28,17 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
         map.get(key).cloned()
     }
 
-    /// A short conditional mutation tied to the current incarnation. The
-    /// callback must not reenter the registry or perform external I/O.
-    pub(crate) fn with_current<R>(&self, key: &K, apply: impl FnOnce(&V) -> R) -> Option<R> {
-        let map = self.processes.lock().unwrap();
-        map.get(key).map(|value| apply(value.as_ref()))
+    /// Replace only the observed incarnation. No caller code executes under
+    /// the map lock; retirement can be coordinated outside the registry.
+    pub(crate) fn replace_if_current(&self, key: K, expected: Option<&Arc<V>>, value: Arc<V>) -> bool {
+        let mut map = self.processes.lock().unwrap();
+        let matches = match (map.get(&key), expected) {
+            (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
+            (None, None) => true,
+            _ => false,
+        };
+        if matches { map.insert(key, value); }
+        matches
     }
 
     /// Insert a new entry. Replaces any existing entry for the same key

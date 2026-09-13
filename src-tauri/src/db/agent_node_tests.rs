@@ -37,6 +37,20 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn recovered_turn_accepts_sqlite_and_rfc3339_lifecycle_stamps() {
+        let completed = 1789324053252;
+        for stamp in ["1789321859469:2026-09-13T18:25:20.569845100+00:00",
+            "1789321859469:2026-09-13 18:25:20",
+            "1789321859469:2026-09-13 18:25:20.569"] {
+            assert!(crate::db::agent_turn_stamp_precedes(stamp, completed), "{stamp}");
+        }
+        for stamp in ["1789321859469:invalid", "bad:2026-09-13 18:25:20",
+            "1789321859469:2026-09-13 18:27:34"] {
+            assert!(!crate::db::agent_turn_stamp_precedes(stamp, completed), "{stamp}");
+        }
+    }
+
     fn insert_node(conn: &Connection, status: &str) -> i64 {
         conn.execute(
             "INSERT INTO agent_nodes (status) VALUES (?1)",

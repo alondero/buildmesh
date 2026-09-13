@@ -1526,7 +1526,7 @@ fn classify_step_turn(
     // Attaching review after a clean turn does not require historical PTY
     // buffering or a supported transcript. This applies only to the initial
     // source handoff; feedback gates must still prove a fresh response.
-    if node_id == "await_source" && review_turn_is_complete(view, node_id, agent_node.status)
+    if initial_review_handoff(view, node_id) && review_turn_is_complete(view, node_id, agent_node.status)
         && view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")).is_none()
     {
         let output = crate::coordinator::enrichment::assistant_report(&agent_node)
@@ -1624,6 +1624,12 @@ fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
                 target_node_id.as_deref() == Some("$source"),
         _ => false,
     }
+}
+
+fn initial_review_handoff(view: &RunView, node_id: &str) -> bool {
+    awaits_review_turn(view, node_id)
+        && !view.has_upstream_node_of_kind(node_id, |kind| matches!(kind,
+            CircuitNodeKind::InjectPty { .. } | CircuitNodeKind::SpawnAgentNode { .. }))
 }
 
 fn review_turn_is_complete(view: &RunView, node_id: &str, status: SessionStatus) -> bool {
@@ -2442,15 +2448,17 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 // A draft/paste is not an unchanged empty prompt. Native
                 // recovery waits until it has a usable input ownership stamp.
                 let (Some(stamp), Some(input)) = (stamp, input) else { continue; };
-                let completion = crate::coordinator::enrichment::native_turn_completion(&node);
+                let snapshot = crate::coordinator::enrichment::native_turn_completion(&node);
+                let completion = snapshot.as_ref().map(|snapshot| snapshot.completion.clone());
                 let completed_at_ms = completion.as_ref().map(|c| c.completed_at_ms).unwrap_or_default();
-                if recover_native_turn(completion, Some(&stamp), |completion| {
+                if recover_native_turn(completion, Some(&stamp), |_| {
                     let Ok(current) = db::get_agent_node_by_id(agent_node_id) else { return false; };
                     current.status == SessionStatus::Running
                         && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
                         && Some(&stamp) == db::agent_turn_stamp(agent_node_id).ok().flatten().as_ref()
                         && Some(&input) == crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id).as_ref()
-                        && crate::coordinator::enrichment::native_turn_completion(&current).as_ref() == Some(completion)
+                        && current.cli_session_id == node.cli_session_id
+                        && snapshot.as_ref().is_some_and(|snapshot| snapshot.is_current())
                 }, || {
                     crate::node_turn::recover_ready(agent_node_id, app,
                         crate::agent::session_lifecycle::HookSignalDetail {
@@ -2807,6 +2815,16 @@ mod tests {
         permission.state = RunState::Cancelled;
         db::write_conn().execute("UPDATE agent_nodes SET status='completed' WHERE id=?1", [node.id]).unwrap();
         assert!(classify_step_turn(&active_run(85), &permission, "await_source").is_none());
+        let mut renamed = view.clone();
+        renamed.graph.nodes.iter_mut().find(|node| node.id == "await_source").unwrap().id = "handoff".into();
+        for edge in &mut renamed.graph.edges {
+            if edge.from == "await_source" { edge.from = "handoff".into(); }
+            if edge.to == "await_source" { edge.to = "handoff".into(); }
+        }
+        renamed.steps.iter_mut().find(|step| step.node_id == "await_source").unwrap().node_id = "handoff".into();
+        assert!(classify_step_turn(&active_run(85), &renamed, "handoff").is_some(),
+            "initial handoff depends on graph role rather than a template's node ID");
+        assert!(!initial_review_handoff(&view, "await_fixes"));
         let turn = classify_step_turn(&active_run(85), &view, "await_source").unwrap();
         advance(&mut view, &CircuitEvent::TurnClassified { node_id: "await_source".into(),
             classification: turn.classification, output: Some(turn.output) });

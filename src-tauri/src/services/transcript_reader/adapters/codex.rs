@@ -48,7 +48,14 @@ impl TranscriptAdapter for CodexAdapter {
         let mut completion = None;
         let mut started_turn = None;
         for line in lines.lines() {
-            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            if line.trim().is_empty() { continue; }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                // Damage before a later complete turn must not poison the
+                // whole window. Damage after completion may conceal new work.
+                completion = None;
+                started_turn = None;
+                continue;
+            };
             let payload = &value["payload"];
             match (value["type"].as_str(), payload["type"].as_str()) {
                 (Some("event_msg"), Some("task_started")) => {
@@ -56,10 +63,13 @@ impl TranscriptAdapter for CodexAdapter {
                     completion = None;
                 }
                 (Some("event_msg"), Some("task_complete")) => {
-                    let turn_id = payload["turn_id"].as_str().filter(|id| !id.is_empty())?;
-                    if started_turn.as_deref().is_some_and(|id| id != turn_id) { return None; }
-                    let completed_at_ms = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?.timestamp_millis();
-                    completion = Some(super::super::NativeTurnCompletion { turn_id: turn_id.into(), completed_at_ms });
+                    let turn_id = payload["turn_id"].as_str().filter(|id| !id.is_empty()
+                        && started_turn.as_deref().is_none_or(|started| started == *id));
+                    let completed_at_ms = value["timestamp"].as_str()
+                        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                        .map(|timestamp| timestamp.timestamp_millis());
+                    completion = turn_id.zip(completed_at_ms).map(|(turn_id, completed_at_ms)|
+                        super::super::NativeTurnCompletion { turn_id: turn_id.into(), completed_at_ms });
                 }
                 (Some("event_msg"), Some("token_count")) | (Some("token_usage_record"), _) => {}
                 // User input, tool activity, aborts, and unknown records after

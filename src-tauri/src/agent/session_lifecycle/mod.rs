@@ -852,8 +852,13 @@ pub(crate) fn recover_turn_completed(
     sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail,
     stamp: &str, input: &str, completed_at_ms: i64,
 ) -> Result<bool, String> {
-    let committed = crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, input, completed_at_ms,
-        || db::complete_agent_turn_if_current(node_id, stamp).map_err(|error| error.to_string()))?;
+    let committed = {
+        // Acquire SQLite before the per-agent input guard. Waiting for the
+        // writer must never freeze registry access or terminal keystrokes.
+        let conn = db::write_conn();
+        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, input, completed_at_ms,
+            || db::complete_agent_turn_if_current_inner(&conn, node_id, stamp).map_err(|error| error.to_string()))?
+    };
     if committed { emit_turn_completed(sink, node_id, detail); }
     Ok(committed)
 }

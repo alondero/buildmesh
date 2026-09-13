@@ -26,7 +26,7 @@ fn transcript_dir(node: &AgentNode) -> String {
     env::node_working_path(node).spawn_path
 }
 
-pub(crate) fn native_turn_completion(node: &AgentNode) -> Option<transcript_reader::NativeTurnCompletion> {
+pub(crate) fn native_turn_completion(node: &AgentNode) -> Option<transcript_reader::NativeTurnSnapshot> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
     if !adapter.produces_readable_transcript() { return None; }
     transcript_reader::read_native_turn_completion(

@@ -37,9 +37,49 @@ No live run, agent, preference, or transcript was modified during inspection.
    validation/publication races. Native completion now rejects later activity,
    partial records, mismatched turns, malformed timestamps, newer sessions,
    drafts, and newer submitted input. The final DB update compares the complete
-   observed lifecycle stamp while registry and writer locks exclude process
-   replacement and input changes. It emits lifecycle events only after the
+   observed lifecycle stamp while a per-agent input guard excludes input and
+   retirement of that incarnation. It emits lifecycle events only after the
    conditional update succeeds and those locks are released.
+
+## Revisions following external review
+
+The original global registry lock across SQLite was a valid contention
+finding. It has been removed. Recovery acquires SQLite before the per-agent
+input guard, so waiting for the database writer holds no PTY locks. Replacement
+and removal retire the observed process under that same per-agent guard before
+changing membership. A concrete compare-and-replace operation retries racing
+inserts; the registry no longer executes arbitrary recovery callbacks under
+its global map lock. Other terminals remain accessible during the DB mutation.
+
+The timestamp gate now accepts both RFC3339 and SQLite UTC timestamps,
+including fractional seconds. It still rejects invalid timestamps. Strict
+ordering assumes host and WSL clocks are aligned; no tolerance was added,
+because accepting an earlier completion after a newer prompt would authorize
+stale work. Uncertain native evidence retains the existing fallback path.
+
+Blank lines, including trailing whitespace without a newline, are harmless.
+Malformed historical records no longer poison a later explicit completion.
+Malformed records *after* the latest completion still invalidate it: they may
+conceal a new user turn or tool activity. Ignoring arbitrary trailing corruption
+would weaken the freshness guarantee, so that part of the suggestion was not
+adopted. Incomplete JSON records remain ineligible until publication finishes.
+
+Native completion is parsed once. A short-lived snapshot checks file size and
+modification time before publication rather than rereading and reparsing the
+whole tail. This is a read-stability check, not the durable report identity.
+Initial handoff uses graph ancestry rather than the literal `await_source` ID.
+
+Follow-up verification reproduced three failures before the fixes: unrelated
+registry access timed out during recovery, SQLite-format timestamps were
+rejected, and blank/historical damaged lines discarded valid completion.
+`scripts/check.ps1 rust -SerialRust` then passed 3,330 library tests and 18
+integration tests (19 library tests and one doctest ignored), including the
+contention, retirement, timestamp, parsing, metadata, and renamed-gate checks.
+Clippy completed with 18 warnings in untouched files and none in changed files.
+The final native-completion recheck passed both tests, including same-length
+file modification detection.
+No additional code-review loop or live circuit run was started; live end-to-end
+sign-off remains pending.
 
 ## Evidence and limits
 
