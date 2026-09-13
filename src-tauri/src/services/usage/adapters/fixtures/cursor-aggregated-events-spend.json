@@ -1,0 +1,13 @@
+{
+  "aggregations": [
+    {
+      "modelIntent": "claude-4.5-sonnet",
+      "inputTokens": "120000",
+      "outputTokens": "8000",
+      "totalCents": 98765
+    }
+  ],
+  "totalInputTokens": "120000",
+  "totalOutputTokens": "8000",
+  "totalCostCents": 98765
+}

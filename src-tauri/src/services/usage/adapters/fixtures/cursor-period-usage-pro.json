@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "planUsage": {
+    "limit": 40000,
+    "totalSpend": 23222,
+    "includedSpend": 23222,
+    "bonusSpend": 0,
+    "remaining": 16778,
+    "totalPercentUsed": 58.055,
+    "autoPercentUsed": 40.0,
+    "apiPercentUsed": 18.0
+  },
+  "spendLimitUsage": {
+    "limitType": "individual",
+    "individualLimit": 5000,
+    "individualUsed": 1250,
+    "individualRemaining": 3750,
+    "pooledLimit": 0,
+    "pooledUsed": 0,
+    "pooledRemaining": 0,
+    "totalSpend": 1250
+  },
+  "billingCycleStart": 1751328000000,
+  "billingCycleEnd": 1754006400000
+}

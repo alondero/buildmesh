@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "spendLimitUsage": {
+    "limitType": "individual",
+    "individualLimit": 100000,
+    "individualUsed": 23456,
+    "individualRemaining": 76544,
+    "pooledLimit": 500000,
+    "pooledUsed": 123456,
+    "pooledRemaining": 376544,
+    "totalSpend": 23456
+  },
+  "billingCycleStart": 1751328000000,
+  "billingCycleEnd": 1754006400000
+}
