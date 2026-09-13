@@ -585,7 +585,8 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             head_repo_clone_url TEXT,
             source_pr_pinned_sha TEXT,
             signal_health TEXT,
-            worktree_path TEXT
+            worktree_path TEXT,
+            spawn_configuration TEXT
         );
 
         -- Node-level lifecycle ownership. Circuit cleanup intent and the

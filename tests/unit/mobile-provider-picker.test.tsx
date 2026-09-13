@@ -144,6 +144,21 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("sends the selected saved configuration while retaining its Spawn Option", async () => {
+    const fetch = mockApi(PROVIDERS.map((p) => p.id === "claude:custom-account" ? {
+      ...p,
+      configurations: [{ id: "proxy-max", name: "Proxy Max", spawn_option_id: p.id, model: "some-model", effort: "max", extra_args: null }],
+    } : p));
+    await openPicker();
+    fireEvent.click(screen.getByText("My Proxy configurations"));
+    fireEvent.click(screen.getByRole("button", { name: "Proxy Max" }));
+    await waitFor(() => {
+      const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "claude:custom-account", configuration_id: "proxy-max" });
+    });
+  });
+
   it("renders the wire glyph in a custom Proxied child's 28px chip", async () => {
     await openPicker();
 

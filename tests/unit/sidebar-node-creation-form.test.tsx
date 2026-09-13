@@ -99,7 +99,7 @@ describe('NodeCreationForm', () => {
 
     await userEvent.click(screen.getByRole('menuitem', { name: /Agy/ }));
 
-    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', undefined);
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', undefined, undefined);
   });
 
   it('selects a specific provider in the mesh root from the open dropdown when alt-clicked', async () => {
@@ -107,7 +107,7 @@ describe('NodeCreationForm', () => {
 
     fireEvent.click(screen.getByRole('menuitem', { name: /Agy/ }), { altKey: true });
 
-    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', false);
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', false, undefined);
   });
 
   it('reflects the resolved default provider in the + button tooltip on hover', async () => {

@@ -62,6 +62,7 @@ pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, ho
         is_proxied: false,
         group_key: profile.id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
+        configurations: Vec::new(),
     })
 }
 
@@ -115,6 +116,7 @@ pub(super) fn provider_info_for_pairing(
         is_proxied: true,
         group_key: pairing.harness_id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
+        configurations: Vec::new(),
     })
 }
 
@@ -250,14 +252,25 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let profiles = crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles());
     let profiles = crate::agent::detection::preferred_profiles(&profiles, Platform::current(),
         if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
-    compose_provider_menu(
+    let mut menu = compose_provider_menu(
         profiles,
         accounts,
         pairings,
         Platform::current(),
         &crate::preferences::harness_order(),
         &crate::preferences::proxied_provider_order(),
-    )
+    );
+    let configurations = crate::preferences::load()
+        .map(|p| p.spawn_configurations)
+        .unwrap_or_default();
+    for option in &mut menu {
+        option.configurations = configurations
+            .iter()
+            .filter(|c| c.spawn_option_id == option.id)
+            .cloned()
+            .collect();
+    }
+    menu
 }
 
 /// Within each harness bucket, sort **Proxied Provider** children by the
@@ -442,6 +455,7 @@ mod tests {
             is_proxied: false,
             group_key: id.to_string(),
             capabilities: caps_all_false(id),
+            configurations: Vec::new(),
         }
     }
 
@@ -717,6 +731,7 @@ mod tests {
             is_proxied: true,
             group_key: harness_id.to_string(),
             capabilities: caps_all_false(harness_id),
+            configurations: Vec::new(),
         }
     }
 

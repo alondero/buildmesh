@@ -356,6 +356,9 @@ pub struct ProviderInfo {
     /// offering settings it would silently drop. Generated to
     /// `src/types/generated/ProviderInfo.ts`.
     pub capabilities: crate::agent::capabilities::HarnessCapabilities,
+    /// Saved configurations offered under this Spawn Option on every client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configurations: Vec<crate::preferences::spawn_configurations::SpawnConfiguration>,
 }
 
 /// Behaviour an agent provider must declare.

@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
+import { SpawnConfigurationMenu } from './SpawnConfigurationMenu';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 
 export interface GroupedProviderMenuProps {
@@ -11,7 +12,7 @@ export interface GroupedProviderMenuProps {
    *  shape — same fields `ProviderDropdown`/`SpawnButtonCluster` pass in. */
   providers: SpawnOption[];
   /** Called with `(providerId, altKey)` when the user picks a row. */
-  onSelect: (providerId: string, altKey: boolean) => void;
+  onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
   /** Optional filter (e.g. the archived-resume picker filters to
    *  `resumable: true`). Applied before grouping so the harness header
    *  is hidden when *all* its rows are filtered out. */
@@ -25,48 +26,18 @@ export interface GroupedProviderMenuProps {
    * repurpose `onSelect` because Escape is a dismiss, not a row pick.
    */
   onClose?: () => void;
+  configurationsEnabled?: boolean;
 }
 
-/**
- * Harness-grouped, always-expanded Spawn Menu (issue #575 / ADR-0016).
- *
- * The backend emits a flat `Vec<ProviderInfo>` already in harness order
- * with `group_key == harness_id`; this component is a pure render — it
- * buckets by `group_key`, keeps the input order within each bucket
- * (so the native row lands first), and renders:
- *
- *   * **Harness header** — the first non-proxied row in each bucket
- *     (`is_proxied === false`) is the clickable native spawn. The whole
- *     row is the button. A `filter` that removes the native row
- *     collapses the bucket to just children (no header) — code-review
- *     finding from issue #575: rendering a Proxied child with the
- *     "harness" badge would mislead the user.
- *   * **Proxied children** — every `is_proxied: true` row in the bucket
- *     is rendered indented as a child button.
- *
- * No hover submenus, no click-to-collapse — the issue calls for an
- * always-expanded flat list so the most common pick (e.g. Claude Code
- * native, or MiniMax via Claude Code) is one click.
- *
- * Issue #814 — WAI-ARIA menu semantics + keyboard nav. The menu now
- * declares `role="menu"` on the root and `role="menuitem"` on every
- * interactive row, with a roving tabindex so only the active row is in
- * the natural Tab order. ArrowDown/ArrowUp cycle focus with wrap-around,
- * Home/End jump to ends, and Escape closes (via `onClose`). The keyboard
- * handler mirrors the WAI-ARIA pattern used by `MeshItem` (issue #735)
- * and `KebabActions` in `GridNodeHeader` so the three menus (context,
- * kebab, spawn) feel identical.
- *
- * Issue #1720 follow-up — single-caret hover contract. Like a native
- * `<select>` dropdown there is exactly ONE highlighted row at any
- * time: the row at `activeIndex`. Hovering a row focuses it (and its
- * focus handler syncs the index), so the highlight moves to the
- * pointer instead of a second row lighting up; keyboard arrows move
- * the same caret (focus + index) back. Pointer and keyboard share one
- * state, so the two can never disagree. Rows therefore carry no CSS
- * `hover:` background paint.
- */
-export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose }: GroupedProviderMenuProps) {
+/** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
+ * opens capability-driven saved configurations. Pointer and keyboard share
+ * the same active parent row. */
+export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
+  const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
+  const editing = useRef(false);
+  const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && option.capabilities && (
+    option.capabilities.supports_model_override || option.capabilities.supports_effort_override || option.capabilities.supports_extra_args
+  ));
   // Group by `group_key`, preserving the backend's harness order and the
   // stable within-bucket order (native row first, then children in their
   // listed order). The filter is applied per-row BEFORE bucketing so a
@@ -116,6 +87,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   useAriaMenu({
     rootRef: menuRef,
     itemCount: flatItems.length,
+    itemSelector: '[data-spawn-id]',
     activeIndex,
     setActiveIndex,
     onClose: () => onClose?.(),
@@ -139,107 +111,61 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   }, [flatItems]);
 
   return (
-    <div
-      ref={menuRef}
-      className={className}
-      // Issue #814 — `role="menu"` + `aria-label` so AT announces
-      // "Select a provider, menu" when the dropdown opens. The
-      // `aria-label` is shared with the parent `ProviderDropdown`
-      // shell so the empty-state panel + menu are announced as one
-      // surface.
-      role="menu"
-      aria-label="Select a provider"
-    >
-      {groups.map(([groupKey, options]) => {
-        // `options[0]` is normally the native harness header (the
-        // backend builds it before appending proxied children for
-        // the same harness). When a `filter` is provided, the native
-        // row may have been filtered out, leaving the first child
-        // in its place — that row would then render with a
-        // misleading "harness" badge. Find the first non-proxied
-        // row explicitly so a filter-out harness header collapses
-        // gracefully (all surviving rows render as peers without
-        // the harness badge).
-        const native = options.find((o) => !o.is_proxied);
-        const proxiedChildren = options.filter((o) => o.is_proxied);
-        // The ONE caret row (keyboard focus == pointer hover, both
-        // routed through `activeIndex`) paints with the semantic
-        // selection surface. `bg-bg-card` is ~1/255 brighter than the
-        // `bg-bg-overlay` menu, so it was invisible — the same reason
-        // CommandOmnibar's listbox rows use `bg-bg-selection` for the
-        // active row. Hover is NOT painted in CSS: `onMouseEnter` moves
-        // the caret itself, so there is never a second lit row.
-        const activeId = flatItems[activeIndex]?.id;
-        return (
-          <div key={groupKey} data-spawn-group={groupKey} className="border-b border-border-subtle last:border-b-0">
-            {native && (
-              <button
-                type="button"
-                // Issue #814 — WAI-ARIA menuitem. Roving tabindex: only
-                // the active item is `tabIndex=0`, the rest stay at `-1`
-                // so Tab leaves the menu (handled by the parent container).
-                role="menuitem"
-                tabIndex={flatIndexById.get(native.id) === activeIndex ? 0 : -1}
-                data-spawn-id={native.id}
-                data-spawn-harness={native.harness_id}
-                onClick={(e) => { e.stopPropagation(); onSelect(native.id, e.altKey); }}
-                // Pointer entry: focus the row under the cursor
-                // (preventScroll so focusing inside the scrollable
-                // dropdown never jumps it). The event already carries
-                // the element — no DOM re-query needed.
-                onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
-                onFocus={() => syncCaretToFocus(native.id)}
-                className={`w-full text-left px-3 py-1.5 text-xs font-medium focus:outline-none flex items-center gap-2 ${
-                  native.id === activeId
-                    ? 'bg-bg-selection text-text-primary'
-                    : 'text-text-primary'
+    <div ref={menuRef} className={className} role="menu" aria-label="Select a provider">
+      {groups.map(([groupKey, options]) => (
+        <div key={groupKey} role="presentation" data-spawn-group={groupKey} className="border-b border-border-subtle last:border-b-0">
+          {options.map((option) => (
+            <div key={option.id} role="presentation" className="flex"
+              onMouseEnter={(e) => {
+                if (editing.current) return;
+                const anchor = e.currentTarget.querySelector<HTMLElement>('[data-spawn-id]');
+                anchor?.focus({ preventScroll: true });
+                setSubmenu(anchor && configurable(option) ? { option, anchor, keyboard: false } : null);
+              }}
+            >
+              <button type="button" role="menuitem"
+                tabIndex={flatIndexById.get(option.id) === activeIndex ? 0 : -1}
+                data-spawn-id={option.id} data-spawn-harness={option.harness_id}
+                aria-label={option.label}
+                aria-haspopup={configurable(option) ? 'menu' : undefined}
+                aria-expanded={configurable(option) ? submenu?.option.id === option.id : undefined}
+                onClick={(e) => { e.stopPropagation(); onSelect(option.id, e.altKey); }}
+                onMouseEnter={(e) => { if (!editing.current) e.currentTarget.focus({ preventScroll: true }); }}
+                onFocus={() => syncCaretToFocus(option.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowRight' && configurable(option)) {
+                    e.preventDefault(); e.stopPropagation();
+                    setSubmenu({ option, anchor: e.currentTarget, keyboard: true });
+                  } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                    setSubmenu(null);
+                  } else if (e.key === 'Escape' && submenu?.option.id === option.id) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSubmenu(null);
+                  }
+                }}
+                className={`min-w-0 flex-1 text-left py-1.5 pr-3 text-xs focus:outline-none flex items-center gap-2 ${option.is_proxied ? 'pl-7' : 'pl-3'} ${
+                  flatItems[activeIndex]?.id === option.id ? 'bg-bg-selection text-text-primary' : option.is_proxied ? 'text-text-secondary' : 'text-text-primary'
                 }`}
               >
-                <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
-                <span className="flex-1 truncate">{native.label}</span>
-                {/* The "native" badge clarifies the row is a harness
-                    launch, not a Proxied child — particularly useful
-                    for the bare-Claude subscription in a host with
-                    no other Claude-compatible accounts. */}
-                <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>
+                <ProviderIcon providerId={option.id} className="h-3.5 w-3.5 shrink-0" />
+                <span className="flex-1 truncate">{option.label}</span>
+                {!option.is_proxied && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
               </button>
-            )}
-            {proxiedChildren.length > 0 && (
-              <div className="pb-1">
-                {proxiedChildren.map((child) => (
-                  <button
-                    type="button"
-                    // Issue #814 — see above.
-                    role="menuitem"
-                    tabIndex={flatIndexById.get(child.id) === activeIndex ? 0 : -1}
-                    key={child.id}
-                    data-spawn-id={child.id}
-                    data-spawn-harness={child.harness_id}
-                    onClick={(e) => { e.stopPropagation(); onSelect(child.id, e.altKey); }}
-                    // See the native row: hover joins the keyboard's
-                    // single caret by focusing the entered row.
-                    onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
-                    onFocus={() => syncCaretToFocus(child.id)}
-                    className={`w-full text-left pl-7 pr-3 py-1 text-xs focus:outline-none flex items-center gap-2 ${
-                      child.id === activeId
-                        ? 'bg-bg-selection text-text-primary'
-                        : 'text-text-secondary'
-                    }`}
-                  >
-                    <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
-                    <span className="flex-1 truncate">{child.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
+              {configurable(option) && <button type="button" role="menuitem" tabIndex={-1} aria-label={`${option.label} configurations`}
+                aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}
+                className="px-2 text-xs text-text-secondary hover:bg-bg-selection"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const anchor = e.currentTarget.previousElementSibling as HTMLElement;
+                  setSubmenu({ option, anchor, keyboard: true });
+                }}
+              >›</button>}
+            </div>
+          ))}
+        </div>
+      ))}
+      {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu} onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
     </div>
   );
 }
-
-// `focusMenuItem` was moved into the `useAriaMenu` hook (issue #837).
-// The hook uses the same `querySelectorAll('[role="menuitem"]')` walk
-// so a re-rendered button (e.g. after a Proxied filter change) is
-// always reachable, even if a caller-side ref array went stale.

@@ -27,7 +27,7 @@ interface ProviderDropdownProps {
    */
   dropdownKey: string;
   providers: SpawnOption[];
-  onSelect: (providerId: string, altKey: boolean) => void;
+  onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
   /**
    * Issue #814 — Escape closes the dropdown. The parent (e.g. the
    * sidebar's `SpawnButtonCluster`) owns the `isOpen` state, so it must
@@ -37,6 +37,7 @@ interface ProviderDropdownProps {
    * so the two paths share the same close action.
    */
   onClose?: () => void;
+  configurationsEnabled?: boolean;
   /**
    * Issue #814 — stable id used by the parent's trigger button's
    * `aria-controls`. The id is mirrored onto the menu's outer div so the
@@ -48,7 +49,7 @@ interface ProviderDropdownProps {
   menuId?: string;
 }
 
-export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId }: ProviderDropdownProps) {
+export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, configurationsEnabled }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The single backend-derived list (issue #538 retired the
   // legacy enum-backed rows) is now grouped by `group_key` (== `harness_id`):
@@ -129,7 +130,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       {/* Issue #814 — forward `onClose` to `GroupedProviderMenu` so its
           keyboard handler (Escape → close) calls the same callback the
           parent's `useClickOutside` and outside-mousedown paths call. */}
-      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} />
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} configurationsEnabled={configurationsEnabled} />
     </div>
   );
 }

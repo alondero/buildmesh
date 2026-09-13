@@ -127,7 +127,7 @@ export function Sidebar() {
     openProbeTab('sessions');
   };
 
-  const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
+  const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => {
     setOpenDropdownFor(null);
     // Guard against a double-spawn: if a spawn for this mesh is already in
     // flight, ignore the click (the button is also disabled once the state
@@ -138,7 +138,7 @@ export function Sidebar() {
     // The create→activate→select-mesh dance + its rollback contract live in
     // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
-      const node = await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
+      const node = await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree, undefined, configurationId);
       activateNode(node.id);
     } catch (e) {
       console.error('Failed to create node:', e);

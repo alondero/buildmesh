@@ -151,7 +151,8 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// persistence read path remains independent of blueprint JSON and step IDs.
 /// v43 adds the durable node lifecycle lease table. Cleanup intent and
 /// transient spawn/cleanup ownership no longer live in historical run JSON.
-pub(crate) const SCHEMA_VERSION: u32 = 43;
+/// v44 adds the nullable saved spawn-configuration snapshot to agent nodes.
+pub(crate) const SCHEMA_VERSION: u32 = 44;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -463,6 +464,8 @@ const SPECS: &[ColumnSpec] = &[
     // NULL means the node predates this field or has never been deliberately
     // reset to a fresh conversation.
     ColumnSpec { version: 39, table: "agent_nodes", column: "session_started_at", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
+    // v44 — immutable saved spawn configuration snapshot used by the node.
+    ColumnSpec { version: 44, table: "agent_nodes", column: "spawn_configuration", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs

@@ -161,13 +161,47 @@ pub fn create_agent_node(
     head_repo_clone_url: Option<&str>,
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
+    create_agent_node_configured(
+        mesh_id, name, path, branch, env, provider, worktree_name, source_issue,
+        source_pr, source_pr_pinned_sha, use_worktree, head_repo_owner,
+        head_repo_clone_url, worktree_path, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_agent_node_configured(
+    mesh_id: i64,
+    name: &str,
+    path: &str,
+    branch: &str,
+    env: EnvType,
+    provider: &str,
+    worktree_name: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    use_worktree: bool,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    worktree_path: Option<&str>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> SqlResult<AgentNode> {
     let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
-    let db = write_conn();
-    create_agent_node_inner(
-        &db, mesh_id, name, path, branch, env, provider,
+    let snapshot = configuration.map(serde_json::to_string).transpose()
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let mut db = write_conn();
+    let tx = db.transaction()?;
+    let node = create_agent_node_inner(
+        &tx, mesh_id, name, path, branch, env, provider,
         worktree_name, source_issue, source_pr, source_pr_pinned_sha,
         use_worktree, head_repo_owner, head_repo_clone_url, worktree_path,
-    )
+    )?;
+    tx.execute(
+        "UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2",
+        params![snapshot, node.id],
+    )?;
+    tx.commit()?;
+    Ok(node)
 }
 
 /// Resolve the spawn `EnvType` from the harness config, the resolved
@@ -359,7 +393,7 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     }.to_string();
     let db = write_conn();
     db.execute(
-        "UPDATE agent_nodes SET provider = ?1, env = ?3 WHERE id = ?2",
+        "UPDATE agent_nodes SET provider = ?1, env = ?3, spawn_configuration = NULL WHERE id = ?2",
         params![provider, id, runtime],
     )?;
     Ok(())
@@ -953,4 +987,26 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
     }
 
     Ok(())
+}
+
+/// Read the immutable launch snapshot separately from the node wire projection.
+pub fn node_spawn_configuration(
+    node_id: i64,
+    provider: &str,
+) -> Result<Option<crate::preferences::spawn_configurations::SpawnConfiguration>, String> {
+    let db = super::try_read_conn().map_err(|e| e.to_string())?;
+    let raw: Option<String> = match db.query_row(
+        "SELECT spawn_configuration FROM agent_nodes WHERE id = ?1 AND provider = ?2",
+        params![node_id, provider],
+        |row| row.get(0),
+    ) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let value = raw
+        .map(|s| serde_json::from_str::<crate::preferences::spawn_configurations::SpawnConfiguration>(&s))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    Ok(value.filter(|c| c.spawn_option_id == provider))
 }

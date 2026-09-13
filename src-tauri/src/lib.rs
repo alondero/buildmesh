@@ -477,6 +477,9 @@ pub fn run() {
             // against the capability descriptor (issue #1148 AC #5).
             commands::preferences::set_harness_default,
             commands::preferences::clear_harness_default,
+            preferences::spawn_configurations::list_spawn_configurations,
+            preferences::spawn_configurations::save_spawn_configuration,
+            preferences::spawn_configurations::delete_spawn_configuration,
             // Resolved harness view (issue #1656) — single IPC entry that
             // returns the full per-harness cascade (four-layer breakdown +
             // capability-masked resolved value) for the Settings modal and

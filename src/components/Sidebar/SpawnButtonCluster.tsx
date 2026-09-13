@@ -65,7 +65,7 @@ interface SpawnButtonClusterProps {
   onSpawnDefault: (altKey: boolean) => void;
   /** Called when a provider row is picked from the open dropdown. `altKey`
    *  forwarded for the same reason as `onSpawnDefault`. */
-  onSelectProvider: (providerId: string, altKey: boolean) => void;
+  onSelectProvider: (providerId: string, altKey: boolean, configurationId?: string) => void;
   /** Optional — returns the default provider id for the cluster's tooltip.
    *  If omitted, the tooltip falls back to the generic "Add agent node".
    *  Hover/focus triggers a fetch; a rejection is swallowed because the
@@ -79,6 +79,7 @@ interface SpawnButtonClusterProps {
    *  buttons disable. Dropdowns should be closed by the parent in this case
    *  (the cluster does not auto-close). */
   isSpawning?: boolean;
+  configurationsEnabled?: boolean;
 }
 
 export function SpawnButtonCluster({
@@ -94,6 +95,7 @@ export function SpawnButtonCluster({
   getDefaultProvider,
   disabled,
   isSpawning,
+  configurationsEnabled = true,
 }: SpawnButtonClusterProps) {
   // Cache the default provider id for the tooltip so we don't refetch on
   // every render. The hover/focus handler triggers the fetch; click is
@@ -204,6 +206,7 @@ export function SpawnButtonCluster({
         <ProviderDropdown
           dropdownKey={dropdownKey}
           providers={providers}
+          configurationsEnabled={configurationsEnabled}
           onSelect={onSelectProvider}
           // Issue #814 — Escape closes the dropdown. The cluster re-uses
           // `onToggleDropdown` because toggling an open cluster is
