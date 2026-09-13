@@ -85,9 +85,40 @@ pub(crate) fn create_node_circuit_run_locked(
     max_rounds: i32,
     reviewer_provider: Option<String>,
 ) -> Result<i64, String> {
+    create_node_circuit_run_with_recovery_locked(db, node_id, selected_circuit_id, max_rounds, reviewer_provider, None)
+}
+
+pub(crate) fn create_node_circuit_run_recovery_locked(
+    db: &mut Connection,
+    recovery: super::recovery::ReviewRecovery,
+    max_rounds: i32,
+) -> Result<i64, String> {
+    create_node_circuit_run_with_recovery_locked(db, recovery.source_id, None, max_rounds, None, Some(recovery))
+}
+
+fn create_node_circuit_run_with_recovery_locked(
+    db: &mut Connection,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    max_rounds: i32,
+    reviewer_provider: Option<String>,
+    recovery: Option<super::recovery::ReviewRecovery>,
+) -> Result<i64, String> {
     let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
+    if recovery.is_some() {
+        // An already-live source can still be owned by terminal cleanup.
+        // Check under the same writer transaction that installs the borrower:
+        // existing cleanup wins; subsequent cleanup sees the live borrower.
+        let cleaning: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_node_lifecycle_leases WHERE node_id=?1 AND cleanup_generation IS NOT NULL)",
+            params![node_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if cleaning {
+            return Err("The implementation agent is still being stopped. Try Continue review again in a moment.".into());
+        }
+    }
     let existing: Option<i64> = tx.query_row(
         &format!(
             "SELECT id FROM autopilot_circuit_runs
@@ -122,7 +153,9 @@ pub(crate) fn create_node_circuit_run_locked(
     } else {
         None
     };
-    let (circuit_id, name) = if let Some(id) = selected_circuit_id {
+    let (circuit_id, name) = if let Some(recovery) = &recovery {
+        super::recovery::recovery_circuit_inner(&tx, node.mesh_id, recovery)?
+    } else if let Some(id) = selected_circuit_id {
         let circuit = get_autopilot_circuit_inner(&tx, id).map_err(|e| e.to_string())?
             .ok_or("Circuit no longer exists")?;
         let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
@@ -170,7 +203,7 @@ pub(crate) fn create_node_circuit_run_locked(
     let base_ref: String = tx.query_row("SELECT base_ref FROM meshes WHERE id = ?1", params![node.mesh_id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
-    if selected_circuit_id.is_none() {
+    if selected_circuit_id.is_none() && recovery.is_none() {
         if let Some(provider) = reviewer_override.as_deref() {
             context.set("review.provider", provider);
         }
@@ -192,6 +225,9 @@ pub(crate) fn create_node_circuit_run_locked(
         );
     }
     context.set("retry.attempt", "1");
+    if let Some(recovery) = recovery {
+        context.set("recovery.from_run_id", recovery.run_id.to_string());
+    }
     context.set("retry.max_retries", max_rounds.to_string());
     tx.execute(
         "INSERT INTO autopilot_circuit_runs

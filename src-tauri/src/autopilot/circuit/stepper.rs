@@ -639,7 +639,8 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     run.context.set(&format!("{prefix}.progress"), progress.clone());
                 }
                 t.context_changed = true;
-            } else if since.is_some_and(|since| now_ms.saturating_sub(since) >= *timeout_ms) {
+            } else if run.step(node_id).is_some_and(|s| s.status != StepStatus::Blocked)
+                && since.is_some_and(|since| now_ms.saturating_sub(since) >= *timeout_ms) {
                 let detail = if reason.is_empty() { "Agent produced no new report" } else { reason };
                 fail_step(run, &mut t, node_id, format!("Timed out after {} minutes without progress: {detail}", timeout_ms / 60_000));
                 // A watchdog expiry ends the run even when the graph wires a
@@ -2925,17 +2926,19 @@ mod tests {
     }
 
     #[test]
-    fn circuit_approval_expires_without_approving_or_starting_downstream_work() {
+    fn circuit_approval_waits_for_the_user_without_expiring() {
         let mut run = gate_run("classify", CircuitNodeKind::CollaboratorCheck { require_approval: true },
             &[(StepOutcome::Completed, "done")]);
         fire_to_gate(&mut run, "classify");
         assert_eq!(status_of(&run, "classify"), StepStatus::Blocked);
         advance(&mut run, &wait_observed(0, None));
-        let expired = advance(&mut run, &wait_observed(900_000, None));
-        assert_eq!(run.state, RunState::Failed);
-        assert!(expired.effects.is_empty());
+        let waiting = advance(&mut run, &wait_observed(86_400_000, None));
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(status_of(&run, "classify"), StepStatus::Blocked);
+        assert!(waiting.effects.is_empty());
         assert!(run.step("done").is_none());
-        assert!(advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "classify".into() }).is_empty());
+        advance(&mut run, &CircuitEvent::CollaboratorApproved { node_id: "classify".into() });
+        assert_eq!(status_of(&run, "classify"), StepStatus::Completed);
     }
 
     #[test]

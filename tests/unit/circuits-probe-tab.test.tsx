@@ -198,6 +198,48 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
+  it('continues a failed review for one round and focuses the admitted follow-up', async () => {
+    const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
+    const failed = { run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+      steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', status: 'completed', outcome: 'working' }] };
+    const circuits = [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }];
+    mockBackend({ circuits, runs: [failed] });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    let finish!: (id: number) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'continue_circuit_review') return new Promise<number>((resolve) => { finish = resolve; });
+      return fallback?.(cmd, args) ?? Promise.resolve(null);
+    });
+    openProbeDestination('circuits');
+    await screen.findByTestId('circuits-view-history');
+    fireEvent.click(screen.getByTestId('circuits-view-history'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue review · 1 round' }));
+    expect(invoke).toHaveBeenCalledWith('continue_circuit_review', { runId: 11, maxRounds: 1 });
+    expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(true);
+    mockBackend({ circuits, runs: [failed, { run: { ...failed.run, id: 45, state: 'running', context_json: '{"recovery.from_run_id":"11"}' }, steps: [] }] });
+    await act(async () => { finish(45); });
+    await waitFor(() => expect(screen.getByTestId('circuits-view-activity').getAttribute('aria-selected')).toBe('true'));
+    expect(screen.getByTestId('run-card-45').getAttribute('data-run-focused')).toBe('true');
+    expect(screen.getByText('Continues run #11 on the same worktree.')).toBeTruthy();
+  });
+
+  it('keeps failed review evidence and shows a recovery error when the saved agent is unavailable', async () => {
+    const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
+    mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(graph) }], runs: [{
+      run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
+      steps: [{ ...RUN_DONE.steps[0], node_id: 'verdict', outcome: 'working', error_message: 'Review requires changes' }],
+    }] });
+    const fallback = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => cmd === 'continue_circuit_review'
+      ? Promise.reject('The saved session is unavailable. Recover from the PR branch.') : fallback!(cmd, args));
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue review · 1 round' }));
+    expect(await screen.findByText('The saved session is unavailable. Recover from the PR branch.')).toBeTruthy();
+    expect(screen.getByTestId('run-card-11')).toBeTruthy();
+    expect(screen.getByTestId('run-continue-review-11').hasAttribute('disabled')).toBe(false);
+  });
+
   it('ignores an older snapshot when a refresh completes out of order', async () => {
     mockBackend();
     let resolveFirst!: (snapshot: unknown) => void;
@@ -759,7 +801,7 @@ describe('CircuitsProbeTab', () => {
           status: 'blocked',
           attempt: 1,
           outcome: null,
-          error_message: null,
+          error_message: 'Waiting for your approval. This gate does not expire while you are away.',
           started_at: '2026-08-22 10:05:00',
           completed_at: null,
         },
@@ -772,6 +814,8 @@ describe('CircuitsProbeTab', () => {
     expect(
       await screen.findByTestId('blocked-badge-15-approval'),
     ).toBeTruthy();
+    expect(screen.queryByTestId('run-error-15')).toBeNull();
+    expect(screen.getByTestId('run-step-15-approval').querySelector('pre')?.className).toContain('text-status-warning');
     await user.click(screen.getByTestId('approve-15-approval'));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('approve_circuit_step', {

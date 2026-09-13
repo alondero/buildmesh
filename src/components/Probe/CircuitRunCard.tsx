@@ -40,6 +40,7 @@ import {
 } from '../Circuits/circuitGraphModel';
 import {
   activityStatusToken,
+  canContinueReview,
   isRunStale,
   runActivity,
   reviewResult,
@@ -71,6 +72,7 @@ interface CircuitRunCardProps {
   busy: boolean;
   onPause: () => void;
   onResume: () => void;
+  onContinueReview?: () => void;
   onCancel: () => void;
   onApprove: (nodeId: string) => void;
   reviewCircuit: ReviewCircuitMetadata | null;
@@ -93,6 +95,7 @@ export function CircuitRunCard({
   busy,
   onPause,
   onResume,
+  onContinueReview,
   onCancel,
   onApprove,
   reviewCircuit,
@@ -112,7 +115,7 @@ export function CircuitRunCard({
   const retried = steps.filter((s) => s.attempt > 1);
   // The run row carries no error column; the ledger's first errored step
   // is the run's failure reason.
-  const firstError = steps.find((s) => s.error_message !== null && s.error_message !== '') ?? null;
+  const firstError = steps.find((s) => s.status !== 'blocked' && s.error_message !== null && s.error_message !== '') ?? null;
   // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
   // memoised: the duration clock re-renders a live card every second and must
   // not re-parse the blob each tick.
@@ -201,6 +204,23 @@ export function CircuitRunCard({
       </button>
 
       {review && <p className="px-2 pb-1.5 text-2xs text-text-secondary break-words">{review.detail}</p>}
+      {canContinueReview(detail, reviewCircuit) && onContinueReview && (
+        <div className="px-2 pb-2">
+          <button type="button" disabled={busy} onClick={onContinueReview}
+            data-testid={`run-continue-review-${run.id}`}
+            className="px-1.5 py-1 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
+            Continue review · 1 round
+          </button>
+          <p className="mt-1 text-2xs text-text-muted break-words">Resumes the saved implementation agent if needed. Starts a linked follow-up; this run and its findings stay in History.</p>
+        </div>
+      )}
+      {context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
+      {blockedSteps.length > 0 && <p className="px-2 pb-1.5 text-2xs text-status-warning break-words">
+        {blockedSteps.some((s) => s.node_id === 'confirm_source')
+          ? 'The source agent may be waiting for input. Check its terminal, then approve when it is ready for review.'
+          : 'This circuit requires human authorization before its next step. Issue-triggered runs use this to check collaborator trust.'}
+        {' '}Waiting does not expire. This is separate from the reviewer approving the code.
+      </p>}
 
       {/* The Agent Node this run drives — the answer to "which node is this
           run about?". Outside the disclosure button (no nested buttons), and
@@ -277,7 +297,7 @@ export function CircuitRunCard({
               <button
                 type="button"
                 onClick={() => onApprove(s.node_id)}
-                disabled={busy}
+                disabled={busy || run.state !== 'running'}
                 aria-label={`Approve ${s.node_id} on run ${run.id}`}
                 data-testid={`approve-${run.id}-${s.node_id}`}
                 className="px-1 rounded-md bg-status-warning/25 hover:bg-status-warning/40 font-semibold shrink-0 disabled:opacity-40"
@@ -293,7 +313,7 @@ export function CircuitRunCard({
           expand to find is an error you miss. */}
       {firstError !== null && (
         <p
-          className="px-2 pb-1.5 text-2xs text-status-error line-clamp-2 break-words"
+          className="px-2 pb-1.5 text-2xs text-status-error break-words"
           data-testid={`run-error-${run.id}`}
         >
           ⚠ {firstError.error_message}
@@ -425,7 +445,7 @@ export function CircuitRunCard({
                       // Per-step log surface. #1219 will widen this to
                       // successful steps' captured output; the wrapping
                       // and colour it needs are already here.
-                      <pre className="mt-0.5 whitespace-pre-wrap break-words text-status-error font-mono">
+                      <pre className={`mt-0.5 whitespace-pre-wrap break-words font-mono ${s.status === 'blocked' ? 'text-status-warning' : 'text-status-error'}`}>
                         {s.error_message}
                       </pre>
                     )}

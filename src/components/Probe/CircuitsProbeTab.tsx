@@ -69,6 +69,7 @@ import {
   pauseCircuitRun,
   reorderCircuitQueue,
   resumeCircuitRun,
+  continueCircuitReview,
   setCircuitEnabled,
   triggerCircuitNow,
   type CircuitBlueprintKind,
@@ -1095,6 +1096,14 @@ export function CircuitsProbeTab() {
                           busy={busy}
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}
+                          onContinueReview={() => runAction(async () => {
+                            const meshId = activeMeshIdRef.current;
+                            const nextRunId = await continueCircuitReview(detail.run.id);
+                            if (mountedRef.current && activeMeshIdRef.current === meshId) {
+                              setLoadedMeshId(null);
+                              useUIStore.getState().focusCircuitRun(nextRunId);
+                            }
+                          })}
                           onCancel={() => runAction(() => cancelCircuitRun(detail.run.id))}
                           onApprove={(nodeId) =>
                             runAction(() => approveCircuitStep(detail.run.id, nodeId))
