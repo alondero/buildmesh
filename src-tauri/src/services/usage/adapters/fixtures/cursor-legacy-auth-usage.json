@@ -1,0 +1,9 @@
+{
+  "gpt-4": {
+    "numRequests": 125,
+    "numSlowRequests": 0,
+    "maxRequestUsage": 500,
+    "maxTokenUsage": null
+  },
+  "startOfMonth": "2026-08-01T00:00:00.000Z"
+}

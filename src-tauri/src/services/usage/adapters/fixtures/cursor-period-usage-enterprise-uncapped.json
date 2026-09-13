@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "spendLimitUsage": {
+    "limitType": "team",
+    "pooledLimit": 500000
+  },
+  "billingCycleStart": 1751328000000,
+  "billingCycleEnd": 1754006400000
+}

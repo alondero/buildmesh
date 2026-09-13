@@ -43,8 +43,8 @@ pub(crate) const FREEBUFF_USAGE_URL: &str = "https://www.codebuff.com/api/usage"
 /// Identity advertised on every quota probe. Some upstreams / reverse
 /// proxies drop or rate-limit bare `reqwest` clients that don't carry a
 /// recognisable User-Agent; this string is the explicit, honest equivalent
-/// of Cursor's `Mozilla/5.0` workaround at `services/usage.rs` (the
-/// `cursor_usage_with_sources` HTTP fetch).
+/// of Cursor's `Mozilla/5.0` workaround in the legacy `/auth/usage` fetch
+/// (`services/usage/adapters/cursor.rs`).
 const FREEBUFF_USER_AGENT: &str = "Buildmesh-Usage-Probe/1.0";
 
 /// Hard cap on the body text we embed in error strings forwarded to the UI.
@@ -320,7 +320,7 @@ pub fn freebuff_usage() -> ProviderUsage {
 /// stand in for `<home>/.config/manicode/credentials.json`) and a
 /// loopback URL (so the live HTTP fetch can run against a `tiny_http`
 /// listener without touching the network). Mirrors
-/// `cursor_usage_with_sources` / `commandcode_usage_with_path`.
+/// `cursor_usage_with_token` / `commandcode_usage_with_path`.
 pub(crate) fn freebuff_usage_with(
     candidates: &[PathBuf],
     live_url: &str,
