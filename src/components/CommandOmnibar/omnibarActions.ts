@@ -3,10 +3,10 @@
  *
  * The indexers (#1410) emit stable item ids — `node:12`, `mesh:3`,
  * `command:open-settings`, `spawn:<option>:<mesh>`, `issue:<mesh>:<n>`,
- * `pull:<mesh>:<n>` — and this module is the single place that maps an id to
- * the app action it stands for. Keeping the routing out of the component
- * makes it unit-testable without rendering React and keeps the palette a
- * pure "search + select" surface.
+ * `pull:<mesh>:<n>`, `probe-in-mesh:<tab>:<mesh>` — and this module is the
+ * single place that maps an id to the app action it stands for. Keeping
+ * the routing out of the component makes it unit-testable without
+ * rendering React and keeps the palette a pure "search + select" surface.
  *
  * Modal opens go through `uiStore` (`cheatsheetOpen` / `appSettingsOpen` /
  * `remoteAccessOpen`), the same source of truth App's `?` key and TitleBar's
@@ -23,6 +23,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
+import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../lib/probeContext';
 import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
 
 /** Everything `executeOmnibarItem` needs beyond the stores themselves. */
@@ -179,6 +180,30 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
       .catch(() => {
         // Spawn failures already toast via the store's error surface.
       });
+    return;
+  }
+  if (id.startsWith('probe-in-mesh:')) {
+    // Id shape is `probe-in-mesh:<tab>:<meshId>` — "Open <Destination> in
+    // <Mesh>". Mesh-lens destinations read their mesh from `meshStore`, so
+    // the item's mesh must be selected first (the same retargeting the
+    // `issue:`/`pull:` branch below performs). A stale per-tab pin would
+    // keep winning over the fresh selection, so it is cleared: the command
+    // is a navigation ("show me Y"), not a pin request, and the probe
+    // returns to following selection afterwards.
+    const body = id.slice('probe-in-mesh:'.length);
+    const sep = body.lastIndexOf(':');
+    if (sep === -1) return;
+    const tab = body.slice(0, sep) as ProbeTab;
+    const meshId = Number(body.slice(sep + 1));
+    if (!(PROBE_TAB_ORDER as readonly string[]).includes(tab)) return;
+    if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
+    const mesh = ctx.meshes.find((item) => item.id === meshId);
+    if (!mesh || !Number.isFinite(meshId)) return;
+    useUIStore.getState().clearProbeContextPin(tab);
+    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
+    useMeshStore.getState().selectMesh(mesh.id);
+    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    ctx.openProbeTab(tab);
     return;
   }
   if (id.startsWith('issue:') || id.startsWith('pull:')) {

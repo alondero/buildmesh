@@ -35,6 +35,7 @@ export {
   indexCommands,
   indexGitHub,
   indexSpawnOptions,
+  indexMeshProbeCommands,
   filterByPrefix,
   field,
   APP_COMMANDS,

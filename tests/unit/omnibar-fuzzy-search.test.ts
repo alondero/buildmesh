@@ -30,6 +30,7 @@ import {
   indexCommands,
   indexGitHub,
   indexSpawnOptions,
+  indexMeshProbeCommands,
   buildOmnibarIndex,
   filterByPrefix,
   field,
@@ -37,6 +38,7 @@ import {
   PROBE_TAB_COMMANDS,
   CATEGORY,
 } from '../../src/lib/omnibar/indexers';
+import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../src/lib/probeContext';
 import { searchOmnibar } from '../../src/lib/omnibar/index';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
@@ -744,6 +746,57 @@ describe('indexSpawnOptions (issue #1410 §1)', () => {
     // empty mesh list there is deliberately no spawn entry — the pre-boot
     // palette simply has none.
     expect(indexSpawnOptions([option], [])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Indexers — Mesh-scoped Probe destinations ("Open <Destination> in <Mesh>")
+// ---------------------------------------------------------------------------
+
+describe('indexMeshProbeCommands', () => {
+  const meshes = [makeMesh({ id: 1, name: 'buildmesh' }), makeMesh({ id: 2, name: 'ProjectY' })];
+  const meshLensTabs = PROBE_TAB_ORDER.filter((tab) => PROBE_TAB_DEFINITIONS[tab].lens === 'mesh');
+
+  it('emits one item per (mesh-lens tab, mesh) pair', () => {
+    const items = indexMeshProbeCommands(meshes);
+    expect(items).toHaveLength(meshes.length * meshLensTabs.length);
+    const entry = items.find((i) => i.id === 'probe-in-mesh:issues:2');
+    expect(entry?.label).toBe('Open GitHub Issues in ProjectY');
+    expect(entry?.category).toBe(CATEGORY.command);
+  });
+
+  it('covers every mesh-lens tab and skips host/agent lenses', () => {
+    const items = indexMeshProbeCommands(meshes);
+    for (const tab of meshLensTabs) {
+      expect(items.some((i) => i.id === `probe-in-mesh:${tab}:1`)).toBe(true);
+    }
+    // Usage is host-wide (no mesh scope); Agent Changes needs a focused node.
+    expect(items.some((i) => i.id.includes(':usage:'))).toBe(false);
+    expect(items.some((i) => i.id.includes(':review:'))).toBe(false);
+  });
+
+  it('matches by mesh name and by destination', () => {
+    const items = indexMeshProbeCommands(meshes);
+    expect(searchItems(items, 'ProjectY')).toHaveLength(meshLensTabs.length);
+    expect(searchItems(items, 'issues ProjectY')[0].item.id).toBe('probe-in-mesh:issues:2');
+  });
+
+  it('is surfaced by the `>` action menu', () => {
+    const index = buildOmnibarIndex({
+      nodes: [],
+      meshes,
+      commands: APP_COMMANDS,
+      spawnOptions: [],
+      issues: [],
+      pullRequests: [],
+    });
+    const { items, query } = filterByPrefix(index, '>issues ProjectY');
+    expect(query).toBe('issues ProjectY');
+    expect(items.some((i) => i.id === 'probe-in-mesh:issues:2')).toBe(true);
+  });
+
+  it('emits nothing when no meshes are loaded yet', () => {
+    expect(indexMeshProbeCommands([])).toEqual([]);
   });
 });
 

@@ -27,7 +27,7 @@ import type { GitHubPullRequest } from '../../types/generated/GitHubPullRequest'
 import type { SpawnOption } from '../groups';
 import type { ProbeTab } from '../../stores/uiStore';
 import type { ViewMode } from '../../stores/uiStore';
-import { PROBE_TAB_ORDER } from '../probeContext';
+import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../probeContext';
 import { getStatusConfig } from '../status';
 import type { IndexedField, IndexedItem, FieldWeight } from './fuzzySearch';
 
@@ -111,12 +111,14 @@ export function buildOmnibarIndex(opts: {
   const commandItems = indexCommands(commands);
   const spawnItems = indexSpawnOptions(spawnOptions, meshes);
   const issueItems = indexGitHub(issues, pullRequests, meshes);
+  const meshProbeItems = indexMeshProbeCommands(meshes);
   return [
     ...nodeItems,
     ...meshItems,
     ...commandItems,
     ...spawnItems,
     ...issueItems,
+    ...meshProbeItems,
   ];
 }
 
@@ -456,6 +458,42 @@ export function indexSpawnOptions(
           field(option.label, 'secondary'),
           field(option.harness_id, 'secondary'),
           field(mesh.name, 'secondary'),
+        ],
+      });
+    }
+  }
+  return items;
+}
+
+/** Mesh-scoped Probe destinations — "Open <Destination> in <Mesh>" (e.g.
+ *  `Open GitHub Issues in ProjectY`). One item per (mesh-lens tab, mesh)
+ *  pair, so a destination can be opened directly in a named project's
+ *  scope without first selecting that mesh in the sidebar. Host-lens tabs
+ *  (Usage) are app-wide and Agent-lens tabs (Agent Changes) need a focused
+ *  node, so neither gets a per-mesh entry — only Mesh-lens destinations.
+ *  Category is `command` so the `>` action menu surfaces them; the mesh
+ *  name is a secondary field so `issues ProjectY` drills down. With an
+ *  empty `meshes` list the indexer emits nothing (same pre-boot rule as
+ *  the spawn recipes above). */
+export function indexMeshProbeCommands(meshes: Mesh[]): IndexedItem[] {
+  const items: IndexedItem[] = [];
+  for (const mesh of meshes) {
+    for (const tab of PROBE_TAB_ORDER) {
+      const definition = PROBE_TAB_DEFINITIONS[tab];
+      if (definition.lens !== 'mesh') continue;
+      const command = PROBE_DESTINATION_COMMANDS[`probe-${tab}`];
+      const label = `Open ${definition.label} in ${mesh.name}`;
+      items.push({
+        id: `probe-in-mesh:${tab}:${mesh.id}`,
+        category: CATEGORY.command,
+        label,
+        subtitle: mesh.path,
+        icon: command.icon,
+        fields: [
+          field(label, 'primary'),
+          field(definition.label, 'secondary'),
+          field(mesh.name, 'secondary'),
+          ...(command.keywords ?? []).map((keyword) => field(keyword, 'secondary')),
         ],
       });
     }
