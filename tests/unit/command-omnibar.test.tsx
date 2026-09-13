@@ -657,6 +657,65 @@ describe('CommandOmnibar — command execution routing', () => {
     });
   });
 
+  it('routes a mesh-scoped probe item to its mesh, clears the stale pin, and opens the tab', () => {
+    // "Open GitHub Issues in ProjectY": the Probe's GitHub tabs read the
+    // selected mesh, so the router must select the item's mesh (2, not the
+    // currently selected 1). A stale per-tab pin to mesh 1 would keep
+    // winning over the fresh selection, so it is cleared first.
+    const projectY = { ...mesh, id: 2, name: 'ProjectY' };
+    useMeshStore.setState({ selectedMeshId: 1 });
+    useUIStore.setState({
+      probeContextPins: { issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null } },
+    });
+    const openProbeTab = vi.fn();
+    executeOmnibarItem('probe-in-mesh:issues:2', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab,
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    expect(useUIStore.getState().probeContextPins.issues).toBeUndefined();
+    expect(openProbeTab).toHaveBeenCalledWith('issues');
+  });
+
+  it('aligns the canvas with Mesh Grid when the mesh-scoped probe targets the current mesh', () => {
+    // No selection change, so the sidebar sync cannot fire — the router
+    // exits non-mesh modes itself (mirrors the `issue:`/`pull:` branch).
+    useMeshStore.setState({ selectedMeshId: 1 });
+    useUIStore.setState({ viewMode: 'pinned', probeContextPins: {} });
+    const openProbeTab = vi.fn();
+    executeOmnibarItem('probe-in-mesh:issues:1', {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab,
+    });
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(openProbeTab).toHaveBeenCalledWith('issues');
+  });
+
+  it('ignores mesh-scoped probe ids with an unknown mesh, tab, or shape', () => {
+    useMeshStore.setState({ selectedMeshId: 1 });
+    const openProbeTab = vi.fn();
+    const ctx = {
+      meshes: [mesh],
+      spawnOptions: [],
+      setViewMode: vi.fn(),
+      openProbeTab,
+    };
+    // Unknown mesh.
+    executeOmnibarItem('probe-in-mesh:issues:99', ctx);
+    // Host-lens tabs have no per-mesh scope.
+    executeOmnibarItem('probe-in-mesh:usage:1', ctx);
+    // Unknown tab.
+    executeOmnibarItem('probe-in-mesh:nope:1', ctx);
+    // Malformed (no mesh segment).
+    executeOmnibarItem('probe-in-mesh:issues', ctx);
+    expect(useMeshStore.getState().selectedMeshId).toBe(1);
+    expect(openProbeTab).not.toHaveBeenCalled();
+  });
+
   it('routes a mesh result to mesh selection', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');

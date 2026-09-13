@@ -28,7 +28,12 @@ export default async function ({ page, invoke }) {
     await page.locator(`#mesh-item-name-${mesh.id}`).click();
     await page.getByRole('button', { name: 'Search or open' }).click();
     await page.getByRole('combobox', { name: 'Search commands, nodes, meshes and more' }).fill('Open Circuits');
-    await page.getByRole('option', { name: /Open Circuits/ }).click();
+    // The bare "Open Circuits" label now also matches the new mesh-scoped
+    // entries ("Open Circuits in <Mesh>"). Anchor on the canonical command's
+    // distinctive label+subtitle prefix "Open Circuits Inspect…" so only the
+    // app-wide command is selected (the per-mesh entries start with
+    // "Open Circuits in ").
+    await page.getByRole('option', { name: /^Open Circuits Inspect/ }).click();
     await page.getByRole('separator', { name: 'Resize probe panel' }).focus();
     await page.keyboard.press('End');
     if (process.env.CIRCUIT_SHOT_BASELINE === '1') {

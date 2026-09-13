@@ -582,6 +582,89 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().probeTab).toBe('sessions');
       });
     });
+
+    describe('clearProbeContextPin', () => {
+      // The setter accepts an optional target tab so the omnibar's
+      // mesh-scoped probe entries can clear a stale pin without disturbing
+      // the user's current tab. Without these contracts the only call sites
+      // (omnibarActions.ts, ProbePanel) could drift — especially the
+      // issue:/pull: routes that clear a non-current tab from the omnibar.
+      beforeEach(() => {
+        useUIStore.setState({ probeContextPins: {} });
+      });
+
+      it('removes only the named tab when multiple pins exist (other pins survive)', () => {
+        // Regression pin: `clearProbeContextPin('issues')` must delete just
+        // the issues slot — `pulls` and `files` keep their pinned context.
+        useUIStore.setState({
+          probeContextPins: {
+            issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null },
+            pulls: { tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null },
+            files: { tab: 'files', lens: 'mesh', meshId: 2, nodeId: null },
+          },
+        });
+        useUIStore.getState().clearProbeContextPin('issues');
+        const pins = useUIStore.getState().probeContextPins;
+        expect(pins.issues).toBeUndefined();
+        expect(pins.pulls).toEqual({
+          tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null,
+        });
+        expect(pins.files).toEqual({
+          tab: 'files', lens: 'mesh', meshId: 2, nodeId: null,
+        });
+      });
+
+      it('defaults to the current probeTab when called without an argument', () => {
+        // The user clicks the inspector pin button while on the `files`
+        // tab — the unsetter must target `files`, not whatever the omnibar
+        // most recently selected.
+        useUIStore.setState({
+          probeTab: 'files',
+          probeContextPins: {
+            files: { tab: 'files', lens: 'mesh', meshId: 1, nodeId: null },
+            pulls: { tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null },
+          },
+        });
+        useUIStore.getState().clearProbeContextPin();
+        const pins = useUIStore.getState().probeContextPins;
+        expect(pins.files).toBeUndefined();
+        expect(pins.pulls).toEqual({
+          tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null,
+        });
+      });
+
+      it('targets the named tab even when probeTab is on a different destination', () => {
+        // Regression pin for the omnibar's `probe-in-mesh:` route: the
+        // current tab is `files` but the mesh-scoped Issues entry must
+        // clear the `issues` pin, not the `files` pin.
+        useUIStore.setState({
+          probeTab: 'files',
+          probeContextPins: {
+            issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null },
+            files: { tab: 'files', lens: 'mesh', meshId: 2, nodeId: null },
+          },
+        });
+        useUIStore.getState().clearProbeContextPin('issues');
+        const pins = useUIStore.getState().probeContextPins;
+        expect(pins.issues).toBeUndefined();
+        expect(pins.files).toEqual({
+          tab: 'files', lens: 'mesh', meshId: 2, nodeId: null,
+        });
+      });
+
+      it('is a clean no-op when no pin exists for the target tab (no state update, no subscriber notification)', () => {
+        // Same shape as `setViewMode` is-idempotent: a no-op must not
+        // trigger a render. The store impl returns before `set()` so the
+        // subscriber counter is the proof.
+        useUIStore.setState({ probeContextPins: {} });
+        let notifyCount = 0;
+        const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
+        useUIStore.getState().clearProbeContextPin('issues');
+        unsub();
+        expect(notifyCount).toBe(0);
+        expect(useUIStore.getState().probeContextPins).toEqual({});
+      });
+    });
   });
 
   describe('Omnibar (map #1371 Decision #2 / issue #1409)', () => {

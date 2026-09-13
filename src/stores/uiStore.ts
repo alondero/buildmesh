@@ -319,7 +319,12 @@ interface UIState extends GridControls {
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
   pinProbeContext: (pin: ProbeContextPin) => void;
-  clearProbeContextPin: () => void;
+  // Clears the pin for `tab` (default: the current tab) so the destination
+  // returns to following selection. The palette's mesh-scoped probe entries
+  // ("Open <Destination> in <Mesh>") clear the target tab's stale pin
+  // before selecting the mesh — otherwise a pin to another mesh would keep
+  // winning over the requested scope and the command would appear broken.
+  clearProbeContextPin: (tab?: ProbeTab) => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
   // click handler — this is a pure "make the tab visible" action.
@@ -514,11 +519,11 @@ export const useUIStore = create<UIState>((set, get) => {
       }));
     },
 
-    clearProbeContextPin: () => {
-      const tab = get().probeTab;
-      if (get().probeContextPins[tab] === undefined) return;
+    clearProbeContextPin: (tab) => {
+      const target = tab ?? get().probeTab;
+      if (get().probeContextPins[target] === undefined) return;
       const probeContextPins = { ...get().probeContextPins };
-      delete probeContextPins[tab];
+      delete probeContextPins[target];
       set({ probeContextPins });
     },
 
