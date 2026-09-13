@@ -58,7 +58,7 @@ pub async fn create_agent_node(
         let configuration = crate::preferences::spawn_configurations::resolve_saved(
             provider.as_deref().unwrap_or("anthropic"),
             configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        )?;
+        ).map_err(|error| error.to_string())?;
         services::agent_node::create_blocking_configured(
             mesh_id,
             provider.as_deref(),

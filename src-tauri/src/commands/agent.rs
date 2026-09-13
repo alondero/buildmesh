@@ -409,7 +409,7 @@ pub fn create_issue_node(
     let configuration = crate::preferences::spawn_configurations::resolve_saved(
         &effective_provider,
         configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_blocking_configured(
         mesh.id,
         Some(&effective_provider),
@@ -760,7 +760,7 @@ pub(crate) fn create_pr_node_impl_configured(
     let configuration = crate::preferences::spawn_configurations::resolve_saved(
         &effective_provider,
         configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-    )?;
+    ).map_err(|error| error.to_string())?;
     let node = crate::services::agent_node::create_pending_with_source_pr_fork_configured(
         mesh.id,
         &mesh.path,

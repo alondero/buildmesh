@@ -107,6 +107,15 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
   };
   const fieldClass = 'w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary';
   const menuClass = 'w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
+  const menuEntries = [
+    { id: 'defaults', kind: 'spawn' as const },
+    ...configurations.flatMap((value) => [
+      { id: `configuration:${value.id}`, kind: 'configuration' as const, value },
+      { id: `edit:${value.id}`, kind: 'edit' as const, value },
+    ]),
+    { id: 'new', kind: 'new' as const },
+  ];
+  const menuIndex = new Map(menuEntries.map((entry, index) => [entry.id, index]));
   return createPortal(
     <div
       ref={panel}
@@ -131,7 +140,9 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
               e.stopPropagation();
               first?.focus();
             }
-          } else if (!anchor.closest('[role="dialog"]')) {
+          } else {
+            e.preventDefault();
+            e.stopPropagation();
             onDismiss();
           }
           return;
@@ -183,14 +194,14 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
         </form>
       ) : (
         <div role="menu" aria-label={`${option.label} configurations`}>
-          <button type="button" role="menuitem" data-menu-index="0" tabIndex={activeMenuIndex === 0 ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">No saved configurations</p>}
-          {configurations.map((value, index) => <div key={value.id} role="presentation" className="flex">
-            <button type="button" role="menuitem" data-menu-index={index * 2 + 1} tabIndex={activeMenuIndex === index * 2 + 1 ? 0 : -1} className={`${menuClass} min-w-0 flex-1 break-words`} onClick={(e) => onSelect(option.id, e.altKey, value.id)}>{value.name}</button>
-            <button type="button" role="menuitem" data-menu-index={index * 2 + 2} tabIndex={activeMenuIndex === index * 2 + 2 ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
+          {configurations.map((value) => <div key={value.id} role="presentation" className="flex">
+            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1} className={`${menuClass} min-w-0 flex-1 break-words`} onClick={(e) => onSelect(option.id, e.altKey, value.id)}>{value.name}</button>
+            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
           </div>)}
-          <button type="button" role="menuitem" data-menu-index={configurations.length * 2 + 1} tabIndex={activeMenuIndex === configurations.length * 2 + 1 && loaded ? 0 : -1} disabled={!loaded} className={menuClass} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={menuClass} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
         </div>
       )}
       {error && <p role="alert" className="p-3 text-xs text-status-error">{error}</p>}

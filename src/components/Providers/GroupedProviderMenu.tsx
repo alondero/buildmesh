@@ -152,7 +152,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                 <span className="flex-1 truncate">{option.label}</span>
                 {!option.is_proxied && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
               </button>
-              {configurable(option) && <button type="button" role="menuitem" tabIndex={-1} aria-label={`${option.label} configurations`}
+              {configurable(option) && <button type="button" tabIndex={-1} aria-label={`${option.label} configurations`}
                 aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}
                 className="px-2 text-xs text-text-secondary hover:bg-bg-selection"
                 onClick={(e) => {

@@ -28,6 +28,10 @@ pub enum AgentNodeError {
     /// `"mesh not found"` carried inside `Status(String)`, which was
     /// brittle stringly-typed control flow.
     MeshNotFound(i64),
+    /// The requested saved spawn configuration is invalid for this option.
+    /// This remains typed so HTTP callers can return a client error without
+    /// scraping the validation text.
+    InvalidConfiguration(String),
     /// A backend orchestrator call (`spawn_agent_inner` today, but
     /// the variant is intentionally generic so future downstream
     /// calls share the path) failed. The wrapped string is the
@@ -42,6 +46,7 @@ impl std::fmt::Display for AgentNodeError {
             AgentNodeError::Db(e) => write!(f, "{}", e),
             AgentNodeError::Status(e) => write!(f, "{}", e),
             AgentNodeError::MeshNotFound(mesh_id) => write!(f, "mesh {mesh_id} not found"),
+            AgentNodeError::InvalidConfiguration(e) => write!(f, "{}", e),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
@@ -166,7 +171,7 @@ pub fn create_with_source_pr_fork_configured(
             )
         })
         .transpose()
-        .map_err(AgentNodeError::Backend)?;
+        .map_err(AgentNodeError::InvalidConfiguration)?;
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 

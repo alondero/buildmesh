@@ -75,7 +75,7 @@ const FORBIDDEN_ASYNC = [
   // `create(?:_blocking)?` — both the wrapper and the new helper.
   {
     kind: 'services::agent_node::create',
-    re: /\bservices::agent_node::create(?:_blocking)?\s*\(/g,
+    re: /\bservices::agent_node::create[a-z0-9_]*\s*\(/g,
   },
   {
     kind: 'services::agent_node::delete',
@@ -612,6 +612,20 @@ pub async fn create_agent_node() -> Result<AgentNode, String> {
 #[command]
 pub async fn spawn_fresh_agent_blocking() -> Result<AgentNode, String> {
     services::agent_node::create_blocking(1, Some("anthropic"), Some("main"), None, None, None, false)
+        .map_err(|e| e.to_string())
+}
+`;
+    const found = findBlockingInAsyncCommands('synth.rs', src);
+    expect(found.map((v) => v.kind)).toEqual([
+      'services::agent_node::create',
+    ]);
+  });
+
+  it('flags an unwrapped configured creator (positive, spawn configurations)', () => {
+    const src = `
+#[command]
+pub async fn spawn_saved_agent() -> Result<AgentNode, String> {
+    services::agent_node::create_blocking_configured(1, Some("anthropic"), Some("main"), None, None, None, false, None)
         .map_err(|e| e.to_string())
 }
 `;

@@ -191,14 +191,11 @@ pub fn create_agent_node_configured(
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let mut db = write_conn();
     let tx = db.transaction()?;
-    let node = create_agent_node_inner(
+    let node = create_agent_node_configured_inner(
         &tx, mesh_id, name, path, branch, env, provider,
         worktree_name, source_issue, source_pr, source_pr_pinned_sha,
         use_worktree, head_repo_owner, head_repo_clone_url, worktree_path,
-    )?;
-    tx.execute(
-        "UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2",
-        params![snapshot, node.id],
+        snapshot.as_deref(),
     )?;
     tx.commit()?;
     Ok(node)
@@ -233,7 +230,7 @@ fn resolve_spawn_env(
 /// env depends on the harness config and worktree path; test callers
 /// pass the env directly because the test knows the env it wants and
 /// does not need harness-runtime fallback.
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn create_agent_node_inner(
     db: &Connection,
     mesh_id: i64,
@@ -250,6 +247,36 @@ pub(crate) fn create_agent_node_inner(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
     worktree_path: Option<&str>,
+) -> SqlResult<AgentNode> {
+    create_agent_node_configured_inner(
+        db, mesh_id, name, path, branch, env, provider, worktree_name,
+        source_issue, source_pr, source_pr_pinned_sha, use_worktree,
+        head_repo_owner, head_repo_clone_url, worktree_path, None,
+    )
+}
+
+/// Isolated connection seam for creating a node with its immutable spawn
+/// configuration snapshot in the initial INSERT. Keeping the snapshot in
+/// this helper avoids a second write and lets database tests use their own
+/// in-memory connection instead of the process-global writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_agent_node_configured_inner(
+    db: &Connection,
+    mesh_id: i64,
+    name: &str,
+    path: &str,
+    branch: &str,
+    env: EnvType,
+    provider: &str,
+    worktree_name: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    use_worktree: bool,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    worktree_path: Option<&str>,
+    spawn_configuration: Option<&str>,
 ) -> SqlResult<AgentNode> {
     // Append at the end of this mesh's grid order. New nodes land last so an
     // existing arrangement isn't disturbed by a fresh spawn.
@@ -269,8 +296,8 @@ pub(crate) fn create_agent_node_inner(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url, worktree_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url, worktree_path, spawn_configuration)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             mesh_id,
             name,
@@ -288,6 +315,7 @@ pub(crate) fn create_agent_node_inner(
             head_repo_owner,
             head_repo_clone_url,
             worktree_path,
+            spawn_configuration,
         ],
     )?;
     let id = db.last_insert_rowid();
@@ -1009,4 +1037,44 @@ pub fn node_spawn_configuration(
         .transpose()
         .map_err(|e| e.to_string())?;
     Ok(value.filter(|c| c.spawn_option_id == provider))
+}
+
+#[cfg(test)]
+mod configured_tests {
+    use super::*;
+
+    #[test]
+    fn configured_inner_persists_snapshot_in_initial_insert() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let mesh = crate::db::create_mesh_inner(&conn, "configured-node-mesh", "/tmp/configured-node").unwrap();
+        let snapshot = r#"{"id":"sol","name":"Sol Max","spawn_option_id":"codex","model":"gpt-5.6-sol","effort":"max","extra_args":null}"#;
+        let node = create_agent_node_configured_inner(
+            &conn,
+            mesh.id,
+            "configured",
+            &mesh.path,
+            "main",
+            EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+            Some(snapshot),
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT spawn_configuration FROM agent_nodes WHERE id = ?1",
+                params![node.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(snapshot));
+    }
 }

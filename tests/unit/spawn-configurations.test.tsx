@@ -48,7 +48,7 @@ describe('Spawn configurations', () => {
     vi.mocked(api.listSpawnConfigurations).mockResolvedValue([]);
     vi.mocked(api.saveSpawnConfiguration).mockResolvedValue({ ...saved, name: 'Sol', effort: null });
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Sol' } });
@@ -84,9 +84,17 @@ describe('Spawn configurations', () => {
     expect(screen.queryByTestId('spawn-configurations')).toBeNull();
   });
 
+  it('dismisses the browsing flyout on Tab inside a dialog', async () => {
+    render(<div role="dialog"><GroupedProviderMenu providers={[option]} onSelect={vi.fn()} /></div>);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const first = within(await screen.findByTestId('spawn-configurations')).getByRole('menuitem', { name: 'Spawn with defaults' });
+    fireEvent.keyDown(first, { key: 'Tab' });
+    expect(screen.queryByTestId('spawn-configurations')).toBeNull();
+  });
+
   it('uses one roving tab stop for configuration menu items and moves it with arrows', async () => {
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     const panel = await screen.findByTestId('spawn-configurations');
     const items = within(panel).getAllByRole('menuitem');
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
@@ -96,10 +104,10 @@ describe('Spawn configurations', () => {
     expect(items[1].tabIndex).toBe(0);
   });
 
-  it('retains failed edits for retry and deletes only after acknowledgement', async () => {
+  it('retains failed edits for retry and reports failed deletes', async () => {
     vi.mocked(api.saveSpawnConfiguration).mockRejectedValue(new Error('disk full'));
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -116,7 +124,7 @@ describe('Spawn configurations', () => {
   it('does not expose effort or extra arguments when unsupported', async () => {
     const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, effort_control: { kind: 'none' as const } } };
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
     expect(screen.getByLabelText('Model')).toBeTruthy();
@@ -135,7 +143,7 @@ describe('Spawn configurations', () => {
     await screen.findByText('No saved configurations');
     resolveOld([saved]);
     expect(screen.queryByText('Sol Max')).toBeNull();
-    fireEvent.click(screen.getByRole('menuitem', { name: 'OpenRouter configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter configurations', exact: true }));
     fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Spawn with defaults' }), { key: 'ArrowLeft' });
     expect(document.activeElement).toBe(parent);
     expect(screen.queryByTestId('spawn-configurations')).toBeNull();

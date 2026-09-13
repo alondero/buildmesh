@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use tauri::Emitter;
 
 use super::{AppPreferences, HarnessConfigValue};
 
@@ -13,6 +14,20 @@ pub struct SpawnConfiguration {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub extra_args: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum SpawnConfigurationError {
+    Invalid(String),
+    Storage(String),
+}
+
+impl std::fmt::Display for SpawnConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) | Self::Storage(message) => write!(f, "{message}"),
+        }
+    }
 }
 
 pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
@@ -73,12 +88,16 @@ pub fn validate_for_option(
     validate(value)
 }
 
-pub fn resolve_saved(option: &str, id: Option<&str>) -> Result<Option<SpawnConfiguration>, String> {
+pub fn resolve_saved(
+    option: &str,
+    id: Option<&str>,
+) -> Result<Option<SpawnConfiguration>, SpawnConfigurationError> {
     let id = id.map(str::trim).filter(|id| !id.is_empty());
     if id.is_none() {
         return Ok(None);
     }
-    resolve(&super::load()?, option, id)
+    let prefs = super::load().map_err(SpawnConfigurationError::Storage)?;
+    resolve(&prefs, option, id).map_err(SpawnConfigurationError::Invalid)
 }
 
 #[tauri::command]
@@ -87,8 +106,11 @@ pub fn list_spawn_configurations() -> Result<Vec<SpawnConfiguration>, String> {
 }
 
 #[tauri::command]
-pub fn save_spawn_configuration(value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
-    let mut value = validate(value)?;
+pub fn save_spawn_configuration(
+    app: tauri::AppHandle,
+    value: SpawnConfiguration,
+) -> Result<SpawnConfiguration, String> {
+    let mut value = validate(value).map_err(|e| e.to_string())?;
     normalize_id(&mut value);
     super::update(|prefs| {
         if let Some(existing) = prefs
@@ -101,6 +123,7 @@ pub fn save_spawn_configuration(value: SpawnConfiguration) -> Result<SpawnConfig
             prefs.spawn_configurations.push(value.clone());
         }
     })?;
+    let _ = app.emit("provider-list-changed", ());
     Ok(value)
 }
 
@@ -112,8 +135,9 @@ fn normalize_id(value: &mut SpawnConfiguration) {
 }
 
 #[tauri::command]
-pub fn delete_spawn_configuration(id: String) -> Result<(), String> {
+pub fn delete_spawn_configuration(app: tauri::AppHandle, id: String) -> Result<(), String> {
     super::update(|prefs| prefs.spawn_configurations.retain(|c| c.id != id))?;
+    let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
 
