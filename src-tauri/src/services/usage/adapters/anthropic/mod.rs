@@ -9,6 +9,7 @@ mod parse;
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
+use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{logged_out, unavailable, ProviderUsage, UsageMeter};
 
 use auth::{
@@ -71,8 +72,14 @@ impl UsageAdapter for AnthropicAdapter {
         cache_identity_from(&resolve_claude_auth(&ProductionLookup))
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        anthropic_usage_with(&ProductionLookup, USAGE_URL)
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        // TODO(#1745 phase 2): the Anthropic adapter has a bespoke scope-403
+        // vs 401 distinction (`classify_oauth_auth_failure` below). On
+        // migration the scope-403 branch lands as `UsageOutcome::Reading`
+        // with `detail` set (matches today's `logged_in: true + detail` wire
+        // triple); the bare 401/403 branch lands as `UsageOutcome::Rejected`.
+        // Until then the shim preserves the wire triple.
+        anthropic_usage_with(&ProductionLookup, USAGE_URL).into()
     }
 }
 

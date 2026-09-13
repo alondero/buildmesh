@@ -11,7 +11,8 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::UsageAdapter;
-use crate::services::usage::types::{ProviderUsage, UsageError};
+use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::UsageError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,8 +36,12 @@ impl UsageAdapter for AgyAdapter {
         Some("agy")
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        crate::services::usage::agy_usage()
+    // TODO(#1745 phase 2): migrate `agy_usage` to return `UsageOutcome`
+    // directly so the bug at `services::usage.rs:2265` (client-build failure
+    // mapped to `logged_out`) and the line 2293 non-auth `logged_out`
+    // classification are fixed together.
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        crate::services::usage::agy_usage().into()
     }
 }
 

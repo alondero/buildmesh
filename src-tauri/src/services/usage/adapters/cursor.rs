@@ -32,6 +32,7 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
+use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
     home_dir, logged_out, unavailable, ProviderUsage, UsageAmount, UsageError, UsageMeter,
     UsageWindow,
@@ -68,8 +69,12 @@ impl UsageAdapter for CursorAdapter {
         Some("cursor")
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        cursor_usage()
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        // TODO(#1745 phase 2): preserve Cursor's bespoke `CurrentFlow`
+        // (unauthorized / fallback / usage) on migration; map each branch
+        // to the right outcome variant. The shim preserves the wire triple
+        // until then.
+        cursor_usage().into()
     }
 }
 
@@ -2058,7 +2063,9 @@ mod tests {
         );
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = with_cursor_loopback("test-token", &base, &base, || CursorAdapter.fetch(&[]));
+        let usage = with_cursor_loopback("test-token", &base, &base, || {
+            CursorAdapter.fetch(&[]).into_usage("cursor")
+        });
 
         assert_eq!(usage.provider, "cursor");
         assert!(usage.logged_in);

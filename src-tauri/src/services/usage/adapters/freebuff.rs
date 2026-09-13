@@ -8,7 +8,7 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::UsageAdapter;
-use crate::services::usage::types::ProviderUsage;
+use crate::services::usage::outcome::UsageOutcome;
 
 /// Drop-in [`UsageAdapter`] for `freebuff`.
 pub(crate) struct FreebuffAdapter;
@@ -22,7 +22,9 @@ impl UsageAdapter for FreebuffAdapter {
         Some("freebuff")
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        crate::services::freebuff_usage::freebuff_usage()
+    // TODO(#1745 phase 2): migrate `freebuff_usage` to return `UsageOutcome`
+    // directly so the adapter is fully seam-owned.
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        crate::services::freebuff_usage::freebuff_usage().into()
     }
 }
