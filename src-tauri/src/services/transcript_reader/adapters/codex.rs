@@ -44,6 +44,33 @@ impl TranscriptAdapter for CodexAdapter {
         parse_codex_turns(lines, keep)
     }
 
+    fn completed_turn(&self, lines: &str) -> Option<super::super::NativeTurnCompletion> {
+        let mut completion = None;
+        let mut started_turn = None;
+        for line in lines.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            let payload = &value["payload"];
+            match (value["type"].as_str(), payload["type"].as_str()) {
+                (Some("event_msg"), Some("task_started")) => {
+                    started_turn = payload["turn_id"].as_str().map(str::to_owned);
+                    completion = None;
+                }
+                (Some("event_msg"), Some("task_complete")) => {
+                    let turn_id = payload["turn_id"].as_str().filter(|id| !id.is_empty())?;
+                    if started_turn.as_deref().is_some_and(|id| id != turn_id) { return None; }
+                    let completed_at_ms = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?.timestamp_millis();
+                    completion = Some(super::super::NativeTurnCompletion { turn_id: turn_id.into(), completed_at_ms });
+                }
+                (Some("event_msg"), Some("token_count")) | (Some("token_usage_record"), _) => {}
+                // User input, tool activity, aborts, and unknown records after
+                // completion invalidate it. A final-looking message alone is
+                // insufficient: Codex can continue working after commentary.
+                _ => completion = None,
+            }
+        }
+        completion
+    }
+
     fn line_has_assistant_text(&self, line: &str) -> bool {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             return false;

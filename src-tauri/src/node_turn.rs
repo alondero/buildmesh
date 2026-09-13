@@ -57,6 +57,21 @@ pub fn publish_ready(
     );
 }
 
+pub(crate) fn recover_ready(
+    node_id: i64, app: &AppHandle,
+    detail: crate::agent::session_lifecycle::HookSignalDetail,
+    stamp: &str, input: &str, completed_at_ms: i64,
+) {
+    match crate::agent::session_lifecycle::recover_turn_completed(
+        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+        node_id, &detail, stamp, input, completed_at_ms,
+    ) {
+        Ok(true) => publish_passive(node_id, app),
+        Ok(false) => {},
+        Err(error) => tracing::warn!(node_id, %error, "failed to recover ready turn"),
+    }
+}
+
 fn publish_ready_with_sink(
     sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
     node_id: i64,

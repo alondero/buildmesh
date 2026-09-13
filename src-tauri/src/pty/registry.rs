@@ -28,6 +28,13 @@ impl<K: std::hash::Hash + Clone + Eq, V> PtyRegistry<K, V> {
         map.get(key).cloned()
     }
 
+    /// A short conditional mutation tied to the current incarnation. The
+    /// callback must not reenter the registry or perform external I/O.
+    pub(crate) fn with_current<R>(&self, key: &K, apply: impl FnOnce(&V) -> R) -> Option<R> {
+        let map = self.processes.lock().unwrap();
+        map.get(key).map(|value| apply(value.as_ref()))
+    }
+
     /// Insert a new entry. Replaces any existing entry for the same key
     /// and returns the previous value, if any.
     pub fn insert(&self, key: K, value: Arc<V>) -> Option<Arc<V>> {

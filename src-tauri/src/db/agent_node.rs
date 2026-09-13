@@ -651,6 +651,23 @@ pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
         })
 }
 
+pub(crate) fn complete_agent_turn_if_current(id: i64, stamp: &str) -> SqlResult<bool> {
+    complete_agent_turn_if_current_inner(&write_conn(), id, stamp)
+}
+
+pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, stamp: &str) -> SqlResult<bool> {
+    Ok(conn.execute("UPDATE agent_nodes SET status='ready', status_changed_at=?3
+        WHERE id=?1 AND status='running'
+        AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at, '') = ?2",
+        params![id, stamp, chrono::Utc::now().to_rfc3339()])? == 1)
+}
+
+pub(crate) fn agent_turn_stamp_precedes(stamp: &str, completed_at_ms: i64) -> bool {
+    let Some((generation, changed)) = stamp.split_once(':') else { return false; };
+    let (Ok(generation), Ok(changed)) = (generation.parse::<i64>(), chrono::DateTime::parse_from_rfc3339(changed)) else { return false; };
+    completed_at_ms >= generation && completed_at_ms >= changed.timestamp_millis()
+}
+
 pub(crate) fn set_cli_session_id_if_missing_inner(
     conn: &Connection,
     id: i64,

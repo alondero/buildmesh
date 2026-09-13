@@ -40,6 +40,7 @@ pub struct AgentProcess {
     /// [`AgentProcessRegistry::write_bytes`].
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     input_version: std::sync::atomic::AtomicU64,
+    last_submit_ms: std::sync::atomic::AtomicI64,
     input_buffer_len: std::sync::atomic::AtomicUsize,
     input_bracketed_paste: AtomicBool,
     /// Handle to the dedicated writer thread. `kill_session` joins it
@@ -247,6 +248,7 @@ impl AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
             input_version: std::sync::atomic::AtomicU64::new(0),
+            last_submit_ms: std::sync::atomic::AtomicI64::new(0),
             input_buffer_len: std::sync::atomic::AtomicUsize::new(0),
             input_bracketed_paste: AtomicBool::new(false),
             writer_handle: Mutex::new(writer_handle),
@@ -285,11 +287,13 @@ impl AgentProcess {
         let current_bracketed_paste = self.input_bracketed_paste.load(Ordering::Relaxed);
         let (next_len, next_bracketed_paste) =
             input_buffer_state_after(current_len, current_bracketed_paste, &data);
+        let submits = !next_bracketed_paste && (data.contains(&b'\r') || data.contains(&b'\n'));
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
         let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
+        if submits { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
         self.input_buffer_len.store(next_len, Ordering::Relaxed);
         self.input_bracketed_paste.store(next_bracketed_paste, Ordering::Relaxed);
         Ok(Some(InputStamp { generation: self.generation, version }))
@@ -431,6 +435,26 @@ impl AgentProcessRegistry {
 
     pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
         self.get(&session_id).and_then(|agent| agent.input_stamp()).map(InputStamp::encode)
+    }
+
+    /// Commit a recovered lifecycle fact while input cannot change. The
+    /// callback must only perform the conditional DB mutation, never emit
+    /// events, access the registry, or perform external I/O under this lock.
+    pub(crate) fn commit_recovered_turn(
+        &self, session_id: i64, expected: &str, completed_at_ms: i64,
+        commit: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let Some(expected) = InputStamp::decode(expected) else { return Ok(false); };
+        self.inner.with_current(&session_id, |agent| {
+            let _guard = agent.writer_tx.lock().unwrap();
+            if expected != (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
+                || agent.input_buffer_len.load(Ordering::Relaxed) != 0
+                || agent.input_bracketed_paste.load(Ordering::Relaxed)
+                || agent.last_submit_ms.load(Ordering::Relaxed) >= completed_at_ms
+                || !agent.reader_alive.load(Ordering::SeqCst)
+            { return Ok(false); }
+            commit()
+        }).unwrap_or(Ok(false))
     }
 
     /// Compare and enqueue under the same writer lock as ordinary keystrokes.
@@ -823,6 +847,53 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    #[test]
+    fn recovered_turn_commits_only_for_the_observed_process_input_and_lifecycle() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_003;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE agent_nodes (id INTEGER PRIMARY KEY, status TEXT,
+            session_started_at INTEGER, status_changed_at TEXT);
+            INSERT INTO agent_nodes VALUES (-930003, 'running', 1, '2026-09-13T18:25:20Z');").unwrap();
+        let lifecycle = "1:2026-09-13T18:25:20Z";
+        let input = registry.input_stamp(id).unwrap();
+        let agent = registry.get(&id).unwrap();
+        let completed_at = chrono::Utc::now().timestamp_millis() - 1000;
+        let commit = || crate::db::complete_agent_turn_if_current_inner(&conn, id, lifecycle).map_err(|e| e.to_string());
+        assert!(registry.commit_recovered_turn(id, &input, completed_at, || {
+            assert!(agent.writer_tx.try_lock().is_err(), "input stays fenced through the DB commit");
+            commit()
+        }).unwrap());
+        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "ready");
+
+        // A lifecycle change after observation must win even when the new
+        // state is also Running. Comparing only status would accept it.
+        conn.execute_batch("UPDATE agent_nodes SET status='running', status_changed_at='2026-09-13T18:30:00Z'").unwrap();
+        assert!(!registry.commit_recovered_turn(id, &input, completed_at, commit).unwrap());
+        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "running");
+
+        registry.write_bytes(id, b"draft").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"draft");
+        assert!(registry.input_stamp(id).is_none());
+        assert!(!registry.commit_recovered_turn(id, &input, completed_at, || panic!("draft must prevent mutation")).unwrap());
+        registry.write_bytes(id, b"\r").unwrap();
+        assert_eq!(rx.recv().unwrap(), b"\r");
+        let after_submit = registry.input_stamp(id).unwrap();
+        assert!(!registry.commit_recovered_turn(id, &after_submit, completed_at,
+            || panic!("even a prompt submitted before observation supersedes old native completion")).unwrap());
+        assert!(!registry.commit_recovered_turn(id, &input, i64::MAX,
+            || panic!("a changed input version must prevent mutation")).unwrap());
+        insert_trivial_agent(&registry, id);
+        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
+            || panic!("a replacement process cannot consume its predecessor's completion")).unwrap());
+        registry.kill_session(id);
+        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
+            || panic!("a dead process cannot publish completion")).unwrap());
+    }
 
     #[test]
     fn circuit_continuation_cannot_append_to_or_submit_a_user_draft() {
