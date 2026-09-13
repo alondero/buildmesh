@@ -477,6 +477,14 @@ pub fn run() {
             // against the capability descriptor (issue #1148 AC #5).
             commands::preferences::set_harness_default,
             commands::preferences::clear_harness_default,
+            // Resolved harness view (issue #1656) — single IPC entry that
+            // returns the full per-harness cascade (four-layer breakdown +
+            // capability-masked resolved value) for the Settings modal and
+            // the spawn menu. Calls into the shared
+            // `preferences::resolver::cascade` helper so the cascade
+            // order lives in exactly one place (the spawn path also routes
+            // through the same helper).
+            commands::preferences::get_resolved_harness_view,
             // Configurable Worktree Node directories (issue #1519): app-wide
             // default + effective-dir read for the Settings surfaces.
             commands::preferences::set_app_worktree_directory,

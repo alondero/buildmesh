@@ -259,6 +259,13 @@ pub struct ResolvedAgentConfig {
 /// 5. **Harness native fallback** — never a Buildmesh synthetic value: when
 ///    every supplied layer is empty/absent, the resolver returns `None` so
 ///    the harness runs with its own defaults.
+///
+/// **Issue #1656:** [`crate::preferences::resolver::cascade`] imports
+/// this `FieldInputs` so the spawn pipeline (this module) and the IPC
+/// `get_resolved_harness_view` (preferences module) agree on the cascade
+/// shape. Single canonical definition here; the cascade module is a
+/// *consumer*, not a re-exporter. Tests below construct the type
+/// directly from the same definition.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FieldInputs<'a> {
     /// Explicit Agent Node spawn argument (highest precedence).
@@ -336,13 +343,16 @@ pub fn resolve_extra_args(
 /// mirrors the issue #1148 cascade (slice 2 settles the per-Mesh override
 /// layer between explicit and the legacy Mesh row):
 ///   explicit > mesh_override > mesh (legacy) > application > native
+///
+/// **Issue #1656:** the helper is now sourced from
+/// [`crate::preferences::resolver::resolve_field`] so the spawn pipeline
+/// AND the IPC `get_resolved_harness_view` rule on the same cascade. The
+/// helper-level tests in `agent::capabilities::tests`
+/// (`resolver_cascade_prefers_explicit_over_mesh_override_over_mesh_over_application`,
+/// `resolver_cascade_falls_through_whitespace_layers`) now also gate the
+/// IPC resolver — a single helper, one set of cascade pin tests.
 fn resolve_field(field: FieldInputs<'_>) -> Option<String> {
-    field
-        .explicit
-        .and_then(normalize_non_empty)
-        .or_else(|| field.mesh_override.and_then(normalize_non_empty))
-        .or_else(|| field.mesh.and_then(normalize_non_empty))
-        .or_else(|| field.application.and_then(normalize_non_empty))
+    crate::preferences::resolver::resolve_field(field)
 }
 
 /// Apply the capability mask for the effort field. Two-stage mask:

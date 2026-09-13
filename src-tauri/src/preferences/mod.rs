@@ -68,6 +68,11 @@ pub use resolver::{
     upsert_provider_account, upsert_provider_pairing,
 };
 #[allow(unused_imports)]
+pub use resolver::{
+    apply_capability_mask, field_inputs, harness_config_str, resolve_field, CapabilityMaskForResolver,
+    HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
+};
+#[allow(unused_imports)]
 pub(crate) use resolver::{
     effective_pairings, pairing_can_potentially_match,
 };
