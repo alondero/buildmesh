@@ -35,6 +35,10 @@ The domain terms this introduces (Proxied/Native Provider, Compatible API surfac
 - **Grouped-flat (chosen)** — every combo one click *and* harness structure, no nesting cost, mobile-trivial; folds the original reorder request in as the favourites mechanism.
 - **Resolver shim vs one-off migration for legacy ids** — chose migration because archived nodes persist forever, so a shim is a permanent maintenance burden, and the legacy→composite mapping is unambiguous only while proxied providers pair with Claude Code alone.
 
+## Spawn Configuration amendment
+
+Spawn Options remain an always-expanded, harness-grouped list. Each parent row still launches with defaults. Named Spawn Configurations are offered in a hover submenu with a separate disclosure button and keyboard access; touch clients expose the saved choices through a disclosure. This refines the original no-submenu decision without nesting or hiding provider pairings. Configuration editing is desktop-owned, and selecting a configuration snapshots its sparse values on the new node.
+
 ## Consequences
 
 - `ProviderInfo` becomes the **Spawn Option** wire type, gaining `harness_id`, optional `provider_id`, `is_proxied`, and grouping/order metadata (ts-rs regenerated, committed, drift-gated per ADR-0009).

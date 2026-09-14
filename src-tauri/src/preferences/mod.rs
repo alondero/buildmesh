@@ -25,6 +25,7 @@ pub mod compatibility;
 pub mod migrations;
 pub mod model;
 pub mod resolver;
+pub mod spawn_configurations;
 pub mod storage;
 
 // Per-feature test files. Shared fixtures (TEST_LOCK, with_temp_dir) live in

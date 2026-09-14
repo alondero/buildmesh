@@ -322,6 +322,7 @@ export function ArchivedNodesTab() {
                     dropdownKey={dropdownId('session', session.session_id)}
                     isOpen={openDropdown === session.session_id}
                     primaryLabel="Resume"
+                    configurationsEnabled={false}
                     busyLabel="Resuming…"
                     primaryAriaLabel="Resume session"
                     onToggleDropdown={() =>

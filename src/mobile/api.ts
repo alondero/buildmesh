@@ -22,12 +22,8 @@ import type { SessionStatus } from "../types/generated/SessionStatus";
 export type { Mesh, AgentNode, Provider };
 export type NodeStatus = SessionStatus;
 
-export interface CreateNodeRequest {
-  mesh_id: number;
-  provider: string;
-  rows?: number;
-  cols?: number;
-}
+import type { CreateNodeRequest } from '../types/generated/CreateNodeRequest';
+export type { CreateNodeRequest };
 
 export function readStoredToken(): string | null {
   try {

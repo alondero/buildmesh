@@ -5,6 +5,7 @@ import type { PairingVerification } from "./PairingVerification";
 import type { ProviderAccount } from "./ProviderAccount";
 import type { ProviderPairing } from "./ProviderPairing";
 import type { ProxiedProviderOrder } from "./ProxiedProviderOrder";
+import type { SpawnConfiguration } from "./SpawnConfiguration";
 
 /**
  * User-editable, persisted preferences applied across all meshes.
@@ -136,7 +137,7 @@ autopilot_pool_size: number | null,
  * loads as an empty `HashMap` (issue #1148 acceptance criteria 1) via
  * `#[serde(default)]`.
  */
-harness_defaults: { [key in string]: HarnessConfigValue }, 
+harness_defaults: { [key in string]: HarnessConfigValue }, spawn_configurations: Array<SpawnConfiguration>,
 /**
  * Buildmesh-wide default Worktree Node directory (issue #1519).
  * Optional raw user input — relative values resolve from the Mesh root,

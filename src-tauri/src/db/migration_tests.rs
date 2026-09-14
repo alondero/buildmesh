@@ -9,6 +9,48 @@ mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
     #[test]
+    fn spawn_configuration_column_upgrade_preserves_existing_nodes() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'configurations', 'C:/configurations')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id, mesh_id, name, path, branch, env, provider) VALUES (1, 1, 'existing', 'C:/configurations', 'main', 'windows', 'codex')",
+            [],
+        )
+        .unwrap();
+        conn.execute("ALTER TABLE agent_nodes DROP COLUMN spawn_configuration", [])
+            .unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT name, spawn_configuration FROM agent_nodes WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("existing".into(), None));
+        conn.execute(
+            "UPDATE agent_nodes SET spawn_configuration = '{\"model\":\"sol\"}' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT spawn_configuration FROM agent_nodes WHERE id=1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+            "{\"model\":\"sol\"}"
+        );
+    }
+
+    #[test]
     fn saved_issue_review_contract_upgrades_stock_preserves_custom_and_defers_active_runs() {
         use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
         let conn = Connection::open_in_memory().unwrap();

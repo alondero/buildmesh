@@ -428,7 +428,7 @@ export function GitPullRequestsTab() {
   // One backend-owned acceptance call. The node-created event makes the row
   // visible immediately; completion/failure events arrive when the intent
   // spawner has registered (or rejected) the PTY.
-  const handleSpawn = async (pr: GitHubPullRequest, providerId: string) => {
+  const handleSpawn = async (pr: GitHubPullRequest, providerId: string, configurationId?: string) => {
     if (activeMeshId === null) return;
     setSpawning(pr.number);
     setSpawnError((prev) => {
@@ -453,6 +453,7 @@ export function GitPullRequestsTab() {
         providerId,
         pr.head_repo_owner,
         pr.head_repo_clone_url,
+        configurationId,
       );
       setOpenDropdown(null);
       setSpawning(null);
@@ -762,7 +763,7 @@ export function GitPullRequestsTab() {
                               setOpenDropdown(isDropdownOpen ? null : pr.number)
                             }
                             onSpawnDefault={() => handleDefaultSpawn(pr)}
-                            onSelectProvider={(providerId) => handleSpawn(pr, providerId)}
+                            onSelectProvider={(providerId, _altKey, configurationId) => handleSpawn(pr, providerId, configurationId)}
                             disabled={spawning !== null}
                             isSpawning={isSpawning}
                           />

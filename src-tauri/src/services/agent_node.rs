@@ -28,6 +28,10 @@ pub enum AgentNodeError {
     /// `"mesh not found"` carried inside `Status(String)`, which was
     /// brittle stringly-typed control flow.
     MeshNotFound(i64),
+    /// The requested saved spawn configuration is invalid for this option.
+    /// This remains typed so HTTP callers can return a client error without
+    /// scraping the validation text.
+    InvalidConfiguration(String),
     /// A backend orchestrator call (`spawn_agent_inner` today, but
     /// the variant is intentionally generic so future downstream
     /// calls share the path) failed. The wrapped string is the
@@ -42,6 +46,7 @@ impl std::fmt::Display for AgentNodeError {
             AgentNodeError::Db(e) => write!(f, "{}", e),
             AgentNodeError::Status(e) => write!(f, "{}", e),
             AgentNodeError::MeshNotFound(mesh_id) => write!(f, "mesh {mesh_id} not found"),
+            AgentNodeError::InvalidConfiguration(e) => write!(f, "{}", e),
             AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
@@ -135,6 +140,38 @@ pub fn create_with_source_pr_fork(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    create_with_source_pr_fork_configured(
+        mesh_id, path, branch, provider, source_issue, source_pr,
+        source_pr_pinned_sha, use_worktree_override, name_override,
+        head_repo_owner, head_repo_clone_url, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_with_source_pr_fork_configured(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    use_worktree_override: Option<bool>,
+    name_override: Option<&str>,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> Result<AgentNode, AgentNodeError> {
+    let configuration = configuration
+        .cloned()
+        .map(|value| {
+            crate::preferences::spawn_configurations::validate_for_option(
+                provider.unwrap_or("anthropic"),
+                value,
+            )
+        })
+        .transpose()
+        .map_err(AgentNodeError::InvalidConfiguration)?;
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 
@@ -178,7 +215,7 @@ pub fn create_with_source_pr_fork(
     // defaults to "anthropic", matching the prior `Provider::Anthropic` default.
     let provider_id = provider.unwrap_or("anthropic");
 
-    let node = db::create_agent_node(
+    let node = db::create_agent_node_configured(
         mesh_id,
         &session_name,
         path,
@@ -193,6 +230,7 @@ pub fn create_with_source_pr_fork(
         head_repo_owner,
         head_repo_clone_url,
         worktree_path_owned.as_deref(),
+        configuration.as_ref(),
     )?;
 
     Ok(node)
@@ -257,6 +295,23 @@ pub fn create_blocking(
     use_worktree_override: Option<bool>,
     pending: bool,
 ) -> Result<AgentNode, AgentNodeError> {
+    create_blocking_configured(
+        mesh_id, provider, branch_override, source_issue, name_override,
+        use_worktree_override, pending, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_blocking_configured(
+    mesh_id: i64,
+    provider: Option<&str>,
+    branch_override: Option<&str>,
+    source_issue: Option<i64>,
+    name_override: Option<&str>,
+    use_worktree_override: Option<bool>,
+    pending: bool,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> Result<AgentNode, AgentNodeError> {
     // 1. Mesh lookup. Map the missing-row case to the typed
     //    `AgentNodeError::MeshNotFound(mesh_id)` variant so the route
     //    can match on `Err(_)` patterns instead of inspecting a
@@ -309,9 +364,10 @@ pub fn create_blocking(
             None, // head_repo_owner
             None, // head_repo_clone_url
             use_worktree_override,
+            configuration,
         )
     } else {
-        create_with_source_pr_fork(
+        create_with_source_pr_fork_configured(
             mesh_id,
             &mesh.path,
             &branch,
@@ -323,6 +379,7 @@ pub fn create_blocking(
             name_override,
             None, // head_repo_owner
             None, // head_repo_clone_url
+            configuration,
         )
     }
 }
@@ -405,6 +462,7 @@ pub fn create_pending_with_worktree_override(
         None,
         None,
         use_worktree_override,
+        None,
     )
 }
 
@@ -426,6 +484,27 @@ pub fn create_pending_with_source_pr_fork(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    create_pending_with_source_pr_fork_configured(
+        mesh_id, path, branch, provider, source_issue, source_pr,
+        source_pr_pinned_sha, name_override, head_repo_owner,
+        head_repo_clone_url, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_pending_with_source_pr_fork_configured(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    source_pr_pinned_sha: Option<&str>,
+    name_override: Option<&str>,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
+) -> Result<AgentNode, AgentNodeError> {
     create_pending_with_source_pr_fork_and_worktree(
         mesh_id,
         path,
@@ -438,6 +517,7 @@ pub fn create_pending_with_source_pr_fork(
         head_repo_owner,
         head_repo_clone_url,
         None,
+        configuration,
     )
 }
 
@@ -454,8 +534,9 @@ fn create_pending_with_source_pr_fork_and_worktree(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
     use_worktree_override: Option<bool>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create_with_source_pr_fork(
+    let mut node = create_with_source_pr_fork_configured(
         mesh_id,
         path,
         branch,
@@ -467,6 +548,7 @@ fn create_pending_with_source_pr_fork_and_worktree(
         name_override,
         head_repo_owner,
         head_repo_clone_url,
+        configuration,
     )?;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
@@ -1145,6 +1227,34 @@ mod tests {
     // -------------------------------------------------------------------
 
     // DB init routes through `db::test_support::ensure_db_for_tests`.
+
+    #[test]
+    fn spawn_configurations_snapshot_reaches_idle_and_pending_nodes() {
+        use crate::preferences::spawn_configurations::SpawnConfiguration;
+        let mesh_id = fresh_mesh();
+        let mut configuration = SpawnConfiguration {
+            id: "sol".into(), name: "Sol Max".into(), spawn_option_id: "codex".into(),
+            model: Some("gpt-5.6-sol".into()), effort: None, extra_args: Some("--search".into()),
+        };
+        for pending in [false, true] {
+            let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
+                None, None, Some(false), pending, Some(&configuration)).unwrap();
+            assert_eq!(node.provider, "codex");
+            assert_eq!(node.status, if pending { SessionStatus::Pending } else { SessionStatus::Idle });
+            assert_eq!(db::node_spawn_configuration(node.id, "codex").unwrap(), Some(configuration.clone()));
+        }
+        let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
+            None, None, Some(false), false, Some(&configuration)).unwrap();
+        configuration.model = Some("edited-later".into());
+        assert_eq!(db::node_spawn_configuration(node.id, "codex").unwrap().unwrap().model.as_deref(), Some("gpt-5.6-sol"));
+        db::set_agent_node_provider(node.id, "claude:minimax").unwrap();
+        assert!(db::node_spawn_configuration(node.id, "claude:minimax").unwrap().is_none());
+        db::set_agent_node_provider(node.id, "codex").unwrap();
+        assert!(db::node_spawn_configuration(node.id, "codex").unwrap().is_none());
+        let defaults = create_blocking(mesh_id, Some("codex"), Some("main"), None, None, Some(false), false).unwrap();
+        assert!(db::node_spawn_configuration(defaults.id, "codex").unwrap().is_none());
+        assert!(db::node_spawn_configuration(i64::MAX, "codex").unwrap().is_none());
+    }
 
     /// Create a fresh mesh in the global DB at a unique per-test path and
     /// return its id. Each call uses a monotonic counter so parallel tests

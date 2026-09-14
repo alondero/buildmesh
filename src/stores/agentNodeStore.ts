@@ -259,7 +259,7 @@ interface AgentNodeState {
   getActiveMeshId: () => number | null;
 
   fetchAgentNodes: () => Promise<void>;
-  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => Promise<AgentNode>;
+  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) => Promise<AgentNode>;
   /// Sidebar "click + or pick provider" entrypoint — creates a node on the
   /// mesh, sets it active, and selects the mesh. The three steps live behind
   /// one action (issue #283) so the invariant — "only switch active mesh/node
@@ -270,7 +270,7 @@ interface AgentNodeState {
   /// `spawnAgent` with `{ prefill }` in the same turn — Terminal
   /// auto-spawn is skipped because the node is already `spawning`.
   /// Omitted / whitespace means Fresh (Terminal auto-spawns as before).
-  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string) => Promise<AgentNode>;
+  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean, initialPrompt?: string, configurationId?: string) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   /// Backend-driven retirement. The Circuit worker's `CloseAgentNode` effect
   /// and cancelled-run cleanup delete the row directly and emit `node-deleted`;
@@ -579,9 +579,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     };
   })(),
 
-  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean): Promise<AgentNode> => {
+  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean, configurationId?: string): Promise<AgentNode> => {
     try {
-      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree);
+      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree, configurationId);
       set((state) => ({
         nodesById: { ...state.nodesById, [node.id]: node },
         nodeIds: [...state.nodeIds, node.id],
@@ -593,14 +593,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     }
   },
 
-  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string): Promise<AgentNode> => {
+  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string): Promise<AgentNode> => {
     // Create FIRST — only switch active mesh/node if creation succeeded.
     // The order is the invariant: pre-refactor this lived in three sequential
     // store calls in Sidebar.handleSelectProvider (#283), where a future hand
     // could re-arrange them and re-introduce the half-applied
     // "mesh selected but no node" state. Holding the order here makes the
     // invariant unit-testable and impossible to violate from a click handler.
-    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree);
+    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree, configurationId);
     get().setActiveNode(node.id);
     useMeshStore.getState().selectMesh(meshId);
     // Explicit create-then-spawn (issue #1413 review): the prompt rides

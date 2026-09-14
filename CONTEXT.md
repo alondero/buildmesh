@@ -51,6 +51,10 @@ _Avoid_: Provider identity (too broad), cache key (implementation detail).
 A single launchable entry in the **Spawn Menu** — either an **Agent Harness** on its own (launched natively) or an Agent Harness paired with a **Proxied Provider**. The unit a user picks to start an **Agent Node**, and the identity recorded on the node.
 _Avoid_: Provider row, launch option, harness profile (the existing `HarnessProfile` struct is harness-only — don't reuse).
 
+**Spawn Configuration**:
+A named set of optional launch settings belonging to one **Spawn Option**, such as a model, effort level, or extra arguments supported by its **Agent Harness**. Unset settings inherit the normal defaults. Selecting a configuration copies its settings to the new **Agent Node**; later edits or deletion do not change existing nodes.
+_Avoid_: Harness profile (identifies the harness itself), Model Provider (identifies credentials and billing).
+
 **Spawn Menu**:
 The single, backend-derived, **Agent Harness**-grouped, user-ordered list of **Spawn Options**. Every spawn surface renders this one menu as-is.
 _Avoid_: Provider menu, launch dropdown.

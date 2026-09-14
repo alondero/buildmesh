@@ -77,7 +77,8 @@ CREATE TABLE agent_nodes (
             head_repo_clone_url TEXT,
             source_pr_pinned_sha TEXT,
             signal_health TEXT,
-            worktree_path TEXT
+            worktree_path TEXT,
+            spawn_configuration TEXT
         , source_issue INTEGER)
 
 table:app_settings

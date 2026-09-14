@@ -363,6 +363,7 @@ pub fn create_issue_node(
     issue_number: i64,
     issue_title: String,
     provider: Option<String>,
+    configuration_id: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
@@ -405,7 +406,11 @@ pub fn create_issue_node(
     // helper own the resolution — one git lookup per call instead
     // of two — and `branch` becomes dead code that's been
     // removed.
-    let node = crate::services::agent_node::create_blocking(
+    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+        &effective_provider,
+        configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+    ).map_err(|error| error.to_string())?;
+    let node = crate::services::agent_node::create_blocking_configured(
         mesh.id,
         Some(&effective_provider),
         /* branch_override = */ None,
@@ -413,6 +418,7 @@ pub fn create_issue_node(
         Some(&initial_name),
         None, // use_worktree_override — falls back to mesh default
         true,  // pending — Pending matches the prior create_pending(...) semantics
+        configuration.as_ref(),
     )
     .map_err(|e| e.to_string())?;
 
@@ -601,6 +607,7 @@ pub fn create_pr_node(
     provider: Option<String>,
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
+    configuration_id: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
     // Issue #1180 — the impl now returns the `SpawnIntent::PullRequest`
     // it built (owner/repo resolved from the mesh + the supplied
@@ -610,7 +617,7 @@ pub fn create_pr_node(
     // prefill text. Previously the wrapper re-built the intent here
     // and the impl called `format_pr_prefill` independently — a silent
     // drift waiting to happen.
-    let (draft, intent) = create_pr_node_impl(
+    let (draft, intent) = create_pr_node_impl_configured(
         mesh_id,
         pr_number,
         pr_title,
@@ -619,6 +626,7 @@ pub fn create_pr_node(
         provider,
         head_repo_owner,
         head_repo_clone_url,
+        configuration_id,
     )?;
     let _ = app.emit(
         "node-created",
@@ -657,6 +665,7 @@ pub fn create_pr_node(
 /// the prefill surfaced on the desktop draft comes from
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
 /// with the background launch path and the Autopilot watcher.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_node_impl(
     mesh_id: i64,
@@ -667,6 +676,31 @@ pub(crate) fn create_pr_node_impl(
     provider: Option<String>,
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    create_pr_node_impl_configured(
+        mesh_id,
+        pr_number,
+        pr_title,
+        head_ref,
+        head_sha,
+        provider,
+        head_repo_owner,
+        head_repo_clone_url,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_pr_node_impl_configured(
+    mesh_id: i64,
+    pr_number: i64,
+    pr_title: String,
+    head_ref: String,
+    head_sha: String,
+    provider: Option<String>,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
+    configuration_id: Option<String>,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     // Issue #471 — the gate is split into two independent rejections. See
     // `validate_pr_spawn_inputs` for the truth table; both guards are tested
@@ -723,7 +757,11 @@ pub(crate) fn create_pr_node_impl(
     // check — same fail-open semantics as `pr_head_unfetchable`.
     let pinned_sha_opt: Option<&str> = if head_sha.is_empty() { None } else { Some(&head_sha) };
 
-    let node = crate::services::agent_node::create_pending_with_source_pr_fork(
+    let configuration = crate::preferences::spawn_configurations::resolve_saved(
+        &effective_provider,
+        configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+    ).map_err(|error| error.to_string())?;
+    let node = crate::services::agent_node::create_pending_with_source_pr_fork_configured(
         mesh.id,
         &mesh.path,
         &head_ref,
@@ -734,6 +772,7 @@ pub(crate) fn create_pr_node_impl(
         Some(&initial_name),
         head_repo_owner.as_deref(),  // fork meta (issue #443) — None for same-repo PRs
         head_repo_clone_url.as_deref(),
+        configuration.as_ref(),
     )
     .map_err(|e| e.to_string())?;
 

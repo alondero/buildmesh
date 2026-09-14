@@ -35,6 +35,7 @@ pub async fn create_agent_node(
     branch: String,
     provider: Option<String>,
     use_worktree: Option<bool>,
+    configuration_id: Option<String>,
 ) -> Result<AgentNode, String> {
     // Tauri command surface has no PR-spawn plumbing; PR flows go via
     // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
@@ -54,7 +55,11 @@ pub async fn create_agent_node(
     // `provider.unwrap_or("anthropic")` fallback (issue #538 default)
     // is preserved inside `create_with_source_pr_fork`.
     crate::commands::run_blocking("create_agent_node", move || {
-        services::agent_node::create_blocking(
+        let configuration = crate::preferences::spawn_configurations::resolve_saved(
+            provider.as_deref().unwrap_or("anthropic"),
+            configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+        ).map_err(|error| error.to_string())?;
+        services::agent_node::create_blocking_configured(
             mesh_id,
             provider.as_deref(),
             Some(&branch),
@@ -62,6 +67,7 @@ pub async fn create_agent_node(
             None, // name_override — Tauri surface doesn't accept one
             use_worktree,
             false, // pending — Idle matches the prior create(...) semantics
+            configuration.as_ref(),
         )
         .map_err(|e| {
             tracing::error!("create_agent_node failed: {}", e);

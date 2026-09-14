@@ -77,8 +77,8 @@ export type FileDiffStatus =
   | 'untracked';
 
 // Agent Node — renamed from `*Session` to `*AgentNode` in issue #490.
-export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
-  _invoke<AgentNode>('create_agent_node', { meshId, name, path, branch, provider, useWorktree });
+export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) =>
+  _invoke<AgentNode>('create_agent_node', { meshId, name, path, branch, provider, useWorktree, configurationId });
 
 export const listAgentNodes = () =>
   _invoke<AgentNode[]>('list_agent_nodes');
@@ -674,8 +674,8 @@ export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle:
 /// transient prefill to a second IPC command.
 export type { IssueNodeDraft };
 
-export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
-  _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
+export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string, configurationId?: string) =>
+  _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider, configurationId });
 
 export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
   _invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
@@ -714,6 +714,7 @@ export const createPrNode = (
   provider?: string,
   headRepoOwner?: string,
   headRepoCloneUrl?: string,
+  configurationId?: string,
 ) =>
   _invoke<IssueNodeDraft>('create_pr_node', {
     meshId,
@@ -724,6 +725,7 @@ export const createPrNode = (
     provider,
     headRepoOwner,
     headRepoCloneUrl,
+    configurationId,
   });
 
 // AI context portability

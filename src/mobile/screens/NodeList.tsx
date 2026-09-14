@@ -255,12 +255,12 @@ export default function NodeList({
       });
   }, [onAuthFailed]);
 
-  const handleCreate = async (meshId: number, providerId: string) => {
+  const handleCreate = async (meshId: number, providerId: string, configurationId?: string) => {
     setPickerMeshId(null);
     setCreating(meshId);
     setError(null);
     try {
-      const node = await createNode({ mesh_id: meshId, provider: providerId });
+      const node = await createNode({ mesh_id: meshId, provider: providerId, configuration_id: configurationId });
       if (!mountedRef.current) return;
       setCreating(null);
       onOpenNode(node);
@@ -525,7 +525,7 @@ export default function NodeList({
       {pickerMeshId !== null && (
         <ProviderPicker
           providers={providers}
-          onPick={(p) => handleCreate(pickerMeshId, p.id)}
+          onPick={(p, configurationId) => handleCreate(pickerMeshId, p.id, configurationId)}
           onCancel={() => setPickerMeshId(null)}
         />
       )}
@@ -919,7 +919,7 @@ function ProviderPicker({
   onCancel,
 }: {
   providers: Provider[];
-  onPick: (p: Provider) => void;
+  onPick: (p: Provider, configurationId?: string) => void;
   onCancel: () => void;
 }) {
   // Issue #575 / ADR-0016 — group the Spawn Options by `harness_id`
@@ -933,6 +933,15 @@ function ProviderPicker({
   // `GroupedProviderMenu` and `MeshPropertiesTab` via `groupByHarness`
   // (issue #583 cleanup).
   const groups = groupByHarness(providers);
+
+  const configurationsFor = (provider: Provider) => (provider.configurations?.length ? (
+    <details style={{ marginLeft: 18, marginBottom: 8 }}>
+      <summary style={{ padding: 10, color: "var(--text-muted)", fontSize: 13 }}>{provider.label} configurations</summary>
+      {provider.configurations.map((configuration) => (
+        <button type="button" className="card" key={configuration.id} onClick={() => onPick(provider, configuration.id)}>{configuration.name}</button>
+      ))}
+    </details>
+  ) : null);
 
   return (
     <Sheet onClose={onCancel} testId="provider-picker">
@@ -977,10 +986,11 @@ function ProviderPicker({
               <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}</span>
               <span style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
             </button>
+            {configurationsFor(native)}
             {children.map((child) => (
+              <div key={child.id}>
               <button
                 type="button"
-                key={child.id}
                 onClick={() => onPick(child)}
                 data-testid={`provider-${child.id}`}
                 className="card"
@@ -1002,6 +1012,8 @@ function ProviderPicker({
                 />
                 <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}</span>
               </button>
+              {configurationsFor(child)}
+              </div>
             ))}
           </div>
         );

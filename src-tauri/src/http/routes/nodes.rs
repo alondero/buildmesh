@@ -24,23 +24,29 @@ pub async fn list_json() -> String {
     }
 }
 
-pub async fn create(req: &ParsedRequest) -> Response {
-    #[derive(serde::Deserialize)]
-    struct CreateNodeRequest {
-        mesh_id: i64,
-        provider: String,
-        #[serde(default = "default_rows")]
-        rows: u16,
-        #[serde(default = "default_cols")]
-        cols: u16,
-    }
-    fn default_rows() -> u16 {
-        24
-    }
-    fn default_cols() -> u16 {
-        80
-    }
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "CreateNodeRequest.ts")]
+pub struct CreateNodeRequest {
+    #[ts(as = "i32")]
+    pub mesh_id: i64,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub rows: Option<u16>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cols: Option<u16>,
+}
 
+#[derive(Debug)]
+enum CreateNodeError {
+    Configuration(crate::preferences::spawn_configurations::SpawnConfigurationError),
+    Agent(crate::services::agent_node::AgentNodeError),
+}
+
+pub async fn create(req: &ParsedRequest) -> Response {
     let parsed: CreateNodeRequest = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
@@ -50,7 +56,14 @@ pub async fn create(req: &ParsedRequest) -> Response {
 
     let mesh_id = parsed.mesh_id;
     let provider = parsed.provider;
+    let configuration_id = parsed.configuration_id.clone();
     let node = match crate::commands::run_blocking("http_create_node", move || {
+        let result: Result<_, CreateNodeError> = (|| {
+            let configuration = crate::preferences::spawn_configurations::resolve_saved(
+                &provider,
+                configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
+            )
+            .map_err(CreateNodeError::Configuration)?;
         // Issue #1658 step 5 — the mesh-lookup + branch-resolution +
         // node-create trio is now a single shared runner; the helper
         // resolves `mesh.path` and the `"main"` branch internally, and
@@ -64,29 +77,47 @@ pub async fn create(req: &ParsedRequest) -> Response {
         // `map_err` here tags the typed variant with its mesh id so
         // the outer match arm compares the discriminator rather than
         // the string body.
-        crate::services::agent_node::create_blocking(mesh_id, Some(provider.as_str()), Some("main"),
+        crate::services::agent_node::create_blocking_configured(mesh_id, Some(provider.as_str()), Some("main"),
             None, // source_issue
             None, // name_override — none on this route
             None, // use_worktree_override — falls back to mesh default
-            false, // pending — Idle matches the prior create(...) semantics
+            false,
+            configuration.as_ref(),
         )
-        .map_err(|e| match e {
-            crate::services::agent_node::AgentNodeError::MeshNotFound(_) => {
-                "mesh not found".to_string()
-            }
-            other => other.to_string(),
-        })
+            .map_err(CreateNodeError::Agent)
+        })();
+        Ok::<_, String>(result)
     })
     .await
     {
-        Ok(n) => n,
-        Err(message) if message == "mesh not found" => {
+        Ok(Ok(n)) => n,
+        Ok(Err(CreateNodeError::Configuration(
+            crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(message),
+        ))) => {
+            return Response::json_error("400 Bad Request", &message);
+        }
+        Ok(Err(CreateNodeError::Configuration(error))) => {
+            return Response::json_error(
+                "500 Internal Server Error",
+                &format!("Failed to resolve spawn configuration: {error}"),
+            );
+        }
+        Ok(Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::MeshNotFound(_)))) => {
             return Response::json_error("400 Bad Request", "Mesh not found");
+        }
+        Ok(Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::InvalidConfiguration(message)))) => {
+            return Response::json_error("400 Bad Request", &message);
+        }
+        Ok(Err(CreateNodeError::Agent(e))) => {
+            return Response::json_error(
+                "500 Internal Server Error",
+                &format!("Failed to create node: {}", e),
+            );
         }
         Err(e) => {
             return Response::json_error(
                 "500 Internal Server Error",
-                &format!("Failed to create node: {}", e),
+                &format!("Failed to create node: {e}"),
             );
         }
     };
@@ -103,8 +134,8 @@ pub async fn create(req: &ParsedRequest) -> Response {
             node_id,
             crate::agent::spawn::SpawnIntent::Fresh,
             crate::agent::spawn::TerminalSize {
-                rows: parsed.rows,
-                cols: parsed.cols,
+                rows: parsed.rows.unwrap_or(24),
+                cols: parsed.cols.unwrap_or(80),
             },
         ),
     )
@@ -246,6 +277,18 @@ mod tests {
     //! forward_mobile_input_handles_registry_error`.
     use super::*;
     use crate::http::router::ParsedRequest;
+
+    #[test]
+    fn configuration_resolution_keeps_validation_and_storage_errors_typed() {
+        let invalid = crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(
+            "Saved configuration no longer exists".into(),
+        );
+        let storage = crate::preferences::spawn_configurations::SpawnConfigurationError::Storage(
+            "failed to read preferences".into(),
+        );
+        assert!(matches!(invalid, crate::preferences::spawn_configurations::SpawnConfigurationError::Invalid(_)));
+        assert!(matches!(storage, crate::preferences::spawn_configurations::SpawnConfigurationError::Storage(_)));
+    }
 
     fn req(body: &[u8], node_id: i64) -> ParsedRequest {
         ParsedRequest::test_post("/api/nodes/0/input", body).with_ids(Some(node_id), None)

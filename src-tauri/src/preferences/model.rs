@@ -454,6 +454,8 @@ pub struct AppPreferences {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub harness_defaults: HashMap<String, HarnessConfigValue>,
+    #[serde(default)]
+    pub spawn_configurations: Vec<super::spawn_configurations::SpawnConfiguration>,
     /// Buildmesh-wide default Worktree Node directory (issue #1519).
     /// Optional raw user input — relative values resolve from the Mesh root,
     /// absolute values must be in the same host environment (native/Windows

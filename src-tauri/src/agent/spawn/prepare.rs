@@ -448,6 +448,16 @@ pub(super) async fn prepare_context(
     // downstream of this line should re-parse the raw composite string.
     let spawn_option_id = SpawnOptionId::from(node.provider.as_str());
     let node_mesh_id = node.mesh_id;
+    let configuration = db::node_spawn_configuration(node.id, &node.provider)?;
+    let explicit_model = explicit_model
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| configuration.as_ref().and_then(|c| c.model.clone()));
+    let explicit_effort = explicit_effort
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| configuration.as_ref().and_then(|c| c.effort.clone()));
+    let explicit_extra_args = explicit_extra_args
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| configuration.as_ref().and_then(|c| c.extra_args.clone()));
     Ok(PrepareOutcome::Ready(Box::new(PreparedPhases {
         workspace: WorkspaceToProvision {
             session_id,

@@ -33,6 +33,7 @@ export type SpawnOption = Pick<
 > & {
   /** Tailwind class (e.g. `bg-blue-500`) derived from `id`. */
   color: string;
+  capabilities?: ProviderInfo['capabilities'];
 };
 
 /**
@@ -49,6 +50,7 @@ export type SpawnOption = Pick<
 export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
   return backend.map((p) => ({
     id: p.id,
+    capabilities: p.capabilities,
     label: p.label,
     icon: p.icon,
     harness_id: p.harness_id,

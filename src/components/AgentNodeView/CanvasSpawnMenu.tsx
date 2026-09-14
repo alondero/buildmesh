@@ -82,7 +82,7 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
 
   if (targetMesh === null) return null;
 
-  const handleSelect = async (providerId: string, altKey: boolean) => {
+  const handleSelect = async (providerId: string, altKey: boolean, configurationId?: string) => {
     close();
     // The `altKey` modifier on a spawn pick toggles the worktree
     // override — Alt+click inverts the mesh's configured default,
@@ -105,6 +105,8 @@ export function CanvasSpawnMenu({ meshId }: CanvasSpawnMenuProps) {
         targetMesh.path,
         providerId,
         useWorktree,
+        undefined,
+        configurationId,
       );
     } catch (error) {
       // The agentNodeStore selector swallows errors and surfaces

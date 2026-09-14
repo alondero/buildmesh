@@ -261,11 +261,11 @@ export function GitIssuesTab() {
   // `node-spawn-completed` / `node-spawn-failed` store listeners. The
   // user dismisses the dock with the activity-bar toggle (or by
   // switching to a non-issues tab) when they're done.
-  const handleSpawn = async (issue: GitHubIssue, providerId: string) => {
+  const handleSpawn = async (issue: GitHubIssue, providerId: string, configurationId?: string) => {
     if (activeMeshId === null) return;
     setSpawning(issue.number);
     try {
-      await createIssueNode(activeMeshId, issue.number, issue.title, providerId);
+      await createIssueNode(activeMeshId, issue.number, issue.title, providerId, configurationId);
       setOpenDropdown(null);
       setSpawning(null);
     } catch (e) {
@@ -478,7 +478,7 @@ export function GitIssuesTab() {
                           setOpenDropdown(openDropdown === issue.number ? null : issue.number)
                         }
                         onSpawnDefault={() => handleDefaultSpawn(issue)}
-                        onSelectProvider={(providerId) => handleSpawn(issue, providerId)}
+                        onSelectProvider={(providerId, _altKey, configurationId) => handleSpawn(issue, providerId, configurationId)}
                         disabled={spawning !== null}
                         isSpawning={spawning === issue.number}
                       />

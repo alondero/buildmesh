@@ -177,4 +177,20 @@ describe('tauri.ts provider memoisation (#405)', () => {
     await api.listProviders();
     expect(callsTo('list_providers')).toBe(2);
   });
+
+  it('saving or deleting a spawn configuration invalidates the cached provider list', async () => {
+    mockProviderIpc();
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(1);
+
+    await api.saveSpawnConfiguration({
+      id: 'sol', name: 'Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null,
+    });
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(2);
+
+    await api.deleteSpawnConfiguration('sol');
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(3);
+  });
 });

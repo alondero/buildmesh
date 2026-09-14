@@ -81,6 +81,7 @@ import type { UsageAmount } from '../../types/generated/UsageAmount';
 import type { UsageMeter } from '../../types/generated/UsageMeter';
 import type { ProviderUsage } from '../../types/generated/ProviderUsage';
 import type { BillingBalance } from '../../types/generated/BillingBalance';
+import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
 
 // Re-export so consumers of `lib/tauri` (the facade) can keep importing
 // types from the same place they used to. `export type` is the right
@@ -359,3 +360,19 @@ export const getResolvedHarnessView = (
   _invoke<
     ResolvedHarnessView
   >('get_resolved_harness_view', { harnessId, meshId });
+
+export const listSpawnConfigurations = () => _invoke<SpawnConfiguration[]>('list_spawn_configurations');
+export const saveSpawnConfiguration = async (value: SpawnConfiguration): Promise<SpawnConfiguration> => {
+  try {
+    return await _invoke<SpawnConfiguration>('save_spawn_configuration', { value });
+  } finally {
+    setProviderListPromise(null);
+  }
+};
+export const deleteSpawnConfiguration = async (id: string): Promise<void> => {
+  try {
+    await _invoke<void>('delete_spawn_configuration', { id });
+  } finally {
+    setProviderListPromise(null);
+  }
+};
