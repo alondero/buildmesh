@@ -82,7 +82,15 @@ jobs:
       - name: Check documentation contract
         env:
           DOCS_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
-        run: node scripts/check-docs.mjs --base "$DOCS_DIFF_BASE"
+        run: |
+          base="$DOCS_DIFF_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then base=HEAD; fi
+          if git rev-parse --verify --end-of-options "${base}^{commit}" >/dev/null 2>&1; then
+            node scripts/check-docs.mjs --base "$base"
+          else
+            echo "::warning::Documentation impact diff base '$base' is unavailable; running the structural documentation check only."
+            node scripts/check-docs.mjs
+          fi
 
       # Issue #1542 — enforced ESLint + React Hooks gate. Two steps:
       #  (a) `npm run lint` runs ESLint across the codebase; the flat

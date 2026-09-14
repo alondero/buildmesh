@@ -251,12 +251,33 @@ function parseBaseArgument() {
   return args[1];
 }
 
-function changedFilesSince(root, base) {
+export function changedFilesSince(root, base) {
   const options = { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 };
-  const commit = execFileSync('git', ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`], options).trim();
-  const changed = execFileSync('git', ['diff', '--name-only', '-z', commit, '--'], options).split('\0').filter(Boolean);
-  const messages = execFileSync('git', ['log', `${commit}..HEAD`, '--format=%B'], options);
-  return { changedFiles: changed, commitMessages: messages ? [messages] : [] };
+  const requestedBase = String(base ?? '').trim();
+  const candidate = !requestedBase || /^0+$/.test(requestedBase) ? 'HEAD' : requestedBase;
+  try {
+    const commit = execFileSync(
+      'git',
+      ['rev-parse', '--verify', '--end-of-options', `${candidate}^{commit}`],
+      { ...options, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    const changed = execFileSync('git', ['diff', '--name-only', '-z', commit, '--'], options).split('\0').filter(Boolean);
+    const messages = execFileSync('git', ['log', `${commit}..HEAD`, '--format=%B%x00'], options);
+    return {
+      changedFiles: changed,
+      commitMessages: messages.split('\0').filter(Boolean),
+      base: candidate,
+      skipped: false,
+    };
+  } catch (error) {
+    return {
+      changedFiles: [],
+      commitMessages: [],
+      base: candidate,
+      skipped: true,
+      reason: error.message,
+    };
+  }
 }
 
 if (isMain()) {
@@ -264,7 +285,14 @@ if (isMain()) {
   try {
     const base = parseBaseArgument();
     failures = checkDocumentation();
-    if (base) failures.push(...checkDocumentationImpact(changedFilesSince(repoRoot, base)));
+    if (base) {
+      const impact = changedFilesSince(repoRoot, base);
+      if (impact.skipped) {
+        console.warn(`Documentation impact check skipped for unavailable base "${impact.base}".`);
+      } else {
+        failures.push(...checkDocumentationImpact(impact));
+      }
+    }
   } catch (error) {
     console.error(`Documentation check failed: ${error.message}`);
     process.exitCode = 1;

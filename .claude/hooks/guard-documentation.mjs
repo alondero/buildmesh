@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const MAX_BUFFER = 32 * 1024 * 1024;
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export function stripHeredocs(command) {
   return String(command ?? "").replace(
@@ -326,14 +327,26 @@ function readTrackedDiff(cwd, revision, pathspecs = []) {
   return readNulNames(cwd, ["diff", revision, "--name-only", "-z", "--", ...pathspecs]);
 }
 
-function readAmendFiles(cwd) {
+function readAmendFiles(cwd, includeWorkingTree = false) {
+  if (includeWorkingTree) {
+    try {
+      return readTrackedDiff(cwd, "HEAD^");
+    } catch {
+      // `HEAD^` does not exist for a root commit. An amend still commits the
+      // current root tree, so combine the committed tree with current changes.
+      const committed = readNulNames(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
+      return [...new Set([...committed, ...readStatusNames(cwd)])];
+    }
+  }
+
   try {
-    return readTrackedDiff(cwd, "HEAD^");
+    // Ordinary amend commits the index. Comparing the index with HEAD's
+    // parent excludes unrelated unstaged working-tree edits.
+    return readNulNames(cwd, ["diff", "--cached", "HEAD^", "--name-only", "-z"]);
   } catch {
-    // `HEAD^` does not exist for a root commit. An amend still commits the
-    // current root tree, so combine the committed tree with current changes.
-    const committed = readNulNames(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"]);
-    return [...new Set([...committed, ...readStatusNames(cwd)])];
+    // `HEAD^` does not exist for a root commit. The index is still the
+    // amended root tree, so compare it with the empty tree.
+    return readNulNames(cwd, ["diff", "--cached", EMPTY_TREE, "--name-only", "-z"]);
   }
 }
 
@@ -359,7 +372,7 @@ function readGitState(cwd, classification) {
 
   if (classification.hasAmend) {
     try {
-      state.commitFiles = readAmendFiles(cwd);
+      state.commitFiles = readAmendFiles(cwd, classification.hasAutoStage);
     } catch {
       state.commitFiles = null;
     }

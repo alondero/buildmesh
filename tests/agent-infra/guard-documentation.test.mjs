@@ -167,6 +167,24 @@ test('the executable hook evaluates the final tracked snapshot for git commit --
   }
 });
 
+test('ordinary amend ignores unrelated unstaged behavior-sensitive files', () => {
+  const fixtureRoot = createGitFixture();
+  try {
+    mkdirSync(join(fixtureRoot, 'tests'));
+    writeFileSync(join(fixtureRoot, 'tests', 'fixture.txt'), 'baseline\n');
+    execFileSync('git', ['add', 'tests/fixture.txt'], { cwd: fixtureRoot });
+    execFileSync('git', ['commit', '-qm', 'baseline tests'], { cwd: fixtureRoot });
+    mkdirSync(join(fixtureRoot, 'src'));
+    writeFileSync(join(fixtureRoot, 'src', 'App.tsx'), 'export const App = () => null;\n');
+
+    const amend = runHook(fixtureRoot, 'git commit --amend --no-edit');
+    assert.equal(amend.status, 0);
+    assert.equal(amend.stdout, '');
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('the executable hook allows a tracked docs-only git commit -a', () => {
   const fixtureRoot = createGitFixture();
   try {

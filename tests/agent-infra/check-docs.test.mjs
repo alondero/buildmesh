@@ -9,6 +9,7 @@ import {
   checkDocumentation,
   checkDocumentationImpact,
   checkLocalLinks,
+  changedFilesSince,
   collectMarkdownFiles,
   extractMarkdownLinks,
   githubAnchor,
@@ -89,6 +90,17 @@ test('documentation impact requires a relevant page or a reasoned exemption', ()
     changedFiles: ['src/App.tsx', 'docs/user-guide.md'],
   }), []);
   assert.deepEqual(checkDocumentationImpact({ changedFiles: ['tests/unit/app.test.tsx'] }), []);
+});
+
+test('documentation impact base handling tolerates first-push and unavailable revisions', () => {
+  const firstPush = changedFilesSince(root, '0'.repeat(40));
+  assert.equal(firstPush.skipped, false);
+  assert.equal(firstPush.base, 'HEAD');
+
+  const unavailable = changedFilesSince(root, 'revision-that-does-not-exist');
+  assert.equal(unavailable.skipped, true);
+  assert.deepEqual(unavailable.changedFiles, []);
+  assert.deepEqual(unavailable.commitMessages, []);
 });
 
 test('local path validation is case-sensitive even on Windows', () => {
