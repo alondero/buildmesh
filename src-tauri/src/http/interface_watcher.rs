@@ -345,6 +345,26 @@ mod tests {
         task.await.unwrap();
     }
 
+    /// Regression pin: `super::enumerate_interfaces()` is used by
+    /// `sorted_snapshot` (cfg(not(windows))) and `interface_rank::enumerate_with_classes`
+    /// (cfg(not(windows))). The path resolves to `crate::http::enumerate_interfaces`
+    /// — which only exists when `state::enumerate_interfaces` is `pub(crate)` AND
+    /// re-exported from `crate::http::mod`. Either piece missing = compile error
+    /// on Linux/macOS (the bug that broke `npm run tauri build` for issue #591
+    /// follow-ups). On Windows both call sites are cfg-gated out and the bug
+    /// stays dormant, so this test pins the resolution on every platform.
+    ///
+    /// Goes through `super::super` (out of the `tests` mod, then out of
+    /// `interface_watcher`) so we test the same path the production callers
+    /// resolve against.
+    #[test]
+    fn super_enumerate_interfaces_resolves_on_every_platform() {
+        let ips: Vec<std::net::IpAddr> = super::super::enumerate_interfaces();
+        // Don't assert on contents (the test override could be installed by a
+        // sibling test) — just need the path to resolve and run.
+        let _ = ips;
+    }
+
     /// Closing the channel exits the debouncer cleanly. No callback, no hang.
     /// The `task.await` returns `Ok(())` rather than panicking on a dropped
     /// receiver — important because `spawn_interface_watcher`'s source task
