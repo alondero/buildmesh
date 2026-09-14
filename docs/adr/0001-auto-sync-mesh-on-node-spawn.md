@@ -1,5 +1,7 @@
 # 1. Auto-sync Mesh on Agent Node Spawn
 
+Status: accepted
+
 When spawning a new **Agent Node** in a worktree, Buildmesh will automatically fetch and attempt a fast-forward pull on the parent **Mesh** repository if the local repository is clean. If the pull fails (network down or history diverged), the spawn proceeds from local `HEAD` and the user sees a non-fatal warning toast.
 
 ## Context

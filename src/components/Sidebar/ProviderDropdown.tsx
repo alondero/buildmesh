@@ -11,7 +11,7 @@ import { useViewportClamp } from '../../hooks/useViewportClamp';
 // share one frontend view and the boundary no longer needs a cast.
 
 /** GitHub README anchor for the install prerequisites (issue #822). */
-const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
+const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#first-run-prerequisites';
 
 interface ProviderDropdownProps {
   /**

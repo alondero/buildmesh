@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through the
-project's [GitHub Security Advisories](../../security/advisories/new)
+project's [GitHub Security Advisories](https://github.com/alondero/buildmesh/security/advisories/new)
 channel — reports stay private between the reporter and the maintainer until
 disclosure. All complaints will be reviewed and investigated promptly and
 fairly.

@@ -67,6 +67,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verify changelog release notes
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if ! grep -Fqx "## [$TAG]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md must contain a '## [$TAG]' release-notes heading before tagging."
+            exit 1
+          fi
+
       - name: Build + publish signed release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -79,7 +88,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Buildmesh ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version. Existing installs will be offered this update automatically."
+          releaseBody: "User-visible changes are maintained in https://github.com/alondero/buildmesh/blob/main/CHANGELOG.md. Download the installer, matching .sig, and SHA256SUMS.txt, then verify the signature using https://github.com/alondero/buildmesh/blob/main/docs/development/releasing.md. Existing installs will be offered this update automatically."
           releaseDraft: true
           prerelease: false
           # Flip createUpdaterArtifacts on for the release build only — the base
@@ -89,3 +98,20 @@ jobs:
           # Generate + upload latest.json (the updater feed the app polls) and
           # the per-artifact .sig signatures. Both default true; pinned for clarity.
           uploadUpdaterJson: true
+
+      - name: Publish SHA-256 checksums
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $assets = @(Get-ChildItem src-tauri/target/release/bundle -Recurse -File |
+            Where-Object { $_.Extension -in @('.exe', '.msi') })
+          if ($assets.Count -eq 0) {
+            throw 'No Windows installer assets found for checksum generation.'
+          }
+          $lines = foreach ($asset in $assets) {
+            $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($asset.Name)"
+          }
+          $lines | Set-Content SHA256SUMS.txt -Encoding ascii
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber

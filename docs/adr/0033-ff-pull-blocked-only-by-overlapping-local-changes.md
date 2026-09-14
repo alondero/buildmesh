@@ -1,5 +1,7 @@
 # 33. Fast-forward pull is blocked only by local changes it would overwrite
 
+Status: accepted
+
 The mesh sync's pull gate is no longer "is the working tree dirty?". It is now
 the precise set of paths the `git pull --ff-only` would rewrite that also carry
 a local change — exactly the condition git itself refuses on. Local edits and

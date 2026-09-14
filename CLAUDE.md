@@ -5,8 +5,9 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 **Implementation and review:** read `docs/agents/engineering.md` for testable design seams, scope-based checks, and evidence requirements. Start with the actual worktree/branch/status and the requested acceptance behavior.
 
 ## Commands
-- **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|all-ts|all]`. `all-ts` builds and tests the frontend; `all` also runs Rust. Both include agent checks, ESLint, and the lint-fixtures verifier. See the engineering contract for checks these targets do not cover.
+- **Windows/worktree:** `scripts\check.ps1 [unit|integration|rust|docs|all-ts|all]`. `docs` runs the documentation contract without a build; `all-ts` builds and tests the frontend; `all` also runs Rust. All product checks include the documentation gate where applicable. See the engineering contract for checks these targets do not cover.
 - **Agent infrastructure:** `npm run test:agent`; `npm run check:agent -- --base <base-commit>` checks changed source against the shared hook rules, including committed work. Default base is HEAD for local edits.
+- **Documentation:** `npm run test:docs` exercises the documentation tests and commit guard; `npm run check:docs` checks required pages, headings, local links/anchors, and source-of-truth drift.
 - **ESLint + React Hooks gate (issue #1542):** `npm run lint` runs the production flat config across `src/` (which includes `src/mobile/`), `tests/`, and `scripts/`. `npm run lint:fixtures` runs ESLint against the two intentional-violation fixtures in `tests/lint-fixtures/` and asserts each one trips its target rule (the inverse of the main gate — proves the React Hooks rules are live AND that `eslint.config.js` still keeps them enabled). Both run as part of `scripts\check.ps1` and the GitHub Actions quality job.
 - Test: `npm test` (unit + integration) · `npm run test:e2e` (needs app on :1991) · `npm run test:ci` (all three)
 - Typecheck/build: `npm run build` (runs `tsc`, desktop `vite build`, then mobile `vite build --mode mobile`)
@@ -39,10 +40,12 @@ Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell wr
 - **PreToolUse** `.claude/hooks/guard-antipatterns.mjs` blocks edits that introduce `.dispose()` / hand-built `\\wsl$\` paths (escape per-line with `// allow-dispose` / `// allow-wsl-path`), and blocks a worktree session editing a path outside its worktree (override with env `BUILDMESH_ALLOW_WORKTREE_ESCAPE=1`).
 - **PostToolUse** `.claude/hooks/verify-edit-persisted.mjs` checks file modification time after Edit/Write. It warns on missing/stale files; it cannot prove the intended content reached disk. Inspect the actual diff.
 - **PreToolUse** `.claude/hooks/guard-commit-staging.mjs` denies a plain `git commit` with nothing staged (the empty/aspirational-commit trap, #491→#504); skips `git add … && commit`, `-a`, `--amend`, `--allow-empty`. Stage your files and re-commit.
+- **PreToolUse** `.claude/hooks/guard-documentation.mjs` denies a plain commit containing behavior-sensitive source/config, check-script, hook, workflow, or release changes without staged documentation. Stage the affected docs, or put `docs: none — <reason>` in the commit message when the change genuinely has no documentation impact. CI remains authoritative.
 
 ## Code quality
 - Match existing patterns. No new abstractions, deps, or speculative generality beyond the task.
 - Add or update tests for behaviour changes (`tests/unit`, `tests/integration`).
+- **Documentation is part of the definition of done.** User-visible behavior, configuration or shortcut changes, provider/harness or platform support, security/remote-access behavior, public APIs, and release behavior require the relevant page and `CHANGELOG.md` update. If no update is needed, record `docs: none — <reason>` in the commit message. Run `npm run check:docs`.
 - Test production boundaries and failure/order transitions, not copied logic or mock expectations. Runtime errors and zero executed tests are not green; report compilation, tests, and real/mock runtime evidence separately. No paper-tiger tests: do not short-circuit test bodies on OS/env to bypass assertions; assert literal outputs, not tautologies.
 - Clean compiler and linter output: zero new warnings in touched files. Commit message claims must strictly match diff reality (no claiming removed casts or dead code that remain in the diff).
 - Comment only non-obvious *why*; let names carry the *what*.

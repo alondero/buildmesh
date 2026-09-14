@@ -9,6 +9,7 @@ others are welcome. This document is the contract for contributing.
 1. **File an issue first.** Describe the problem, not just the fix. Use the
    [triage labels](docs/agents/triage-labels.md) so the maintainer can route it.
 2. **Read the project docs in this order:**
+   - [`docs/README.md`](docs/README.md) — documentation map and audience-based starting points.
    - [`CONTEXT.md`](CONTEXT.md) — domain language (what a *Mesh* and *Agent
      Node* are, and how they relate).
    - [`docs/knowledge-primer.md`](docs/knowledge-primer.md) — architecture,
@@ -35,6 +36,7 @@ npm run tauri dev        # launches the Tauri shell + Vite dev server
 
 ```bash
 scripts\check.ps1 all    # Windows/worktree wrapper (dist/mobile build, vitest, cargo test)
+npm run check:docs        # required docs, local links/anchors, source drift
 npm run test:ci          # vitest unit + integration + Playwright e2e (needs the app on :1991)
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```
@@ -73,6 +75,7 @@ engineering contract for their scope and limits; none proves behavior on its own
 | Never hand-declare a TS interface for a Rust wire type | CI drift-gate on `src/types/generated/` | Use `#[derive(TS)]` and import the generated type instead. Annotate 64-bit ints with `#[ts(as = "i32")]`. See *Shared Rust↔TS Types* in `docs/knowledge-primer.md` |
 | Inside a worktree, only edit paths under your worktree root | `.claude/hooks/guard-antipatterns.mjs` | Otherwise you silently edit the main checkout on a different branch |
 | `git commit` with nothing staged | `.claude/hooks/guard-commit-staging.mjs` | Empty/aspirational commit trap (#491→#504). Stage your files first |
+| Behavior-sensitive source committed without a documentation decision | `.claude/hooks/guard-documentation.mjs` | Stage the relevant docs, or record `docs: none — <reason>` when no update is needed |
 | New `#[command]` Tauri commands must be registered in `lib.rs` | (runtime — fails with "command not found") | Easy to forget; the handler list is the source of truth |
 
 If you genuinely need to override a hook, use the per-rule env-var escape
@@ -109,7 +112,7 @@ credential, etc.), **please do not file a public issue**. See
 
 By participating, you agree to the
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
-Report CoC violations through the project's [GitHub Security Advisories](../../security/advisories/new)
+Report CoC violations through the project's [GitHub Security Advisories](https://github.com/alondero/buildmesh/security/advisories/new)
 channel (private until disclosure) — the same path used for security
 reports.
 
@@ -120,6 +123,18 @@ Issue and PR templates live under
 [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
 GitHub will surface them automatically when you open a new issue or PR;
 following them speeds up triage.
+
+## Documentation impact
+
+Documentation is part of the feature contract. For a user-visible change,
+configuration or shortcut change, provider/harness change, platform or
+security change, API/protocol change, or release behavior change:
+
+1. Update the applicable page from the [documentation hub](docs/README.md).
+2. Add a categorized entry to [`CHANGELOG.md`](CHANGELOG.md) for behavior
+   changes. Use `docs: none — <reason>` in the PR when a documentation update
+   is genuinely unnecessary.
+3. Run `npm run test:docs` and `npm run check:docs`.
 
 ## License
 

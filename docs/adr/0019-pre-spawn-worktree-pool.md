@@ -1,5 +1,7 @@
 # 19. Pre-spawn Worktree Pool
 
+Status: accepted
+
 To eliminate the 10.5-second cold-write latency caused by Windows Defender and NTFS USN journaling on fresh `git worktree add` operations, Buildmesh maintains a persistent pool of pre-warmed worktrees (pre-spawn worktrees) in a detached HEAD state. 
 
 When a spawn is requested, Buildmesh grabs a pre-spawn worktree, renames it, and performs a fast local checkout or delta update in under 500ms.

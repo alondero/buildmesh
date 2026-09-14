@@ -107,7 +107,7 @@ describe('ProviderDropdown', () => {
     it('links to the README prerequisites via openUrl (Tauri 2 routing)', async () => {
       render(<ProviderDropdown dropdownKey="mesh-1" providers={TERMINAL_ONLY} onSelect={() => {}} />);
       await userEvent.click(screen.getByRole('link', { name: /View setup instructions/ }));
-      expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alondero/buildmesh#prerequisites');
+      expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alondero/buildmesh#first-run-prerequisites');
     });
 
     it('hides the panel once a real agent harness is present', () => {

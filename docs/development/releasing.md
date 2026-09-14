@@ -55,6 +55,11 @@ output.)
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
+Before publishing, move the release's user-visible entries from
+[`CHANGELOG.md`](../../CHANGELOG.md) into a version heading. Include features,
+fixes, security changes, breaking changes, migrations, and known limitations;
+do not rely on the generic workflow body as release notes.
+
 ## One-time setup: updater signing secrets
 
 The release build signs each update package with a minisign private key so the
@@ -89,3 +94,30 @@ This is expected for an internal tool. OS code signing (Authenticode /
 Apple notarization) would remove these warnings but requires paid certificates —
 it is deferred (tracked in issue #834). The auto-updater is unaffected by
 this: it verifies updates with its own minisign signature regardless.
+
+## Verify a published installer
+
+The `.sig` asset verifies update integrity; it is separate from OS code signing
+and does not remove SmartScreen or Gatekeeper warnings. Download the installer
+and matching `.sig` from the same GitHub release, then verify it with
+[minisign](https://jedisct1.github.io/minisign/). The updater public-key
+fingerprint is `B754F88FD69AD0DD` and the public key is committed in
+`src-tauri/tauri.conf.json`.
+
+PowerShell example:
+
+```powershell
+$publicKey = 'RWTd0JrWj/hUt82KDADoxTpTfqs8p6/ay6iht36EPXl2feP892wH1aBG'
+$installer = Get-ChildItem .\Buildmesh_*_x64-setup.exe | Select-Object -First 1
+minisign -Vm $installer.FullName `
+  -x "$($installer.FullName).sig" `
+  -P $publicKey
+Get-FileHash $installer.FullName -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+The command must report a valid signature before installation. Compare the
+SHA-256 output with the matching filename in the published `SHA256SUMS.txt`.
+Never replace the public key with a key copied from an untrusted release
+comment. The checksum file is a second download-integrity check; it does not
+replace the cryptographic signature.
