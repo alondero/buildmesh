@@ -36,9 +36,18 @@ pub use state::{
     RealizedBind, SerializeTerminalRequestPayload, HTTP_PORT_DEFAULT,
 };
 
+// `enumerate_interfaces` is consumed by `interface_watcher::sorted_snapshot`
+// and `interface_rank::enumerate_with_classes`, both `#[cfg(not(windows))]`
+// — so on Windows lib builds (which exclude `#[cfg(test)]`) the import is
+// technically unused. The re-export still has to exist on Windows for the
+// regression test in `interface_watcher::tests` to resolve
+// `super::super::enumerate_interfaces()`. Scope the suppression to Windows
+// so any genuine future regression on non-Windows surfaces immediately.
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub(crate) use state::{
-    app_handle, enumerate_interfaces_with_classes_fallback, local_classes_if_populated,
-    local_interface_ips, read_interface_override_for_test, request_terminal_snapshot,
+    app_handle, enumerate_interfaces, enumerate_interfaces_with_classes_fallback,
+    local_classes_if_populated, local_interface_ips, read_interface_override_for_test,
+    request_terminal_snapshot,
 };
 
 #[cfg(test)]

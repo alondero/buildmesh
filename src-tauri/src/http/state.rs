@@ -327,7 +327,14 @@ pub(crate) fn set_interface_enumerator_for_testing(
 /// the primary path (no `GetAdaptersAddresses`). Failures log a warning and
 /// return an empty list — the bind path then sees no LAN interfaces, which is
 /// a safe degrade (loopback still binds).
-fn enumerate_interfaces() -> Vec<IpAddr> {
+///
+/// `pub(crate)` + re-exported via `crate::http::mod` so `interface_watcher::sorted_snapshot`
+/// (cfg(not(windows))) and `interface_rank::enumerate_with_classes` (cfg(not(windows)))
+/// can call it as `super::enumerate_interfaces()` — same pattern as
+/// `enumerate_interfaces_with_classes_fallback` and `read_interface_override_for_test`.
+/// Without the re-export the non-Windows callers can't resolve the path and
+/// `npm run tauri build` fails on Linux/macOS (issue #591 follow-up regression).
+pub(crate) fn enumerate_interfaces() -> Vec<IpAddr> {
     if let Some(override_ips) = read_interface_override_for_test() {
         return override_ips;
     }
