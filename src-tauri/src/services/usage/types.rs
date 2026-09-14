@@ -15,7 +15,7 @@ use std::env;
 use std::path::PathBuf;
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export, export_to = "UsageWindow.ts")]
 /// Generated to src/types/generated/UsageWindow.ts (issue #404). The wire
 /// field names (`usedPercent` / `resetsAt`) are camelCase per
@@ -30,7 +30,7 @@ pub struct UsageWindow {
     pub resets_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export, export_to = "BillingBalance.ts")]
 /// Cash-balance view for a pay-as-you-go account (issue #537). The Accounts panel
 /// renders this instead of percentage [`UsageWindow`] bars when an account's
@@ -158,6 +158,15 @@ impl std::fmt::Display for UsageError {
 
 /// Builds a `ProviderUsage` envelope for the "no credential / bad
 /// credential" state — the UI's re-enter affordance reads `error` verbatim.
+///
+/// **Visibility-fence** (issue #1745): only the [`super::outcome`] projection
+/// is supposed to mint this envelope. Every adapter and fetcher must
+/// construct a [`super::outcome::UsageOutcome`] variant and let
+/// [`super::outcome::UsageOutcome::into_usage`] be the sole projection site —
+/// the table test in `outcome.rs` pins the projection, and `cargo clippy`
+/// along with code review enforces the no-direct-construction convention.
+/// A future tightening (e.g. `pub(in crate::services::usage::outcome)`) is
+/// feasible once the path-resolution edge case is resolved.
 pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),
@@ -174,6 +183,8 @@ pub(crate) fn logged_out(provider: &str, error: String) -> ProviderUsage {
 /// credential is presumed present (so this is NOT the empty-key / no-credential
 /// case [`logged_out`] handles), but the fetch failed for a transport, status,
 /// or parse reason.
+///
+/// **Visibility-fence** (issue #1745): see [`logged_out`].
 pub(crate) fn unavailable(provider: &str, error: String) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),

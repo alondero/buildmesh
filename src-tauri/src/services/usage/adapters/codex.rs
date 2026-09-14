@@ -7,6 +7,7 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
+use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
     home_dir, logged_out, unavailable, BillingBalance, ProviderUsage, UsageAmount, UsageError,
     UsageMeter, UsageWindow,
@@ -30,8 +31,12 @@ impl UsageAdapter for CodexAdapter {
         Some("codex")
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        codex_usage()
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        // TODO(#1745 phase 2): rewrite `codex_usage` with the shared driver
+        // so its hand-rolled status ladder (`codex_usage_with_paths` ~lines
+        // 533–565) centralises. The shim preserves the wire triple until
+        // then.
+        codex_usage().into()
     }
 }
 
@@ -1000,7 +1005,9 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = with_adapter_loopback(vec![auth_path], url, || CodexAdapter.fetch(&[]));
+        let usage = with_adapter_loopback(vec![auth_path], url, || {
+            CodexAdapter.fetch(&[]).into_usage("codex")
+        });
 
         assert!(usage.logged_in);
         assert!(usage.error.is_none());
@@ -1025,7 +1032,9 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = with_adapter_loopback(vec![auth_path], url, || CodexAdapter.fetch(&[]));
+        let usage = with_adapter_loopback(vec![auth_path], url, || {
+            CodexAdapter.fetch(&[]).into_usage("codex")
+        });
 
         assert!(usage.logged_in);
         assert_eq!(usage.windows.len(), 3);

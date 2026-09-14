@@ -8,7 +8,7 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::UsageAdapter;
-use crate::services::usage::types::ProviderUsage;
+use crate::services::usage::outcome::UsageOutcome;
 
 /// Drop-in [`UsageAdapter`] for `opencode`.
 pub(crate) struct OpencodeAdapter;
@@ -22,7 +22,11 @@ impl UsageAdapter for OpencodeAdapter {
         Some("opencode")
     }
 
-    fn fetch(&self, _accounts: &[ProviderAccount]) -> ProviderUsage {
-        crate::services::usage::opencode_usage()
+    // TODO(#1745 phase 2): migrate `opencode_usage` to return `UsageOutcome`
+    // directly so the retry-on-401 logic can switch from "substring-match
+    // the wire error string for `401`" (fragile) to "outcome is `Rejected`".
+    // Today the shim preserves the wire triple.
+    fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+        crate::services::usage::opencode_usage().into()
     }
 }

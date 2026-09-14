@@ -1,6 +1,7 @@
 //! Tauri commands for provider usage fetching.
 
 use crate::preferences::{self, HarnessProfile, ProviderAccount};
+use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::{self, ProviderMeters, ProviderUsage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -116,6 +117,7 @@ fn assemble_meters(
     accounts: &[ProviderAccount],
     profiles: &[HarnessProfile],
     usages: &HashMap<String, ProviderUsage>,
+    outcomes: &HashMap<String, UsageOutcome>,
     configured_keys: &HashSet<String>,
 ) -> Vec<ProviderMeters> {
     accounts
@@ -147,8 +149,18 @@ fn assemble_meters(
             // fetcher's `logged_in = false` already correlates with "no
             // credential on disk" with acceptable accuracy; we still
             // honour configured_keys for any future keyed native flows.
+            //
+            // Issue #1745: the keep/drop decision is keyed on the
+            // outcome taxonomy, not on the wire triple. `NoCredential`
+            // always drops (even if a key is configured — that is an
+            // adapter bug, but the gate stays safe). `Rejected` drops
+            // when no key is configured, keeps when configured (the
+            // "Invalid API key" affordance). Every other variant keeps
+            // the row so the user sees the transient failure or the
+            // degraded/managed-externally hint.
             let usage = usages.get(&a.id)?;
-            if !usage.logged_in && !configured_keys.contains(&a.id) {
+            let outcome = outcomes.get(&a.id);
+            if !outcome.is_some_and(|o| o.keep(configured_keys, &a.id)) {
                 return None;
             }
             Some(ProviderMeters {
@@ -181,25 +193,36 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
     // Each fetch is a blocking HTTP round-trip to a different vendor; running
     // them serially made the panel wait for the sum of all of them. Fan out on
     // blocking threads and collect into a map keyed by provider id.
+    //
+    // Issue #1745: each worker also returns the raw `UsageOutcome` so the
+    // gate can decide keep/drop on the outcome taxonomy rather than on the
+    // wire triple. The catalog caches the projected `ProviderUsage` (the
+    // wire triple is unchanged for the IPC); the outcome lives only in
+    // this command closure.
     let handles: Vec<_> = ids
         .into_iter()
         .map(|id| {
             let accounts = Arc::clone(&accounts);
             tauri::async_runtime::spawn_blocking(move || {
-                match usage::catalog::cached_or_fetch(&id, force_refresh, accounts.as_ref()) {
-                    Some(usage) => Ok((id, usage)),
-                    None => Err(format!("usage catalog lost registered provider: {id}")),
-                }
+                let (outcome, usage) = usage::catalog::cached_outcome_and_usage(
+                    &id,
+                    force_refresh,
+                    accounts.as_ref(),
+                )
+                .ok_or_else(|| format!("usage catalog lost registered provider: {id}"))?;
+                Ok::<_, String>((id, outcome, usage))
             })
         })
         .collect();
 
     let mut usages: HashMap<String, ProviderUsage> = HashMap::new();
+    let mut outcomes: HashMap<String, UsageOutcome> = HashMap::new();
     for handle in handles {
         let result = handle
             .await
             .map_err(|e| format!("usage fetch task failed: {}", e))?;
-        let (id, usage) = result?;
+        let (id, outcome, usage) = result?;
+        outcomes.insert(id.clone(), outcome);
         usages.insert(id, usage);
     }
 
@@ -207,6 +230,7 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
         accounts.as_ref(),
         &profiles,
         &usages,
+        &outcomes,
         &configured_keys,
     ))
 }
@@ -258,6 +282,50 @@ mod tests {
             detail: None,
             error: None,
         }
+    }
+
+    /// Issue #1745: tests now build an `outcomes` map alongside `usages`.
+    /// Each entry's variant must match what `fetch` would have returned;
+    /// the helpers below produce the matching outcome for each envelope
+    /// shape used in this module's tests.
+    #[allow(dead_code)]
+    fn reading_outcome(_provider: &str) -> UsageOutcome {
+        UsageOutcome::Reading {
+            windows: Vec::new(),
+            balance: None,
+            meters: Vec::new(),
+            detail: None,
+        }
+    }
+
+    fn no_credential_outcome(provider: &str) -> UsageOutcome {
+        UsageOutcome::NoCredential {
+            hint: format!("No API key configured for {provider}"),
+        }
+    }
+
+    fn outcomes_from_usages(usages: &HashMap<String, ProviderUsage>) -> HashMap<String, UsageOutcome> {
+        // For each cached usage, project the variant the gate expects. The
+        // gate's keep() predicate is total on every variant, so a wrong
+        // mapping here silently changes keep/drop; tests must use the
+        // helpers above so the projection is explicit.
+        let mut map = HashMap::new();
+        for (id, usage) in usages {
+            let outcome = if usage.logged_in {
+                UsageOutcome::Reading {
+                    windows: usage.windows.clone(),
+                    balance: usage.balance.clone(),
+                    meters: usage.meters.clone(),
+                    detail: usage.detail.clone(),
+                }
+            } else {
+                UsageOutcome::NoCredential {
+                    hint: usage.error.clone().unwrap_or_default(),
+                }
+            };
+            map.insert(id.clone(), outcome);
+        }
+        map
     }
 
     // ── Detection gating (issue #574) ───────────────────────────────────────
@@ -356,7 +424,7 @@ mod tests {
         usages.insert("anthropic".to_string(), usage("anthropic"));
         usages.insert("minimax".to_string(), usage("minimax"));
 
-        let rows = assemble_meters(&accounts, &claude, &usages, &HashSet::new());
+        let rows = assemble_meters(&accounts, &claude, &usages, &outcomes_from_usages(&usages), &HashSet::new());
         let ids: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
         assert_eq!(ids, vec!["anthropic", "minimax", "glm"]);
 
@@ -377,6 +445,7 @@ mod tests {
         let rows = assemble_meters(
             &[account("anthropic", false)],
             &claude,
+            &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
         );
@@ -401,7 +470,7 @@ mod tests {
         // the user contract for unconfigured providers).
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), usage("anthropic"));
-        let rows = assemble_meters(&accounts, &profiles, &usages, &HashSet::new());
+        let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes_from_usages(&usages), &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
     }
@@ -431,10 +500,14 @@ mod tests {
         let mut usages = HashMap::new();
         usages.insert("minimax".to_string(), logged_out_usage("minimax"));
         usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
+        let mut outcomes = HashMap::new();
+        outcomes.insert("minimax".to_string(), no_credential_outcome("minimax"));
+        outcomes.insert("openrouter".to_string(), no_credential_outcome("openrouter"));
         let rows = assemble_meters(
             &[account("minimax", true), account("openrouter", true)],
             &[],
             &usages,
+            &outcomes,
             &HashSet::new(),
         );
         assert!(
@@ -453,10 +526,16 @@ mod tests {
         let claude = vec![profile("claude", "anthropic")];
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), logged_out_usage("anthropic"));
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "anthropic".to_string(),
+            no_credential_outcome("anthropic"),
+        );
         let rows = assemble_meters(
             &[account("anthropic", true)],
             &claude,
             &usages,
+            &outcomes,
             &HashSet::new(),
         );
         assert!(
@@ -479,6 +558,24 @@ mod tests {
         let mut usages = HashMap::new();
         usages.insert("kimi".to_string(), logged_out_usage("kimi"));
         usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
+        // Issue #1745: the kept rows are `Rejected` outcomes (the wire
+// envelope is `logged_out`, but the projection of a `Rejected` is
+// identical and the test cares about the affordance being visible, not
+// about which variant was minted). The gate's keep() predicate keeps
+// `Rejected` when a key is configured.
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "kimi".to_string(),
+            UsageOutcome::Rejected {
+                hint: "Invalid API key".into(),
+            },
+        );
+        outcomes.insert(
+            "openrouter".to_string(),
+            UsageOutcome::Rejected {
+                hint: "Invalid API key".into(),
+            },
+        );
         let mut configured_keys = HashSet::new();
         configured_keys.insert("kimi".to_string());
         configured_keys.insert("openrouter".to_string());
@@ -486,6 +583,7 @@ mod tests {
             &[account("kimi", true), account("openrouter", true)],
             &[],
             &usages,
+            &outcomes,
             &configured_keys,
         );
         assert_eq!(
@@ -517,6 +615,7 @@ mod tests {
             &[account("minimax", true)],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &HashSet::new(),
         );
         assert!(
@@ -538,6 +637,7 @@ mod tests {
             &[account("minimax", false)],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &HashSet::new(),
         );
         assert_eq!(rows.len(), 1);
@@ -556,27 +656,120 @@ mod tests {
     }
 
     #[test]
-    fn muse_code_unconfigured_unavailable_row_stays_on_the_usage_surface() {
+    fn muse_code_no_credential_outcome_drops_the_row_just_like_grok_and_agy() {
+        // Issue #1745 acceptance criterion #3: this is the load-bearing
+        // test that pins the bug pre-#1745 (Muse's unconfigured row
+        // stayed on the usage surface and rendered red error text) and
+        // pins the fix post-#1745 (Muse's no-credential outcome drops
+        // the row, identical to Grok and Agy's no-credential case).
         let muse = vec![profile("muse", "muse")];
-        let mut usage = usage::types::unavailable("muse-code", "Muse service unavailable".into());
-        usage.meters = vec![usage::types::UsageMeter::Unavailable];
-        assert_eq!(usage.meters, vec![crate::services::usage::types::UsageMeter::Unavailable]);
-        assert!(usage.logged_in);
+        let no_credential = UsageOutcome::NoCredential {
+            hint: "Muse login missing. Run muse login again.".into(),
+        };
+
+        // The projection of `NoCredential` is the same wire envelope that
+        // `logged_out()` would have produced — `logged_in: false,
+        // error: Some(hint), meters: []`. Pin it here so a future change
+        // to the projection cannot silently re-add the `UsageMeter::Unavailable`
+        // sentinel (the dead-branch combination pre-#1745).
+        let projected = no_credential.clone().into_usage("muse-code");
+        assert!(!projected.logged_in);
+        assert_eq!(
+            projected.error.as_deref(),
+            Some("Muse login missing. Run muse login again.")
+        );
+        assert!(projected.meters.is_empty());
+
         let mut usages = HashMap::new();
-        usages.insert("muse-code".to_string(), usage);
+        usages.insert("muse-code".to_string(), projected);
+        let mut outcomes = HashMap::new();
+        outcomes.insert("muse-code".to_string(), no_credential);
         let rows = assemble_meters(
             &[account("muse-code", true)],
             &muse,
             &usages,
+            &outcomes,
             &HashSet::new(),
         );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provider, "muse-code");
-        assert!(rows[0].usage_tracked);
-        let meters = &rows[0].usage.as_ref().unwrap().meters;
-        assert_eq!(
-            meters,
-            &vec![crate::services::usage::types::UsageMeter::Unavailable]
+        assert!(
+            rows.is_empty(),
+            "Muse Code's no-credential case must drop the row (issue #1745), got: {rows:?}"
         );
+    }
+
+    /// Issue #1745 acceptance criterion #3: cross-provider equality.
+    /// The no-credential wire envelope for muse-code, grok, and agy must
+    /// be identical — same field set, same values. Without this, a
+    /// future adapter drift re-introduces the cross-provider inconsistency
+    /// the seam exists to prevent.
+    #[test]
+    fn no_credential_envelope_is_identical_across_providers() {
+        let muse = UsageOutcome::NoCredential {
+            hint: "Muse login missing.".into(),
+        }
+        .into_usage("muse-code");
+        let grok = UsageOutcome::NoCredential {
+            hint: "Grok auth missing.".into(),
+        }
+        .into_usage("grok");
+        let agy = UsageOutcome::NoCredential {
+            hint: "Antigravity OAuth missing.".into(),
+        }
+        .into_usage("agy");
+
+        // Compare the structural shape, not the provider-specific copy.
+        for (
+            (muse_field, muse_value),
+            (grok_field, grok_value),
+            (agy_field, agy_value),
+        ) in [
+            (
+                ("logged_in", muse.logged_in),
+                ("logged_in", grok.logged_in),
+                ("logged_in", agy.logged_in),
+            ),
+            (
+                ("windows", muse.windows.is_empty()),
+                ("windows", grok.windows.is_empty()),
+                ("windows", agy.windows.is_empty()),
+            ),
+            (
+                ("balance", muse.balance.is_none()),
+                ("balance", grok.balance.is_none()),
+                ("balance", agy.balance.is_none()),
+            ),
+            (
+                ("meters", muse.meters.is_empty()),
+                ("meters", grok.meters.is_empty()),
+                ("meters", agy.meters.is_empty()),
+            ),
+            (
+                ("detail", muse.detail.is_none()),
+                ("detail", grok.detail.is_none()),
+                ("detail", agy.detail.is_none()),
+            ),
+            (
+                ("error_is_some", muse.error.is_some()),
+                ("error_is_some", grok.error.is_some()),
+                ("error_is_some", agy.error.is_some()),
+            ),
+        ] {
+            assert_eq!(
+                muse_field, grok_field,
+                "field name must match across providers"
+            );
+            assert_eq!(
+                muse_field, agy_field,
+                "field name must match across providers"
+            );
+            assert_eq!(
+                muse_value, grok_value,
+                "field {muse_field} must match across providers: muse {muse_value:?} vs grok {grok_value:?}"
+            );
+            assert_eq!(
+                muse_value, agy_value,
+                "field {muse_field} must match across providers: muse {muse_value:?} vs agy {agy_value:?}"
+            );
+        }
     }
 }

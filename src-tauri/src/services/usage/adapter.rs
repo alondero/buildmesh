@@ -1,30 +1,49 @@
-//! The `UsageAdapter` seam (issue #1657).
+//! The `UsageAdapter` seam (issue #1657, deepened in #1745).
 //!
 //! After the split the `usage` module keeps wire types ([`super::types`]) +
-//! cache ([`super::cache`]) only. One trait sits between the catalog table
-//! and per-provider adapters:
+//! cache ([`super::cache`]) + the outcome taxonomy ([`super::outcome`]) only.
+//! One trait sits between the catalog table and per-provider adapters:
 //!
 //! ```text
-//! usage module (types + cache only, deep: small interface, shared types)
-//!              │ seam: UsageAdapter { id(), fetch(accounts) -> ProviderUsage }
+//! usage module (types + outcome + cache only, deep: small interface, shared taxonomy)
+//!              │ seam: UsageAdapter { id(), fetch(accounts) -> UsageOutcome,
+//!              │                       auth_policy() -> AuthPolicy }
 //!    ┌─────────┼──────────┬──────────────┬─── …nth adapter
 //! anthropic  minimax   opencode   freebuff
 //! adapter    adapter   adapter    adapter
 //! ```
+//!
+//! **Issue #1745** changed the return type of `fetch` from `ProviderUsage` to
+//! [`super::outcome::UsageOutcome`]. Adapters no longer mint the wire
+//! directly — the [`super::outcome::UsageOutcome::into_usage`] projection is
+//! the sole boundary. This makes it structurally impossible for an adapter
+//! to encode the same underlying state differently from its siblings:
+//!
+//! - The `NoCredential` / `Rejected` / `RateLimited` / `Unavailable` /
+//!   `Degraded` / `ManagedExternally` / `Reading` taxonomy is owned by
+//!   `super::outcome`, not by per-adapter envelope choices.
+//! - The shared [`fetch_usage`] driver classifies HTTP 401/403 according to
+//!   the adapter's [`super::outcome::AuthPolicy`] default, eliminating the
+//!   per-adapter hand-rolled status ladder that drifted (MiniMax missing
+//!   the arm, Muse Code conflating no-credential with unavailable, Agy
+//!   mapping client-build errors to logged-out).
+//! - The `assemble_meters` gate in `commands/usage.rs` reads the outcome's
+//!   [`super::outcome::UsageOutcome::keep`] predicate, so the keep/drop
+//!   decision is testable in one table.
 //!
 //! Catalog dispatch and `commands/usage.rs` ask the seam — never per-provider
 //! lore. Adding provider N means adding one `adapters/<name>.rs` file and one
 //! catalog entry (drop-in adapter to delete), not editing the fetcher module
 //! AND the catalog entry.
 //!
-//! Two adapters already existed in spirit (freebuff, opencode-oauth DTO) and
-//! were promoted here first to prove the seam is real; the rest migrate one
-//! provider per commit. Thin wrappers that still delegate to the legacy
-//! `usage.rs` fetchers are an intentional intermediate step — the catalog no
-//! longer holds raw fn pointers, so the seam is the test surface even before
-//! `usage.rs` reaches zero HTTP code.
+//! Migration cadence (#1657 precedent): adapters migrate one per commit.
+//! As of #1745 phase 1, every adapter's `fetch` returns `UsageOutcome`;
+//! adapters that still build `ProviderUsage` literals internally wrap their
+//! final value via `outcome.into_usage(provider_id)` at the adapter
+//! boundary.
 
-use super::types::{ProviderUsage, UsageError, UsageWindow};
+use super::outcome::{AuthPolicy, UsageOutcome};
+use super::types::{UsageError, UsageWindow};
 use crate::preferences::ProviderAccount;
 use reqwest::blocking::{Client, RequestBuilder};
 use sha2::{Digest, Sha256};
@@ -69,7 +88,9 @@ impl UsageIdentityFingerprint {
 ///   self-authenticating native meters (detection-gated card) and `None` for
 ///   keyed meters (card always visible; credential comes from `accounts`).
 /// - [`fetch`](UsageAdapter::fetch) takes the effective account snapshot the
-///   command already resolved — adapters never read preferences themselves.
+///   command already resolved — adapters never read preferences themselves —
+///   and returns a [`UsageOutcome`]. The catalog projection
+///   ([`UsageOutcome::into_usage`]) is the sole mint site of the wire shape.
 pub(crate) trait UsageAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn native_harness(&self) -> Option<&'static str> {
@@ -88,7 +109,7 @@ pub(crate) trait UsageAdapter: Send + Sync {
             self.id().as_bytes(),
         )
     }
-    fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage;
+    fn fetch(&self, accounts: &[ProviderAccount]) -> UsageOutcome;
 }
 
 /// Resolve the non-empty API key for a keyed provider from the effective
@@ -209,20 +230,29 @@ impl ClientOverrideGuard {
 /// loopback tests must pass unmodified after each provider move (tests move
 /// files, not assertions); the only intended behaviour delta is the 15s
 /// timeout noted on [`shared_client`].
+///
+/// **Issue #1745**: the 401/403 arm was added; before, every non-2xx
+/// mapped to `unavailable()` (red transport error), which is why MiniMax's
+/// revoked-key case rendered red text while its keyed siblings rendered
+/// "Invalid API key". The arm now classifies via the adapter's
+/// [`AuthPolicy`] so each provider gets the right variant.
+///
+/// The provider name is set by the catalog projection (see
+/// [`UsageOutcome::into_usage`]); this driver is intentionally
+/// provider-agnostic so adapters can't accidentally leak provider-id
+/// strings into the error variants.
 pub(crate) fn fetch_usage<F1, F2>(
-    provider: &str,
+    auth_policy: AuthPolicy,
     build_request: F1,
     parse: F2,
-) -> ProviderUsage
+) -> UsageOutcome
 where
     F1: FnOnce(&Client) -> RequestBuilder,
     F2: FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
 {
-    use super::types::unavailable;
-
     let client = match shared_client() {
         Ok(c) => c,
-        Err(e) => return unavailable(provider, e),
+        Err(e) => return UsageOutcome::Unavailable { reason: e },
     };
 
     // Production request → response → parse. `shared_client` (above) may
@@ -230,30 +260,35 @@ where
     // the timeout test drive the production path with a 1s client.
     let request = build_request(&client);
     match request.send() {
-        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
-            provider,
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
-        Ok(r) if !r.status().is_success() => {
-            let code = r.status().as_u16();
-            unavailable(
-                provider,
-                format!("API error {}: {}", code, r.text().unwrap_or_default()),
-            )
+        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => {
+            let status = r.status().as_u16();
+            let body = r.text().unwrap_or_default();
+            let reason = format!("API error {status}: {body}");
+            match auth_policy {
+                AuthPolicy::Rejected => UsageOutcome::Rejected { hint: reason },
+                AuthPolicy::NoCredential => UsageOutcome::NoCredential { hint: reason },
+            }
         }
+        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => UsageOutcome::RateLimited {
+            reason: "Rate limited — usage data temporarily unavailable".to_string(),
+        },
+        Ok(r) if !r.status().is_success() => UsageOutcome::Unavailable {
+            reason: format!("API error {}: {}", r.status().as_u16(), r.text().unwrap_or_default()),
+        },
         Ok(r) => match parse(&r.text().unwrap_or_default()) {
-            Ok((windows, detail)) => ProviderUsage {
-                provider: provider.to_string(),
-                logged_in: true,
+            Ok((windows, detail)) => UsageOutcome::Reading {
                 windows,
                 balance: None,
-                meters: vec![],
+                meters: Vec::new(),
                 detail,
-                error: None,
             },
-            Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
+            Err(e) => UsageOutcome::Unavailable {
+                reason: format!("Failed to parse response: {}", e),
+            },
         },
-        Err(e) => unavailable(provider, format!("Request failed: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Request failed: {}", e),
+        },
     }
 }
 
@@ -307,6 +342,9 @@ mod tests {
         // tolerance catches the regression class where the timeout
         // is reduced (say) to 5s without anybody noticing because the
         // test still passes.
+        //
+        // Issue #1745: `fetch_usage` now returns `UsageOutcome`; the
+        // timeout path is `UsageOutcome::Unavailable { reason: "Request failed: ..." }`.
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
         let client = Client::builder()
             .timeout(TIMEOUT)
@@ -314,18 +352,21 @@ mod tests {
             .expect("test client build");
         let (port, _server) = spawn_idle_loopback();
         let start = std::time::Instant::now();
-        let result = with_client_override(client, || {
+        let outcome = with_client_override(client, || {
             fetch_usage(
-                "anthropic",
+                AuthPolicy::Rejected,
                 |c| c.get(format!("http://127.0.0.1:{port}/usage")),
                 |body| Ok((vec![], Some(body.to_string()))),
             )
         });
         let elapsed = start.elapsed();
-        let error = result.error.as_deref().unwrap_or_default();
+        let reason = match &outcome {
+            UsageOutcome::Unavailable { reason } => reason.as_str(),
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        };
         assert!(
-            error.starts_with("Request failed:"),
-            "expected reqwest timeout envelope, got: {result:?}"
+            reason.starts_with("Request failed:"),
+            "expected reqwest timeout envelope, got reason: {reason:?}"
         );
         // IdleServer Drop joins the worker thread on every exit path
         // (success or panic); the assertion below proves the timeout

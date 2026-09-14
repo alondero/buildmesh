@@ -2,18 +2,30 @@
 //!
 //! Endpoints are undocumented / reverse-engineered; treat non-200 responses or
 //! shape mismatches as "usage unavailable", never as hard errors.
+//!
+//! After issue #1745, the module shape is:
+//! - [`types`] — wire shapes (`ProviderUsage`, `UsageWindow`, …). `ts-rs`-derived.
+//! - [`outcome`] — internal failure taxonomy + the only place that mints the
+//!   wire triple from a [`outcome::UsageOutcome`] (the seam that prevents
+//!   per-adapter drift). Visibility-fenced so adapters cannot bypass it.
+//! - [`cache`] — 5-minute in-process TTL cache keyed on account identity.
+//! - [`adapter`] — the [`adapter::UsageAdapter`] seam and shared HTTP driver.
+//! - [`adapters`] — per-provider drop-in adapters.
+//! - [`catalog`] — registry + dispatch + cache lookup.
 
 pub mod types;
 pub(crate) mod cache;
 pub(crate) mod adapter;
 pub(crate) mod adapters;
 pub(crate) mod catalog;
+pub(crate) mod outcome;
 
 // Re-export the wire types so existing `crate::services::usage::{...}`
 // paths keep working while adapters import from `usage::types` directly.
 pub use types::{
     BillingBalance, ProviderMeters, ProviderUsage, UsageError, UsageWindow,
 };
+pub(crate) use outcome::UsageOutcome;
 // Cache stays behind the same `usage::` paths callers already use.
 pub use cache::{invalidate_cache, invalidate_provider_cache};
 // `fetch_usage` is a fetcher-only driver: internal call sites in this
@@ -193,13 +205,20 @@ fn parse_minimax_balance(body: &str) -> Result<BillingBalance, UsageError> {
     })
 }
 
-pub fn minimax_usage(api_key: &str) -> ProviderUsage {
+pub fn minimax_usage(api_key: &str) -> UsageOutcome {
+    // Issue #1745 phase 2 step 1: minimax is the first provider migrated to
+    // the outcome seam. Empty key → `NoCredential` (gate drops). Non-empty
+    // key routes through the shared driver, which classifies 401/403 as
+    // `Rejected` (the "Invalid API key" affordance) — matching MiniMax's
+    // keyed siblings (Kimi/OpenRouter/OpenAI/DeepSeek).
     if api_key.is_empty() {
-        return logged_out("minimax", "No API key configured".to_string());
+        return UsageOutcome::NoCredential {
+            hint: "No API key configured".to_string(),
+        };
     }
     let auth = format!("Bearer {}", api_key);
     fetch_usage(
-        "minimax",
+        crate::services::usage::outcome::AuthPolicy::Rejected,
         |c| {
             c.get("https://api.minimax.io/v1/token_plan/remains")
                 .header("Authorization", auth)
@@ -272,14 +291,24 @@ fn parse_kimi_response(body: &str) -> Result<BillingBalance, UsageError> {
     })
 }
 
-pub fn kimi_usage(api_key: &str) -> ProviderUsage {
+pub fn kimi_usage(api_key: &str) -> UsageOutcome {
+    // Issue #1745 phase 2: Kimi is migrated to the outcome seam. Empty key
+    // → `NoCredential` (gate drops). 401/403 → `Rejected` ("Invalid API
+    // key" affordance). 429 → `RateLimited`. Other non-2xx / transport /
+    // parse → `Unavailable`.
     if api_key.is_empty() {
-        return logged_out("kimi", "No API key configured".to_string());
+        return UsageOutcome::NoCredential {
+            hint: "No API key configured".to_string(),
+        };
     }
 
     let client = match Client::builder().build() {
         Ok(c) => c,
-        Err(e) => return unavailable("kimi", format!("Client error: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {}", e),
+            }
+        }
     };
 
     let auth = format!("Bearer {}", api_key);
@@ -289,43 +318,46 @@ pub fn kimi_usage(api_key: &str) -> ProviderUsage {
         .send()
     {
         Ok(r) if r.status() == 429 => {
-            return unavailable(
-                "kimi",
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            )
+            return UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            }
         }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
             // 401 (Unauthorized) AND 403 (Forbidden / account revoked) both signal
-            // "the credential is bad" — surface as logged-out so the UI can prompt
-            // the user to re-enter, matching the `logged_in=false` semantics in
-            // `logged_out()`. Moonshot returns 403 for disabled accounts per their
+            // "the credential is bad" — surface as `Rejected` so the UI can
+            // prompt the user to re-enter, matching the `logged_in=false`
+            // semantics. Moonshot returns 403 for disabled accounts per their
             // API contract; missing the branch silently degrades to a generic
             // 'API error 403' with no re-enter affordance.
             if code == 401 || code == 403 {
-                return logged_out("kimi", "Invalid API key".to_string());
+                return UsageOutcome::Rejected {
+                    hint: "Invalid API key".to_string(),
+                };
             }
-            return unavailable(
-                "kimi",
-                format!("API error {}: {}", code, r.text().unwrap_or_default()),
-            );
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {}: {}", code, r.text().unwrap_or_default()),
+            };
         }
         Ok(r) => r,
-        Err(e) => return unavailable("kimi", format!("Request failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {}", e),
+            }
+        }
     };
 
     let body = resp.text().unwrap_or_default();
     match parse_kimi_response(&body) {
-        Ok(balance) => ProviderUsage {
-            provider: "kimi".to_string(),
-            logged_in: true,
+        Ok(balance) => UsageOutcome::Reading {
             windows: Vec::new(),
             balance: Some(balance),
-            meters: vec![],
+            meters: Vec::new(),
             detail: None,
-            error: None,
         },
-        Err(e) => unavailable("kimi", format!("Failed to parse response: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {}", e),
+        },
     }
 }
 
@@ -437,21 +469,32 @@ fn current_month_start_epoch() -> i64 {
 
 /// Public OpenAI fetcher. Registered in [`catalog`] so the keyed-provider
 /// panel polls it on the same cadence as the other keyed fetchers.
-pub fn openai_usage(api_key: &str) -> ProviderUsage {
+pub fn openai_usage(api_key: &str) -> UsageOutcome {
+    // Issue #1745 phase 2: migrated to the outcome seam. Empty key →
+    // `NoCredential`. 401/403 on inference → `Rejected`. 429 →
+    // `RateLimited`. 401/403 on costs → `Degraded` (sk-proj- contract per
+    // ADR-0026 §2: key works, admin endpoint doesn't, surface a hint via
+    // `detail`). Other failures → `Unavailable`.
     openai_usage_with_base_url(api_key, "https://api.openai.com/v1")
 }
 
 /// Test seam: pass an explicit base URL so a loopback `tiny_http` server can
 /// stand in for the production endpoint in mocked HTTP tests (issue #971
 /// pattern).
-fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
+fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> UsageOutcome {
     if api_key.is_empty() {
-        return logged_out("openai", "No API key configured".to_string());
+        return UsageOutcome::NoCredential {
+            hint: "No API key configured".to_string(),
+        };
     }
 
     let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(c) => c,
-        Err(e) => return unavailable("openai", format!("Client error: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {}", e),
+            }
+        }
     };
 
     let auth = format!("Bearer {}", api_key);
@@ -468,23 +511,27 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
         .send()
     {
         Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
-            return logged_out("openai", "Invalid API key".to_string());
+            return UsageOutcome::Rejected {
+                hint: "Invalid API key".to_string(),
+            };
         }
         Ok(r) if r.status().as_u16() == 429 => {
-            return unavailable(
-                "openai",
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            );
+            return UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            };
         }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
-            return unavailable(
-                "openai",
-                format!("API error {}: inference check failed", code),
-            );
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {}: inference check failed", code),
+            };
         }
         Ok(_) => {} // 2xx — proceed to costs probe
-        Err(e) => return unavailable("openai", format!("Inference check failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Inference check failed: {}", e),
+            }
+        }
     }
 
     // ── Step 2: organization costs (admin-scoped) ───────────────────────
@@ -499,57 +546,52 @@ fn openai_usage_with_base_url(api_key: &str, base_url: &str) -> ProviderUsage {
         .send()
     {
         Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
-            // Project key — graceful degradation. The key is valid for
-            // inference; we just can't reach the admin endpoint. Spec §3.2:
-            // logged_in=true, balance=None, detail explains the gap. The
-            // `error` field stays None so the UI doesn't render the red
-            // "fetch failed" affordance — the user is logged in, they just
-            // need an admin key for spend.
-            return ProviderUsage {
-                provider: "openai".to_string(),
-                logged_in: true,
-                windows: Vec::new(),
-                balance: None,
-                meters: vec![],
-                detail: Some(
-                    "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
-                        .to_string(),
-                ),
-                error: None,
+            // Project key — graceful degradation per ADR-0026 §2. The key
+            // is valid for inference; we just can't reach the admin
+            // endpoint. Surface as `Degraded` so the panel renders the
+            // `detail` hint without painting the row as "fetch failed".
+            return UsageOutcome::Degraded {
+                detail: "Monthly spend tracking requires an Organization Admin API Key (sk-admin-...)"
+                    .to_string(),
             };
         }
         Ok(r) if r.status().as_u16() == 429 => {
-            return unavailable(
-                "openai",
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            );
+            return UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            };
         }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
-            return unavailable(
-                "openai",
-                format!("API error {}: costs query failed", code),
-            );
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {}: costs query failed", code),
+            };
         }
         Ok(r) => r,
-        Err(e) => return unavailable("openai", format!("Costs query failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Costs query failed: {}", e),
+            }
+        }
     };
 
     let body = match resp.text() {
         Ok(b) => b,
-        Err(e) => return unavailable("openai", format!("Failed to read response: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {}", e),
+            }
+        }
     };
     match parse_openai_costs_response(&body) {
-        Ok(balance) => ProviderUsage {
-            provider: "openai".to_string(),
-            logged_in: true,
+        Ok(balance) => UsageOutcome::Reading {
             windows: Vec::new(),
             balance: Some(balance),
-            meters: vec![],
+            meters: Vec::new(),
             detail: None,
-            error: None,
         },
-        Err(e) => unavailable("openai", format!("Failed to parse costs response: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse costs response: {}", e),
+        },
     }
 }
 
@@ -600,9 +642,14 @@ fn parse_openrouter_response(body: &str) -> Result<BillingBalance, UsageError> {
     })
 }
 
-pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
+pub fn openrouter_usage(api_key: &str) -> UsageOutcome {
+    // Issue #1745 phase 2: migrated to the outcome seam. Empty key →
+    // `NoCredential`. 401/403 → `Rejected`. 429 → `RateLimited`. Other →
+    // `Unavailable`.
     if api_key.is_empty() {
-        return logged_out("openrouter", "No API key configured".to_string());
+        return UsageOutcome::NoCredential {
+            hint: "No API key configured".to_string(),
+        };
     }
 
     let client = match Client::builder()
@@ -610,7 +657,11 @@ pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return unavailable("openrouter", format!("Client error: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {}", e),
+            }
+        }
     };
 
     let auth = format!("Bearer {}", api_key);
@@ -621,54 +672,54 @@ pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
     {
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
-            // 401/403 → logged-out (bad / revoked key) so the UI prompts for
-            // re-entry; 429 → rate-limited "unavailable"; everything else →
-            // generic unavailable with the status for debug.
             if code == 401 || code == 403 {
-                return logged_out("openrouter", "Invalid API key".to_string());
+                return UsageOutcome::Rejected {
+                    hint: "Invalid API key".to_string(),
+                };
             }
             if code == 429 {
-                return unavailable(
-                    "openrouter",
-                    "Rate limited — usage data temporarily unavailable".to_string(),
-                );
+                return UsageOutcome::RateLimited {
+                    reason: "Rate limited — usage data temporarily unavailable".to_string(),
+                };
             }
-            // Body-read failure here is a transport issue, NOT a malformed
-            // payload — surface as "Request failed" rather than collapsing
-            // to an empty body that downstream parsing treats as a Shape error.
             let body = match r.text() {
                 Ok(b) => b,
                 Err(e) => {
-                    return unavailable(
-                        "openrouter",
-                        format!("API error {}: failed to read error body: {}", code, e),
-                    )
+                    return UsageOutcome::Unavailable {
+                        reason: format!("API error {}: failed to read error body: {}", code, e),
+                    }
                 }
             };
-            return unavailable(
-                "openrouter",
-                format!("API error {}: {}", code, body),
-            );
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {}: {}", code, body),
+            };
         }
         Ok(r) => r,
-        Err(e) => return unavailable("openrouter", format!("Request failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {}", e),
+            }
+        }
     };
 
     let body = match resp.text() {
         Ok(b) => b,
-        Err(e) => return unavailable("openrouter", format!("Failed to read response body: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response body: {}", e),
+            }
+        }
     };
     match parse_openrouter_response(&body) {
-        Ok(balance) => ProviderUsage {
-            provider: "openrouter".to_string(),
-            logged_in: true,
+        Ok(balance) => UsageOutcome::Reading {
             windows: Vec::new(),
             balance: Some(balance),
-            meters: vec![],
+            meters: Vec::new(),
             detail: None,
-            error: None,
         },
-        Err(e) => unavailable("openrouter", format!("Failed to parse response: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {}", e),
+        },
     }
 }
 
@@ -773,7 +824,10 @@ fn parse_deepseek_response(body: &str) -> Result<BillingBalance, UsageError> {
 /// [`deepseek_usage_with_url`] with the production endpoint pinned — the
 /// test seam keeps the loopback HTTP integration tests (issue #971
 /// pattern) runnable without hitting the real DeepSeek API.
-pub fn deepseek_usage(api_key: &str) -> ProviderUsage {
+pub fn deepseek_usage(api_key: &str) -> UsageOutcome {
+    // Issue #1745 phase 2: migrated to the outcome seam. Empty key →
+    // `NoCredential`. 401/403 → `Rejected`. 429 → `RateLimited`. Other →
+    // `Unavailable`.
     deepseek_usage_with_url(api_key, "https://api.deepseek.com/user/balance")
 }
 
@@ -1157,51 +1211,66 @@ fn commandcode_fetch_monthly_window(
 /// thorough contract — leaving room for either kimi/openrouter to gain
 /// the same seam in a follow-up, or for this seam to be dropped once
 /// parity across balance fetchers is the chosen design.)
-fn deepseek_usage_with_url(api_key: &str, live_url: &str) -> ProviderUsage {
+fn deepseek_usage_with_url(api_key: &str, live_url: &str) -> UsageOutcome {
     if api_key.is_empty() {
-        return logged_out("deepseek", "No API key configured".to_string());
+        return UsageOutcome::NoCredential {
+            hint: "No API key configured".to_string(),
+        };
     }
     let client = match Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return unavailable("deepseek", format!("Client error: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {}", e),
+            }
+        }
     };
     let auth = format!("Bearer {}", api_key);
     let resp = match client.get(live_url).header("Authorization", auth).send() {
-        Ok(r) if r.status() == 429 => return unavailable(
-            "deepseek",
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
+        Ok(r) if r.status() == 429 => {
+            return UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            }
+        }
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
             if code == 401 || code == 403 {
-                return logged_out("deepseek", "Invalid API key".to_string());
+                return UsageOutcome::Rejected {
+                    hint: "Invalid API key".to_string(),
+                };
             }
-            return unavailable(
-                "deepseek",
-                format!("API error {}: {}", code, r.text().unwrap_or_default()),
-            );
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {}: {}", code, r.text().unwrap_or_default()),
+            };
         }
         Ok(r) => r,
-        Err(e) => return unavailable("deepseek", format!("Request failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {}", e),
+            }
+        }
     };
     let body = match resp.text() {
         Ok(b) => b,
-        Err(e) => return unavailable("deepseek", format!("Failed to read response: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {}", e),
+            }
+        }
     };
     match parse_deepseek_response(&body) {
-        Ok(balance) => ProviderUsage {
-            provider: "deepseek".to_string(),
-            logged_in: true,
+        Ok(balance) => UsageOutcome::Reading {
             windows: Vec::new(),
             balance: Some(balance),
-            meters: vec![],
+            meters: Vec::new(),
             detail: None,
-            error: None,
         },
-        Err(e) => unavailable("deepseek", format!("Failed to parse response: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {}", e),
+        },
     }
 }
 
@@ -1736,7 +1805,7 @@ fn opencode_live_request_at(
     let (token, workspace_id, server_id) = opencode_live_request_parts(cred)?;
     let live_url_owned = live_url.to_string();
     Some(fetch_usage(
-        "opencode",
+        crate::services::usage::outcome::AuthPolicy::Rejected,
         move |client| {
             client
                 .post(&live_url_owned)
@@ -1745,7 +1814,8 @@ fn opencode_live_request_at(
                 .json(&[workspace_id])
         },
         parse_opencode_billing_response,
-    ))
+    )
+    .into_usage("opencode"))
 }
 
 /// True when the live probe returned an HTTP 401 (the "refresh-on-the-
@@ -2238,7 +2308,7 @@ fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsag
     let project = agy_load_project(client, token)?;
 
     Ok(fetch_usage(
-        "agy",
+        crate::services::usage::outcome::AuthPolicy::Rejected,
         |c| {
             c.post(format!("{AGY_HOST}/v1internal:fetchAvailableModels"))
                 .header("Authorization", format!("Bearer {token}"))
@@ -2247,7 +2317,8 @@ fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsag
                 .json(&serde_json::json!({ "project": project }))
         },
         parse_agy_models,
-    ))
+    )
+    .into_usage("agy"))
 }
 
 pub fn agy_usage() -> ProviderUsage {
@@ -2464,8 +2535,9 @@ pub(crate) mod tests {
         };
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = openai_usage_with_base_url("sk-admin-test", &base);
-        assert_eq!(usage.provider, "openai");
+        let outcome = openai_usage_with_base_url("sk-admin-test", &base);
+        // Issue #1745: assertions are on the outcome variant, not the wire.
+        let usage = outcome.into_usage("openai");
         assert!(usage.logged_in);
         assert!(usage.error.is_none());
         let balance = usage.balance.expect("admin key must populate balance");
@@ -2513,16 +2585,23 @@ pub(crate) mod tests {
         };
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = openai_usage_with_base_url("sk-proj-test", &base);
-        assert_eq!(usage.provider, "openai");
+        let outcome = openai_usage_with_base_url("sk-proj-test", &base);
+        // Issue #1745: `sk-proj-` graceful degradation lands as
+        // `UsageOutcome::Degraded`, which projects to `logged_in: true` with
+        // `detail` set and no `error` — preserving the ADR-0026 §2 wire.
+        match &outcome {
+            UsageOutcome::Degraded { detail } => {
+                assert!(
+                    detail.contains("Organization Admin") && detail.contains("sk-admin"),
+                    "detail must explain the org-admin requirement, got: {detail:?}"
+                );
+            }
+            other => panic!("expected Degraded outcome, got: {other:?}"),
+        }
+        let usage = outcome.into_usage("openai");
         assert!(usage.logged_in, "project key on org costs must NOT log out");
         assert!(usage.error.is_none(), "degradation must not carry an error");
         assert!(usage.balance.is_none(), "no balance when costs 403");
-        let detail = usage.detail.expect("degradation detail must be set");
-        assert!(
-            detail.contains("Organization Admin") && detail.contains("sk-admin"),
-            "detail must explain the org-admin requirement, got: {detail:?}"
-        );
         let _ = fs::remove_dir_all(openai_temp_home());
     }
 
@@ -2551,7 +2630,7 @@ pub(crate) mod tests {
         };
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = openai_usage_with_base_url("sk-bad", &base);
+        let usage = openai_usage_with_base_url("sk-bad", &base).into_usage("openai");
         assert_eq!(usage.provider, "openai");
         assert!(!usage.logged_in);
         assert_eq!(usage.error.as_deref(), Some("Invalid API key"));
@@ -2566,7 +2645,7 @@ pub(crate) mod tests {
         // configured-key gate should catch a missing key, but the fetcher
         // still defends with a logged-out message so a misconfigured call
         // surfaces "no key" instead of a confusing 401.
-        let usage = openai_usage_with_base_url("", "http://127.0.0.1:1");
+        let usage = openai_usage_with_base_url("", "http://127.0.0.1:1").into_usage("openai");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "openai");
         assert!(usage.error.as_deref().map(|e| e.contains("No API key")).unwrap_or(false));
@@ -2593,7 +2672,7 @@ pub(crate) mod tests {
         };
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = openai_usage_with_base_url("sk-test", &base);
+        let usage = openai_usage_with_base_url("sk-test", &base).into_usage("openai");
         assert!(usage.logged_in, "429 must not flip to logged_out");
         assert!(usage.error.as_deref().map(|e| e.contains("Rate limited")).unwrap_or(false));
         let _ = fs::remove_dir_all(openai_temp_home());
@@ -2757,9 +2836,16 @@ pub(crate) mod tests {
 
     #[test]
     fn no_credential_returns_error() {
-        let usage = minimax_usage("");
-        assert!(!usage.logged_in);
-        assert!(usage.error.is_some());
+        // Issue #1745: minimax is the first provider migrated to the
+        // outcome seam. The no-credential case is `UsageOutcome::NoCredential`,
+        // which projects to `logged_in: false, error: Some(hint)`.
+        let outcome = minimax_usage("");
+        match outcome {
+            UsageOutcome::NoCredential { hint } => {
+                assert_eq!(hint, "No API key configured");
+            }
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -2988,7 +3074,7 @@ pub(crate) mod tests {
         // Mirrors minimax_usage("") — the upstream caller is expected to gate on
         // the key being present; we still defend here so a misconfigured fetch
         // surfaces as "no API key configured" rather than an HTTP 401.
-        let usage = kimi_usage("");
+        let usage = kimi_usage("").into_usage("kimi");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "kimi");
         assert!(usage.error.is_some());
@@ -3066,7 +3152,7 @@ pub(crate) mod tests {
         // Mirrors `kimi_usage_with_empty_key_returns_logged_out` — the upstream
         // caller is expected to gate on key presence, but we still defend here
         // so a misconfigured fetch surfaces as "no API key" rather than a 401.
-        let usage = openrouter_usage("");
+        let usage = openrouter_usage("").into_usage("openrouter");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "openrouter");
         assert!(usage.error.is_some());
@@ -4237,7 +4323,7 @@ pub(crate) mod tests {
         // `cached_or_fetch` is expected to gate on key presence via
         // `configured_keyed_providers`, but the fetcher still defends so a
         // misconfigured call surfaces "no API key" instead of a confusing 401.
-        let usage = deepseek_usage("");
+        let usage = deepseek_usage("").into_usage("deepseek");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "deepseek");
         assert!(usage
@@ -4267,7 +4353,7 @@ pub(crate) mod tests {
             let _ = req.respond(tiny_http::Response::from_string(DEEPSEEK_BALANCE_BODY));
         });
         let url = format!("http://127.0.0.1:{port}/user/balance");
-        let usage = deepseek_usage_with_url("sk-test", &url);
+        let usage = deepseek_usage_with_url("sk-test", &url).into_usage("deepseek");
         assert!(usage.logged_in);
         assert_eq!(usage.provider, "deepseek");
         assert!(usage.error.is_none());
@@ -4294,7 +4380,7 @@ pub(crate) mod tests {
             );
         });
         let url = format!("http://127.0.0.1:{port}/user/balance");
-        let usage = deepseek_usage_with_url("sk-bad", &url);
+        let usage = deepseek_usage_with_url("sk-bad", &url).into_usage("deepseek");
         assert!(!usage.logged_in);
         assert_eq!(usage.provider, "deepseek");
         assert_eq!(usage.error.as_deref(), Some("Invalid API key"));
@@ -4310,7 +4396,7 @@ pub(crate) mod tests {
             let _ = req.respond(tiny_http::Response::empty(403));
         });
         let url = format!("http://127.0.0.1:{port}/user/balance");
-        let usage = deepseek_usage_with_url("sk-revoked", &url);
+        let usage = deepseek_usage_with_url("sk-revoked", &url).into_usage("deepseek");
         assert!(!usage.logged_in);
         assert_eq!(usage.error.as_deref(), Some("Invalid API key"));
     }
@@ -4324,7 +4410,7 @@ pub(crate) mod tests {
             let _ = req.respond(tiny_http::Response::empty(429));
         });
         let url = format!("http://127.0.0.1:{port}/user/balance");
-        let usage = deepseek_usage_with_url("sk-test", &url);
+        let usage = deepseek_usage_with_url("sk-test", &url).into_usage("deepseek");
         assert!(usage.logged_in, "429 must not flip to logged_out");
         assert!(usage
             .error
@@ -4344,7 +4430,7 @@ pub(crate) mod tests {
             let _ = req.respond(tiny_http::Response::from_string("not-json"));
         });
         let url = format!("http://127.0.0.1:{port}/user/balance");
-        let usage = deepseek_usage_with_url("sk-test", &url);
+        let usage = deepseek_usage_with_url("sk-test", &url).into_usage("deepseek");
         assert!(usage.logged_in);
         assert!(usage
             .error

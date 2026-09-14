@@ -4,7 +4,7 @@
 
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
-use crate::services::usage::types::ProviderUsage;
+use crate::services::usage::outcome::UsageOutcome;
 
 /// Drop-in [`UsageAdapter`] for `openrouter`.
 pub(crate) struct OpenrouterAdapter;
@@ -14,7 +14,10 @@ impl UsageAdapter for OpenrouterAdapter {
         "openrouter"
     }
 
-    fn fetch(&self, accounts: &[ProviderAccount]) -> ProviderUsage {
+    // Issue #1745 phase 2 step 9: openrouter migrated to the outcome
+    // seam. Empty key → `NoCredential`. 401/403 → `Rejected`. 429 →
+    // `RateLimited`. Other → `Unavailable`.
+    fn fetch(&self, accounts: &[ProviderAccount]) -> UsageOutcome {
         crate::services::usage::openrouter_usage(api_key_for(accounts, "openrouter").unwrap_or(""))
     }
 }
