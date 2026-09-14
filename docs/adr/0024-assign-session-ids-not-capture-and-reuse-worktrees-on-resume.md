@@ -1,5 +1,7 @@
 # 24. Assign Session IDs Rather Than Capture Them; Resume Reuses the Existing Worktree
 
+Status: accepted
+
 For providers whose session ID we control (Anthropic), Buildmesh
 **assigns** a UUID at spawn time and passes it to the CLI via
 `--session-id <uuid>`, rather than sniffing the ID back out of PTY output.

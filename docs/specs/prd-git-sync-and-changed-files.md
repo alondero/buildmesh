@@ -1,5 +1,7 @@
 # PRD: Git Synchronization and Unified Changed Files Panel
 
+Status: accepted
+
 ## Problem Statement
 
 Users of Buildmesh experience friction when managing Git repositories for their Meshes and Agent Nodes. 

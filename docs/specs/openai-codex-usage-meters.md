@@ -1,6 +1,7 @@
 # Technical Specification: OpenAI & Codex Usage Meters
 
-Status: Approved / Ready for Implementation  
+Status: accepted; current implementation is governed by ADR-0026
+
 Associated Issues: #1107, #1108, #1109, #1110, #1111, #1112  
 Architecture Decision Record: [ADR-0026](../adr/0026-openai-and-codex-usage-meters.md)
 

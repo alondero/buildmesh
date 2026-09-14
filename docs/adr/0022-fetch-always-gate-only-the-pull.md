@@ -1,5 +1,7 @@
 # 22. Fetch Always, Gate Only the Pull — and Pin the Refspec
 
+Status: accepted
+
 Every mesh sync path (spawn-time auto-sync, background worker, manual Sync
 button, PR-head fetch) now runs the `git fetch` unconditionally and applies the
 dirty-working-tree gate only to the `git pull --ff-only` step. The fetch also

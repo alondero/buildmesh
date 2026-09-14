@@ -24,7 +24,7 @@
                        self-deadlock or interfere when run in parallel)
 
 .PARAMETER Target
-  unit | integration | rust | all | all-ts  (default: all)
+  unit | integration | rust | docs | all | all-ts  (default: all)
 
   all    = agent checks + frontend build + unit + integration + cargo test
            (the default green bar; integration added in issue #1257 to
@@ -33,16 +33,19 @@
            green bar, mirrors the TS gates the GitHub Actions quality job
            runs on PRs — local parity with CI without spending 13
            minutes on a Rust build)
+  docs   = documentation contract tests, local-link/anchor validation, and
+           source-to-documentation drift checks
 
 .EXAMPLE
   scripts\check.ps1                 # full green bar (mobile build + unit + integration + rust)
   scripts\check.ps1 unit            # just the TS unit suite, correct pool
   scripts\check.ps1 rust -SerialRust
   scripts\check.ps1 all-ts          # full TS gates (unit + integration + build)
+  scripts\check.ps1 docs            # documentation contract only
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('unit', 'integration', 'rust', 'all', 'all-ts')]
+  [ValidateSet('unit', 'integration', 'rust', 'docs', 'all', 'all-ts')]
   [string]$Target = 'all',
   [switch]$CleanRust,
   [switch]$SerialRust
@@ -257,6 +260,20 @@ function Invoke-ReadmeDrift {
   if ($LASTEXITCODE -ne 0) { $script:failed += 'readme-drift' }
 }
 
+function Invoke-Documentation {
+  # Documentation is a first-class product surface: check its required
+  # information architecture, local links/anchors, harness coverage, and
+  # source links without waiting for a frontend or Rust build.
+  Write-Host '== documentation contract ==' -ForegroundColor Cyan
+  Push-Location $repo
+  try {
+    & npm run test:docs
+    if ($LASTEXITCODE -ne 0) { $script:failed += 'docs-tests' }
+    & npm run check:docs
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { $script:failed += 'docs-check' }
+}
+
 Write-Host '== agent infrastructure and diff rules ==' -ForegroundColor Cyan
 Push-Location $repo
 try {
@@ -282,6 +299,9 @@ if ($Target -in @('unit', 'integration', 'all', 'all-ts')) {
   & npm run test:lint
   if ($LASTEXITCODE -ne 0) { $script:failed += 'lint-tests' }
   Invoke-ReadmeDrift
+}
+if ($Target -in @('unit', 'integration', 'all', 'all-ts', 'docs')) {
+  Invoke-Documentation
 }
 
 # Build before Rust so embedded mobile assets reflect the current source.

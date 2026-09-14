@@ -1,6 +1,11 @@
 # 18. Persistent Device Sessions & Mobile Revocation
 
-Status: proposed
+Status: accepted
+
+> The original root-token pairing flow described below is historical. Current
+> pairing uses a one-time ticket and trusted-root lifecycle described in
+> [ADR-0034](0034-pairing-tickets-and-trusted-root-rotation.md). The device
+> session and revocation consequences remain part of the implemented contract.
 
 The Admin surface gains **per-device session tokens**: a paired phone is issued
 its own token at pairing, stored hashed in SQLite with last-seen metadata, so

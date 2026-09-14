@@ -1,6 +1,11 @@
 # 15. Two-Tier API Roles (RBAC) & Header Auth
 
-Status: proposed
+Status: accepted
+
+> The transport and pairing details in this historical decision are refined by
+> [ADR-0034](0034-pairing-tickets-and-trusted-root-rotation.md). Keep this ADR
+> as the source for the two-role boundary and header/cookie authentication;
+> follow ADR-0034 for the current phone pairing flow.
 
 The embedded HTTP/WS server gains an explicit two-role authorization model and
 moves every credential off the URL into headers/cookies, with a ticket exchange

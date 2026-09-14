@@ -1,5 +1,7 @@
 # 2. Allow Branched Worktree Creation on Dirty Mesh
 
+Status: accepted
+
 We will allow spawning new **Agent Nodes** in `branched` worktree mode even if the parent **Mesh** has uncommitted changes.
 
 ## Context

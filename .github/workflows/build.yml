@@ -64,6 +64,7 @@ jobs:
           # glob) keeps CI in lock-step with what `scripts/check.ps1`
           # invokes locally.
           npm run test:agent
+          npm run test:docs
           npm run test:readme
           npm run test:lint
           base="$AGENT_DIFF_BASE"
@@ -77,6 +78,19 @@ jobs:
       # job so a stale landing page fails before any compilation starts.
       - name: Check README drift (issue #1545)
         run: npm run check:readme
+
+      - name: Check documentation contract
+        env:
+          DOCS_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
+        run: |
+          base="$DOCS_DIFF_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then base=HEAD; fi
+          if git rev-parse --verify --end-of-options "${base}^{commit}" >/dev/null 2>&1; then
+            node scripts/check-docs.mjs --base "$base"
+          else
+            echo "::warning::Documentation impact diff base '$base' is unavailable; running the structural documentation check only."
+            node scripts/check-docs.mjs
+          fi
 
       # Issue #1542 — enforced ESLint + React Hooks gate. Two steps:
       #  (a) `npm run lint` runs ESLint across the codebase; the flat
