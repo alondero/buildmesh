@@ -9,6 +9,7 @@ import {
   checkDocumentation,
   checkDocumentationImpact,
   checkLocalLinks,
+  collectMarkdownFiles,
   extractMarkdownLinks,
   githubAnchor,
   hasDocumentStatus,
@@ -21,6 +22,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 test('the documentation contract passes for the real repository', () => {
   const failures = checkDocumentation({ root });
   assert.deepEqual(failures, [], failures.join('\n'));
+  assert.ok(collectMarkdownFiles(root).includes(join(root, 'CONTEXT.md')));
 });
 
 test('local links check both targets and GitHub-style anchors', () => {

@@ -23,7 +23,7 @@ Use the smallest existing seam that hides the external dependency. Avoid exporti
 | Scope | Commands / evidence |
 |---|---|
 | Instructions, hooks, verification scripts | `npm run test:agent`; `npm run test:docs`; `npm run check:agent`; run changed hooks through their stdin entrypoints and run affected script paths. |
-| Documentation | `npm run test:docs`; `npm run check:docs`. The gate checks required information architecture, level-one headings, local links/anchors, harness coverage, and source links. |
+| Documentation | `npm run test:docs`; `npm run check:docs`. The gate checks required information architecture, level-one headings, local links/anchors, harness coverage, and source-of-truth coverage. |
 | Frontend | `scripts\check.ps1 all-ts` on Windows; elsewhere `npm run build`, `npm run lint`, and `npm test`. The ESLint gate (issue #1542) catches `rules-of-hooks` violations — the regression class behind closed #1242 — and `exhaustive-deps` / `eqeqeq` / `ban-ts-comment` warnings. `npm run lint:fixtures` is the inverse: it MUST trip on the two fixtures in `tests/lint-fixtures/`, proving the React Hooks rules are live. Focused tests are useful during iteration; report their scope. |
 | Rust | `scripts\check.ps1 rust` on Windows. Elsewhere build mobile assets, unset `BUILDMESH_PREFILL`, then `cargo test --locked --manifest-path src-tauri/Cargo.toml`. Changed mobile source requires a fresh mobile build before Rust embeds it. |
 | Frontend + Rust | `scripts\check.ps1 all` (build + unit + integration + Rust + agent checks). This does not run Clippy, binding drift, or browser tests. |

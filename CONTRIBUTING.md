@@ -132,7 +132,7 @@ security change, API/protocol change, or release behavior change:
 
 1. Update the applicable page from the [documentation hub](docs/README.md).
 2. Add a categorized entry to [`CHANGELOG.md`](CHANGELOG.md) for behavior
-   changes. Use `docs: none — <reason>` in the PR when a documentation update
+   changes. Use `docs: none — <reason>` in the commit message when a documentation update
    is genuinely unnecessary.
 3. Run `npm run test:docs` and `npm run check:docs`.
 

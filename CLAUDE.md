@@ -40,7 +40,7 @@ Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell wr
 - **PreToolUse** `.claude/hooks/guard-antipatterns.mjs` blocks edits that introduce `.dispose()` / hand-built `\\wsl$\` paths (escape per-line with `// allow-dispose` / `// allow-wsl-path`), and blocks a worktree session editing a path outside its worktree (override with env `BUILDMESH_ALLOW_WORKTREE_ESCAPE=1`).
 - **PostToolUse** `.claude/hooks/verify-edit-persisted.mjs` checks file modification time after Edit/Write. It warns on missing/stale files; it cannot prove the intended content reached disk. Inspect the actual diff.
 - **PreToolUse** `.claude/hooks/guard-commit-staging.mjs` denies a plain `git commit` with nothing staged (the empty/aspirational-commit trap, #491→#504); skips `git add … && commit`, `-a`, `--amend`, `--allow-empty`. Stage your files and re-commit.
-- **PreToolUse** `.claude/hooks/guard-documentation.mjs` denies a plain commit containing behavior-sensitive source/config, check-script, hook, workflow, or release changes without staged documentation. Stage the affected docs, or put `docs: none — <reason>` in the commit message when the change genuinely has no documentation impact. CI remains authoritative.
+- **PreToolUse** `.claude/hooks/guard-documentation.mjs` checks behavior-sensitive commit snapshots, including plain commits, common `git add` chains, `-a`, and `--amend`. Stage the affected docs, or put `docs: none — <reason>` in the commit message when the change genuinely has no documentation impact. Ambiguous shell commands fail open; CI remains authoritative.
 
 ## Code quality
 - Match existing patterns. No new abstractions, deps, or speculative generality beyond the task.

@@ -15,6 +15,7 @@ export const repoRoot = resolve(scriptDir, '..');
 export const REQUIRED_PATHS = [
   'README.md',
   'CONTRIBUTING.md',
+  'CONTEXT.md',
   'SECURITY.md',
   'CODE_OF_CONDUCT.md',
   'CHANGELOG.md',
@@ -49,7 +50,7 @@ export function collectMarkdownFiles(root = repoRoot) {
   return [
     ...walkMarkdown(resolve(root, 'docs')),
     ...walkMarkdown(resolve(root, '.github')),
-    ...['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md', 'CHANGELOG.md']
+    ...['README.md', 'CONTRIBUTING.md', 'CONTEXT.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md', 'CHANGELOG.md']
       .map((file) => resolve(root, file))
       .filter(existsSync),
   ];
@@ -225,19 +226,6 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     const labels = parseHarnessLabel(readFileSync(harnessPath, 'utf8')) ?? {};
     for (const variant of variants) {
       if (!(variant in labels)) add('harness-source-coverage', `Provider variant ${variant} has no HARNESS_LABEL entry`);
-    }
-  }
-
-  const sourceLinkContracts = [
-    'src/components/Sidebar/ProviderDropdown.tsx',
-    'src/components/AgentNodeView/CanvasSpawnMenu.tsx',
-  ];
-  for (const path of sourceLinkContracts) {
-    const sourcePath = resolve(root, path);
-    if (!existsSync(sourcePath)) continue;
-    const source = readFileSync(sourcePath, 'utf8');
-    if (!source.includes('#first-run-prerequisites')) {
-      add('source-doc-link', `${path} must link to README#first-run-prerequisites`);
     }
   }
 

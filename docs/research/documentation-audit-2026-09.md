@@ -24,6 +24,7 @@ Primary sources reviewed:
 - [jq README](https://github.com/jqlang/jq/blob/master/README.md)
 - [bat contributing guide](https://github.com/sharkdp/bat/blob/master/CONTRIBUTING.md)
 - [Ruff contributing guide](https://github.com/astral-sh/ruff/blob/main/CONTRIBUTING.md)
+- [just README](https://github.com/casey/just/blob/master/README.md)
 
 These projects do not share one template. The useful common standard is a
 clear front door, a deeper task reference, explicit limitations, a contributor
