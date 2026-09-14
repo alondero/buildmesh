@@ -1,22 +1,17 @@
-# Changelog
+# Release notes index
 
-Notable user-visible changes are recorded here. Release artifacts and the
-in-app updater are described in [the release guide](docs/development/releasing.md).
+Status: current
 
-## [Unreleased]
+Release notes are maintained as one versioned file per release in
+[`docs/releases/`](docs/releases/). This file is only an index; it is not a
+staging area for unreleased work. Release artifacts and the in-app updater are
+described in the [release guide](docs/development/releasing.md).
 
-### Documentation
+## Upcoming
 
-- Added a documentation hub, task-oriented user guide, troubleshooting guide,
-  developer guide, and documentation quality gate.
+- [v1.3.0 (draft)](docs/releases/v1.3.0.md)
 
-### Changed
+## Published releases
 
-<!-- Add behavior changes under Features, Changed, Fixed, or Security before
-     opening a PR. Documentation-only corrections do not need an entry. -->
-
-## Release history
-
-Published releases are listed on the [GitHub Releases page](https://github.com/alondero/buildmesh/releases).
-When cutting a release, move the relevant Unreleased entries under the release
-version and keep the user-facing wording concise.
+See the [GitHub Releases page](https://github.com/alondero/buildmesh/releases)
+for published installers and their release notes.

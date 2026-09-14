@@ -67,14 +67,26 @@ jobs:
             exit 1
           fi
 
-      - name: Verify changelog release notes
+      - name: Verify and load release notes
+        id: release-notes
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          if ! grep -Fqx "## [$TAG]" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md must contain a '## [$TAG]' release-notes heading before tagging."
+          NOTES="docs/releases/v$TAG.md"
+          if [[ ! -f "$NOTES" ]]; then
+            echo "::error::$NOTES must exist before tagging."
             exit 1
           fi
+          if ! grep -Fqx "# Buildmesh v$TAG" "$NOTES"; then
+            echo "::error::$NOTES must contain '# Buildmesh v$TAG' before tagging."
+            exit 1
+          fi
+          DELIMITER="RELEASE_NOTES_${GITHUB_RUN_ID}"
+          {
+            echo "body<<$DELIMITER"
+            cat "$NOTES"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build + publish signed release
         uses: tauri-apps/tauri-action@v0
@@ -88,7 +100,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Buildmesh ${{ github.ref_name }}"
-          releaseBody: "User-visible changes are maintained in https://github.com/alondero/buildmesh/blob/main/CHANGELOG.md. Download the installer, matching .sig, and SHA256SUMS.txt, then verify the signature using https://github.com/alondero/buildmesh/blob/main/docs/development/releasing.md. Existing installs will be offered this update automatically."
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           # Flip createUpdaterArtifacts on for the release build only — the base

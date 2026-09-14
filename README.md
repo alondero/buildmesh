@@ -14,7 +14,7 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 - **New users:** follow the [first-session user guide](docs/user-guide.md#your-first-session).
 - **Something is wrong:** check [Troubleshooting](docs/troubleshooting.md).
 - **Contributors:** read the [developer guide](docs/development/README.md) and [contribution contract](CONTRIBUTING.md).
-- **Maintainers:** use the [release guide](docs/development/releasing.md), [CHANGELOG](CHANGELOG.md), and [documentation standards](docs/documentation-standards.md).
+- **Maintainers:** use the [release guide](docs/development/releasing.md), [release notes](docs/releases/README.md), and [documentation standards](docs/documentation-standards.md).
 
 ## Install Buildmesh
 

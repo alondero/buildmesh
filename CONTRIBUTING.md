@@ -131,9 +131,10 @@ configuration or shortcut change, provider/harness change, platform or
 security change, API/protocol change, or release behavior change:
 
 1. Update the applicable page from the [documentation hub](docs/README.md).
-2. Add a categorized entry to [`CHANGELOG.md`](CHANGELOG.md) for behavior
-   changes. Use `docs: none — <reason>` in the commit message when a documentation update
-   is genuinely unnecessary.
+2. Add a categorized entry to the current versioned release note in
+   [`docs/releases/`](docs/releases/) for user-visible behavior changes. Do
+   not use a generic `Unreleased` bucket. Use `docs: none — <reason>` in the
+   commit message when a documentation update is genuinely unnecessary.
 3. Run `npm run test:docs` and `npm run check:docs`.
 
 ## License

@@ -35,19 +35,26 @@ output.)
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`,
    `src-tauri/Cargo.toml`, and the `buildmesh` entry in `src-tauri/Cargo.lock`.
-2. Commit the bump and merge to `main`.
-3. **Push a matching tag** — this is the only trigger for the release build:
+2. Create or update `docs/releases/v1.2.0.md` with the concise, user-visible
+   changes for this release. The release workflow checks that this exact file
+   exists and uses it as the GitHub Release body.
+3. Commit the version bump and release notes, then merge to `main`.
+4. **Push a matching tag** — this is the only trigger for the release build:
    ```
    git tag v1.2.0
    git push origin v1.2.0
    ```
-4. The `Release` workflow (`.github/workflows/release.yml`) builds the Windows
+5. The `Release` workflow (`.github/workflows/release.yml`) builds the Windows
    installer + updater artifacts, signs them, and creates a **draft** GitHub
    Release containing the installer, its `.sig`, and `latest.json`.
-5. Review the draft release on GitHub and **publish** it. Once published,
+6. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-6. **Immediately bump back to the next `-0` version**:
+7. Remove the published version from the `Upcoming` section of the root
+   release-notes index and point the [release-notes guide](../releases/README.md)
+   at the next draft when one is ready. Do not rewrite the published note to
+   describe later work.
+8. **Immediately bump back to the next `-0` version**:
    ```
    npm run version:set -- 1.3.0-0
    ```
@@ -55,10 +62,10 @@ output.)
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
-Before publishing, move the release's user-visible entries from
-[`CHANGELOG.md`](../../CHANGELOG.md) into a version heading. Include features,
-fixes, security changes, breaking changes, migrations, and known limitations;
-do not rely on the generic workflow body as release notes.
+Release notes are versioned under [`docs/releases/`](../releases/). Include
+features, fixes, security changes, breaking changes, migrations, and known
+limitations; do not add internal implementation work or rely on a generic
+workflow-generated body.
 
 ## One-time setup: updater signing secrets
 

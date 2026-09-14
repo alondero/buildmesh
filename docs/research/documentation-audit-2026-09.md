@@ -40,7 +40,7 @@ path, and automated checks for the facts that are easy to let drift.
 | Install matrix and explicit prerequisites | Strong Windows/WSL coverage; provider setup and runtime boundaries were easy to miss | Made the workflow and runtime distinction prominent in the user guide and troubleshooting guide |
 | Examples, screenshots, demos, or a reference manual | README had a wordmark and feature prose but no guided workflow evidence | Added executable first-session steps and identified screenshots/browser evidence as a review standard; existing PR screenshots remain developer evidence |
 | Build/test/contributor path | Present in `CONTRIBUTING.md`, `engineering.md`, and scripts, but fragmented | Added `docs/development/README.md` and linked the verification matrix |
-| Changelog/release notes | No `CHANGELOG.md`; release guide existed | Added `CHANGELOG.md` and release/contribution expectations |
+| Changelog/release notes | No versioned release-note source; release guide existed | Added a release-notes index, a versioned draft, and release/contribution expectations |
 | Explicit project documentation map | Missing | Added `docs/README.md`, ADR index, and spec index |
 | Docs kept accurate by automation | README provider/platform checks existed; Markdown was excluded from ESLint and local links were not gated | Added `npm run check:docs` and its tests to CI/local checks |
 | AI/automation contribution policy | Agent rules and hooks existed, but no documentation-impact rule | Added documentation standards, PR evidence, and a commit hook requiring docs or an explicit `docs: none — reason` decision for behavior-sensitive commits |
@@ -95,7 +95,7 @@ path, and automated checks for the facts that are easy to let drift.
 - Added the contributor/developer map in `docs/development/README.md`.
 - Added the standards and behavior-to-document impact map in
   `docs/documentation-standards.md`.
-- Added `CHANGELOG.md`, an ADR index, and a specs index.
+- Added the release-notes index and initial versioned release draft, plus ADR and specs indexes.
 - Added a repository-native documentation checker and regression tests for
   local Markdown links, case-sensitive anchors, required documents, one-H1
   structure, ADR/spec status, image alt text, and the docs index.
@@ -108,7 +108,7 @@ path, and automated checks for the facts that are easy to let drift.
 - Corrected the README prerequisites anchor used by the provider and canvas
   setup links.
 - Added public-key/fingerprint guidance, published SHA-256 checksums, and a
-  release workflow gate requiring versioned changelog notes.
+  release workflow gate requiring matching versioned release notes.
 
 ## Deliberately not added
 

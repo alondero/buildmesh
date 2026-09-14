@@ -46,13 +46,13 @@ Use this impact map when changing behavior:
 
 | Change | Documentation and evidence to consider |
 |---|---|
-| New or changed user workflow | README discovery link, user guide procedure, troubleshooting entry if failure modes changed, and `CHANGELOG.md` |
+| New or changed user workflow | README discovery link, user guide procedure, troubleshooting entry if failure modes changed, and the current versioned release note in `docs/releases/` |
 | New harness, provider, setting, shortcut, or platform | User guide capability/setup table, README summary or drift source, platform limitations, and a live/tested source of truth |
 | Security, auth, data storage, network, or destructive behavior | User-facing warning and recovery steps, `SECURITY.md` if reporting scope changes, and an ADR |
 | Tauri command, HTTP route, IPC payload, or generated type | Developer guide/API documentation, Rust source docs, contract tests, and regenerated bindings where applicable |
 | Architectural boundary or trade-off | ADR with status; update `CONTEXT.md` or `knowledge-primer.md` only when vocabulary or durable AI guidance changes |
 | Build, lint, hook, CI, or release change | Developer guide, `CONTRIBUTING.md`, and the relevant command/check documentation |
-| Documentation-only correction | The affected document and its navigation links; no changelog entry is required unless users need to know about the correction |
+| Documentation-only correction | The affected document and its navigation links; no release-note entry is required unless users need to know about the correction |
 
 If a behavior change needs no user-facing update, make that decision explicit in
 the PR evidence or commit message with `docs: none — <reason>`. Do not hide a

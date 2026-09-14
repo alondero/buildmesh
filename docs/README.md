@@ -13,7 +13,7 @@ the complete product manual.
 | Installing or evaluating Buildmesh | [README](../README.md) | Supported platforms, downloads, prerequisites, security limitations, and a feature overview |
 | Contributor | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution contract, checks, issue flow, and PR evidence |
 | Developer | [Development guide](development/README.md) | Repository map, test matrix, seams, generated types, and feature checklists |
-| Maintainer | [Releasing](development/releasing.md) and [CHANGELOG](../CHANGELOG.md) | Release procedure, updater signing, and release-note discipline |
+| Maintainer | [Releasing](development/releasing.md) and [release notes](releases/README.md) | Release procedure, updater signing, and release-note discipline |
 | AI coding agent | [CLAUDE.md](../CLAUDE.md) and [AI context](knowledge-primer.md) | Always-on rules, architecture, conventions, and anti-patterns |
 
 ## Source-of-truth order
@@ -29,6 +29,9 @@ the complete product manual.
   implementation contracts and may be superseded.
 - [Development documentation](development/README.md) owns contributor-facing
   build, test, release, and maintenance procedures.
+- Versioned [release notes](releases/README.md) own concise, user-visible
+  changes for a specific release. The root [release-notes index](../CHANGELOG.md)
+  only points readers to the current draft and published releases.
 - [CLAUDE.md](../CLAUDE.md) and [knowledge-primer.md](knowledge-primer.md) are
   AI context, not a substitute for human-facing documentation.
 
@@ -48,5 +51,6 @@ The folders below are deliberately separated by purpose:
   implementation notes.
 - [`learning/`](learning/) and [`research/`](research/) — evidence captured
   while investigating a behavior or external integration.
+- [`releases/`](releases/) — versioned drafts and historical release notes.
 - [`specs/`](specs/README.md) — product and technical specifications.
 - [`archive/`](archive/README.md) — retired material that is not current truth.

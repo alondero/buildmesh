@@ -24,6 +24,8 @@ test('the documentation contract passes for the real repository', () => {
   const failures = checkDocumentation({ root });
   assert.deepEqual(failures, [], failures.join('\n'));
   assert.ok(collectMarkdownFiles(root).includes(join(root, 'CONTEXT.md')));
+  assert.ok(collectMarkdownFiles(root).includes(join(root, 'docs', 'releases', 'v1.3.0.md')));
+  assert.doesNotMatch(readFileSync(join(root, 'CHANGELOG.md'), 'utf8'), /^##\s+\[Unreleased\]/m);
 });
 
 test('local links check both targets and GitHub-style anchors', () => {
@@ -78,6 +80,19 @@ test('heading and status checks ignore fenced examples but enforce document meta
   assert.equal(hasDocumentStatus('# Doc\n\nStatus: accepted\n'), true);
   assert.equal(hasDocumentStatus('# Doc\n\n## Status\n\nAccepted\n'), true);
   assert.equal(hasDocumentStatus('# Doc\n'), false);
+});
+
+test('versioned release notes use a matching Buildmesh title', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'buildmesh-release-notes-'));
+  try {
+    mkdirSync(join(fixtureRoot, 'docs', 'releases'), { recursive: true });
+    const release = join(fixtureRoot, 'docs', 'releases', 'v2.0.0.md');
+    writeFileSync(release, '# Buildmesh v1.9.0\n');
+    const failures = checkDocumentation({ root: fixtureRoot, files: [release] });
+    assert.ok(failures.some((failure) => failure.includes('docs/releases/v2.0.0.md must have the title')));
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test('documentation impact requires a relevant page or a reasoned exemption', () => {

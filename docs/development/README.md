@@ -94,7 +94,7 @@ without pretending that a code linter can judge prose quality. CI passes
 ### Changing a user-visible feature
 
 - Update the task procedure, defaults, limitations, and recovery path.
-- Add or update `CHANGELOG.md` for behavior changes.
+- Add or update the current versioned release note under `docs/releases/` for user-visible behavior changes.
 - Add screenshots or browser evidence for layout, accessibility, or interaction
   changes when the engineering contract calls for it.
 - Run `npm run check:docs` and the product checks appropriate to the boundary.

@@ -45,13 +45,13 @@ Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell wr
 ## Code quality
 - Match existing patterns. No new abstractions, deps, or speculative generality beyond the task.
 - Add or update tests for behaviour changes (`tests/unit`, `tests/integration`).
-- **Documentation is part of the definition of done.** User-visible behavior, configuration or shortcut changes, provider/harness or platform support, security/remote-access behavior, public APIs, and release behavior require the relevant page and `CHANGELOG.md` update. If no update is needed, record `docs: none — <reason>` in the commit message. Run `npm run check:docs`.
+- **Documentation is part of the definition of done.** User-visible behavior, configuration or shortcut changes, provider/harness or platform support, security/remote-access behavior, public APIs, and release behavior require the relevant page and current versioned release note under `docs/releases/`. If no update is needed, record `docs: none — <reason>` in the commit message. Run `npm run check:docs`.
 - Test production boundaries and failure/order transitions, not copied logic or mock expectations. Runtime errors and zero executed tests are not green; report compilation, tests, and real/mock runtime evidence separately. No paper-tiger tests: do not short-circuit test bodies on OS/env to bypass assertions; assert literal outputs, not tautologies.
 - Clean compiler and linter output: zero new warnings in touched files. Commit message claims must strictly match diff reality (no claiming removed casts or dead code that remain in the diff).
 - Comment only non-obvious *why*; let names carry the *what*.
 
 ## Pointers
-- Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`. Durable architecture and boundaries only (no changelog narratives, no speculative rules, no hardcoded line numbers).
+- Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`. Durable architecture and boundaries only (no release-note narratives, no speculative rules, no hardcoded line numbers).
 - Domain language and mental model: `CONTEXT.md`. Ubiquitous language only (no code symbols, file paths, store keys, or DOM gestures). README.md is user-facing only (no internal issue numbers or backlog notes).
 - DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
 - Verification: `/verify` — see `.claude/skills/verify/SKILL.md`

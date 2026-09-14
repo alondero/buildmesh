@@ -24,6 +24,7 @@ export const REQUIRED_PATHS = [
   'docs/user-guide.md',
   'docs/troubleshooting.md',
   'docs/development/README.md',
+  'docs/releases/README.md',
   'docs/adr/README.md',
   'docs/specs/README.md',
 ];
@@ -32,6 +33,7 @@ const DOC_HUB_LINKS = [
   'user-guide.md',
   'troubleshooting.md',
   'development/README.md',
+  'releases/README.md',
   'documentation-standards.md',
   'adr/README.md',
   'specs/README.md',
@@ -194,13 +196,18 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     }
   }
 
-  const changelogPath = resolve(root, 'CHANGELOG.md');
-  if (existsSync(changelogPath) && !/^##\s+\[Unreleased\]/m.test(readFileSync(changelogPath, 'utf8'))) {
-    add('changelog', 'CHANGELOG.md must keep an [Unreleased] section at the top');
-  }
-
   for (const source of files) {
     const relativePath = relative(root, source).replaceAll('\\', '/');
+    const releaseMatch = relativePath.match(/^docs\/releases\/(v\d+\.\d+\.\d+)\.md$/i);
+    if (releaseMatch) {
+      const headings = markdownHeadings(readFileSync(source, 'utf8'));
+      const expectedTitle = `Buildmesh ${releaseMatch[1]}`;
+      if (!headings.some(({ level, text }) => level === 1 && text === expectedTitle)) {
+        add('release-note', `${relativePath} must have the title "${expectedTitle}"`);
+      }
+    } else if (relativePath.startsWith('docs/releases/') && !/\/README\.md$/i.test(relativePath)) {
+      add('release-note', `${relativePath} must be named vX.Y.Z.md`);
+    }
     if (!/^docs\/(?:adr|specs)\/[^/]+\.md$/i.test(relativePath) || /\/README\.md$/i.test(relativePath)) continue;
     const markdown = readFileSync(source, 'utf8');
     if (!hasDocumentStatus(markdown)) {
