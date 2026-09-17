@@ -35,25 +35,35 @@ output.)
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`,
    `src-tauri/Cargo.toml`, and the `buildmesh` entry in `src-tauri/Cargo.lock`.
-2. Commit the bump and merge to `main`.
-3. **Push a matching tag** — this is the only trigger for the release build:
+2. Create or update `docs/releases/v1.2.0.md` with the concise, user-visible
+   changes for this release. The release workflow checks that this exact file
+   exists and uses it as the GitHub Release body.
+3. Commit the version bump and release notes, then merge to `main`.
+4. **Push a matching tag** — this is the only trigger for the release build:
    ```
    git tag v1.2.0
    git push origin v1.2.0
    ```
-4. The `Release` workflow (`.github/workflows/release.yml`) builds the Windows
+5. The `Release` workflow (`.github/workflows/release.yml`) builds the Windows
    installer + updater artifacts, signs them, and creates a **draft** GitHub
    Release containing the installer, its `.sig`, and `latest.json`.
-5. Review the draft release on GitHub and **publish** it. Once published,
+6. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-6. **Immediately bump back to the next `-0` version**:
+7. Point the [release-notes guide](../releases/README.md) at the next draft
+   when one is ready. Do not rewrite the published note to describe later work.
+8. **Immediately bump back to the next `-0` version**:
    ```
    npm run version:set -- 1.3.0-0
    ```
    Commit and merge so subsequent local builds stay newer than the release.
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
+
+Release notes are versioned under [`docs/releases/`](../releases/). Include
+features, fixes, security changes, breaking changes, migrations, and known
+limitations; do not add internal implementation work or rely on a generic
+workflow-generated body.
 
 ## One-time setup: updater signing secrets
 
@@ -89,3 +99,30 @@ This is expected for an internal tool. OS code signing (Authenticode /
 Apple notarization) would remove these warnings but requires paid certificates —
 it is deferred (tracked in issue #834). The auto-updater is unaffected by
 this: it verifies updates with its own minisign signature regardless.
+
+## Verify a published installer
+
+The `.sig` asset verifies update integrity; it is separate from OS code signing
+and does not remove SmartScreen or Gatekeeper warnings. Download the installer
+and matching `.sig` from the same GitHub release, then verify it with
+[minisign](https://jedisct1.github.io/minisign/). The updater public-key
+fingerprint is `B754F88FD69AD0DD` and the public key is committed in
+`src-tauri/tauri.conf.json`.
+
+PowerShell example:
+
+```powershell
+$publicKey = 'RWTd0JrWj/hUt82KDADoxTpTfqs8p6/ay6iht36EPXl2feP892wH1aBG'
+$installer = Get-ChildItem .\Buildmesh_*_x64-setup.exe | Select-Object -First 1
+minisign -Vm $installer.FullName `
+  -x "$($installer.FullName).sig" `
+  -P $publicKey
+Get-FileHash $installer.FullName -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+The command must report a valid signature before installation. Compare the
+SHA-256 output with the matching filename in the published `SHA256SUMS.txt`.
+Never replace the public key with a key copied from an untrusted release
+comment. The checksum file is a second download-integrity check; it does not
+replace the cryptographic signature.

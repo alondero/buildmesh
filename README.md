@@ -6,6 +6,16 @@ Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents —
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
+[![Build](https://github.com/alondero/buildmesh/actions/workflows/build.yml/badge.svg)](https://github.com/alondero/buildmesh/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/alondero/buildmesh?display_name=tag)](https://github.com/alondero/buildmesh/releases/latest)
+
+## Start here
+
+- **New users:** follow the [first-session user guide](docs/user-guide.md#your-first-session).
+- **Something is wrong:** check [Troubleshooting](docs/troubleshooting.md).
+- **Contributors:** read the [developer guide](docs/development/README.md) and [contribution contract](CONTRIBUTING.md).
+- **Maintainers:** use the [release guide](docs/development/releasing.md), [release notes](docs/releases/README.md), and [documentation standards](docs/documentation-standards.md).
+
 ## Install Buildmesh
 
 Buildmesh ships as a Windows installer through GitHub Releases and is upgraded in place by the in-app updater. Each release publishes an updater feed, and every update is verified with the app's own minisign signature before it installs. OS code-signing is **not** in place yet, so first launch shows a SmartScreen / Gatekeeper warning — see [SmartScreen & Gatekeeper warnings](#smartscreen--gatekeeper-warnings-unsigned-installers).
@@ -215,6 +225,8 @@ The dev profile is what `/use` and `/verify` use — it never touches the stable
 
 ```bash
 npm test                 # unit + integration
+npm run test:docs        # documentation contract tests
+npm run check:docs       # local links, anchors, required docs, source drift
 npm run test:e2e         # Playwright e2e (requires the app running on :1991)
 npm run test:ci          # all three in one go
 cargo test               # Rust unit tests (run inside src-tauri/)
@@ -289,6 +301,11 @@ buildmesh/
 
 ## Documentation
 
+- **[`docs/`](docs/)** — documentation hub and audience-based navigation.
+- **[`docs/user-guide.md`](docs/user-guide.md)** — first session, harness capabilities, worktrees, settings, and remote access.
+- **[`docs/troubleshooting.md`](docs/troubleshooting.md)** — common detection, runtime, connectivity, and recovery problems.
+- **[`docs/development/`](docs/development/)** — setup, verification, architecture boundaries, and release operations.
+- **[`docs/documentation-standards.md`](docs/documentation-standards.md)** — what must be documented when behavior changes.
 - **[`docs/knowledge-primer.md`](docs/knowledge-primer.md)** — architecture, conventions, anti-patterns. Read this before touching backend, terminal, agent-spawn, or path code.
 - **[`CONTEXT.md`](CONTEXT.md)** — domain language and mental model (what a "Mesh" is, what an "Agent Node" is, how they relate).
 - **[`docs/adr/`](docs/adr/)** — Architecture Decision Records.

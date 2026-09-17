@@ -44,10 +44,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProviderList } from '../../hooks/useProviderList';
 import { hasSpawnableAgent } from '../../lib/groups';
-
-/** README anchor for the install prerequisites — mirrors the sidebar
- *  spawn dropdown's onboarding panel (issue #822). */
-const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
+import { PREREQUISITES_URL } from '../../lib/urls';
 
 interface CanvasSpawnMenuProps {
   /** The mesh id the canvas empty state requested the spawn menu

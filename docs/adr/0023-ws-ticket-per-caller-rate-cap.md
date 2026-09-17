@@ -1,6 +1,6 @@
 # 23. Per-caller rate cap on `POST /api/ws-ticket`
 
-Status: proposed
+Status: accepted
 
 `POST /api/ws-ticket`, which mints the single-use WebSocket handshake ticket
 that gates every WS upgrade, gains a per-token sliding-window rate cap

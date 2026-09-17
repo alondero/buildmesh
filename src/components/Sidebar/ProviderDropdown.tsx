@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
+import { PREREQUISITES_URL } from '../../lib/urls';
 import { useViewportClamp } from '../../hooks/useViewportClamp';
 
 // `SpawnOption` is the frontend view of the Spawn Option wire shape
@@ -9,9 +10,6 @@ import { useViewportClamp } from '../../hooks/useViewportClamp';
 // harness-grouped render. `GroupedProviderMenu` now consumes `SpawnOption`
 // directly (not `ProviderInfo`) so the four desktop spawn surfaces
 // share one frontend view and the boundary no longer needs a cast.
-
-/** GitHub README anchor for the install prerequisites (issue #822). */
-const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
 
 interface ProviderDropdownProps {
   /**

@@ -1,5 +1,7 @@
 # Autopilot ModeSpec — Event-Driven Agent Node Provisioning and Self-Correction Loop
 
+Status: accepted
+
 ## Problem Statement
 
 The problem that the user is facing, from the user's perspective:

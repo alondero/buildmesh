@@ -3,6 +3,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProviderDropdown } from '../../src/components/Sidebar/ProviderDropdown';
 import { colorClassForProvider, type SpawnOption } from '../../src/lib/groups';
+import { PREREQUISITES_URL } from '../../src/lib/urls';
 
 // `SafeLink` (rendered by the issue #822 empty state) routes its click
 // through `openUrl` — Tauri 2 drops `target="_blank"` without the
@@ -107,7 +108,7 @@ describe('ProviderDropdown', () => {
     it('links to the README prerequisites via openUrl (Tauri 2 routing)', async () => {
       render(<ProviderDropdown dropdownKey="mesh-1" providers={TERMINAL_ONLY} onSelect={() => {}} />);
       await userEvent.click(screen.getByRole('link', { name: /View setup instructions/ }));
-      expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alondero/buildmesh#prerequisites');
+      expect(openUrlMock).toHaveBeenCalledWith(PREREQUISITES_URL);
     });
 
     it('hides the panel once a real agent harness is present', () => {

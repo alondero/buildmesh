@@ -28,3 +28,12 @@
      Inspect the actual diff for unrelated edits, scratch files, and missing files.
      Use a Conventional Commit PR title (convention, not a current CI title gate).
      Do not mark work complete because the template contains a checkbox. -->
+
+## Documentation impact
+
+<!-- Documentation is part of the feature contract. Name the updated user
+     guide, troubleshooting page, developer doc, ADR/spec, or release notes.
+     If no update is needed, record the reason here and in the commit message,
+     for example `docs: none — generated binding only`. -->
+
+Documentation impact: <!-- paths updated, or `docs: none — <reason>` -->

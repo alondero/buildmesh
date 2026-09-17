@@ -1,3 +1,12 @@
+# Remote access MVP (superseded specification)
+
+Status: superseded
+
+> This historical PRD records the original remote-access design. The current
+> pairing, session, transport, and certificate contract lives in [ADR-0034](../adr/0034-pairing-tickets-and-trusted-root-rotation.md)
+> and the [user guide](../user-guide.md#remote-access). Do not implement this
+> document without reconciling it with those sources first.
+
 ## Problem Statement
 
 Users need to monitor and interact with their buildmesh agent nodes from a mobile phone when away from their desktop — for example, checking on a long-running build or responding to an agent prompt from another room — without disrupting the existing desktop session.
