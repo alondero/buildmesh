@@ -162,7 +162,8 @@ export function hasActiveAutopilotOwnership(
 // `awaiting_input`) into one chip, so `revealAttention` can cycle through all
 // of them — the reachability guarantee the pre-refactor count pill had
 // (round-3 review). It does not drop a waiting session because a sibling
-// failed.
+// failed, and it does not drop a background member's failure because the
+// focused member happens to look healthy.
 //
 // One member is chosen as the *primary*: the focused session when it demands
 // attention, otherwise the highest-priority one (failures before waits). The
@@ -170,11 +171,15 @@ export function hasActiveAutopilotOwnership(
 // so switching tabs updates what the chip describes instead of pinning the
 // copy to whichever member happened to be listed first.
 //
-// Non-actionable states earn no chip. An active run is carried by the Pilot
-// light. A finished run is already told four ways — the green lifecycle dot,
-// the Pilot-light check, the PR pill, and the `autopilot-pr-created` toast —
-// so a third green chip with a no-op click was pure noise (round-1 review).
-// An unpiloted, healthy card renders none.
+// The only failure suppressed is a solo card's own: with a single member the
+// title bar's Pilot light already shows that member's failure in red, so the
+// chip would repeat it and its `revealAttention` click would land on the same
+// session. See `isSoloFocusedFailure`.
+//
+// An active run is carried by the Pilot light. A finished run is already told
+// four ways — the green lifecycle dot, the Pilot-light check, the PR pill, and
+// the `autopilot-pr-created` toast — so a third green chip with a no-op click
+// was pure noise (round-1 review). An unpiloted, healthy card renders none.
 
 export type AutopilotOutcomeKind = 'failed' | 'needs_input';
 
@@ -235,6 +240,24 @@ function outcomeCandidateFor(node: AgentNode, sources: AutopilotOutcomeSources):
   return null;
 }
 
+/**
+ * A solo card whose focused member failed under Autopilot: the title bar's one
+ * Pilot light is already visibly red for that member, and `revealAttention`
+ * could only cycle back to it. The chip adds no reachability here, so it is the
+ * single case this resolver suppresses. A multi-member card keeps the chip even
+ * when the focused member failed, because its siblings are otherwise hidden.
+ */
+function isSoloFocusedFailure(
+  members: readonly AgentNode[],
+  primary: OutcomeCandidate,
+  focusedNodeId?: number,
+): boolean {
+  return members.length === 1
+    && primary.kind === 'failed'
+    && primary.responsible
+    && primary.id === focusedNodeId;
+}
+
 /** Keep detail copy sentence-shaped however `semanticTurns` phrases it. */
 function asSentence(text: string): string {
   return /[.!?]$/.test(text) ? text : `${text}.`;
@@ -285,5 +308,6 @@ export function resolveAutopilotOutcome(
     ...candidates.filter(candidate => candidate.kind === 'needs_input'),
   ];
   const primary = ordered.find(candidate => candidate.id === focusedNodeId) ?? ordered[0];
+  if (isSoloFocusedFailure(members, primary, focusedNodeId)) return null;
   return buildOutcome(primary, ordered.map(candidate => candidate.id), sources);
 }

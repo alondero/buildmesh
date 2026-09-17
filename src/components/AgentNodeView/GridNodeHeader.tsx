@@ -155,6 +155,18 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   };
   const showDetails = () => { activateNode(node.id); openProbeTab('properties'); };
   const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
+  // Scope the mesh-scoped Probe to this node's mesh before focusing, so the run
+  // is present in the snapshot the tab loads (the grid can show nodes from
+  // several meshes). Shared by the menu row and the title-bar Pilot light.
+  const openCircuitRun = (runId: number) => {
+    useMeshStore.getState().selectMesh(node.mesh_id);
+    useUIStore.getState().focusCircuitRun(runId);
+  };
+  // A visible Pilot light backed by Circuit ownership is the quick link to that
+  // run; a legacy Autopilot run has no Circuits Probe entry to open.
+  const circuitRunAction = autopilotPresentation && circuitOwnership
+    ? { label: 'Open this Circuit run in the Circuits Probe.', onActivate: () => openCircuitRun(circuitOwnership.run_id) }
+    : undefined;
   const outcomeCount = attentionOutcome?.nodeIds.length ?? 0;
 
   return (
@@ -167,7 +179,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         <span role="status" aria-label={activity?.label ?? getStatusConfig(node.status).label}
           title={activity?.label ?? getStatusConfig(node.status).label}
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getStatusConfig(titleNode.status).bgColor}`} />
-        <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
+        <AutopilotNodeIndicatorCell presentation={autopilotPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
           title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">
@@ -198,6 +210,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
           onOpenInExplorer={handleOpenInExplorer} node={node} providerList={providerList}
           isRegenerateDisabled={regen.isRegenerateDisabled} hasRegenerateTargets={regen.hasRegenerateTargets}
           onPickRegenerate={regen.pickRegenerateProvider} onDetails={showDetails} onChanges={showChanges}
+          onOpenCircuitRun={openCircuitRun}
           circuitRun={circuitPill && circuitOwnership
             ? { ...circuitPill, runId: circuitOwnership.run_id }
             : null}
@@ -271,7 +284,7 @@ interface KebabActionsProps {
   isPinned: boolean;
   onTogglePin: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'provider' | 'mesh_id'>;
+  node: Pick<AgentNode, 'provider'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -281,11 +294,13 @@ interface KebabActionsProps {
   onPickRegenerate: (providerId: string, providerLabel: string) => void;
   /** Circuit-owned row: the run to open in the Circuits Probe, or null. */
   circuitRun: { label: string; title: string; className: string; runId: number } | null;
+  /** Opens `circuitRun` in the Circuits Probe, scoped to this node's mesh. */
+  onOpenCircuitRun: (runId: number) => void;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 
-function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges, circuitRun }: KebabActionsProps) {
+function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerList, isRegenerateDisabled, hasRegenerateTargets, onPickRegenerate, details, onDetails, onChanges, circuitRun, onOpenCircuitRun }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -512,11 +527,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
               title={circuitRun.title}
               onClick={() => {
                 closeAndReturnFocus();
-                // Scope the mesh-scoped Probe to this node's mesh before
-                // focusing, so the run is present in the snapshot the tab
-                // loads (the grid can be showing nodes from several meshes).
-                useMeshStore.getState().selectMesh(node.mesh_id);
-                useUIStore.getState().focusCircuitRun(circuitRun.runId);
+                onOpenCircuitRun(circuitRun.runId);
               }}
               className={`w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs hover:bg-bg-card-hover ${circuitRun.className}`}
             >

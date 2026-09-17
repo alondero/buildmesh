@@ -303,7 +303,27 @@ describe('GridNodeHeader contextual information and actions', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'completed', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Autopilot done/ })).toBeTruthy();
+  });
+
+  it('opens the run in the Circuits Probe from the title-bar Pilot light', () => {
+    useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
+      circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    const indicator = screen.getByRole('button', { name: /Autopilot active/ });
+    expect(indicator.getAttribute('aria-label'))
+      .toBe('Autopilot active. Open this Circuit run in the Circuits Probe.');
+    fireEvent.click(indicator);
+    expect(useUIStore.getState().probeTab).toBe('circuits');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().pendingCircuitRunFocus).toBe(2);
+  });
+
+  it('leaves a legacy Autopilot run’s Pilot light non-interactive', () => {
+    useAgentNodeStore.setState({ autopilotStates: { 1: 'implementing' } });
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Autopilot active/ })).toBeNull();
+    expect(screen.getByRole('img', { name: 'Autopilot active' })).toBeTruthy();
   });
 
   it('renders waiting and failure tones without changing the ownership cell', () => {

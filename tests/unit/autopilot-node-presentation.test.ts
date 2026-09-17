@@ -196,6 +196,18 @@ describe('resolveAutopilotOutcome', () => {
     expect(result?.nodeIds).toEqual([2, 1]);
   });
 
+  it('surfaces a background member failure on a multi-member card', () => {
+    // The title bar draws one Pilot light — the focused member's — so a sibling
+    // that failed must still reach the chip or it stays invisible on the canvas.
+    const result = resolveAutopilotOutcome(
+      [member(1, 'running'), member(2, 'error')],
+      sources({ 2: 'failed' }),
+      1,
+    );
+    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Autopilot failed', nodeId: 2 });
+    expect(result?.nodeIds).toEqual([2]);
+  });
+
   it('leaves completed automation to the existing green signals (no chip)', () => {
     // A finished run needs no action and is already told by the lifecycle dot,
     // the Pilot-light check, the PR pill, and the autopilot-pr-created toast.
@@ -263,6 +275,39 @@ describe('resolveAutopilotOutcome', () => {
     const srcs = sources({ 1: 'finishing', 2: 'finishing' }, {}, turns);
     expect(resolveAutopilotOutcome(members, srcs, 1)?.detail).toContain('approve the first command');
     expect(resolveAutopilotOutcome(members, srcs, 2)?.detail).toContain('approve the second command');
+  });
+
+  it('suppresses the chip for a solo card whose focused member failed under Autopilot', () => {
+    // The lone Pilot light is already visibly red for this member and a chip
+    // click could only cycle back to it, so the chip is pure duplication.
+    expect(resolveAutopilotOutcome([member(1, 'error')], sources({ 1: 'failed' }), 1)).toBeNull();
+    expect(resolveAutopilotOutcome([member(1, 'completed')], sources({}, { 1: ownership('failed') }), 1)).toBeNull();
+  });
+
+  it.each(['cancelled', 'completed'] as const)(
+    'keeps the failure chip for a solo card with a %s Circuit, where no Pilot light is drawn',
+    (state) => {
+      // An unpiloted node and a cancelled or terminal Circuit render no Pilot
+      // light at all, so the text chip is the card's only failure disclosure.
+      const result = resolveAutopilotOutcome([member(1, 'error')], sources({}, { 1: ownership(state) }), 1);
+      expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Agent failed', nodeId: 1 });
+    },
+  );
+
+  it('keeps the failure chip for a solo card whose failed member is not focused', () => {
+    // Focus is what puts the light on screen; if the failed member is not the
+    // one being shown, the chip is the only route back to it.
+    const result = resolveAutopilotOutcome([member(1, 'error')], sources({ 1: 'failed' }), 99);
+    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed', nodeId: 1 });
+  });
+
+  it('keeps the failure chip on a multi-member card even when the focused member failed', () => {
+    const result = resolveAutopilotOutcome(
+      [member(1, 'error'), member(2, 'running')],
+      sources({ 1: 'failed' }),
+      1,
+    );
+    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed', nodeId: 1 });
   });
 
   it('attributes a failed Circuit run to Autopilot', () => {
