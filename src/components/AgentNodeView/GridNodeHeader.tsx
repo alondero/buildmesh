@@ -193,7 +193,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         onClick={event => { event.stopPropagation(); onReveal?.(); }}
         aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
         title={attentionOutcome.detail}
-        data-testid="autopilot-outcome-chip"
+        data-testid="autopilot-outcome-chip" data-outcome={attentionOutcome.kind}
         className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${AUTOPILOT_PILL_CLASSES[attentionOutcome.tone]}`}>
         <AutopilotIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}

@@ -1,4 +1,4 @@
-import type { MouseEvent } from 'react';
+import type { SyntheticEvent } from 'react';
 import type { AutopilotIndicatorPhase, AutopilotIndicatorTone, AutopilotNodePresentation } from '../../lib/autopilotNodePresentation';
 
 interface AutopilotNodeIndicatorAction {
@@ -27,9 +27,11 @@ const TONE_COLORS: Record<AutopilotIndicatorTone, string> = {
   error: 'text-status-error',
 };
 
-/// Keep activation local: the indicator often sits inside a drag handle and a
-/// double-click target, so a click on it must not start a drag or maximize.
-function stopPointerPropagation(event: MouseEvent) {
+/// Activation must stay local: the indicator sits inside a drag handle, a
+/// double-click target, and the card's select-and-focus-terminal click handler,
+/// so none of those may see the event. `SyntheticEvent` is the common base of
+/// the pointer, mouse, and double-click events these handlers receive.
+function stopPropagation(event: SyntheticEvent) {
   event.stopPropagation();
 }
 
@@ -91,12 +93,18 @@ export function AutopilotNodeIndicator({ presentation, action }: AutopilotNodeIn
       <button
         type="button"
         data-testid="autopilot-indicator"
-        onClick={action.onActivate}
-        onPointerDown={stopPointerPropagation}
-        onDoubleClick={stopPointerPropagation}
+        onClick={(event) => {
+          // Stop the click before the card's own handler selects the member and
+          // re-focuses its terminal, which would pull focus off the Circuits
+          // Probe the user just asked to open.
+          event.stopPropagation();
+          action.onActivate();
+        }}
+        onPointerDown={stopPropagation}
+        onDoubleClick={stopPropagation}
         aria-label={`${presentation.label}. ${action.label}`}
         title={`${presentation.detail} ${action.label}`}
-        className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm hover:bg-bg-base/70 ${toneClass}`}
+        className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan hover:bg-bg-base/70 ${toneClass}`}
       >
         {glyph}
       </button>
