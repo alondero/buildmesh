@@ -253,6 +253,30 @@ describe('useWindowControlOverlay', () => {
     expect(reportMetrics.set).toHaveBeenCalledTimes(1);
   });
 
+  it('skips the report when there is no layout to measure the viewport against', async () => {
+    // A half-mocked or layout-less DOM: the button has a box but the root
+    // element does not, which would turn the inset negative and describe a box
+    // that cannot be true. Reporting nothing keeps the overlay uninstalled
+    // (and therefore the DOM path intact) instead of parking it off the edge.
+    document.documentElement.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const { ref } = maximizeTarget();
+    renderHook(() => useWindowControlOverlay(ref, () => {}));
+    await act(async () => {});
+
+    expect(reportMetrics.set).not.toHaveBeenCalled();
+  });
+
   it('is inert off Windows — no listeners, no metrics, no calls', async () => {
     platform.isWindows = false;
     const { ref } = maximizeTarget();

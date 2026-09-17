@@ -112,6 +112,15 @@ pure, so it can be unit-tested off Windows.
 - **Don't hang the overlay's lifetime off `WM_CLOSE`.** It is advisory while a
   close can still be vetoed, so the overlay silently dies on a cancelled exit.
   Use `WM_NCDESTROY`.
+- **Don't treat a stored `HWND` as a validity token, and don't "validate" it with
+  `IsWindow`.** `IsWindow` answers "does this *value* name a window right now", so
+  once the handle has been destroyed and its value recycled it returns `TRUE` —
+  the check waves the wrong action through instead of preventing it. By
+  `WM_NCDESTROY` the children are already destroyed (Windows destroys them as
+  part of the parent's destruction), so there is nothing to destroy and teardown
+  must not try. Destroy a stored handle only where you know it is live: here, the
+  replace-a-stale-overlay path in `install_on_main`, where the parent is alive and
+  this module is the sole destroyer of the child.
 - **Don't compute a position from an empty client rect.** A minimized window has
   none; hide the overlay instead of moving it somewhere the parent cannot
   contain.

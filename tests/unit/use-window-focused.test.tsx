@@ -94,6 +94,35 @@ describe('useWindowFocused', () => {
     expect(result.current).toBe(true);
   });
 
+  it('unsubscribes even when unmount lands while the subscription is still pending', async () => {
+    // Subscribing is an awaited call, so unmount can land between the call and
+    // its resolution — by which point the cleanup has already run with nothing
+    // to tear down. Without a `disposed` re-check after that await the listener
+    // outlives the component forever, and StrictMode's mount → cleanup → mount
+    // makes the interleaving routine rather than exotic.
+    const unlisten = vi.fn();
+    let resolveSubscription: ((stop: () => void) => void) | null = null;
+    windowApi.onFocusChanged.mockImplementation(
+      () =>
+        new Promise<() => void>((resolve) => {
+          resolveSubscription = resolve;
+        }),
+    );
+
+    const { unmount } = renderHook(() => useWindowFocused());
+    // `isFocused` has resolved and `onFocusChanged` is now in flight.
+    await act(async () => {});
+
+    unmount();
+    // Nothing to call yet — the cleanup could not have known about the listener.
+    expect(unlisten).not.toHaveBeenCalled();
+
+    // The subscription lands after the component is gone and must be torn down
+    // immediately, not merely ignored.
+    await act(async () => { resolveSubscription!(unlisten); });
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
   it('stays lit when the query fails rather than dimming on an error', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     windowApi.isFocused.mockRejectedValue(new Error('focus unavailable'));

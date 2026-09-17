@@ -40,7 +40,7 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, IsWindow,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic,
             RegisterClassExW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HTMAXBUTTON,
             HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_SHOWWINDOW, SW_HIDE, WM_DPICHANGED, WM_NCDESTROY,
             WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
@@ -176,7 +176,15 @@ unsafe fn install_on_main(parent: SendHwnd, window: WebviewWindow) {
         return;
     }
 
-    teardown();
+    // A leftover entry means an overlay belonging to a *different* parent. That
+    // child is still alive — while its parent exists, this module is the only
+    // thing that destroys it — so unhook and destroy it explicitly. This is the
+    // one place destroying a stored handle is sound; see `teardown`.
+    if let Some(stale) = STATE.lock().take() {
+        RemoveWindowSubclass(stale.parent.get(), Some(parent_subclass_proc), SUBCLASS_ID);
+        DestroyWindow(stale.overlay.get());
+    }
+
     register_class();
 
     let class = class_name();
@@ -219,27 +227,30 @@ unsafe fn install_on_main(parent: SendHwnd, window: WebviewWindow) {
     tracing::debug!("snap overlay installed over the maximise button");
 }
 
-/// Destroy the overlay and drop its state.
+/// Unhook the overlay and forget it, WITHOUT destroying its child window.
 ///
-/// Called from `WM_NCDESTROY` — the parent is genuinely going away — and from
-/// `install_on_main` when it needs to replace a stale overlay. Deliberately NOT
-/// from `WM_CLOSE`: that message is advisory while the exit-confirmation modal
-/// can still veto the close (see the module doc), so hanging teardown off it
-/// would tear the overlay down on a cancelled exit.
+/// Runs from `WM_NCDESTROY`, by which point the parent's destruction has already
+/// destroyed its children — there is nothing left to destroy. `IsWindow` is
+/// deliberately not consulted to "make this safe", because it cannot: it answers
+/// "does this *value* name a window right now", so for a handle whose value has
+/// since been recycled it returns TRUE and would wave a `DestroyWindow` through
+/// to an unrelated window. A stored `HWND` is not a validity token across
+/// destruction; what makes this correct is knowing *where* teardown was called
+/// from. The one place a stored handle is destroyed is `install_on_main`, where
+/// the parent is alive and this module is the only thing that can have destroyed
+/// the child.
+///
+/// Deliberately NOT hung off `WM_CLOSE`: that message is advisory while the
+/// exit-confirmation modal can still veto the close (see the module doc), so
+/// tearing down there would kill Snap Layouts on a cancelled exit.
 fn teardown() {
     let Some(state) = STATE.lock().take() else {
         return;
     };
 
-    // SAFETY: both handles came from the main thread and are torn down on it.
+    // SAFETY: the parent handle came from the main thread and is unhooked on it.
     unsafe {
         RemoveWindowSubclass(state.parent.get(), Some(parent_subclass_proc), SUBCLASS_ID);
-        // By `WM_NCDESTROY` the parent's children have already been destroyed, so
-        // the handle is normally stale — and a stale handle may since have been
-        // recycled, so ask before destroying rather than firing blind.
-        if IsWindow(state.overlay.get()) != 0 {
-            DestroyWindow(state.overlay.get());
-        }
     }
 }
 

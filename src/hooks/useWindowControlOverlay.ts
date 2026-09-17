@@ -72,6 +72,12 @@ export function useWindowControlOverlay(
       // overlay drifts about a pixel and ends up overlapping the neighbouring
       // close button. This is the same viewport edge without the rounding.
       const viewportRight = document.documentElement.getBoundingClientRect().right;
+      // No layout to measure against (jsdom without mocked geometry, or a
+      // document that has not been styled): a zero viewport right would make the
+      // inset negative and describe a box that cannot be true, so skip the
+      // report — the same discipline as the degenerate button rect above — rather
+      // than send nonsense and park the overlay off the right edge.
+      if (viewportRight <= 0) return;
       setTitlebarMaximizeMetrics({
         rightInset: viewportRight - rect.right,
         top: rect.top,
