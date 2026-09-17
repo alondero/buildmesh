@@ -69,6 +69,18 @@
   --color-border-strong: rgba(255, 255, 255, 0.14);
   --color-border-active: #00d4ff;
 
+  /* Caption-button backplates — the minimise / maximise-restore / close
+     controls in the bespoke title bar (ADR-0035). Windows 11's own caption
+     buttons tint by compositing a translucent fill over whatever is behind
+     them, and VS Code's hand-drawn equivalents (the model these controls
+     follow) use the same alphas rather than pre-mixed hexes. The close fill is
+     deliberately theme-independent: the shell's red is a fixed system accent,
+     not a surface colour, so it needs no light counterpart. */
+  --color-caption-hover: rgba(255, 255, 255, 0.1);
+  --color-caption-pressed: rgba(255, 255, 255, 0.2);
+  --color-caption-close-hover: rgba(232, 17, 35, 0.9);
+  --color-caption-close-pressed: rgba(232, 17, 35, 1);
+
   /* Typography. --font-sans / --font-mono are the single source: Tailwind
      v4 generates the `font-sans` / `font-mono` utilities from them, and the
      base body rule reads --font-sans directly. */
@@ -214,6 +226,14 @@
   --color-border-default: rgba(0, 0, 0, 0.17);
   --color-border-strong: rgba(0, 0, 0, 0.37);
   --color-border-active: #0891b2;
+
+  /* Caption-button backplates (ADR-0035) — the translucent fill flips from
+     white-over-dark to black-over-light so the tint stays a *deepening* of the
+     surface in both themes, matching how the shell composites it. The
+     `--color-caption-close-*` tokens above have no light counterpart on
+     purpose: the shell's red is a fixed system accent, not a surface colour. */
+  --color-caption-hover: rgba(0, 0, 0, 0.1);
+  --color-caption-pressed: rgba(0, 0, 0, 0.2);
 
   /* Shadows — lower alpha on light bg; shadows read stronger there */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);

@@ -988,6 +988,25 @@ export const cancelWindowClose = () =>
 export const exitApplication = () =>
   _invoke('exit_application');
 
+/** Native Windows Snap Layouts for the bespoke title bar (ADR-0035).
+ *
+ *  The window controls can't get the Windows 11 snap flyout from CSS or JS:
+ *  the shell only offers it to a window whose `WM_NCHITTEST` answers
+ *  `HTMAXBUTTON`, and our page lives in a WebView2 child HWND that answers the
+ *  hit test first. A native child window is parked over the maximise button
+ *  instead, and this reports that button's real box so it lands exactly on top
+ *  of it.
+ *
+ *  Logical (CSS) pixels — the backend applies the window DPI scale, which the
+ *  frontend cannot see. Reported on mount and again on resize; the backend is
+ *  idempotent. No-op off Windows. */
+export const setTitlebarMaximizeMetrics = (metrics: {
+  rightInset: number;
+  top: number;
+  width: number;
+  height: number;
+}) => _invoke('set_titlebar_maximize_metrics', { ...metrics });
+
 /** Buildmesh-wide default Worktree Node directory (issue #1519).
  *  Pass `null` (or blank) to clear and restore `.claude/worktrees` under
  *  each inheriting Mesh root. Relative resolves from each Mesh root;

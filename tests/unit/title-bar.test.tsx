@@ -23,6 +23,11 @@ const windowApi = vi.hoisted(() => ({
   close: vi.fn(),
   isMaximized: vi.fn().mockResolvedValue(false),
   onResized: vi.fn<(cb: () => void) => Promise<() => void>>(),
+  // Focus tracking (ADR-0035): drives the caption buttons' inactive state.
+  isFocused: vi.fn().mockResolvedValue(true),
+  onFocusChanged: vi.fn<
+    (cb: (event: { payload: boolean }) => void) => Promise<() => void>
+  >(),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -54,6 +59,7 @@ import {
 } from '../../src/components/Terminal/terminalConfig';
 
 let resizeHandler: (() => void) | null = null;
+let focusHandler: ((event: { payload: boolean }) => void) | null = null;
 
 /** Render and flush the initial isMaximized sync (a promise that resolves
     after mount) so tests don't trip act() warnings on the settle. */
@@ -63,13 +69,26 @@ async function renderTitleBar() {
   return utils;
 }
 
+/** The class list on a caption button's glyph. */
+function captionGlyphClass(name: string): string {
+  return screen.getByRole('button', { name }).querySelector('svg')!.getAttribute('class') ?? '';
+}
+
 beforeEach(() => {
   resizeHandler = null;
+  focusHandler = null;
   windowApi.isMaximized.mockResolvedValue(false);
+  windowApi.isFocused.mockResolvedValue(true);
   windowApi.onResized.mockImplementation((cb: () => void) => {
     resizeHandler = cb;
     return Promise.resolve(() => {});
   });
+  windowApi.onFocusChanged.mockImplementation(
+    (cb: (event: { payload: boolean }) => void) => {
+      focusHandler = cb;
+      return Promise.resolve(() => {});
+    },
+  );
   useUIStore.setState({
     omnibarOpen: false,
     omnibarMode: 'files',
@@ -151,6 +170,127 @@ describe('TitleBar (bespoke window chrome)', () => {
       windowApi.isMaximized.mockResolvedValue(false);
       await act(async () => { resizeHandler!(); });
       expect(screen.getByRole('button', { name: 'Maximize window' })).toBeTruthy();
+    });
+  });
+
+  describe('caption buttons (ADR-0035)', () => {
+    it('renders all three as 46px backplates marked with data-window-control', async () => {
+      const { container } = await renderTitleBar();
+      const controls = Array.from(container.querySelectorAll('[data-window-control]'));
+      expect(controls.map((control) => control.getAttribute('data-window-control'))).toEqual([
+        'minimize',
+        'maximize',
+        'close',
+      ]);
+      for (const control of controls) {
+        // 46px is the native caption width, so the three make up the standard
+        // 138px cluster flush to the right edge — and it is also the width the
+        // measured snap-overlay box has to line up with (the overlay follows
+        // the DOM, so this stays honest if it ever changes).
+        expect(control.className).toContain('w-[46px]');
+        expect(control.className).toContain('shrink-0');
+      }
+    });
+
+    it('runs the caption cluster full-bleed down the bar', async () => {
+      const { container } = await renderTitleBar();
+      const cluster = container.querySelector('[data-window-control]')!.parentElement!;
+      // A real caption strip fills the height of its title bar rather than
+      // floating as three centred chips.
+      expect(cluster.className).toContain('self-stretch');
+      expect(cluster.className).toContain('shrink-0');
+    });
+
+    it('carries the VS Code hover and pressed fills as class literals', async () => {
+      await renderTitleBar();
+      for (const name of ['Minimize window', 'Maximize window']) {
+        const button = screen.getByRole('button', { name });
+        expect(button.className).toContain('hover:bg-caption-hover');
+        expect(button.className).toContain('active:bg-caption-pressed');
+        // The old generic card/status hovers are gone — a caption backplate is
+        // a translucent tint, not an opaque chip.
+        expect(button.className).not.toContain('hover:bg-bg-card');
+        expect(button.className).not.toContain('bg-status-error');
+      }
+      const close = screen.getByRole('button', { name: 'Close window' });
+      expect(close.className).toContain('hover:bg-caption-close-hover');
+      expect(close.className).toContain('active:bg-caption-close-pressed');
+      expect(close.className).toContain('hover:text-white');
+    });
+
+    it('drops the HTML tooltip that native caption buttons do not have', async () => {
+      await renderTitleBar();
+      // `title` also used to be the source of the accessible name; it now has
+      // to come from `aria-label` alone, so pin both halves of that move.
+      for (const name of ['Minimize window', 'Maximize window', 'Close window']) {
+        const button = screen.getByRole('button', { name });
+        expect(button.hasAttribute('title')).toBe(false);
+        expect(button.getAttribute('aria-label')).toBe(name);
+      }
+    });
+
+    it('paints the caption glyphs as filled 16x16 codicon shapes', async () => {
+      const { container } = await renderTitleBar();
+      const glyphs = Array.from(container.querySelectorAll('[data-window-control] svg'));
+      expect(glyphs).toHaveLength(3);
+      for (const glyph of glyphs) {
+        expect(glyph.getAttribute('viewBox')).toBe('0 0 16 16');
+        expect(glyph.getAttribute('fill')).toBe('currentColor');
+        // Filled outlines, not the 18px stroke-2 figures they replaced — the
+        // stroke weight was most of what read as "not quite Windows".
+        expect(glyph.getAttribute('stroke')).toBeNull();
+        // 16px as a literal: the app's root font is 13px, so `h-4` would be 13.
+        expect(glyph.getAttribute('class')).toContain('h-[16px]');
+        expect(glyph.getAttribute('class')).toContain('w-[16px]');
+      }
+    });
+
+    it('dims the caption glyphs while the window is inactive', async () => {
+      await renderTitleBar();
+      // Focused on mount → full strength.
+      expect(captionGlyphClass('Minimize window')).not.toContain('opacity-60');
+
+      // A focus change the OS drives (alt-tab, taskbar click) dims every
+      // caption glyph, not just one of them.
+      await act(async () => { focusHandler!({ payload: false }); });
+      expect(captionGlyphClass('Minimize window')).toContain('opacity-60');
+      expect(captionGlyphClass('Maximize window')).toContain('opacity-60');
+      expect(captionGlyphClass('Close window')).toContain('opacity-60');
+      // Only the glyph dims — the backplate must stay full-strength so hovering
+      // an inactive window's button still reads as a live control.
+      const button = screen.getByRole('button', { name: 'Minimize window' });
+      expect(button.className).not.toContain('opacity-60');
+
+      await act(async () => { focusHandler!({ payload: true }); });
+      expect(captionGlyphClass('Minimize window')).not.toContain('opacity-60');
+    });
+
+    it('dims the caption glyphs when the window is already unfocused at mount', async () => {
+      // The initial query covers launching behind another window, where no
+      // focus-change event is ever delivered to this webview.
+      windowApi.isFocused.mockResolvedValue(false);
+      await renderTitleBar();
+      expect(captionGlyphClass('Minimize window')).toContain('opacity-60');
+    });
+
+    it('swaps the maximise glyph for the restore outline on the resize re-query', async () => {
+      await renderTitleBar();
+      const maximizePath = screen
+        .getByRole('button', { name: 'Maximize window' })
+        .querySelector('path')!
+        .getAttribute('d');
+      windowApi.isMaximized.mockResolvedValue(true);
+      await act(async () => { resizeHandler!(); });
+      const restorePath = screen
+        .getByRole('button', { name: 'Restore window' })
+        .querySelector('path')!
+        .getAttribute('d');
+      expect(restorePath).not.toBe(maximizePath);
+      // Still the same single-writer rule: the glyph follows the re-query, and
+      // the two codicon figures are genuinely different shapes (the restore
+      // one is the overlapped pair).
+      expect(maximizePath).toBeTruthy();
+      expect(restorePath).toBeTruthy();
     });
   });
 

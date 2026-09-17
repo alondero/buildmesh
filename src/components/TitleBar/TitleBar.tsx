@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import Wordmark from '../../assets/wordmark.png';
 import { isMac } from '../../lib/platform';
+import { useWindowControlOverlay } from '../../hooks/useWindowControlOverlay';
+import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
 import { HeaderPillButton } from './HeaderPillButton';
@@ -204,59 +206,116 @@ function UsageButton() {
   );
 }
 
-function MinimizeIcon({ className }: IconProps) {
+/** The four Windows caption glyphs, taken from Microsoft's codicon set — the
+    exact outlines VS Code draws for its window controls (`chrome-minimize` /
+    `chrome-maximize` / `chrome-restore` / `chrome-close`), which are in turn
+    the Segoe Fluent Icons caption shapes the shell itself uses (E921-E923,
+    E8BB). These replace stroked 18px figures: heavy stroke geometry is most of
+    why hand-drawn caption buttons read as "not quite Windows", and these are
+    the shapes the user sees in every other title bar on the machine. */
+const CAPTION_GLYPH = {
+  minimize: 'M3 7.5C3 7.22386 3.22386 7 3.5 7H12.5C12.7761 7 13 7.22386 13 7.5C13 7.77614 12.7761 8 12.5 8H3.5C3.22386 8 3 7.77614 3 7.5Z',
+  maximize: 'M2 4.5C2 3.11929 3.11929 2 4.5 2H11.5C12.8807 2 14 3.11929 14 4.5V11.5C14 12.8807 12.8807 14 11.5 14H4.5C3.11929 14 2 12.8807 2 11.5V4.5ZM4.5 3C3.67157 3 3 3.67157 3 4.5V11.5C3 12.3284 3.67157 13 4.5 13H11.5C12.3284 13 13 12.3284 13 11.5V4.5C13 3.67157 12.3284 3 11.5 3H4.5Z',
+  restore: 'M5.08496 4C5.29088 3.4174 5.8465 3 6.49961 3H9.99961C11.6565 3 12.9996 4.34315 12.9996 6V9.5C12.9996 10.1531 12.5822 10.7087 11.9996 10.9146V6C11.9996 4.89543 11.1042 4 9.99961 4H5.08496ZM4.5 5H9.5C10.3284 5 11 5.67157 11 6.5V11.5C11 12.3284 10.3284 13 9.5 13H4.5C3.67157 13 3 12.3284 3 11.5V6.5C3 5.67157 3.67157 5 4.5 5ZM4.5 6C4.22386 6 4 6.22386 4 6.5V11.5C4 11.7761 4.22386 12 4.5 12H9.5C9.77614 12 10 11.7761 10 11.5V6.5C10 6.22386 9.77614 6 9.5 6H4.5Z',
+  close: 'M2.58859 2.71569L2.64645 2.64645C2.82001 2.47288 3.08944 2.4536 3.28431 2.58859L3.35355 2.64645L8 7.293L12.6464 2.64645C12.8417 2.45118 13.1583 2.45118 13.3536 2.64645C13.5488 2.84171 13.5488 3.15829 13.3536 3.35355L8.707 8L13.3536 12.6464C13.5271 12.82 13.5464 13.0894 13.4114 13.2843L13.3536 13.3536C13.18 13.5271 12.9106 13.5464 12.7157 13.4114L12.6464 13.3536L8 8.707L3.35355 13.3536C3.15829 13.5488 2.84171 13.5488 2.64645 13.3536C2.45118 13.1583 2.45118 12.8417 2.64645 12.6464L7.293 8L2.64645 3.35355C2.47288 3.17999 2.4536 2.91056 2.58859 2.71569L2.64645 2.64645L2.58859 2.71569Z',
+} as const;
+
+/** 16px, as a literal — NOT `h-4`. The app's root font is 13px (App.css
+    `--font-size-base`), so `h-4` = 1rem would compile to 13px; the caption
+    glyph box is a fixed 16px in both the codicon design grid and VS Code. */
+const CAPTION_GLYPH_CLASS = 'h-[16px] w-[16px]';
+
+/** Caption glyph sizing, dimmed when the window is inactive — the fifth of
+    Microsoft's caption-button states (rest, hover, pressed, active,
+    inactive). Only the glyph dims, never the backplate: hovering an inactive
+    window's caption button still shows the full-strength fill, as it does
+    natively. */
+function captionGlyphClass(inactive: boolean) {
+  return inactive ? `${CAPTION_GLYPH_CLASS} opacity-60` : CAPTION_GLYPH_CLASS;
+}
+
+/** A caption glyph. Unlike `Svg` (24×24, stroked, for the icon-font glyphs
+    elsewhere in the bar) the codicon paths are filled 16×16 outlines, and each
+    one relies on its subpaths winding oppositely to punch the inner hole that
+    makes the maximise and restore figures read as outlines. */
+function CaptionGlyph({ className, name }: IconProps & { name: keyof typeof CAPTION_GLYPH }) {
   return (
-    <Svg className={className}>
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </Svg>
+    <svg className={className} viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <path d={CAPTION_GLYPH[name]} />
+    </svg>
   );
 }
 
-function MaximizeIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <rect x="5" y="5" width="14" height="14" rx="1" />
-    </Svg>
-  );
-}
+/** Caption backplate values, matching VS Code's window controls (the agreed
+    model for these buttons): a translucent fill that reads as a deepening of
+    the surface rather than an opaque chip, plus the shell's fixed red for
+    close. Each state is spelled twice on purpose — the `hover:` / `active:`
+    utilities are the normal DOM path, and the bare classes are what the native
+    snap overlay applies when it drives the same state from its own events
+    (ADR-0035). One definition per state is what stops the two spellings
+    drifting into two subtly different greys. */
+const CAPTION_BACKPLATE = {
+  neutral: {
+    rest: 'text-text-secondary',
+    hover: 'hover:bg-caption-hover hover:text-text-primary',
+    pressed: 'active:bg-caption-pressed active:text-text-primary',
+    overlayHover: 'bg-caption-hover text-text-primary',
+    overlayPressed: 'bg-caption-pressed text-text-primary',
+  },
+  danger: {
+    rest: 'text-text-secondary',
+    hover: 'hover:bg-caption-close-hover hover:text-white',
+    pressed: 'active:bg-caption-close-pressed active:text-white',
+    overlayHover: 'bg-caption-close-hover text-white',
+    overlayPressed: 'bg-caption-close-pressed text-white',
+  },
+} as const;
 
-function RestoreIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <rect x="7" y="3" width="12" height="12" rx="1" />
-      <path d="M5 9v10a1 1 0 0 0 1 1h10" />
-    </Svg>
-  );
-}
-
-function CloseIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <line x1="6" y1="6" x2="18" y2="18" />
-      <line x1="18" y1="6" x2="6" y2="18" />
-    </Svg>
-  );
-}
-
-/** Shared skeleton for the three window controls; `danger` gives the close
-    button its red hover instead of the standard card hover. */
-function WindowControlButton({ onClick, title, danger, children }: {
+/** Shared skeleton for the three window controls.
+ *
+ *  Geometry follows the Windows 11 caption buttons as VS Code draws them: a
+ *  46px-wide full-bleed backplate, so the three form the standard 138px cluster
+ *  flush to the right edge. 46px is not arbitrary — it is the native width, and
+ *  it is also what the measured snap-overlay box has to line up with, so
+ *  resizing these means the overlay follows automatically (it is measured, not
+ *  assumed).
+ *
+ *  No `title` attribute: native caption buttons carry no tooltip, and one here
+ *  would only re-state the label. The accessible name lives on `aria-label`.
+ *
+ *  `hovered` / `pressed` exist because the Windows snap overlay owns the mouse
+ *  over the maximise button, so that button's real `:hover` and `:active`
+ *  cannot fire there (ADR-0035); the two props let the hook drive the same
+ *  states. The utilities stay as the base so the DOM path is untouched on
+ *  macOS/Linux and on Windows if the overlay never installs. The two paths
+ *  can't fight: the overlay owning the mouse is exactly what suppresses the
+ *  DOM pseudo-classes. */
+function WindowControlButton({ onClick, label, control, danger = false, hovered = false, pressed = false, buttonRef, children }: {
   onClick: () => void;
-  title: string;
+  label: string;
+  control: 'minimize' | 'maximize' | 'close';
   danger?: boolean;
+  hovered?: boolean;
+  pressed?: boolean;
+  buttonRef?: React.Ref<HTMLButtonElement>;
   children: React.ReactNode;
 }) {
+  const backplate = danger ? CAPTION_BACKPLATE.danger : CAPTION_BACKPLATE.neutral;
+  // Pressed wins over hovered, as it does natively.
+  const overlayState = pressed
+    ? backplate.overlayPressed
+    : hovered
+      ? backplate.overlayHover
+      : '';
+
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={onClick}
-      className={`w-11 inline-flex items-center justify-center transition-colors ${
-        danger
-          ? 'text-text-secondary hover:bg-status-error hover:text-white'
-          : 'text-text-secondary hover:bg-bg-card hover:text-text-primary'
-      }`}
-      title={title}
-      aria-label={`${title} window`}
+      data-window-control={control}
+      aria-label={`${label} window`}
+      className={`inline-flex w-[46px] shrink-0 items-center justify-center transition-colors ${backplate.rest} ${backplate.hover} ${backplate.pressed} ${overlayState}`}
     >
       {children}
     </button>
@@ -344,6 +403,9 @@ export function TitleBar() {
   // bar in through the same state the switcher writes.
   const viewMode = useUIStore((s) => s.viewMode);
   const [isMaximized, setIsMaximized] = useState(false);
+  // The snap overlay is positioned onto this button's measured box, so the ref
+  // has to reach the real DOM node (ADR-0035).
+  const maximizeButtonRef = useRef<HTMLButtonElement>(null);
 
   // Track the maximized state so the middle window control can swap between
   // the maximize and restore glyphs. `onResized` fires for maximize,
@@ -370,6 +432,20 @@ export function TitleBar() {
   const handleToggleMaximize = () => {
     appWindow.toggleMaximize();
   };
+
+  // Windows only: hands the maximise button's measured box to the native child
+  // window that makes the shell offer Snap Layouts, and takes that window's
+  // hover/press state back (ADR-0035). The button's own `onClick` below stays
+  // wired — the overlay swallows mouse clicks, but keyboard activation never
+  // goes near it, and no other platform installs one.
+  const { hovered: maximizeHovered, pressed: maximizePressed } =
+    useWindowControlOverlay(maximizeButtonRef, handleToggleMaximize);
+
+  // Caption glyphs dim while the window is inactive, as native ones do. Applied
+  // only to the Windows/Linux controls — the macOS traffic lights are drawn
+  // unchanged (ADR-0035 keeps that branch out of scope).
+  const windowFocused = useWindowFocused();
+  const captionGlyphs = captionGlyphClass(!windowFocused);
 
   return (
     <>
@@ -461,23 +537,37 @@ export function TitleBar() {
 
               {/* `shrink-0` — window buttons are critical chrome: flex
                   pressure at the 900px minimum width must never squish
-                  them into unreadable slivers. */}
-              <div className="flex items-stretch shrink-0">
-                <WindowControlButton onClick={() => appWindow.minimize()} title="Minimize">
-                  <MinimizeIcon className="w-[18px] h-[18px]" />
+                  them into unreadable slivers. `self-stretch` runs the
+                  cluster full-bleed down the bar, the way a real caption
+                  strip fills the height of its title bar. */}
+              <div className="flex items-stretch shrink-0 self-stretch">
+                <WindowControlButton
+                  onClick={() => appWindow.minimize()}
+                  label="Minimize"
+                  control="minimize"
+                >
+                  <CaptionGlyph className={captionGlyphs} name="minimize" />
                 </WindowControlButton>
                 <WindowControlButton
+                  buttonRef={maximizeButtonRef}
                   onClick={handleToggleMaximize}
-                  title={isMaximized ? 'Restore' : 'Maximize'}
+                  label={isMaximized ? 'Restore' : 'Maximize'}
+                  control="maximize"
+                  hovered={maximizeHovered}
+                  pressed={maximizePressed}
                 >
-                  {isMaximized ? (
-                    <RestoreIcon className="w-[18px] h-[18px]" />
-                  ) : (
-                    <MaximizeIcon className="w-[18px] h-[18px]" />
-                  )}
+                  <CaptionGlyph
+                    className={captionGlyphs}
+                    name={isMaximized ? 'restore' : 'maximize'}
+                  />
                 </WindowControlButton>
-                <WindowControlButton onClick={() => appWindow.close()} title="Close" danger>
-                  <CloseIcon className="w-[18px] h-[18px]" />
+                <WindowControlButton
+                  onClick={() => appWindow.close()}
+                  label="Close"
+                  control="close"
+                  danger
+                >
+                  <CaptionGlyph className={captionGlyphs} name="close" />
                 </WindowControlButton>
               </div>
             </>
