@@ -177,7 +177,7 @@ describe('resolveAutopilotOutcome', () => {
       [member(1, 'awaiting_input')],
       sources({ 1: 'finishing' }, {}, { 1: { node_id: 1, kind: 'permission_request', description: 'approve the deploy' } }),
     );
-    expect(result).toMatchObject({ kind: 'needs_input', phase: 'waiting', tone: 'warning', label: 'Needs input', nodeId: 1, nodeIds: [1] });
+    expect(result).toMatchObject({ phase: 'waiting', tone: 'warning', label: 'Needs input', nodeId: 1, nodeIds: [1] });
     expect(result?.detail).toContain('approve the deploy');
   });
 
@@ -186,14 +186,13 @@ describe('resolveAutopilotOutcome', () => {
     expect(result?.detail).toContain('This agent is waiting');
   });
 
-  it('aggregates every attention session, failures first', () => {
+  it('aggregates every awaiting session, ignoring a failure the Pilot light already shows', () => {
     const result = resolveAutopilotOutcome(
       [member(1, 'awaiting_input'), member(2, 'error')],
       sources({ 2: 'failed' }),
     );
-    // The failure leads the copy, but the waiting session stays cyclable.
-    expect(result).toMatchObject({ kind: 'failed', tone: 'error', nodeId: 2 });
-    expect(result?.nodeIds).toEqual([2, 1]);
+    expect(result).toMatchObject({ nodeId: 1 });
+    expect(result?.nodeIds).toEqual([1]);
   });
 
   it('leaves completed automation to the existing green signals (no chip)', () => {
@@ -208,19 +207,20 @@ describe('resolveAutopilotOutcome', () => {
       [member(1, 'awaiting_input'), member(2, 'completed')],
       sources({ 1: 'implementing', 2: 'completed' }),
     );
-    expect(mixed?.kind).toBe('needs_input');
+    expect(mixed?.label).toBe('Needs input');
+    expect(mixed?.nodeId).toBe(1);
   });
 
-  it('keeps every attention session in cycling order, failures first', () => {
+  it('keeps every awaiting session in cycling order, in member order', () => {
     const result = resolveAutopilotOutcome(
       [member(1, 'awaiting_input'), member(2, 'error'), member(3, 'awaiting_input')],
       sources({ 1: 'finishing', 2: 'failed', 3: 'finishing' }),
     );
-    expect(result?.nodeIds).toEqual([2, 1, 3]);
-    expect(result?.nodeId).toBe(2);
+    expect(result?.nodeIds).toEqual([1, 3]);
+    expect(result?.nodeId).toBe(1);
   });
 
-  it('describes the focused session when it is one of the attention sessions', () => {
+  it('describes the focused session when it is one of the awaiting sessions', () => {
     const result = resolveAutopilotOutcome(
       [member(1, 'error'), member(2, 'awaiting_input')],
       sources(
@@ -230,18 +230,18 @@ describe('resolveAutopilotOutcome', () => {
       ),
       2,
     );
-    expect(result).toMatchObject({ kind: 'needs_input', nodeId: 2 });
+    expect(result).toMatchObject({ nodeId: 2 });
     expect(result?.detail).toContain('approve the deploy');
-    expect(result?.nodeIds).toEqual([1, 2]);
+    expect(result?.nodeIds).toEqual([2]);
   });
 
-  it('falls back to the highest-priority session when focus is elsewhere', () => {
+  it('falls back to the first awaiting session when focus is elsewhere', () => {
     const result = resolveAutopilotOutcome(
-      [member(1, 'error'), member(2, 'awaiting_input')],
-      sources({ 1: 'failed', 2: 'finishing' }),
+      [member(1, 'error'), member(2, 'awaiting_input'), member(3, 'awaiting_input')],
+      sources({ 1: 'failed', 2: 'finishing', 3: 'finishing' }),
       99,
     );
-    expect(result).toMatchObject({ kind: 'failed', nodeId: 1 });
+    expect(result).toMatchObject({ nodeId: 2 });
   });
 
   it('attributes responsibility from the focused member, not evaluation order', () => {
@@ -250,7 +250,7 @@ describe('resolveAutopilotOutcome', () => {
       sources({ 2: 'failed' }),
       1,
     );
-    expect(result).toMatchObject({ kind: 'needs_input', label: 'Needs input', nodeId: 1 });
+    expect(result).toMatchObject({ label: 'Needs input', nodeId: 1 });
     expect(result?.detail).toContain('This agent is waiting');
   });
 
@@ -265,28 +265,20 @@ describe('resolveAutopilotOutcome', () => {
     expect(resolveAutopilotOutcome(members, srcs, 2)?.detail).toContain('approve the second command');
   });
 
-  it('attributes a failed Circuit run to Autopilot', () => {
-    const result = resolveAutopilotOutcome([member(1, 'completed')], sources({}, { 1: ownership('failed') }));
-    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Autopilot failed', nodeId: 1 });
+  it('leaves every failure to the Pilot light instead of a chip', () => {
+    // A failed Circuit run, a failed legacy run, an error with no ownership, and
+    // error nodes whose automation already finished all render as the error-toned
+    // Pilot light on the member's own header — never as a duplicate chip.
+    expect(resolveAutopilotOutcome([member(1, 'completed')], sources({}, { 1: ownership('failed') }))).toBeNull();
+    expect(resolveAutopilotOutcome([member(1, 'error')], sources({ 1: 'failed' }))).toBeNull();
+    expect(resolveAutopilotOutcome([member(1, 'error')], sources())).toBeNull();
+    expect(resolveAutopilotOutcome([member(1, 'error')], sources({}, { 1: ownership('cancelled') }))).toBeNull();
+    expect(resolveAutopilotOutcome([member(1, 'error')], sources({}, { 1: ownership('completed') }))).toBeNull();
   });
-
-  it('attributes a legacy failed run to Autopilot', () => {
-    const result = resolveAutopilotOutcome([member(1, 'error')], sources({ 1: 'failed' }));
-    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed' });
-  });
-
-  it.each(['cancelled', 'completed'] as const)(
-    'does not attribute a %s Circuit to Autopilot (retained history is not responsibility)',
-    (state) => {
-      const result = resolveAutopilotOutcome([member(1, 'error')], sources({}, { 1: ownership(state) }));
-      expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Agent failed' });
-      expect(result?.detail).toContain('This agent is in an error state');
-    },
-  );
 
   it('attributes a paused Circuit gate waiting on a human to Autopilot', () => {
     const result = resolveAutopilotOutcome([member(1, 'awaiting_input')], sources({}, { 1: ownership('paused') }));
-    expect(result).toMatchObject({ kind: 'needs_input', label: 'Needs input' });
+    expect(result).toMatchObject({ label: 'Needs input' });
     expect(result?.detail).toContain('Autopilot is waiting for your input');
   });
 

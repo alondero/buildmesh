@@ -158,28 +158,25 @@ export function hasActiveAutopilotOwnership(
 // A node card can hold several members, so the header needs a card-level
 // answer to "who on this card needs a human, and what do they need?".
 //
-// This resolver aggregates EVERY attention-demanding member (`error` or
-// `awaiting_input`) into one chip, so `revealAttention` can cycle through all
-// of them — the reachability guarantee the pre-refactor count pill had
-// (round-3 review). It does not drop a waiting session because a sibling
-// failed.
+// This resolver aggregates EVERY member awaiting input into one chip, so
+// `revealAttention` can cycle through all of them — the reachability guarantee
+// the pre-refactor count pill had (round-3 review).
 //
-// One member is chosen as the *primary*: the focused session when it demands
-// attention, otherwise the highest-priority one (failures before waits). The
-// primary drives the chip's label, tone, detail, and Autopilot-attribution —
-// so switching tabs updates what the chip describes instead of pinning the
-// copy to whichever member happened to be listed first.
+// One member is chosen as the *primary*: the focused session when it awaits
+// input, otherwise the first one. The primary drives the chip's label, detail,
+// and Autopilot-attribution — so switching tabs updates what the chip
+// describes instead of pinning the copy to whichever member happened to be
+// listed first.
 //
-// Non-actionable states earn no chip. An active run is carried by the Pilot
-// light. A finished run is already told four ways — the green lifecycle dot,
-// the Pilot-light check, the PR pill, and the `autopilot-pr-created` toast —
-// so a third green chip with a no-op click was pure noise (round-1 review).
-// An unpiloted, healthy card renders none.
-
-export type AutopilotOutcomeKind = 'failed' | 'needs_input';
+// Only `awaiting_input` earns a chip. A failure renders on the member's own
+// header as the error-toned Pilot light, so a red "Autopilot failed"/"Agent
+// failed" pill repeated news the indicator already carries. An active run is
+// carried by the Pilot light. A finished run is already told four ways — the
+// green lifecycle dot, the Pilot-light check, the PR pill, and the
+// `autopilot-pr-created` toast — so a third green chip with a no-op click was
+// pure noise (round-1 review). An unpiloted, healthy card renders none.
 
 export interface AutopilotOutcome {
-  kind: AutopilotOutcomeKind;
   /** Pilot-light shape to draw; mirrors `AutopilotNodePresentation.phase`. */
   phase: AutopilotIndicatorPhase;
   tone: AutopilotIndicatorTone;
@@ -187,10 +184,10 @@ export interface AutopilotOutcome {
   label: string;
   /** Factual sentence describing what the primary session needs. */
   detail: string;
-  /** Every attention-demanding member, failures first, for chip cycling. */
+  /** Every awaiting member, in member order, for chip cycling. */
   nodeIds: number[];
   /** The member the label/detail describe — the focused session when it needs
-   * attention, otherwise the highest-priority one. */
+   * attention, otherwise the first one. */
   nodeId: number;
 }
 
@@ -206,9 +203,8 @@ export interface AutopilotOutcomeSources {
  * ledger and the legacy runs ledger retain terminal rows for inspection
  * (`completed`, `failed`, `cancelled`). A cancelled circuit withdrew
  * automation (`mapCircuitOwnership` returns `null`), and a completed run is
- * finished — so a later failure or prompt belongs to the agent, not to
- * Autopilot, and must read "Agent failed" / "This agent is waiting" rather
- * than claiming Autopilot needs a human.
+ * finished — so a later prompt belongs to the agent, not to Autopilot, and
+ * must read "This agent is waiting" rather than claiming Autopilot is waiting.
  */
 function isAutopilotResponsible(presentation: AutopilotNodePresentation | null): boolean {
   return presentation != null && presentation.phase !== 'done';
@@ -216,23 +212,17 @@ function isAutopilotResponsible(presentation: AutopilotNodePresentation | null):
 
 interface OutcomeCandidate {
   id: number;
-  kind: AutopilotOutcomeKind;
   responsible: boolean;
 }
 
 function outcomeCandidateFor(node: AgentNode, sources: AutopilotOutcomeSources): OutcomeCandidate | null {
+  if (node.status !== 'awaiting_input') return null;
   const presentation = getAutopilotNodePresentation(
     node,
     sources.autopilotStates[node.id],
     sources.circuitOwnerships[node.id],
   );
-  if (node.status === 'error' || presentation?.tone === 'error') {
-    return { id: node.id, kind: 'failed', responsible: isAutopilotResponsible(presentation) };
-  }
-  if (node.status === 'awaiting_input') {
-    return { id: node.id, kind: 'needs_input', responsible: isAutopilotResponsible(presentation) };
-  }
-  return null;
+  return { id: node.id, responsible: isAutopilotResponsible(presentation) };
 }
 
 /** Keep detail copy sentence-shaped however `semanticTurns` phrases it. */
@@ -244,17 +234,10 @@ function asSentence(text: string): string {
 /// appends its own ("Show next session"), and a directive here produced the
 /// double em-dash the round-3 review caught.
 function buildOutcome(primary: OutcomeCandidate, nodeIds: number[], sources: AutopilotOutcomeSources): AutopilotOutcome {
-  const { id: nodeId, kind, responsible } = primary;
-  if (kind === 'failed') {
-    return {
-      kind, phase: 'waiting', tone: 'error', nodeId, nodeIds,
-      label: responsible ? 'Autopilot failed' : 'Agent failed',
-      detail: responsible ? 'Autopilot failed and needs a human.' : 'This agent is in an error state.',
-    };
-  }
+  const { id: nodeId, responsible } = primary;
   const what = sources.semanticTurns[nodeId]?.description?.trim();
   return {
-    kind, phase: 'waiting', tone: 'warning', label: 'Needs input', nodeId, nodeIds,
+    phase: 'waiting', tone: 'warning', label: 'Needs input', nodeId, nodeIds,
     detail: what
       ? asSentence(`${responsible ? 'Autopilot' : 'This agent'} is waiting for you: ${what}`)
       : `${responsible ? 'Autopilot' : 'This agent'} is waiting for your input.`,
@@ -264,11 +247,11 @@ function buildOutcome(primary: OutcomeCandidate, nodeIds: number[], sources: Aut
 /**
  * Resolve the card-level attention chip over all members.
  *
- * `focusedNodeId` is the member the user is currently on. When it is one of
- * the attention-demanding members it becomes the primary (so the chip
- * describes the session in front of the user); otherwise the primary is the
- * highest-priority attention member. Either way `nodeIds` lists every
- * attention-demanding member, failures first, for `revealAttention` to cycle.
+ * `focusedNodeId` is the member the user is currently on. When it awaits input
+ * it becomes the primary (so the chip describes the session in front of the
+ * user); otherwise the primary is the first awaiting member. Either way
+ * `nodeIds` lists every awaiting member, in member order, for
+ * `revealAttention` to cycle.
  */
 export function resolveAutopilotOutcome(
   members: readonly AgentNode[],
@@ -280,10 +263,6 @@ export function resolveAutopilotOutcome(
     .filter((candidate): candidate is OutcomeCandidate => candidate !== null);
   if (candidates.length === 0) return null;
 
-  const ordered = [
-    ...candidates.filter(candidate => candidate.kind === 'failed'),
-    ...candidates.filter(candidate => candidate.kind === 'needs_input'),
-  ];
-  const primary = ordered.find(candidate => candidate.id === focusedNodeId) ?? ordered[0];
-  return buildOutcome(primary, ordered.map(candidate => candidate.id), sources);
+  const primary = candidates.find(candidate => candidate.id === focusedNodeId) ?? candidates[0];
+  return buildOutcome(primary, candidates.map(candidate => candidate.id), sources);
 }

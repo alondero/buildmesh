@@ -1,7 +1,17 @@
+import type { MouseEvent } from 'react';
 import type { AutopilotIndicatorPhase, AutopilotIndicatorTone, AutopilotNodePresentation } from '../../lib/autopilotNodePresentation';
+
+interface AutopilotNodeIndicatorAction {
+  /// Sentence describing what activation does, appended to the accessible name
+  /// and tooltip (e.g. "Open this Circuit run in the Circuits Probe.").
+  label: string;
+  onActivate: () => void;
+}
 
 interface AutopilotNodeIndicatorProps {
   presentation: AutopilotNodePresentation | null;
+  /// When set, the indicator renders as a button instead of a static glyph.
+  action?: AutopilotNodeIndicatorAction;
 }
 
 interface AutopilotIndicatorGlyphProps {
@@ -16,6 +26,12 @@ const TONE_COLORS: Record<AutopilotIndicatorTone, string> = {
   success: 'text-accent-green',
   error: 'text-status-error',
 };
+
+/// Keep activation local: the indicator often sits inside a drag handle and a
+/// double-click target, so a click on it must not start a drag or maximize.
+function stopPointerPropagation(event: MouseEvent) {
+  event.stopPropagation();
+}
 
 /**
  * The Pilot-light shape for an Autopilot presentation. Shared by the fixed
@@ -56,17 +72,36 @@ export function AutopilotIndicatorGlyph({ phase, tone, className = 'h-3.5 w-3.5'
 }
 
 /** Reserves the shared 14px identity column even when the light is absent. */
-export function AutopilotNodeIndicatorCell({ presentation }: AutopilotNodeIndicatorProps) {
+export function AutopilotNodeIndicatorCell({ presentation, action }: AutopilotNodeIndicatorProps) {
   return (
     <span data-testid="autopilot-indicator-cell" className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-      <AutopilotNodeIndicator presentation={presentation} />
+      <AutopilotNodeIndicator presentation={presentation} action={action} />
     </span>
   );
 }
 
 /** The compact, shape-plus-label indicator used by both node identity rows. */
-export function AutopilotNodeIndicator({ presentation }: AutopilotNodeIndicatorProps) {
+export function AutopilotNodeIndicator({ presentation, action }: AutopilotNodeIndicatorProps) {
   if (!presentation) return null;
+
+  const glyph = <AutopilotIndicatorGlyph phase={presentation.phase} tone={presentation.tone} />;
+  const toneClass = TONE_COLORS[presentation.tone];
+  if (action) {
+    return (
+      <button
+        type="button"
+        data-testid="autopilot-indicator"
+        onClick={action.onActivate}
+        onPointerDown={stopPointerPropagation}
+        onDoubleClick={stopPointerPropagation}
+        aria-label={`${presentation.label}. ${action.label}`}
+        title={`${presentation.detail} ${action.label}`}
+        className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm hover:bg-bg-base/70 ${toneClass}`}
+      >
+        {glyph}
+      </button>
+    );
+  }
 
   return (
     <span
@@ -74,9 +109,9 @@ export function AutopilotNodeIndicator({ presentation }: AutopilotNodeIndicatorP
       role="img"
       aria-label={presentation.label}
       title={presentation.detail}
-      className={`inline-flex h-3.5 w-3.5 items-center justify-center ${TONE_COLORS[presentation.tone]}`}
+      className={`inline-flex h-3.5 w-3.5 items-center justify-center ${toneClass}`}
     >
-      <AutopilotIndicatorGlyph phase={presentation.phase} tone={presentation.tone} />
+      {glyph}
     </span>
   );
 }
