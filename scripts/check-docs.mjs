@@ -18,7 +18,6 @@ export const REQUIRED_PATHS = [
   'CONTEXT.md',
   'SECURITY.md',
   'CODE_OF_CONDUCT.md',
-  'CHANGELOG.md',
   'docs/README.md',
   'docs/documentation-standards.md',
   'docs/user-guide.md',
@@ -52,7 +51,7 @@ export function collectMarkdownFiles(root = repoRoot) {
   return [
     ...walkMarkdown(resolve(root, 'docs')),
     ...walkMarkdown(resolve(root, '.github')),
-    ...['README.md', 'CONTRIBUTING.md', 'CONTEXT.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md', 'CHANGELOG.md']
+    ...['README.md', 'CONTRIBUTING.md', 'CONTEXT.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md']
       .map((file) => resolve(root, file))
       .filter(existsSync),
   ];

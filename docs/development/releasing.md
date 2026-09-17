@@ -50,10 +50,8 @@ output.)
 6. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
-7. Remove the published version from the `Upcoming` section of the root
-   release-notes index and point the [release-notes guide](../releases/README.md)
-   at the next draft when one is ready. Do not rewrite the published note to
-   describe later work.
+7. Point the [release-notes guide](../releases/README.md) at the next draft
+   when one is ready. Do not rewrite the published note to describe later work.
 8. **Immediately bump back to the next `-0` version**:
    ```
    npm run version:set -- 1.3.0-0

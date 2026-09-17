@@ -47,7 +47,7 @@ test('documentation guard denies a behavior-sensitive commit without a decision'
 test('documentation guard handles each supported commit snapshot', () => {
   assert.equal(decideFor(
     'git commit -m "feat: change the spawn flow"',
-    ['src/components/SpawnMenu.tsx', 'docs/user-guide.md', 'CHANGELOG.md'],
+    ['src/components/SpawnMenu.tsx', 'docs/user-guide.md', 'docs/releases/v1.3.0.md'],
   ), null);
   assert.equal(decideFor('git add docs/user-guide.md src/App.tsx && git commit -m "feat: change the app"', [
     'src/App.tsx',
@@ -57,7 +57,7 @@ test('documentation guard handles each supported commit snapshot', () => {
   assert.equal(decideFor('git add . && git commit -m "feat: change the app"', ['src/App.tsx']).permissionDecision, 'deny');
   assert.equal(decideFor('git add . && git commit -m "docs: only"', ['docs/user-guide.md']), null);
   assert.equal(decideFor('git commit --amend --no-edit', ['src/App.tsx']).permissionDecision, 'deny');
-  assert.equal(decideFor('git commit --amend --no-edit', ['src/App.tsx', 'CHANGELOG.md']), null);
+  assert.equal(decideFor('git commit --amend --no-edit', ['src/App.tsx', 'docs/releases/v1.3.0.md']), null);
   assert.equal(decideFor('git commit -a -m "fix: docs only"', ['docs/user-guide.md']), null);
   assert.equal(decideFor('git commit -a -m "fix: source"', ['src/App.tsx']).permissionDecision, 'deny');
   assert.equal(decideFor('git commit -a -m "fix: source"', ['src/App.tsx', 'docs/user-guide.md']), null);

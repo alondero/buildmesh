@@ -881,7 +881,7 @@ function LoopingSection({
             if (!mountedRef.current) return;
             await onSaveLoopConfig({ ...form, suffixPrompt: e.target.value });
           }}
-          placeholder="e.g., Now write a changelog entry and post it to #releases."
+          placeholder="e.g., Now write a release note and post it to #releases."
           className={TEXTAREA_CLASS}
         />
       </Field>

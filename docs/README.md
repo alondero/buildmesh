@@ -30,8 +30,8 @@ the complete product manual.
 - [Development documentation](development/README.md) owns contributor-facing
   build, test, release, and maintenance procedures.
 - Versioned [release notes](releases/README.md) own concise, user-visible
-  changes for a specific release. The root [release-notes index](../CHANGELOG.md)
-  only points readers to the current draft and published releases.
+  changes for a specific release. GitHub Releases is the published history;
+  the versioned files remain reviewable source records in the repository.
 - [CLAUDE.md](../CLAUDE.md) and [knowledge-primer.md](knowledge-primer.md) are
   AI context, not a substitute for human-facing documentation.
 

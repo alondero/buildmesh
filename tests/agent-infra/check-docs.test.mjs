@@ -25,7 +25,6 @@ test('the documentation contract passes for the real repository', () => {
   assert.deepEqual(failures, [], failures.join('\n'));
   assert.ok(collectMarkdownFiles(root).includes(join(root, 'CONTEXT.md')));
   assert.ok(collectMarkdownFiles(root).includes(join(root, 'docs', 'releases', 'v1.3.0.md')));
-  assert.doesNotMatch(readFileSync(join(root, 'CHANGELOG.md'), 'utf8'), /^##\s+\[Unreleased\]/m);
 });
 
 test('local links check both targets and GitHub-style anchors', () => {
