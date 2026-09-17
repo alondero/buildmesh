@@ -13,6 +13,13 @@
 //!   WebView2 host HWND.
 //! - Invisibility comes from *never painting* (`NULL_BRUSH`, no `WM_PAINT`
 //!   handling), never from alpha.
+//! - **`WM_CLOSE` is advisory, so the lifecycle hangs off destruction instead.**
+//!   Buildmesh vetoes the close request whenever the exit-confirmation modal is
+//!   up (`WindowCloseGuard` → `cancel_window_close`), so tearing the overlay down
+//!   on `WM_CLOSE` would silently kill Snap Layouts for the rest of the session
+//!   the moment a user cancels an exit — the exact silent-failure class this
+//!   module exists to avoid. Teardown runs on `WM_NCDESTROY`, which only fires
+//!   when the window really is going away.
 //!
 //! Subclassing the Tauri window to answer `WM_NCHITTEST` — Microsoft's
 //! documented approach — cannot work here, and fails in a recognisable way: the
@@ -33,11 +40,11 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, RegisterClassExW,
-            SetWindowPos, CS_HREDRAW, CS_VREDRAW, HTMAXBUTTON, HWND_TOP, SWP_ASYNCWINDOWPOS,
-            SWP_SHOWWINDOW, WM_CLOSE, WM_DPICHANGED, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-            WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SIZE, WNDCLASSEXW, WS_CHILD,
-            WS_CLIPSIBLINGS, WS_OVERLAPPED, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsIconic, IsWindow,
+            RegisterClassExW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HTMAXBUTTON,
+            HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_SHOWWINDOW, SW_HIDE, WM_DPICHANGED, WM_NCDESTROY,
+            WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+            WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
         },
     },
 };
@@ -173,11 +180,17 @@ unsafe fn install_on_main(parent: SendHwnd, window: WebviewWindow) {
     register_class();
 
     let class = class_name();
+    // The style set is deliberately minimal. `WS_CLIPSIBLINGS` keeps the overlay
+    // from being painted over by its sibling, the WebView2 host. There are no
+    // extended styles: `WS_EX_LAYERED` costs the hit test and
+    // `WS_EX_TRANSPARENT` makes the window hit-test-transparent. Invisibility
+    // comes from never painting, not from alpha. (`WS_OVERLAPPED` is
+    // `0x00000000` and contradicts `WS_CHILD`, so it is not listed.)
     let overlay = CreateWindowExW(
         0,
         class.as_ptr(),
         class.as_ptr(),
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_OVERLAPPED,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0,
         0,
         0,
@@ -206,9 +219,13 @@ unsafe fn install_on_main(parent: SendHwnd, window: WebviewWindow) {
     tracing::debug!("snap overlay installed over the maximise button");
 }
 
-/// Destroy the overlay and drop its state. Safe to call when nothing is
-/// installed; also the `WM_CLOSE` path so a stale always-on-top child can never
-/// outlive the window it belongs to.
+/// Destroy the overlay and drop its state.
+///
+/// Called from `WM_NCDESTROY` — the parent is genuinely going away — and from
+/// `install_on_main` when it needs to replace a stale overlay. Deliberately NOT
+/// from `WM_CLOSE`: that message is advisory while the exit-confirmation modal
+/// can still veto the close (see the module doc), so hanging teardown off it
+/// would tear the overlay down on a cancelled exit.
 fn teardown() {
     let Some(state) = STATE.lock().take() else {
         return;
@@ -217,12 +234,22 @@ fn teardown() {
     // SAFETY: both handles came from the main thread and are torn down on it.
     unsafe {
         RemoveWindowSubclass(state.parent.get(), Some(parent_subclass_proc), SUBCLASS_ID);
-        DestroyWindow(state.overlay.get());
+        // By `WM_NCDESTROY` the parent's children have already been destroyed, so
+        // the handle is normally stale — and a stale handle may since have been
+        // recycled, so ask before destroying rather than firing blind.
+        if IsWindow(state.overlay.get()) != 0 {
+            DestroyWindow(state.overlay.get());
+        }
     }
 }
 
 /// Move the overlay onto the measured button box. Called on install, on each
 /// metrics update, and on every parent resize or DPI change.
+///
+/// A minimized window has an empty client area, so the arithmetic would place
+/// the overlay at a negative x for no benefit — and it would still be a live
+/// hit-test target if anything asked. Park it hidden instead; the restore's
+/// `WM_SIZE` brings it back, because the normal path passes `SWP_SHOWWINDOW`.
 unsafe fn reposition(parent: HWND) {
     let Some(metrics) = *MAXIMIZE_METRICS.lock() else {
         return;
@@ -233,20 +260,35 @@ unsafe fn reposition(parent: HWND) {
         return;
     }
 
+    // Read the handle, then release the lock: no Win32 call below should run
+    // with `STATE` held, because a synchronous message could re-enter
+    // `with_state` and deadlock on the non-reentrant mutex. Handles only ever
+    // change on this thread (`install_on_main` and `teardown` both run here), so
+    // there is nothing to race with between dropping the lock and using it.
+    let overlay = {
+        let guard = STATE.lock();
+        match guard.as_ref() {
+            Some(state) => state.overlay.get(),
+            None => return,
+        }
+    };
+
+    if IsIconic(parent) != 0 || client.right <= 0 || client.bottom <= 0 {
+        ShowWindow(overlay, SW_HIDE);
+        return;
+    }
+
     let (x, y, width, height) = overlay_rect(&metrics, client.right, GetDpiForWindow(parent));
 
-    let guard = STATE.lock();
-    if let Some(state) = guard.as_ref() {
-        SetWindowPos(
-            state.overlay.get(),
-            HWND_TOP,
-            x,
-            y,
-            width,
-            height,
-            SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW,
-        );
-    }
+    SetWindowPos(
+        overlay,
+        HWND_TOP,
+        x,
+        y,
+        width,
+        height,
+        SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW,
+    );
 }
 
 /// Run `f` against the state owning `overlay`, if there is one.
@@ -286,26 +328,27 @@ unsafe extern "system" fn overlay_proc(
         WM_NCHITTEST => return HTMAXBUTTON as LRESULT,
 
         WM_NCMOUSEMOVE => {
-            // Emit the enter event only on the transition — WM_NCMOUSEMOVE
-            // fires per pixel, and the coordinates are not needed because the
-            // button does not move.
+            // The event *and* the tracking are edge-triggered. WM_NCMOUSEMOVE
+            // fires per pixel, the coordinates are not needed because the button
+            // does not move, and once armed, non-client tracking stays armed
+            // until WM_NCMOUSELEAVE — so re-arming on every pixel would be a
+            // syscall per pixel for nothing.
             let entered = with_state(overlay, |state| {
                 !std::mem::replace(&mut state.hovering, true)
             })
             .unwrap_or(false);
 
             if entered {
+                // Ask for WM_NCMOUSELEAVE, or we never learn the pointer left.
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE | TME_NONCLIENT,
+                    hwndTrack: overlay,
+                    dwHoverTime: 0,
+                };
+                TrackMouseEvent(&mut track);
                 emit_event(overlay, EVENT_HOVER);
             }
-
-            // Ask for WM_NCMOUSELEAVE, or we never learn the pointer left.
-            let mut track = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE | TME_NONCLIENT,
-                hwndTrack: overlay,
-                dwHoverTime: 0,
-            };
-            TrackMouseEvent(&mut track);
             return 0;
         }
 
@@ -354,9 +397,11 @@ unsafe extern "system" fn parent_subclass_proc(
     match msg {
         // Keep the overlay pinned to the button across resizes and DPI moves.
         // Repositioning reads the stored right-inset, so it tracks a live drag
-        // without waiting for the frontend to re-measure.
+        // without waiting for the frontend to re-measure. This also covers the
+        // minimize → restore round trip, which re-shows the overlay.
         WM_SIZE | WM_DPICHANGED => reposition(parent),
-        WM_CLOSE => teardown(),
+        // Real destruction, not the advisory `WM_CLOSE` — see `teardown`.
+        WM_NCDESTROY => teardown(),
         _ => {}
     }
 

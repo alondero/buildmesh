@@ -71,12 +71,15 @@ fn overlay_rect(metrics: &MaximizeMetrics, client_width: i32, dpi: u32) -> (i32,
     // 1px window rather than a broken one.
     let width = scale(metrics.width, dpi).max(1);
     let height = scale(metrics.height, dpi).max(1);
-    (
-        client_width - scale(metrics.right_inset, dpi) - width,
-        scale(metrics.top, dpi),
-        width,
-        height,
-    )
+    // Floored at the client's left edge. A client narrower than the caption
+    // cluster — a minimized window reports an empty client area — would
+    // otherwise yield a negative x. `snap_overlay::reposition` hides the overlay
+    // outright in that state, so this is the arithmetic's own floor rather than
+    // the defence that matters; but a position the parent cannot contain is
+    // never a useful one, and the floor is the part that can be unit-tested off
+    // Windows.
+    let x = (client_width - scale(metrics.right_inset, dpi) - width).max(0);
+    (x, scale(metrics.top, dpi), width, height)
 }
 
 /// Record the maximise button's measured box and install/refresh the overlay.
@@ -145,6 +148,23 @@ mod tests {
         };
         let (_, _, width, height) = overlay_rect(&degenerate, 1280, 96);
         assert_eq!((width, height), (1, 1));
+    }
+
+    #[test]
+    fn a_client_narrower_than_the_cluster_never_yields_a_negative_x() {
+        // A minimized window reports an empty client area; a client narrower than
+        // the maximise backplate's own 92px of run-up is the same arithmetic case
+        // (its 46px width plus the 46px Close backplate to its right). 92 is the
+        // boundary — exactly 0 — so the floor starts biting above it.
+        // `reposition` hides the overlay in that state, so this pins only the
+        // floor: the maths must not emit a position the parent cannot contain.
+        for client_width in [0, 40, 91, 92] {
+            let (x, _, width, _) = overlay_rect(&metrics(), client_width, 96);
+            assert_eq!(x, 0, "client_width {client_width}");
+            assert_eq!(width, 46, "client_width {client_width}");
+        }
+        // Above the floor the right-inset is honoured exactly: 200 − 46 − 46.
+        assert_eq!(overlay_rect(&metrics(), 200, 96).0, 108);
     }
 
     #[test]

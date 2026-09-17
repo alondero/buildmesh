@@ -71,6 +71,36 @@ shell, so screenshot-based verification produces confident false failures. The
 same applies to rounded corners, which DWM composites rather than paints. Assert
 against the live window (hit-test results, window rects) or verify by hand.
 
+### 6. Snap Layouts stops working after the user cancels an exit
+
+**Cause.** The overlay's teardown was hung off `WM_CLOSE`. In Buildmesh that
+message is *advisory*: `WindowCloseGuard` vetoes the close request whenever the
+exit-confirmation modal is up (`event.preventDefault()` → `cancel_window_close`),
+so the window survives while the overlay **and** its `WM_SIZE` subclass are
+already gone. Snap Layouts then silently stops working — and unlike most of the
+failures here it can look like it recovered, because any later resize re-runs the
+frontend's metrics report and reinstalls the overlay.
+
+**Fix.** Hang teardown off `WM_NCDESTROY`, which only fires when the window is
+genuinely going away. More generally: never tie a native child's lifetime to an
+advisory message. Note that the *confirmed*-exit path never sends `WM_CLOSE` at
+all — `exit_application` calls `AppHandle::exit(0)` — so on `WM_CLOSE` the veto is
+the only thing that ever happens. This is worth knowing because it means the bug
+fires on essentially every cancelled exit, not on some rare race.
+
+### 7. A minimized window places the overlay at a negative x
+
+**Cause.** A minimized window reports an empty client area, so
+`x = client_width − inset − width` goes negative. It is clipped out of sight
+rather than visibly broken, which is why it survives casual testing — but it is a
+position the parent cannot contain, and it leaves a live hit-test target pointing
+at nothing.
+
+**Fix.** Check `IsIconic(parent)` (and a non-positive client rect) and hide the
+overlay instead; the restore's `WM_SIZE` re-shows it, because the normal path
+passes `SWP_SHOWWINDOW`. Also floor `x` at 0 in the rect arithmetic — that half is
+pure, so it can be unit-tested off Windows.
+
 ## Anti-patterns to avoid
 
 - **`WS_EX_LAYERED`** costs the hit test, and **`WS_EX_TRANSPARENT`** makes the
@@ -79,11 +109,25 @@ against the live window (hit-test results, window rects) or verify by hand.
   not from alpha.
 - **`WS_CLIPSIBLINGS` is load-bearing**, not decorative: it keeps the overlay
   from being painted over by its sibling, the WebView2 host HWND.
+- **Don't hang the overlay's lifetime off `WM_CLOSE`.** It is advisory while a
+  close can still be vetoed, so the overlay silently dies on a cancelled exit.
+  Use `WM_NCDESTROY`.
+- **Don't compute a position from an empty client rect.** A minimized window has
+  none; hide the overlay instead of moving it somewhere the parent cannot
+  contain.
+- **Don't re-arm `TrackMouseEvent` on every `WM_NCMOUSEMOVE`.** Tracking stays
+  armed until `WM_NCMOUSELEAVE`, so the enter edge is the only place it belongs —
+  otherwise it is a syscall per pixel.
 - **Don't hardcode the button geometry in Rust.** The overlay is positioned by
   arithmetic, so a constant that drifts from a Tailwind class stops the flyout
   appearing and breaks nothing else — a failure with no other symptom. Measure
   the button from the DOM and report it (ADR-0035), or at minimum pin the
   constants with a test.
+- **Don't measure the inset with `window.innerWidth`.** It is an integer while
+  `getBoundingClientRect()` is fractional, so mixing the two biases the inset by
+  up to a pixel at fractional display scaling — and because the bias flips as the
+  viewport width changes, the overlay drifts about a pixel and overlaps the
+  neighbouring close button. Use the root element's fractional right edge.
 
 ## Sources
 

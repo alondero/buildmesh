@@ -56,17 +56,24 @@ export function useWindowControlOverlay(
     let frame = 0;
     const unlisteners: Array<() => void> = [];
 
-    /** Report the button's real box. Logical (CSS) pixels: `innerWidth` and the
-        client rect share the viewport's coordinate space, which is the client
-        area the overlay is positioned in, and the backend applies the window's
-        DPI scale. */
+    /** Report the button's real box. Logical (CSS) pixels: the root element's
+        right edge and the client rect share the viewport's coordinate space,
+        which is the client area the overlay is positioned in, and the backend
+        applies the window's DPI scale. */
     const reportMetrics = () => {
       const button = maximizeButtonRef.current;
       if (!button) return;
       const rect = button.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
+      // Measured against the root element's right edge, NOT `window.innerWidth`:
+      // the latter is an integer while `getBoundingClientRect` is fractional, so
+      // mixing them biases the inset by up to a pixel at fractional display
+      // scaling — and because the bias flips as the viewport width changes, the
+      // overlay drifts about a pixel and ends up overlapping the neighbouring
+      // close button. This is the same viewport edge without the rounding.
+      const viewportRight = document.documentElement.getBoundingClientRect().right;
       setTitlebarMaximizeMetrics({
-        rightInset: window.innerWidth - rect.right,
+        rightInset: viewportRight - rect.right,
         top: rect.top,
         width: rect.width,
         height: rect.height,

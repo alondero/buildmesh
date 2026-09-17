@@ -38,6 +38,13 @@ describe('src-tauri/capabilities/default.json', () => {
       'core:window:allow-toggle-maximize',
       'core:window:allow-internal-toggle-maximize',
       'core:window:allow-is-maximized',
+      // The caption glyphs dim while the window is inactive (ADR-0035), which
+      // reads `isFocused()` and follows `onFocusChanged`. `core:window:default`
+      // happens to cover it today, but the point of this list is to name what
+      // the title bar relies on — the read-only window permissions that
+      // `core:window:default` already grants are exactly the set a future
+      // tightening would quietly remove.
+      'core:window:allow-is-focused',
       'core:window:allow-start-dragging',
     ];
     for (const perm of required) {

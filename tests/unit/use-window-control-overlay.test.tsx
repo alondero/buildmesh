@@ -99,7 +99,21 @@ beforeEach(() => {
   overlay.listen.mockClear();
   reportMetrics.set.mockClear();
   platform.isWindows = true;
-  Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true });
+  // The hook measures the inset against the root element's right edge (a
+  // fractional-safe stand-in for the viewport width), which jsdom leaves at all
+  // zeroes. Give it a 1280px viewport to match the button box below.
+  document.documentElement.getBoundingClientRect = () =>
+    ({
+      left: 0,
+      right: 1280,
+      top: 0,
+      bottom: 800,
+      width: 1280,
+      height: 800,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
   // Run the measure frame synchronously so assertions don't race a real rAF.
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
     cb(0);
@@ -118,8 +132,8 @@ describe('useWindowControlOverlay', () => {
     renderHook(() => useWindowControlOverlay(ref, () => {}));
     await act(async () => {});
 
-    // innerWidth (1280) − rect.right (1234) = 46. An inset, not an absolute x,
-    // so the backend can follow a live resize without a round trip.
+    // viewport right edge (1280) − rect.right (1234) = 46. An inset, not an
+    // absolute x, so the backend can follow a live resize without a round trip.
     expect(reportMetrics.set).toHaveBeenCalledWith({
       rightInset: 46,
       top: 0,

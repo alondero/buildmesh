@@ -34,7 +34,10 @@ that: both are about the framework shipping a first-class API.
 - **Measure the button from the DOM; never hardcode its geometry in Rust.** The
   frontend reports the button's box in logical pixels once on mount and again on
   resize; the backend applies the window's DPI scale and repositions the overlay
-  on `WM_SIZE` / `WM_DPICHANGED` from the stored right-inset.
+  on `WM_SIZE` / `WM_DPICHANGED` from the stored right-inset. The inset is taken
+  from the root element's *fractional* right edge rather than `window.innerWidth`,
+  whose integer rounding biases it by up to a pixel at fractional display scaling
+  — enough to drift the overlay onto the neighbouring close button.
 - **Geometry and states follow VS Code's window controls**, which the title bar's
   design already takes as its reference: 46px full-bleed backplates forming the
   standard 138px cluster, translucent hover/pressed fills, the shell's fixed red
@@ -56,6 +59,18 @@ Invariants this creates:
   window state.
 - The overlay is created lazily on the first metrics report, and is a no-op off
   Windows.
+- **Its teardown hangs off destruction, not the close request.** Buildmesh vetoes
+  the close request while the exit-confirmation modal is up (`WindowCloseGuard` →
+  `cancel_window_close`), which makes `WM_CLOSE` advisory. Tearing down there
+  would remove the overlay *and* its `WM_SIZE` subclass on a cancelled exit —
+  silently killing Snap Layouts until something happened to trigger a
+  re-measure. Teardown runs on `WM_NCDESTROY`, which only fires when the window
+  really is going away.
+- **A minimized window keeps the overlay hidden, never misplaced.** The client
+  area is empty while minimized, so the positioning arithmetic would place the
+  overlay at a negative x. `reposition` hides it instead and the restore's
+  `WM_SIZE` re-shows it; the pure rect maths additionally floors x at the client's
+  left edge, which is the half of that fix that can be unit-tested off Windows.
 
 ## Alternatives considered
 
