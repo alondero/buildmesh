@@ -140,16 +140,32 @@ fn profile_platform(profile: &crate::preferences::HarnessProfile, host: Platform
 mod runtime_tests {
     use super::*;
     #[test]
-    fn unix_only_harness_is_visible_on_windows_only_with_wsl_runtime() {
-        let mut profile = crate::preferences::HarnessProfile {
+    fn muse_is_visible_on_windows_native_or_wsl_runtime() {
+        // Native-Windows profile (no runtime annotation → host-native).
+        // Pre-fix this returned None because Muse's `available_on()`
+        // excluded `Platform::Windows`; with Windows added the filter
+        // lets the row through. The WSL fallback row keeps working
+        // because `profile_platform` resolves `runtime: Some(Wsl)` to
+        // `Platform::Linux`, which was already in `available_on()`.
+        let native = crate::preferences::HarnessProfile {
+            id: "muse".into(), name: "Meta Muse".into(), harness: "muse".into(),
+            runtime: None, wsl_distro: None,
+        };
+        let info = provider_info_for(&native, Platform::Windows)
+            .expect("muse is available on Windows once Platform::Windows is in available_on()");
+        assert_eq!(info.id, "muse");
+        assert_eq!(info.harness_id, "muse");
+        assert!(info.capabilities.available_on.iter().any(|p| p == "windows"),
+                "capabilities descriptor must advertise windows so the frontend renders the row (platform_name normalises to lowercase, see capabilities::platform_name)");
+
+        // WSL fallback profile — preserved from the pre-fix behaviour.
+        let wsl = crate::preferences::HarnessProfile {
             id: "muse-wsl".into(), name: "Meta Muse (WSL)".into(), harness: "muse".into(),
             runtime: Some(crate::models::EnvType::Wsl), wsl_distro: None,
         };
-        let info = provider_info_for(&profile, Platform::Windows).unwrap();
-        assert_eq!(info.id, "muse-wsl");
-        assert_eq!(info.label, "Meta Muse (WSL)");
-        profile.runtime = None;
-        assert!(provider_info_for(&profile, Platform::Windows).is_none());
+        let wsl_info = provider_info_for(&wsl, Platform::Windows).unwrap();
+        assert_eq!(wsl_info.id, "muse-wsl");
+        assert_eq!(wsl_info.label, "Meta Muse (WSL)");
     }
 }
 

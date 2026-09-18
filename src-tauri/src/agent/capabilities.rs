@@ -786,10 +786,13 @@ mod tests {
         assert!(!muse.is_plain_terminal);
         assert_eq!(muse.effort_control, EffortControlKind::None);
         // Order matches `MuseAdapter::available_on()`:
-        // `&[Platform::Linux, Platform::Macos]`.
+        // `&[Platform::Linux, Platform::Macos, Platform::Windows]` — the
+        // Windows entry landed in Muse 1.3.0 (2026-09). Mirrors the pin
+        // tests `kimi::available_on_all_three_platforms` /
+        // `muse::available_on_all_three_platforms`.
         assert_eq!(
             muse.available_on,
-            vec!["linux".to_string(), "macos".to_string()]
+            vec!["linux".to_string(), "macos".to_string(), "windows".to_string()]
         );
     }
 
