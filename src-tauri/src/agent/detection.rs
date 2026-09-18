@@ -211,7 +211,7 @@ pub fn detect_profiles(
             id: d.id.to_string(),
             name: d.name.to_string(),
             harness: d.harness.to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         })
         .collect()
 }
@@ -277,8 +277,16 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
     // npm's Windows prefix also contains extensionless POSIX shims. They
     // belong to the Windows installation, not an independent Linux install.
+    // The window-stem check walks every `DETECTABLE` harness — the WSL
+    // *guest probe* may skip harnesses in `WSL_EXCLUDED` (issue #1773), but a
+    // directory containing a `<harness>.cmd` shim is **still a Windows npm
+    // prefix** regardless of whether we plan to probe the guest for that
+    // harness, and must still be stripped from `path_dirs` before they
+    // reach the guest's PATH. Filtering on `wsl_probed(tool)` here was an
+    // inversion that let Windows-npm dirs slip through for `WSL_EXCLUDED`
+    // harnesses.
     if crate::env::is_wsl_host() {
-        path_dirs.retain(|dir| !DETECTABLE.iter().filter(|tool| wsl_probed(tool)).any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
+        path_dirs.retain(|dir| !DETECTABLE.iter().any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
         if let Ok(path) = std::env::join_paths(&path_dirs) { let _ = NATIVE_WSL_PATH.set(path); }
     }
     let mut executable_profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.exists());
@@ -294,7 +302,7 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
         &|path| path.exists(),
     );
-    if cline_install.is_some() {
+    if let Some(cline_path) = cline_install {
         for list in [&mut profiles, &mut executable_profiles] {
             if !list.iter().any(|profile| profile.id == "cline") {
                 list.push(HarnessProfile {
@@ -303,6 +311,17 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
                     harness: "cline".into(),
                     runtime: None,
                     wsl_distro: None,
+                    // The resolved absolute path (issue #1773 review —
+                    // previously discarded, which made every Cline spawn
+                    // `cmd.exe /c cline` and fail for off-PATH installs).
+                    // `cmd.exe` resolves `cline.cmd` when the npm prefix is
+                    // on PATH, so the shim path can stay `None` in that
+                    // specific case — but the npm-shim and node_modules
+                    // paths are otherwise not on the orchestrator's PATH,
+                    // so we propagate the resolved path unconditionally
+                    // and let `wrap` decide between binary-name lookup and
+                    // absolute-path spawn (issue #1773).
+                    executable: Some(cline_path.clone()),
                 });
             }
         }
@@ -357,7 +376,7 @@ fn runtime_profile(profile: &HarnessProfile, runtime: crate::models::EnvType) ->
         id: format!("{}-{}", profile.id, label.to_ascii_lowercase()),
         name: format!("{} ({label})", profile.name),
         harness: profile.harness.clone(),
-        runtime: Some(runtime), wsl_distro: None,
+        runtime: Some(runtime), wsl_distro: None, executable: None,
     }
 }
 
@@ -435,7 +454,7 @@ fn detect_windows_from_wsl() -> Vec<HarnessProfile> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     DETECTABLE.iter().filter(|tool| wsl_probed(tool) && stdout.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
         .map(|tool| HarnessProfile { id: format!("{}-windows", tool.id), name: format!("{} (Windows)", tool.name),
-            harness: tool.harness.into(), runtime: Some(crate::models::EnvType::WindowsInterop), wsl_distro: None })
+            harness: tool.harness.into(), runtime: Some(crate::models::EnvType::WindowsInterop), wsl_distro: None, executable: None })
         .collect()
 }
 
@@ -548,7 +567,7 @@ fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
     DETECTABLE.iter().filter(|tool| wsl_probed(tool) && output.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
         .map(|tool| {
             let mut profile = runtime_profile(&HarnessProfile {
-                id: tool.id.into(), name: tool.name.into(), harness: tool.harness.into(), runtime: None, wsl_distro: None,
+                id: tool.id.into(), name: tool.name.into(), harness: tool.harness.into(), runtime: None, wsl_distro: None, executable: None,
             }, crate::models::EnvType::Wsl);
             profile.id.push_str(&format!("-{}", hex::encode(distro.as_bytes())));
             profile.name = format!("{} (WSL: {distro})", tool.name);
@@ -584,10 +603,10 @@ mod tests {
         use crate::models::EnvType;
         use crate::agent::provider::Platform;
         let profiles = vec![
-            crate::preferences::HarnessProfile { id: "mcode".into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime: None, wsl_distro: None },
-            crate::preferences::HarnessProfile { id: "mcode-windows".into(), name: "MiniMax Code (Windows)".into(), harness: "mcode".into(), runtime: Some(EnvType::Windows), wsl_distro: None },
-            crate::preferences::HarnessProfile { id: "mcode-wsl-test".into(), name: "MiniMax Code (WSL)".into(), harness: "mcode".into(), runtime: Some(EnvType::Wsl), wsl_distro: None },
-            crate::preferences::HarnessProfile { id: "custom".into(), name: "Custom".into(), harness: "anthropic".into(), runtime: None, wsl_distro: None },
+            crate::preferences::HarnessProfile { id: "mcode".into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime: None, wsl_distro: None, executable: None },
+            crate::preferences::HarnessProfile { id: "mcode-windows".into(), name: "MiniMax Code (Windows)".into(), harness: "mcode".into(), runtime: Some(EnvType::Windows), wsl_distro: None, executable: None },
+            crate::preferences::HarnessProfile { id: "mcode-wsl-test".into(), name: "MiniMax Code (WSL)".into(), harness: "mcode".into(), runtime: Some(EnvType::Wsl), wsl_distro: None, executable: None },
+            crate::preferences::HarnessProfile { id: "custom".into(), name: "Custom".into(), harness: "anthropic".into(), runtime: None, wsl_distro: None, executable: None },
         ];
         let installed = super::filter_installed_profiles(profiles, &["mcode-wsl-test".into()]);
         let menu = super::preferred_profiles(&installed, Platform::Windows, None);
@@ -602,7 +621,7 @@ mod tests {
         use crate::agent::provider::Platform;
         let profile = |id: &str, harness: &str, runtime| crate::preferences::HarnessProfile {
             id: id.into(), name: if harness == "mcode" { "MiniMax Code".into() } else { "Meta Muse (WSL)".into() },
-            harness: harness.into(), runtime, wsl_distro: None,
+            harness: harness.into(), runtime, wsl_distro: None, executable: None,
         };
         let profiles = vec![profile("mcode", "mcode", None), profile("mcode-windows", "mcode", Some(EnvType::Windows)),
             profile("mcode-wsl-test", "mcode", Some(EnvType::Wsl)), profile("muse-wsl-test", "muse", Some(EnvType::Wsl))];
@@ -627,7 +646,7 @@ mod tests {
         use crate::agent::provider::Platform;
         use crate::models::EnvType;
         let profile = |id: &str, runtime| crate::preferences::HarnessProfile {
-            id: id.into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime, wsl_distro: None,
+            id: id.into(), name: "MiniMax Code".into(), harness: "mcode".into(), runtime, wsl_distro: None, executable: None,
         };
         let profiles = vec![profile("mcode", None), profile("mcode-wsl-test", Some(EnvType::Wsl))];
         let menu = super::preferred_profiles_with_executables(&profiles, Platform::Windows, Some("Ubuntu"), Some(&[]));

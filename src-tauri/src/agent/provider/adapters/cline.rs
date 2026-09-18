@@ -82,26 +82,17 @@ fn shell_for(platform: Platform) -> WindowsShell {
     }
 }
 
-/// Collapse CR/LF to single spaces so the positional prefill stays one
-/// `cmd.exe /c` argument. A bare newline inside a quoted argument is treated
-/// as end-of-command by `cmd.exe`, and prefill text (issue / PR handovers) is
-/// frequently multi-line. Mirrors `opencode.rs`'s `flatten_cmd_prefill`.
-fn flatten_cmd_prefill(text: &str) -> String {
-    text.split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Off-`PATH` install candidates for Cline, in the documented resolver order:
 ///
 /// 1. `CLINE_BIN_PATH` when set (wins unconditionally).
-/// 2. `%APPDATA%\npm\cline.cmd` — the npm shim `cmd.exe` resolves.
-/// 3. `%APPDATA%\npm\node_modules\@cline\cli-windows-x64\bin\cline.exe` — the
-///    platform binary spawned directly (avoids `cmd.exe` and Node, at the cost
-///    of the wrapper's CA-cert harvesting: `~/.cline/cli-node-extra-ca-certs.pem`
-///    → `NODE_EXTRA_CA_CERTS`).
+/// 2. `%APPDATA%\npm\cline.cmd` — the npm shim `cmd.exe` resolves when the
+///    npm prefix is on `PATH`.
+/// 3. `%APPDATA%\npm\node_modules\@cline\cli-windows-{x64,arm64}\bin\cline.exe`
+///    — the platform binary spawned directly (avoids `cmd.exe` and Node, at
+///    the cost of the wrapper's CA-cert harvesting:
+///    `~/.cline/cli-node-extra-ca-certs.pem` → `NODE_EXTRA_CA_CERTS`). Both
+///    architectures are probed because `@cline/cli` ships separate
+///    platform-specific binaries and the npm prefix doesn't symlink them.
 ///
 /// Pure — the caller supplies `appdata` — so the order is unit-testable
 /// without touching the real filesystem. `detection::detect_installed_profiles`
@@ -114,21 +105,29 @@ pub fn install_candidates(env_bin_path: Option<&str>, appdata: Option<&Path>) ->
     if let Some(appdata) = appdata {
         let npm = appdata.join("npm");
         candidates.push(npm.join("cline.cmd"));
-        candidates.push(
-            npm.join("node_modules")
-                .join("@cline")
-                .join("cli-windows-x64")
-                .join("bin")
-                .join("cline.exe"),
-        );
+        // Both architectures — `@cline/cli` ships separate platform packages
+        // and npm installs the one matching the host CPU. The walk can't
+        // pre-know which is on disk, so it probes both in deterministic order
+        // (x64 first to match the documented CLI naming) and lets the
+        // existence check pick whichever exists.
+        for arch in ["x64", "arm64"] {
+            candidates.push(
+                npm.join("node_modules")
+                    .join("@cline")
+                    .join(format!("cli-windows-{arch}"))
+                    .join("bin")
+                    .join("cline.exe"),
+            );
+        }
     }
     candidates
 }
 
 /// The first [`install_candidates`] entry that exists — `CLINE_BIN_PATH` wins
-/// when set. Detection-only: the spawn recipe keeps the stable `cline` binary
-/// name (`cmd.exe` resolves `cline.cmd` on Windows, the plain stem elsewhere),
-/// so this never rewrites the argv.
+/// when set. **The resolved absolute path is what `spawn_environment::wrap`
+/// receives as `executable_override`** (issue #1773 review — previously the
+/// path was discarded and `spawn_recipe.binary = "cline"` was always used,
+/// which fails with `'cline' is not recognized` for off-PATH installs).
 pub fn resolve_install(
     env_bin_path: Option<&str>,
     appdata: Option<&Path>,
@@ -219,15 +218,19 @@ impl AgentProvider for ClineAdapter {
     }
 
     /// `cline -i "<prefill>"` — the positional prompt seeds the TUI's first
-    /// turn. CRLF/LF flattened: `cmd.exe /c` treats a bare newline as
-    /// end-of-command. **Returns just the prefill text**; the base `-i` is
-    /// already in `spawn_recipe.base_args` and `default_prepare` extends
-    /// `base_args` with this list. Emitting `-i` here too would compose to
+    /// turn. **Returns just the prefill text**; the base `-i` is already in
+    /// `spawn_recipe.base_args` and `default_prepare` extends `base_args`
+    /// with this list. Emitting `-i` here too would compose to
     /// `cline -i -i "<text>"` — a flag the Cline CLI accepts (last write
     /// wins) but that we shouldn't rely on. Regression-pinned by
     /// `launch::tests::cline_prefill_composes_without_repeating_the_tui_flag`.
+    ///
+    /// Platform-aware line-end handling lives one level up in
+    /// [`crate::agent::launch::normalize_prefill_for_platform`]: Windows
+    /// flattens newlines to single spaces (the `cmd.exe /c` requirement),
+    /// macOS/Linux preserves them (direct spawn).
     fn prefill_args(&self, text: &str) -> Vec<String> {
-        vec![flatten_cmd_prefill(text)]
+        vec![text.to_string()]
     }
 
     /// Cline's closed-vocabulary reasoning-effort flag is `--thinking`
@@ -333,14 +336,14 @@ mod tests {
     }
 
     #[test]
-    fn prefill_args_flatten_crlf_for_cmd_exe() {
-        let args = CLINE.prefill_args("fix auth\nthen run tests\r\nand push");
-        assert_eq!(args, vec!["fix auth then run tests and push"]);
-        assert!(
-            !args[0].contains('\n') && !args[0].contains('\r'),
-            "cmd.exe /c must not see a newline in the positional prompt; got {:?}",
-            args[0]
-        );
+    fn prefill_args_pass_text_through_unchanged() {
+        // Platform-aware newline handling lives in
+        // `launch::normalize_prefill_for_platform`. The adapter's contract
+        // is now strictly "return the prefill text verbatim" — the leading
+        // space-join for `cmd.exe /c` would destroy multi-line prompts on
+        // macOS/Linux (issue #1773 review).
+        let args = CLINE.prefill_args("fix auth\nthen run tests");
+        assert_eq!(args, vec!["fix auth\nthen run tests"]);
     }
 
     #[test]
@@ -473,12 +476,13 @@ mod tests {
     }
 
     /// Detection resolver order: `CLINE_BIN_PATH` wins even when the npm shim
-    /// also exists.
+    /// also exists. Direct-platform binaries probe both `x64` and `arm64`
+    /// because `@cline/cli` ships architecture-specific packages.
     #[test]
     fn install_candidates_prefer_env_override_then_npm_shim_then_direct_exe() {
         let appdata = Path::new("C:/Users/me/AppData/Roaming");
         let candidates = install_candidates(Some("D:/tools/cline.exe"), Some(appdata));
-        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates.len(), 4);
         assert_eq!(candidates[0], PathBuf::from("D:/tools/cline.exe"));
         assert_eq!(candidates[1], appdata.join("npm").join("cline.cmd"));
         assert!(
@@ -486,8 +490,16 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/")
                 .ends_with("npm/node_modules/@cline/cli-windows-x64/bin/cline.exe"),
-            "third candidate must be the direct platform binary; got {:?}",
+            "third candidate must be the x64 direct platform binary; got {:?}",
             candidates[2]
+        );
+        assert!(
+            candidates[3]
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("npm/node_modules/@cline/cli-windows-arm64/bin/cline.exe"),
+            "fourth candidate must be the arm64 direct platform binary; got {:?}",
+            candidates[3]
         );
 
         // Blank / whitespace-only overrides are ignored rather than producing a
@@ -503,31 +515,48 @@ mod tests {
     fn resolve_install_picks_the_first_existing_candidate() {
         let appdata = Path::new("C:/appdata");
         let shim = appdata.join("npm").join("cline.cmd");
-        let direct = appdata
+        let direct_x64 = appdata
             .join("npm")
             .join("node_modules")
             .join("@cline")
             .join("cli-windows-x64")
             .join("bin")
             .join("cline.exe");
+        let direct_arm64 = appdata
+            .join("npm")
+            .join("node_modules")
+            .join("@cline")
+            .join("cli-windows-arm64")
+            .join("bin")
+            .join("cline.exe");
         let override_path = PathBuf::from("D:/override/cline.exe");
 
-        // Only the shim exists → shim wins over the absent node_modules binary.
+        // Only the shim exists → shim wins over the absent node_modules binaries.
         let only_shim = |p: &Path| p == shim;
         assert_eq!(
             resolve_install(None, Some(appdata), &only_shim).as_deref(),
             Some(shim.as_path())
         );
 
-        // Shim absent, direct binary present → falls through to the walk.
-        let only_direct = |p: &Path| p == direct;
+        // Shim absent, x64 direct binary present → falls through to the walk
+        // in deterministic order. x64 is checked first (documented CLI order).
+        let only_x64 = |p: &Path| p == direct_x64;
         assert_eq!(
-            resolve_install(None, Some(appdata), &only_direct).as_deref(),
-            Some(direct.as_path())
+            resolve_install(None, Some(appdata), &only_x64).as_deref(),
+            Some(direct_x64.as_path())
+        );
+
+        // x64 absent, arm64 direct binary present → falls through to arm64.
+        let only_arm64 = |p: &Path| p == direct_arm64;
+        assert_eq!(
+            resolve_install(None, Some(appdata), &only_arm64).as_deref(),
+            Some(direct_arm64.as_path())
         );
 
         // Everything present → the override wins (resolver order).
-        let all = |p: &Path| p == shim || p == direct || p == override_path;
+        let all = |p: &Path| {
+            p == shim || p == direct_x64 || p == direct_arm64 || p == override_path
+        };
         assert_eq!(
             resolve_install(Some("D:/override/cline.exe"), Some(appdata), &all).as_deref(),
             Some(override_path.as_path())

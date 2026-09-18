@@ -111,7 +111,10 @@ pub fn build_spawn_command_prepared(
             install.wsl_distro.as_deref(),
             Some(install.executable.as_str()),
         ),
-        _ => (None, None),
+        _ => (
+            None,
+            routing.executable_override().and_then(|path| path.to_str()),
+        ),
     };
     let mut cmd = spawn_environment::wrap(
         recipe,

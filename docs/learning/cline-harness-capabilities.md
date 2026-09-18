@@ -75,12 +75,26 @@ separate capture pipeline.
 
 - **Fresh:** `cline -i` — the TUI opens with no session id.
 - **Resume:** `cline -i --id <id>` — the base `-i` survives composition.
-- **With prefill:** `cline -i "<prompt>"` — CR/LF is flattened first, because
-  `cmd.exe /c` on Windows treats a bare newline in a quoted argument as
-  end-of-command.
-- **Windows** resolves the npm `cline.cmd` shim through `cmd.exe`
-  (`WindowsShell::Cmd`); **macOS / Linux** spawn the executable directly
+- **With prefill:** `cline -i "<prompt>"`. Prefill normalisation is
+  platform-aware: Windows flattens CR/LF/CRLF to single spaces (the
+  `cmd.exe /c` end-of-command trap); macOS / Linux preserve the line
+  structure and only normalise CRLF→LF (direct spawn, argv elements
+  carry newlines safely). The platform-agnostic flattening that lived
+  in the adapter for the first draft of this slice destroyed multi-line
+  prompts on Unix; it now lives in
+  `agent::launch::normalize_prefill_for_platform`.
+- **Windows** wraps the spawn with `cmd.exe /c` (`WindowsShell::Cmd`),
+  even when the resolved path is an absolute path off `PATH`.
+  **macOS / Linux** spawn the executable directly
   (`WindowsShell::Direct`).
+- **Off-PATH detection.** When Cline was detected via `CLINE_BIN_PATH`
+  or the `node_modules\@cline\cli-windows-{x64,arm64}\bin` walk, the
+  resolved absolute path is stored on the profile's `executable` field
+  and threaded through `spawn_environment::wrap` as
+  `executable_override`. `cmd.exe` resolves the npm shim directly via
+  `cline.cmd` only when the npm prefix is on `PATH`; for everything
+  else the orchestrator hands the absolute path to `cmd.exe /c`
+  explicitly.
 
 ## Native Provider boundary and the env-var seam
 
@@ -106,11 +120,26 @@ Cline runs as a **Native Provider**:
 | OpenRouter | `OPENROUTER_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 
-Buildmesh's Anthropic surface emitter also sets `ANTHROPIC_AUTH_TOKEN` (and
-`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` for a custom endpoint); the OpenAI
-surface emitter sets `OPENAI_API_KEY` (plus `OPENAI_BASE_URL` / `OPENAI_MODEL`).
-The injected values come from the attached account only — Cline keeps its own
-authentication as the fallback.
+> **Important consumer-aware branch (issue #1773 review).** The
+> Anthropic surface emitter that targets **Claude Code** deliberately
+> emits `ANTHROPIC_AUTH_TOKEN=<key>` and blanks `ANTHROPIC_API_KEY=""` for
+> custom endpoints — that's the OpenRouter trap that forces Claude Code
+> through the third-party token instead of a shell-set Anthropic key.
+> Cline does **not** read `ANTHROPIC_AUTH_TOKEN`. If we naively fed
+> that emitter to a Cline spawn, the Cline process would see
+> `ANTHROPIC_API_KEY=""` and fail to authenticate. The env-builder
+> therefore branches on the consumer harness: a `cline:<account>` spawn
+> gets a Cline-shaped emitter (`ANTHROPIC_API_KEY=<key>` non-empty,
+> `ANTHROPIC_BASE_URL=<base>` when set, `ANTHROPIC_MODEL=<primary>` when
+> configured) — no `ANTHROPIC_AUTH_TOKEN`, no key-blanking. The
+> OpenAI surface emitter is already the right shape for Cline so it
+> is reused as-is.
+>
+> Regression-pinned by
+> `preferences::compatibility::tests::cline_anthropic_default_endpoint_sets_anthropic_api_key`,
+> `…_custom_endpoint_sets_anthropic_api_key_not_blank`, `…_openai_custom_endpoint_sets_openai_api_key`,
+> and the Claude-Code contract pinned by
+> `…_claude_anthropic_custom_endpoint_still_uses_auth_token_trap`.
 
 ## State and isolation
 
@@ -128,16 +157,25 @@ run many Cline nodes at once, watch for lock contention and hub port reuse.
   `Get-AuthenticodeSignature`. Buildmesh does **not** auto-unblock a blocked
   binary — resolve the block with your organisation's tooling, then restart
   Buildmesh so detection refreshes.
-- **npm shim vs direct binary.** The default Windows spawn goes through the npm
-  `cline.cmd` shim (which runs Node, then the platform binary) because
-  `CreateProcess` cannot execute a batch file directly. Buildmesh also detects
-  a direct `node_modules\@cline\cli-windows-x64\bin\cline.exe` if the shim is
-  not present. Spawning the binary directly avoids `cmd.exe` and Node but loses
-  the wrapper's CA-certificate harvesting
-  (`~/.cline/cli-node-extra-ca-certs.pem` → `NODE_EXTRA_CA_CERTS`).
+- **npm shim vs direct binary.** When the npm prefix (`%APPDATA%\npm`) is
+  on `PATH`, Windows spawns through `cmd.exe /c cline`, which resolves
+  the `cline.cmd` shim, which runs Node, which loads the platform
+  binary. When Cline was detected via `CLINE_BIN_PATH` or the
+  `node_modules\@cline\cli-windows-{x64,arm64}\bin` walk, the
+  orchestrator hands the resolved absolute path to `cmd.exe /c` so the
+  same `cmd.exe`-wrapped spawn shape is preserved. The CA-cert
+  harvesting the npm shim does (`~/.cline/cli-node-extra-ca-certs.pem`
+  → `NODE_EXTRA_CA_CERTS`) only fires on the npm-shim path; if you
+  use the resolved-direct path you opt out of that wrapper. (Both
+  architectures — `x64` and `arm64` — are probed because `@cline/cli`
+  ships separate platform-specific packages.)
 - **`CLINE_BIN_PATH`.** Set this environment variable to an absolute path to
-  have detection prefer a specific Cline executable. It wins over the npm shim
-  and the `node_modules` walk when the path exists.
+  have detection prefer a specific Cline executable. The resolver walks
+  `CLINE_BIN_PATH`, then the npm shim, then
+  `node_modules\@cline\cli-windows-x64\bin`, then
+  `node_modules\@cline\cli-windows-arm64\bin`. The first one that exists
+  wins, and its absolute path is propagated to the spawn command
+  through the profile's `executable` field.
 - **WSL.** Cline in WSL is not a supported or tested runtime in this release.
   The guest-side and Windows-from-WSL detection probes deliberately skip
   Cline, so a WSL-only install does not produce a Spawn Menu row.

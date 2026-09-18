@@ -18,7 +18,7 @@ pub fn default_harness_profiles() -> Vec<HarnessProfile> {
         id: "terminal".to_string(),
         name: "Terminal".to_string(),
         harness: "terminal".to_string(),
-        runtime: None, wsl_distro: None,
+        runtime: None, wsl_distro: None, executable: None,
     }]
 }
 

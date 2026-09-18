@@ -149,7 +149,7 @@ mod runtime_tests {
         // `Platform::Linux`, which was already in `available_on()`.
         let native = crate::preferences::HarnessProfile {
             id: "muse".into(), name: "Meta Muse".into(), harness: "muse".into(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&native, Platform::Windows)
             .expect("muse is available on Windows once Platform::Windows is in available_on()");
@@ -161,7 +161,7 @@ mod runtime_tests {
         // WSL fallback profile — preserved from the pre-fix behaviour.
         let wsl = crate::preferences::HarnessProfile {
             id: "muse-wsl".into(), name: "Meta Muse (WSL)".into(), harness: "muse".into(),
-            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: None,
+            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: None, executable: None,
         };
         let wsl_info = provider_info_for(&wsl, Platform::Windows).unwrap();
         assert_eq!(wsl_info.id, "muse-wsl");
@@ -608,7 +608,7 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&claude, Platform::Windows)
             .expect("claude profile is available on Windows");
@@ -629,7 +629,7 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }];
         let mm = crate::preferences::ProviderAccount {
             id: "minimax".to_string(),
@@ -668,13 +668,13 @@ mod tests {
                 id: "claude".to_string(),
                 name: "Claude Code".to_string(),
                 harness: "anthropic".to_string(),
-                runtime: None, wsl_distro: None,
+                runtime: None, wsl_distro: None, executable: None,
             },
             crate::preferences::HarnessProfile {
                 id: "codex".to_string(),
                 name: "OpenAI Codex".to_string(),
                 harness: "codex".to_string(),
-                runtime: None, wsl_distro: None,
+                runtime: None, wsl_distro: None, executable: None,
             },
         ];
         let mm = crate::preferences::ProviderAccount {
@@ -1061,7 +1061,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             harness: harness.to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }
     }
 
@@ -1211,7 +1211,7 @@ mod tests {
             id: "deepseek-via-claude".to_string(),
             name: "DeepSeek (via Claude)".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&deepseek, Platform::Windows)
             .expect("anthropic-backed profile is available on Windows");
@@ -1228,7 +1228,7 @@ mod tests {
             id: "cursor".to_string(),
             name: "Cursor Agent".to_string(),
             harness: "cursor".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&cursor, Platform::Windows)
             .expect("Cursor is available on Windows");
@@ -1258,7 +1258,7 @@ mod tests {
             id: "custom-opencode-flavor".to_string(),
             name: "Custom OpenCode".to_string(),
             harness: "opencode".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&custom_opencode, Platform::Windows)
             .expect("OpenCode-backed profile is available on Windows");
@@ -1285,7 +1285,7 @@ mod tests {
             id: "terminal".to_string(),
             name: "Terminal".to_string(),
             harness: "terminal".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&terminal, Platform::Windows)
             .expect("Terminal is available on Windows");
@@ -1316,7 +1316,7 @@ mod tests {
             id: "minimax".to_string(),
             name: "Minimax".to_string(),
             harness: "minimax".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         };
         let info = provider_info_for(&profile, Platform::Windows)
             .expect("minimax resolves to Anthropic and must be available on Windows");
