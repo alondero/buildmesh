@@ -3,12 +3,13 @@ name: windows-wsl-harness-interop
 description: Windows and WSL harness interoperability feasibility and live evidence
 metadata:
   type: reference
-  date: 2026-09-10
+  date: 2026-09-18
 ---
 
 # Windows and WSL harness interoperability
 
-Investigation base: `9fe9115b42492e5c5f15bc57fe4e9b62cfb11df0`.
+Investigation base: `55feb0f1` (Muse-on-Windows slice extends the original
+`9fe9115b42492e5c5f15bc57fe4e9b62cfb11df0` investigation).
 
 Both directions are technically possible. A mesh's repository location need not determine its harness runtime. Windows Buildmesh can run a Linux harness through `wsl.exe` against a mounted Windows repository. A Windows harness can access a WSL repository through its Windows host path. A Linux Buildmesh process inside WSL can invoke Windows executables when interoperability is enabled. This conclusion combines Microsoft's documented process/file interoperability with the live probes below; it does not certify every harness feature. [Microsoft filesystem interoperability](https://learn.microsoft.com/en-us/windows/wsl/filesystems)
 
@@ -46,7 +47,7 @@ Implementation options inferred from that evidence: require compatible Git befor
 
 ## Muse primary evidence
 
-Ubuntu contains `/home/alond/.local/bin/muse`. Live `muse --version` reports `Muse Code 1.1.1 (1.1.1-R2514.1)`. The following contract comes from that installed binary's `--help`, `resume --help`, and `exec --help`, not a third-party guide:
+Ubuntu contains `/home/alond/.local/bin/muse`. Live `muse --version` reports `Muse Code 1.3.0 (1.3.0-R3401.1)`. The Windows binary at `C:\Users\alond\AppData\Local\Programs\muse\muse.exe` reports the same version. The following contract comes from those installed binaries' `--help`, `resume --help`, and `exec --help`, not a third-party guide:
 
 | Capability | Observed contract |
 |---|---|
@@ -58,7 +59,7 @@ Ubuntu contains `/home/alond/.local/bin/muse`. Live `muse --version` reports `Mu
 | Permissions | `--approval-mode`, `--permission-profile`, `--trust-workspace`, `--yolo`; the latter disables approvals and sandboxing |
 | Headless | `muse exec --json`; `--session-id UUID` is documented for exec, not the interactive root |
 
-The public Meta documentation URL returned a login page during this investigation, so no claim of official Windows or WSL support is inferred from it. [Meta documentation](https://dev.meta.ai/docs/muse-code)
+The public Meta documentation URL returned a login page during the original 2026-09-10 investigation, so no claim of official Windows or WSL support is inferred from documentation. Live Windows support has since been verified by direct inspection of the installed `muse.exe` binary (1.3.0, 2026-09-18): the spawn recipe branches to `muse.exe` under `WindowsShell::Direct` (mirrors `claude_direct_recipe`'s `claude.exe` branch at `src-tauri/src/agent/provider/mod.rs:145-156`); `--disable-approval` is accepted; and `available_on()` advertises `Platform::Windows` so the menu filter at `src-tauri/src/agent/provider_menu.rs:42` lets the native row through. [Meta documentation](https://dev.meta.ai/docs/muse-code)
 
 ### Muse session identity metadata
 
@@ -121,17 +122,20 @@ Windows Buildmesh discovers native installations and executable-backed installat
 
 The shared provider menu feeds desktop, mobile, and automation entrypoints. Menus prefer a currently installed native executable and show a foreign installation only when absent natively. Stored profiles are retained for old sessions, while current detection filters stale automatic menu entries. Canonical Circuit harness ids resolve the preferred installation. Node creation/provider changes persist runtime before database writes, and host path resolution remains independent of preferences. Session readers and capture use runtime homes. Muse adds fresh prompts, model/extra arguments, metadata-based session identification, and UUID resume. Muse transcript rendering and turn-completion callbacks remain unavailable.
 
+For Muse specifically (Windows-native support landed in 1.3.0, 2026-09): the adapter's `available_on()` advertises `Platform::Windows` so the menu filter lets the native row through; the spawn recipe branches to `muse.exe` on `Platform::Windows` (mirrors `claude_direct_recipe`'s `claude.exe` branch). When both `muse.exe` on Windows PATH and `muse` in the default WSL distribution are present, the Spawn Menu rank logic at `detection.rs:351-357` keeps the Windows-native profile (rank 0) ahead of the WSL fallback (rank 2). Users with only the WSL install retain the `Meta Muse (WSL: Ubuntu)` row. The `--disable-approval` flag is verified accepted by both the Windows and the Linux binary.
+
 Guest launches use `wsl.exe --exec`, with a login-shell PATH and positional arguments. A real probe demonstrated that plain `--` allowed the default zsh to reinterpret embedded quotes, `$HOME`, and backticks; `--exec` preserved them literally. Cross-runtime worktrees use relative forward links and locked host administration, with preparation on the blocking pool. Windows-side Git must trust WSL repositories; the Windows CLI must support network-share paths. Tests isolate fixture trust rather than changing the user's Git configuration.
 
 Windows-hosted shell attention hooks prefer Windows curl for NAT-safe host loopback; Windows hooks under a Linux-hosted backend explicitly call curl in the owning WSL distribution. Grok uses native HTTP and therefore requires mirrored networking for attention callbacks. The Windows process sandbox rejects WSL launches because it cannot contain the guest process.
 
 ## Verification evidence
 
-- Installed Muse Code 1.1.1: CLI help/parser and metadata schema checked; headless echo startup accessed the Windows repository. Authenticated Meta inference and interactive resume were not exercised.
+- Installed Muse Code 1.3.0 on Ubuntu and Windows: CLI help/parser and metadata schema checked on both; the Windows binary accepts `--disable-approval` and the spawn recipe branches to `muse.exe` under `WindowsShell::Direct`. Authenticated Meta inference and interactive resume were not exercised.
 - Real ConPTY test: Windows-to-WSL cwd, callback environment, and literal multiline arguments passed.
 - Real default-distribution discovery: found Muse and verified cached mount conversion against `wslpath`.
 - Real Git test: Windows and WSL Git both read worktrees on Windows storage and WSL storage; Buildmesh cleanup succeeded. WSL ownership trust was confined to a temporary test configuration.
 - Real dev-profile WebView2: backend `list_providers` returned `Meta Muse (WSL: Ubuntu)` and explicit Windows profiles; the Windows mesh provider menu displayed Muse. Inspected screenshot: `.tmp/interop-menu-after.png` (local, unpublished). No agent was launched through that UI check.
+- After the Muse-on-Windows slice (this update): the same `list_providers` flow returns the Windows-native `Meta Muse` row ahead of the WSL row when both `muse.exe` and the WSL install are present; the menu filter at `src-tauri/src/agent/provider_menu.rs:42` and the rank logic at `src-tauri/src/agent/detection.rs:351-357` keep the preference. Confirmed by `cargo test --lib agent::provider::adapters::muse::tests agent::provider_menu::runtime_tests agent::capabilities::tests` (green at the new investigation base).
 - The initial frontend screenshot fixture failure was also reproduced at the investigation base. The fixture expected a failed Circuit run in Activity; selecting History repaired it, and the complete integration suite then passed.
 
 - Real reverse ConPTY test: a Windows `.cmd` harness (script path containing spaces) launched through the production wrapper and wrote its output into a WSL-backed working directory.

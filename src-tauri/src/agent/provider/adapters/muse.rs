@@ -1,5 +1,17 @@
-//! Muse Code 1.1.1 interactive CLI contract, checked against the installed
-//! Linux CLI. See docs/learning/windows-wsl-harness-interop.md.
+//! Muse Code 1.3.0 interactive CLI contract, checked against the installed
+//! Linux CLI (`/home/alond/.local/bin/muse` 1.3.0-R3401.1) and the Windows
+//! binary (`%LOCALAPPDATA%\Programs\muse\muse.exe`, same version). See
+//! docs/learning/windows-wsl-harness-interop.md.
+//!
+//! **Windows support (Muse 1.3.0, 2026-09).** The native Windows binary is
+//! a real PE that accepts the same `--disable-approval` flag as the
+//! Linux/macOS builds. The spawn recipe branches to `muse.exe` on
+//! `Platform::Windows` (mirrors `claude_direct_recipe`'s `claude.exe`
+//! branch at `provider/mod.rs:145-156`); `available_on()` includes
+//! `Platform::Windows` so the menu filter at
+//! `provider_menu.rs:42` lets the row through. The Spawn Menu rank logic
+//! at `detection.rs:351-357` keeps the Windows-native profile (rank 0)
+//! ahead of the WSL fallback (rank 2) when both installs are present.
 //!
 //! **Approval policy (issue #1705).** Every interactive harness Buildmesh
 //! spawns runs unattended in a PTY, so each adapter bakes its harness's
@@ -11,7 +23,9 @@
 //! - `--disable-approval` — disables tool approval only; outer sandbox stays
 //!   on. Sibling-harness precedent: matches OpenCode `--auto` and
 //!   AGY / Claude `--dangerously-skip-permissions` in spirit (one flag, one
-//!   policy, adapter-owned).
+//!   policy, adapter-owned). Confirmed supported on the Windows build
+//!   via `muse.exe --help` ("Disable tool approval prompts for this
+//!   workspace run").
 //! - `--yolo` — disables approval **AND** sandboxing **AND** trusts the
 //!   workspace. Three policies in one. Explicitly rejected by issue #1705 as
 //!   too wide for the quiet default.
@@ -55,12 +69,27 @@ impl AgentProvider for MuseAdapter {
             icon: "M".into(),
         }
     }
-    fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+    fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         // Issue #1705: bake `--disable-approval`. See the module docstring
         // for the rationale (sibling-harness precedent; `--yolo` rejected
         // as too wide; outer sandbox stays on).
+        //
+        // Binary stem branches on `Platform::Windows` to `muse.exe`,
+        // mirroring `claude_direct_recipe` at `provider/mod.rs:145-156`.
+        // The branch is defensive + convention-following: Windows
+        // `CreateProcess` auto-appends `.exe` for PATH searches, so a
+        // bare `muse` would also resolve `muse.exe` on PATH (Kimi proves
+        // this with its bare `"kimi"` recipe). The explicit branch makes
+        // the platform dependency visible at the type level and protects
+        // against a future Muse `.cmd` shim (which `CreateProcess` does
+        // NOT auto-resolve — that needs a `cmd.exe /c` wrapper like
+        // OpenCode uses).
+        let binary = match platform {
+            Platform::Windows => "muse.exe",
+            _ => "muse",
+        };
         SpawnRecipe {
-            binary: "muse",
+            binary,
             base_args: vec!["--disable-approval".into()],
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
@@ -115,7 +144,17 @@ impl AgentProvider for MuseAdapter {
         true
     }
     fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Linux, Platform::Macos]
+        // Windows joined the supported set in Muse Code 1.3.0
+        // (2026-09 — the binary at `%LOCALAPPDATA%\Programs\muse\muse.exe`
+        // is a real PE binary that accepts `--disable-approval` like the
+        // Linux/macOS builds). The detection probe at
+        // `detection.rs:374-391` finds `muse.exe` on Windows PATH; with
+        // Windows in this list, the menu filter at
+        // `provider_menu.rs:42` lets the row through. The rank logic at
+        // `detection.rs:351-357` keeps the Windows-native profile
+        // (rank 0) ahead of the WSL-only one (rank 2) when both
+        // installs are present.
+        &[Platform::Linux, Platform::Macos, Platform::Windows]
     }
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["resume".into(), id.into()]
@@ -341,22 +380,35 @@ mod tests {
 
     /// Issue #1705 — per-platform pin of the baked approval flag.
     /// Mirrors OpenCode's `spawn_recipe_carries_auto_flag_on_every_platform`:
-    /// iterate over `available_on()` (not every `Platform` variant — muse
-    /// does not run on Windows) and assert the exact base_args vector so
-    /// a future flag smuggle (e.g. `--approval-mode never` slipping in
+    /// iterate over `available_on()` (not every `Platform` variant) and
+    /// assert the exact base_args vector + per-platform binary name so a
+    /// future flag smuggle (e.g. `--approval-mode never` slipping in
     /// alongside `--disable-approval`) trips here, not at runtime.
     ///
     /// Each platform variant is paired with the canonical `EnvType` for
     /// that host (see [`env_type_for`]) so the test reads as "the host
     /// that actually runs the binary" — `Platform::Macos, EnvType::Wsl`
     /// would be a platform-impossible pairing.
+    ///
+    /// Binary-name shape: Windows uses `muse.exe` (matches Anthropic's
+    /// `claude.exe` branch at `provider/mod.rs:145-156`); macOS/Linux
+    /// keep the bare stem. The Windows branch is defensive + convention
+    /// (`CreateProcess` auto-appends `.exe` for PATH searches), but
+    /// mirrors Anthropic exactly so a future Muse `.cmd` shim still
+    /// resolves correctly.
     #[test]
     fn spawn_recipe_carries_disable_approval_on_supported_platforms() {
         for platform in MUSE.available_on() {
             let recipe = MUSE.spawn_recipe(*platform, env_type_for(*platform));
+            let expected_binary = match *platform {
+                Platform::Windows => "muse.exe",
+                _ => "muse",
+            };
             assert_eq!(
-                recipe.binary, "muse",
-                "muse binary name must be exact on {platform:?}"
+                recipe.binary, expected_binary,
+                "muse binary name must be exact on {platform:?}: \
+                 Windows → muse.exe (mirrors claude_direct_recipe's \
+                 claude.exe branch), others → muse"
             );
             assert_eq!(
                 recipe.base_args,
@@ -367,8 +419,8 @@ mod tests {
             );
             assert!(
                 matches!(recipe.windows_shell, WindowsShell::Direct),
-                "muse is a real ELF binary / macOS Mach-O on its supported \
-                 hosts — must use WindowsShell::Direct on {platform:?}; got {:?}",
+                "muse is a real PE binary on Windows / ELF on Linux / Mach-O \
+                 on macOS — must use WindowsShell::Direct on {platform:?}; got {:?}",
                 recipe.windows_shell
             );
             // `--yolo` is the explicit no-go for issue #1705: it disables
@@ -383,6 +435,27 @@ mod tests {
                 recipe.base_args
             );
         }
+    }
+
+    /// Pin the exact `available_on()` set. Pre-fix this failed with
+    /// `len() == 2` because `Platform::Windows` was absent (Muse
+    /// originally shipped Linux + macOS only — the Windows binary landed
+    /// in 1.3.0 this week). Now that Windows is supported, the assertion
+    /// forces any future "while we're here" addition (or removal) to
+    /// surface in review, not at runtime as a missing menu row. Mirrors
+    /// `kimi::available_on_all_three_platforms` at kimi.rs:425-437.
+    #[test]
+    fn available_on_all_three_platforms() {
+        let platforms = MUSE.available_on();
+        assert_eq!(
+            platforms.len(),
+            3,
+            "available_on should pin to exactly {{Windows, Linux, Macos}} — got {:?}",
+            platforms
+        );
+        assert!(platforms.contains(&Platform::Windows), "muse is available on Windows since 1.3.0; got {:?}", platforms);
+        assert!(platforms.contains(&Platform::Linux));
+        assert!(platforms.contains(&Platform::Macos));
     }
 
     // -- Prepared-launch evidence (issue #1705 round-1 review) ------------
