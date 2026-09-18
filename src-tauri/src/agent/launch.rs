@@ -395,6 +395,38 @@ mod tests {
         assert_eq!(last, "first\nsecond\nthird");
     }
 
+    /// Issue #1773 — Cline's base recipe already carries `-i`, so the
+    /// adapter's `prefill_args` returns just the positional text and
+    /// `default_prepare` extends the base with it. The composed argv must
+    /// contain exactly one `-i` and the prefill text as its trailing
+    /// argument. Regression-pin for a previous draft that re-emitted `-i`
+    /// inside `prefill_args`, producing `cline -i -i "<text>"`.
+    #[test]
+    fn cline_prefill_composes_without_repeating_the_tui_flag() {
+        let adapter = &crate::agent::provider::adapters::CLINE as &dyn AgentProvider;
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("fix the auth bug"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let args: Vec<&str> = prepared.recipe.argv().collect();
+        assert_eq!(
+            args.iter().filter(|a| **a == "-i").count(),
+            1,
+            "exactly one -i must survive the prefill composition; got {args:?}"
+        );
+        assert_eq!(
+            args.last().copied(),
+            Some("fix the auth bug"),
+            "prefill text must be the trailing argument; got {args:?}"
+        );
+    }
+
     /// Assign mode must forward the adapter's `session_assign_args`.
     /// Anthropic uses the default `["--session-id", id]`.
     #[test]

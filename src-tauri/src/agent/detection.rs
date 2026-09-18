@@ -97,6 +97,19 @@ const DETECTABLE: &[Detectable] = &[
         config_dirs: &[],
     },
     Detectable {
+        id: "cline",
+        name: "Cline",
+        harness: "cline",
+        // `cline` is a real executable on PATH on macOS/Linux, and the npm
+        // `cline.cmd` shim resolves on Windows via `PATHEXT` + the npm prefix
+        // directories `standard_npm_bin_dirs` adds. `~/.cline` is Cline's
+        // config root (`--config` overrides it), so a shell-function / alias
+        // install that exposes only the config directory still counts as
+        // installed — mirrors `.claude` / `.kimi` / `.mcode`.
+        binaries: &["cline"],
+        config_dirs: &[".cline"],
+    },
+    Detectable {
         id: "grok",
         name: "Grok Code",
         harness: "grok",
@@ -146,6 +159,17 @@ const DETECTABLE: &[Detectable] = &[
         config_dirs: &[".config/manicode"],
     },
 ];
+
+/// Harnesses whose WSL cross-runtime probes are deliberately disabled. Cline
+/// is a native Windows / macOS / Linux target in this slice — WSL behaviour is
+/// undocumented and untested (issue #1773) — so neither the guest-side probe
+/// nor the Windows-from-WSL probe may conjure a WSL profile for it.
+const WSL_EXCLUDED: &[&str] = &["cline"];
+
+/// True for a harness the WSL cross-runtime probes should skip.
+fn wsl_probed(tool: &Detectable) -> bool {
+    !WSL_EXCLUDED.contains(&tool.id)
+}
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
 /// `exts` always includes the empty string (the exact stem, e.g. a `claude`
@@ -254,11 +278,35 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
     // npm's Windows prefix also contains extensionless POSIX shims. They
     // belong to the Windows installation, not an independent Linux install.
     if crate::env::is_wsl_host() {
-        path_dirs.retain(|dir| !DETECTABLE.iter().any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
+        path_dirs.retain(|dir| !DETECTABLE.iter().filter(|tool| wsl_probed(tool)).any(|tool| dir.join(format!("{}.cmd", tool.binaries[0])).is_file()));
         if let Ok(path) = std::env::join_paths(&path_dirs) { let _ = NATIVE_WSL_PATH.set(path); }
     }
-    let executable_profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.exists());
+    let mut executable_profiles = detect_profiles(&path_dirs, &ext_refs, None, &|p| p.exists());
     let mut profiles = detect_profiles(&path_dirs, &ext_refs, home.as_deref(), &|p| p.exists());
+    // Cline (issue #1773): its Windows install can live entirely off `PATH` —
+    // the npm shim under `%APPDATA%\npm` and the direct platform binary under
+    // `node_modules\@cline\cli-windows-x64\bin`. The stem sweep above already
+    // finds the shim when the npm prefix is on the search path; this explicit
+    // probe honours the documented resolver order (`CLINE_BIN_PATH` first) and
+    // the `node_modules` walk for installs that sweep misses.
+    let cline_install = crate::agent::provider::adapters::cline::resolve_install(
+        std::env::var("CLINE_BIN_PATH").ok().as_deref(),
+        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
+        &|path| path.exists(),
+    );
+    if cline_install.is_some() {
+        for list in [&mut profiles, &mut executable_profiles] {
+            if !list.iter().any(|profile| profile.id == "cline") {
+                list.push(HarnessProfile {
+                    id: "cline".into(),
+                    name: "Cline".into(),
+                    harness: "cline".into(),
+                    runtime: None,
+                    wsl_distro: None,
+                });
+            }
+        }
+    }
     if cfg!(windows) {
         // Explicit Windows entries also work in WSL-backed meshes. Keep the
         // legacy entries so existing node identities retain their semantics.
@@ -374,6 +422,7 @@ fn preferred_profiles_with_executables(
 fn detect_windows_from_wsl() -> Vec<HarnessProfile> {
     let mut script = String::from("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ");
     for tool in DETECTABLE {
+        if !wsl_probed(tool) { continue; }
         script.push_str(&format!("if (Get-Command '{}' -CommandType Application -ErrorAction SilentlyContinue) {{ [Console]::WriteLine('buildmesh-harness:{}') }}; ", if tool.id == "commandcode" { "cmdc" } else { tool.binaries[0] }, tool.id));
     }
     let command = crate::env::powershell_command(&script);
@@ -384,7 +433,7 @@ fn detect_windows_from_wsl() -> Vec<HarnessProfile> {
     let mounts = wsl_drive_mounts_from_proc();
     crate::env::set_wsl_drive_mounts(mounts);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    DETECTABLE.iter().filter(|tool| stdout.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
+    DETECTABLE.iter().filter(|tool| wsl_probed(tool) && stdout.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
         .map(|tool| HarnessProfile { id: format!("{}-windows", tool.id), name: format!("{} (Windows)", tool.name),
             harness: tool.harness.into(), runtime: Some(crate::models::EnvType::WindowsInterop), wsl_distro: None })
         .collect()
@@ -471,6 +520,7 @@ fn detect_wsl_profiles() -> Vec<HarnessProfile> {
         script.push_str(&format!("mount=$(wslpath -u '{drive}:\\' 2>/dev/null) && printf 'buildmesh-mount:{drive}:%s\\n' \"$mount\"; "));
     }
     for tool in DETECTABLE {
+        if !wsl_probed(tool) { continue; }
         let binary = if tool.id == "commandcode" { "cmd" } else { tool.binaries[0] };
         script.push_str(&format!(
             "if command -v {binary} >/dev/null 2>&1; then printf 'buildmesh-harness:{}\\n'; fi; ",
@@ -495,7 +545,7 @@ fn detect_wsl_profiles() -> Vec<HarnessProfile> {
 }
 
 fn profiles_from_wsl_probe(output: &str, distro: &str) -> Vec<HarnessProfile> {
-    DETECTABLE.iter().filter(|tool| output.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
+    DETECTABLE.iter().filter(|tool| wsl_probed(tool) && output.lines().any(|line| line == format!("buildmesh-harness:{}", tool.id)))
         .map(|tool| {
             let mut profile = runtime_profile(&HarnessProfile {
                 id: tool.id.into(), name: tool.name.into(), harness: tool.harness.into(), runtime: None, wsl_distro: None,
@@ -614,6 +664,27 @@ mod tests {
         assert_eq!(profiles[0].harness, "muse");
         assert_eq!(profiles[0].runtime, Some(crate::models::EnvType::Wsl));
         assert!(profiles_from_wsl_probe("command not found", "Ubuntu").is_empty());
+    }
+
+    /// Issue #1773 — Cline is explicitly excluded from the WSL cross-runtime
+    /// probes (WSL behaviour is undocumented and untested), so even a guest
+    /// that reports `cline` on PATH must not produce a WSL profile. The
+    /// Windows-from-WSL probe shares the same exclusion via `wsl_probed`.
+    #[test]
+    fn wsl_probe_excludes_cline() {
+        assert!(
+            !wsl_probed(DETECTABLE.iter().find(|tool| tool.id == "cline").expect("cline row")),
+            "cline must be listed in WSL_EXCLUDED so the guest probes skip it"
+        );
+        let profiles = profiles_from_wsl_probe(
+            "buildmesh-harness:cline\nbuildmesh-harness:codex\n",
+            "Ubuntu",
+        );
+        assert_eq!(
+            profiles.iter().map(|p| p.harness.as_str()).collect::<Vec<_>>(),
+            vec!["codex"],
+            "the WSL probe must not conjure a cline profile; got {profiles:?}"
+        );
     }
 
     /// Build an `exists` closure that reports the given paths (as strings) as
@@ -901,6 +972,30 @@ mod tests {
         assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["freebuff"]);
     }
 
+    /// Cline (issue #1773) ships `~/.cline` as its config root. A
+    /// shell-function / alias install that exposes only the config directory
+    /// (no PATH entry) must still surface as a Cline harness — same rationale
+    /// as the `.claude` / `.kimi` / `.mcode` config-dir tests above.
+    #[test]
+    fn cline_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.cline"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["cline"]);
+        assert_eq!(profiles[0].harness, "cline");
+    }
+
+    /// The npm shim (`cline.cmd`) in the npm prefix bin must detect Cline on
+    /// Windows — the same probe Freebuff / Command Code rely on.
+    #[test]
+    fn cline_npm_prefix_shim_detected() {
+        let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
+        let exists = fake_fs(&["C:/Users/me/AppData/Roaming/npm/cline.cmd"]);
+        let profiles = detect_profiles(&path_dirs, &["", ".CMD", ".EXE"], None, &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["cline"]);
+    }
+
     #[test]
     fn detected_ids_resolve_to_their_legacy_provider() {
         use crate::models::Provider;
@@ -912,6 +1007,7 @@ mod tests {
             "/bin/cursor-agent",
             "/bin/agy",
             "/bin/opencode",
+            "/bin/cline",
             "/bin/grok",
             "/bin/kimi",
             "/bin/mcode",
@@ -931,6 +1027,7 @@ mod tests {
                 "cursor" => assert_eq!(provider, Provider::Cursor),
                 "agy" => assert_eq!(provider, Provider::Agy),
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
+                "cline" => assert_eq!(provider, Provider::Cline),
                 "grok" => assert_eq!(provider, Provider::Grok),
                 "kimi" => assert_eq!(provider, Provider::Kimi),
                 "mcode" => assert_eq!(provider, Provider::Mcode),

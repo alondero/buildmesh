@@ -135,15 +135,55 @@ pub fn harness_default_for(prefs: &AppPreferences, profile_id: &str) -> Option<H
 /// Resolve the **stored** pairing for spawn / env (ADR-0025). Spawn is
 /// stored-only — a composite spawn id without a stored attach yields `None`
 /// (empty env), so a keyless account never auto-spawns.
+///
+/// **Surface-level fallback** (issue #1777 / #1773): Cline is a Native
+/// Provider with no Buildmesh-side pairing UI — users add providers through
+/// `cline auth`. For a `cline:<account>` spawn Option there is therefore no
+/// `cline`-specific pairing to find, so when the exact `(harness, provider)`
+/// attach is absent we fall back to *any* stored pairing for the same account
+/// whose [`ApiSurface`] the harness speaks. Cline reads both the Anthropic and
+/// OpenAI key env vars, so a `claude:<account>` (Anthropic) or
+/// `codex:<account>` (OpenAI) attach supplies its credential without the user
+/// duplicating the pairing per harness. Preference order follows
+/// [`fallback_surfaces`] (Anthropic first). Every other harness returns an
+/// empty fallback set, so its exact-match contract is unchanged.
 fn resolve_pairing(
     harness_id: &str,
     account: &ProviderAccount,
     stored: &[ProviderPairing],
 ) -> Option<ProviderPairing> {
-    stored
+    if let Some(exact) = stored
         .iter()
         .find(|p| p.harness_id == harness_id && p.provider_id == account.id)
+    {
+        return Some(exact.clone());
+    }
+    let surfaces = fallback_surfaces(harness_id);
+    if surfaces.is_empty() {
+        return None;
+    }
+    stored
+        .iter()
+        .filter(|p| p.provider_id == account.id && surfaces.contains(&p.surface))
+        .min_by_key(|p| {
+            surfaces
+                .iter()
+                .position(|surface| *surface == p.surface)
+                .unwrap_or(usize::MAX)
+        })
         .cloned()
+}
+
+/// The surfaces a harness can consume when no harness-specific pairing exists.
+/// Only `cline` opts in today (issue #1777): it is a Native Provider that reads
+/// the standard provider key env vars for both surfaces. Order is the
+/// preference order for [`resolve_pairing`]'s fallback.
+fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
+    if harness_id == "cline" {
+        &[ApiSurface::Anthropic, ApiSurface::OpenAI]
+    } else {
+        &[]
+    }
 }
 
 /// Build the backend-selecting environment for a **Spawn Option** (issue #576 /
@@ -422,4 +462,135 @@ fn openai_surface_env(
         env.push(("OPENAI_MODEL".to_string(), model.to_string()));
     }
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preferences::model::{BillingMode, ModelTiers};
+
+    fn account(id: &str) -> ProviderAccount {
+        ProviderAccount {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some(format!("sk-{id}")),
+        }
+    }
+
+    fn pairing(harness: &str, provider: &str, surface: ApiSurface) -> ProviderPairing {
+        ProviderPairing {
+            harness_id: harness.to_string(),
+            provider_id: provider.to_string(),
+            surface,
+            base_url: Some(format!("https://api.example.com/{harness}")),
+            model_tiers: ModelTiers::default(),
+        }
+    }
+
+    /// Issue #1773 / #1777 — Cline is a Native Provider with no Buildmesh-side
+    /// pairing UI, so an Anthropic-surface attach under Claude Code supplies a
+    /// `cline:<account>` spawn's env.
+    #[test]
+    fn cline_falls_back_to_an_anthropic_pairing() {
+        let acct = account("minimax");
+        let stored = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.harness_id, "claude");
+        assert_eq!(resolved.surface, ApiSurface::Anthropic);
+    }
+
+    #[test]
+    fn cline_falls_back_to_an_openai_pairing() {
+        let acct = account("minimax");
+        let stored = vec![pairing("codex", "minimax", ApiSurface::OpenAI)];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.harness_id, "codex");
+        assert_eq!(resolved.surface, ApiSurface::OpenAI);
+    }
+
+    /// When both surfaces are attached, the fallback preference order
+    /// (Anthropic first, mirroring `fallback_surfaces`) is deterministic.
+    #[test]
+    fn cline_prefers_the_anthropic_pairing_when_both_are_attached() {
+        let acct = account("minimax");
+        let stored = vec![
+            pairing("codex", "minimax", ApiSurface::OpenAI),
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+        ];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.surface, ApiSurface::Anthropic);
+    }
+
+    /// An exact `cline:<account>` pairing (if one is ever stored) always wins
+    /// over the surface fallback.
+    #[test]
+    fn cline_exact_pairing_wins_over_fallback() {
+        let acct = account("minimax");
+        let stored = vec![
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+            pairing("cline", "minimax", ApiSurface::OpenAI),
+        ];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("exact pairing");
+        assert_eq!(resolved.harness_id, "cline");
+    }
+
+    /// Mixed surfaces fall through cleanly: a pairing belonging to a different
+    /// account never leaks into another account's env.
+    #[test]
+    fn cline_ignores_pairings_for_other_accounts() {
+        let acct = account("deepseek");
+        let stored = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        assert!(resolve_pairing("cline", &acct, &stored).is_none());
+    }
+
+    /// No pairing at all → no env (the existing stored-only contract).
+    #[test]
+    fn cline_without_any_pairing_resolves_to_none() {
+        assert!(resolve_pairing("cline", &account("minimax"), &[]).is_none());
+    }
+
+    /// Regression guard for the existing harnesses: the fallback set is empty
+    /// for every non-Cline harness, so their exact-match contract is unchanged.
+    /// A `claude:<account>` lookup must not pick up the `codex:<account>`
+    /// (OpenAI) pairing, and vice versa.
+    #[test]
+    fn non_cline_harnesses_keep_exact_match_only() {
+        let acct = account("minimax");
+        let cross = vec![
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+            pairing("codex", "minimax", ApiSurface::OpenAI),
+        ];
+        assert_eq!(
+            resolve_pairing("claude", &acct, &cross).map(|p| p.surface),
+            Some(ApiSurface::Anthropic)
+        );
+        assert_eq!(
+            resolve_pairing("codex", &acct, &cross).map(|p| p.surface),
+            Some(ApiSurface::OpenAI)
+        );
+        // Cross-surface lookups fall through rather than borrowing the other
+        // harness's attach.
+        let only_claude = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        assert!(resolve_pairing("codex", &acct, &only_claude).is_none());
+        let only_codex = vec![pairing("codex", "minimax", ApiSurface::OpenAI)];
+        assert!(resolve_pairing("claude", &acct, &only_codex).is_none());
+        // Anthropic/OpenCode/etc. never inherit an unrelated harness's pairing.
+        assert!(resolve_pairing("opencode", &acct, &cross).is_none());
+    }
+
+    /// The fallback set is what gates the whole mechanism — pin it so a future
+    /// "while we're here" harness addition is a deliberate act.
+    #[test]
+    fn only_cline_declares_fallback_surfaces() {
+        assert_eq!(
+            fallback_surfaces("cline"),
+            &[ApiSurface::Anthropic, ApiSurface::OpenAI]
+        );
+        for harness in ["anthropic", "claude", "codex", "opencode", "terminal"] {
+            assert!(fallback_surfaces(harness).is_empty(), "{harness} must not fall back");
+        }
+    }
 }

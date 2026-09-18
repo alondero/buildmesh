@@ -55,6 +55,7 @@ export type InspectorHarnessId =
   | 'commandcode'
   | 'freebuff'
   | 'muse'
+  | 'cline'
   | 'terminal';
 
 const ANTHROPIC_CAPS: HarnessCapabilities = {
@@ -351,6 +352,32 @@ const MUSE_CAPS: HarnessCapabilities = {
   available_on: ['linux', 'macos'],
 };
 
+// Cline (issue #1773) — Native Provider: resume + model + effort + prefill,
+// but no attention hook (#1775) and no readable transcript (#1776) in this
+// slice, so both stay honest-empty. Effort is the closed `--thinking`
+// vocabulary (verified against Cline 3.0.62 `--help`).
+const CLINE_CAPS: HarnessCapabilities = {
+  harness_id: 'cline',
+  supports_resume: true,
+  auto_resume_on_startup: true,
+  requires_attention_hook: false,
+  attention_capability: { kind: 'none' },
+  supports_passive_turn_watcher: false,
+  produces_readable_transcript: false,
+  supports_model_override: true,
+  supports_effort_override: true,
+  supports_extra_args: true,
+  supports_prefill: true,
+  is_plain_terminal: false,
+  effort_control: {
+    kind: 'closed',
+    allowed: ['none', 'low', 'medium', 'high', 'xhigh'],
+  },
+  // Order matches `ClineAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/cline.rs`.
+  available_on: ['windows', 'linux', 'macos'],
+};
+
 /**
  * The harness-to-capability map. Mirrors the Rust inventory table
  * exactly — see `tests/unit/circuits-inspector-capabilities.test.ts`
@@ -368,7 +395,8 @@ export const HARNESS_CAPABILITIES: Record<InspectorHarnessId, HarnessCapabilitie
   dsh: DSH_CAPS,
   commandcode: COMMANDCODE_CAPS,
   freebuff: FREEBUFF_CAPS,
-muse: MUSE_CAPS,
+  muse: MUSE_CAPS,
+  cline: CLINE_CAPS,
   terminal: TERMINAL_CAPS,
 };
 
@@ -392,6 +420,7 @@ export const HARNESS_LABEL: Record<InspectorHarnessId, string> = {
   commandcode: 'Command Code',
   freebuff: 'Freebuff',
   muse: 'Meta Muse',
+  cline: 'Cline',
   terminal: 'Terminal',
 };
 

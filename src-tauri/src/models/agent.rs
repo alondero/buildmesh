@@ -86,6 +86,9 @@ pub enum Provider {
     Freebuff,
     /// Meta Muse Code, executed in a Unix runtime.
     Muse,
+    /// Cline CLI (`cline`) — interactive terminal coding agent.
+    /// See `agent::provider::adapters::cline` (issue #1773).
+    Cline,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -108,6 +111,7 @@ impl Provider {
             Provider::CommandCode,
             Provider::Freebuff,
             Provider::Muse,
+            Provider::Cline,
             Provider::Terminal,
         ]
     }
@@ -136,6 +140,7 @@ impl Provider {
             "commandcode" | "command-code" | "cmdc" | "cmd" => Provider::CommandCode,
             "freebuff" => Provider::Freebuff,
             "muse" => Provider::Muse,
+            "cline" => Provider::Cline,
             "terminal" => Provider::Terminal,
             // "minimax" is no longer a first-class executor: it is Claude Code
             // with a swapped backend, configured as a harness profile whose
@@ -172,6 +177,7 @@ impl Provider {
             Provider::CommandCode => &adapters::COMMANDCODE,
             Provider::Freebuff => &adapters::FREEBUFF,
             Provider::Muse => &adapters::MUSE,
+            Provider::Cline => &adapters::CLINE,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -192,6 +198,7 @@ impl std::fmt::Display for Provider {
             Provider::CommandCode => write!(f, "commandcode"),
             Provider::Freebuff => write!(f, "freebuff"),
             Provider::Muse => write!(f, "muse"),
+            Provider::Cline => write!(f, "cline"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

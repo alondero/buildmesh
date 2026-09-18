@@ -78,6 +78,11 @@ fn capability_recipe_coherence() {
         let effort_value = match adapter.id() {
             "anthropic" => "high",
             "codex" => "xhigh",
+            // Issue #1773 — Cline's closed vocabulary is the only one that
+            // exposes `xhigh` and a `--thinking` flag. Picking `xhigh`
+            // exercises the long end of the vocabulary rather than the
+            // every-harness `high` fallback.
+            "cline" => "xhigh",
             _ => "high", // other harnesses don't accept effort
         };
         let config = ResolvedAgentConfig {
@@ -119,13 +124,17 @@ fn capability_recipe_coherence() {
         );
 
         // 2. Effort-flag coherence. Codex uses -c model_reasoning_effort=...;
-        //    anthropic uses --effort; everything else must not carry either.
-        //    Pin by `caps.effort_control` shape: Closed => "--effort";
-        //    InlineConfig => the configured key prefix; None => neither.
+        //    anthropic uses --effort; Cline (issue #1773) uses --thinking.
+        //    Ask the adapter for its flag shape rather than special-casing
+        //    ids here — same pattern as the model-flag check above, and the
+        //    only way to keep the test honest as future harnesses pick
+        //    vendor-specific flag names.
         let has_effort_flag = match &caps.effort_control {
-            crate::agent::capabilities::EffortControlKind::Closed { .. } => {
-                args.iter().any(|a| a == "--effort")
-            }
+            crate::agent::capabilities::EffortControlKind::Closed { .. } => adapter
+                .effort_args(effort_value)
+                .first()
+                .map(|flag| args.iter().any(|a| a == flag))
+                .unwrap_or(false),
             crate::agent::capabilities::EffortControlKind::InlineConfig { key, .. } => {
                 args.iter().any(|a| a.starts_with(key))
             }
