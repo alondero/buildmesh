@@ -1082,6 +1082,87 @@ describe('GitIssuesTab (#378)', () => {
     expect(vi.mocked(addToast)).toHaveBeenCalledWith('GitHub', errorMessage, 'error');
   });
 
+  it('filters issues by the search query across title, body, and labels', async () => {
+    // The toolbar search narrows the loaded list in place. Title, body,
+    // and label names all match so a user hunting for a label finds the
+    // issues carrying it. Case-insensitive; clearing the box restores
+    // the full list.
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Fix the wobble',
+          body: 'The foobar widget wobbles under load.',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: ['bug'],
+          blocked_by: [],
+        },
+        {
+          number: 102,
+          title: 'Add a dark theme',
+          body: 'Polish the palette.',
+          url: 'https://github.com/acme/demo/issues/102',
+          state: 'open',
+          labels: ['enhancement'],
+          blocked_by: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    await screen.findByText('Fix the wobble');
+    const search = screen.getByLabelText('Filter issues');
+
+    // Label-name match narrows to the labelled row only.
+    await userEvent.type(search, 'bug');
+    expect(screen.getByText('Fix the wobble')).toBeTruthy();
+    expect(screen.queryByText('Add a dark theme')).toBeNull();
+
+    // Non-matching query shows the no-matches empty state (not the
+    // "no open issues" state — the list itself is non-empty).
+    await userEvent.clear(search);
+    await userEvent.type(search, 'zzz-no-such-issue');
+    expect(screen.getByText('No matches')).toBeTruthy();
+    expect(screen.queryByText('Fix the wobble')).toBeNull();
+
+    // Clearing restores both rows.
+    await userEvent.clear(search);
+    expect(await screen.findByText('Fix the wobble')).toBeTruthy();
+    expect(screen.getByText('Add a dark theme')).toBeTruthy();
+  });
+
+  it('renders label chips under the title (capped with +N overflow)', async () => {
+    // The wire already carries `labels`; the row surfaces them as quiet
+    // chips so a scan of the list shows triage state at a glance.
+    // Capped at 3 + "+N more" so a heavily-labelled issue doesn't wrap
+    // into a second row of noise.
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Heavily labelled',
+          body: 'Body',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: ['bug', 'p1', 'frontend', 'needs-repro', 'v2'],
+          blocked_by: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Heavily labelled');
+    const row = title.closest('[data-issue-row]')!;
+    expect(row.textContent).toContain('bug');
+    expect(row.textContent).toContain('p1');
+    expect(row.textContent).toContain('frontend');
+    // Overflow folds behind "+2" with the hidden names on the tooltip.
+    const overflow = row.querySelector('[title="needs-repro, v2"]');
+    expect(overflow).toBeTruthy();
+    expect(overflow!.textContent).toContain('+2');
+  });
+
   it('disables the badge while a toggle is in flight to block double-clicks', async () => {
     // While the IPC is pending, the badge must be disabled so a second
     // click can't race the in-flight write. The guard mirrors the
