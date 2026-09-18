@@ -81,6 +81,32 @@
   --color-caption-close-hover: rgba(232, 17, 35, 0.9);
   --color-caption-close-pressed: rgba(232, 17, 35, 1);
 
+  /* macOS traffic lights — the close / minimise / zoom circles in the
+     bespoke title bar (ADR-0036). Like the caption tokens above, these are
+     the *system* palette rather than surface colours: macOS draws the same
+     three hues in Light and Dark mode, so only the inactive grey below has a
+     light counterpart. A close button in any other red is most of why a
+     hand-drawn traffic light reads as "not quite macOS". The pressed fills
+     are AppKit's mouse-down variants of the same hues — the lights darken
+     while held, they do not lighten. */
+  --color-mac-close: #ff5f57;
+  --color-mac-minimize: #febc2e;
+  --color-mac-zoom: #28c840;
+  --color-mac-close-pressed: #bf4942;
+  --color-mac-minimize-pressed: #bf8e22;
+  --color-mac-zoom-pressed: #1d9730;
+  /* Glyph tints — the × / − / + revealed while the cluster is hovered. Each
+     is a darkened relative of its own fill, the way `NSWindow` tints them;
+     an untinted near-black reads as a generic dot rather than a system
+     control. */
+  --color-mac-close-glyph: #4d0000;
+  --color-mac-minimize-glyph: #995700;
+  --color-mac-zoom-glyph: #006500;
+
+  /* The one themed value: the flat grey every light takes while its window
+     is inactive, which macOS matches to the current appearance. */
+  --color-mac-traffic-inactive: #4e4f52;
+
   /* Typography. --font-sans / --font-mono are the single source: Tailwind
      v4 generates the `font-sans` / `font-mono` utilities from them, and the
      base body rule reads --font-sans directly. */
@@ -234,6 +260,13 @@
      purpose: the shell's red is a fixed system accent, not a surface colour. */
   --color-caption-hover: rgba(0, 0, 0, 0.1);
   --color-caption-pressed: rgba(0, 0, 0, 0.2);
+
+  /* Inactive traffic lights (ADR-0036) — the light-appearance neutral macOS
+     greys the three circles to when the window is not focused. The coloured
+     fills and their glyph tints above have no light counterpart on purpose:
+     the system draws the red / yellow / green identically in both
+     appearances, so only the grey is a surface-relative value. */
+  --color-mac-traffic-inactive: #dddddd;
 
   /* Shadows — lower alpha on light bg; shadows read stronger there */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
