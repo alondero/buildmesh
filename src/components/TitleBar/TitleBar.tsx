@@ -16,11 +16,13 @@ import { UsageIcon } from '../Probe/probeIcons';
 
 /**
  * Bespoke window chrome for the frameless window (`decorations: false`).
- * macOS draws traffic lights on the LEFT — we can't reuse Tauri's
- * `titleBarStyle: Overlay` because it requires native decorations, so
- * the lights are drawn by us. Drag-region placement (per-target, never
- * on buttons or SVGs) is the load-bearing detail; see the recipe in
- * `docs/knowledge-primer.md`.
+ * macOS draws traffic lights on the LEFT — we can't bind to Tauri's own
+ * `titleBarStyle: Overlay`, which would need `decorations: true` (a single
+ * cross-platform field) and still leave the bar's height to fight, so the
+ * lights are drawn by us and their rest / hover / pressed / inactive states
+ * are emulated from `NSWindow` (ADR-0036). Drag-region placement
+ * (per-target, never on buttons or SVGs) is the load-bearing detail; see
+ * the recipe in `docs/knowledge-primer.md`.
  *
  * Issue #1375 moved navigation title-bar-first: a labelled "Search or
  * open…" command field opens the Universal Command Omnibar (the palette
@@ -322,54 +324,93 @@ function WindowControlButton({ onClick, label, control, danger = false, hovered 
   );
 }
 
-/** macOS traffic-light background classes — system palette values for the
-    standard red/yellow/green, matching what `NSWindow` draws natively. */
-const MAC_TRAFFIC_LIGHT_CLASSES = {
-  close: 'bg-[#FF5F57]',
-  minimize: 'bg-[#FEBC2E]',
-  maximize: 'bg-[#28C840]',
+/** macOS traffic-light state classes (ADR-0036), keyed by light. Every string
+    is a literal so Tailwind v4's source scanner compiles the rule — a template
+    literal would defeat JIT detection and the state would silently never
+    paint. `restore` is the colour a light returns to while the *cluster* is
+    hovered on an unfocused window; `pressed` is AppKit's darker mouse-down
+    fill. Tokens live in `App.css` alongside the caption ones. */
+const MAC_TRAFFIC_LIGHT = {
+  close: {
+    fill: 'bg-mac-close',
+    restore: 'group-hover:bg-mac-close',
+    pressed: 'active:bg-mac-close-pressed',
+    glyph: 'text-mac-close-glyph',
+  },
+  minimize: {
+    fill: 'bg-mac-minimize',
+    restore: 'group-hover:bg-mac-minimize',
+    pressed: 'active:bg-mac-minimize-pressed',
+    glyph: 'text-mac-minimize-glyph',
+  },
+  maximize: {
+    fill: 'bg-mac-zoom',
+    restore: 'group-hover:bg-mac-zoom',
+    pressed: 'active:bg-mac-zoom-pressed',
+    glyph: 'text-mac-zoom-glyph',
+  },
 } as const;
 
-/** One of the three macOS traffic lights. 12×12 px coloured circle, with
-    the matching glyph (X / dash / plus) revealed on hover to mirror
-    NSWindow's behaviour. The button itself is the circle (no padding
-    wrapper) so the click target matches the visible affordance — Tauri
-    buttons live in the bar's flex row at `items-center` so vertical
-    centring is inherited from the parent. */
-function MacosTrafficLight({ kind, onClick, ariaLabel }: {
-  kind: keyof typeof MAC_TRAFFIC_LIGHT_CLASSES;
+/** One of the three macOS traffic lights.
+ *
+ *  Geometry is the native 12px circle. `w-3` / `h-3` would compile to 9.75px
+ *  at this app's 13px root (0.75rem), the same rem trap the caption glyphs
+ *  fell into, so the box is a pixel literal. The button *is* the circle — no
+ *  padding wrapper — so the click target matches the visible affordance; the
+ *  bar's `items-center` centres it vertically.
+ *
+ *  States mirror `NSWindow` (ADR-0036): the glyph is revealed while the pointer
+ *  is anywhere over the three-light cluster, NOT per button — macOS shows all
+ *  three symbols at once — the fill darkens while pressed, and an unfocused
+ *  window paints all three as one flat grey with no glyphs. Hovering the
+ *  cluster of an inactive window restores the colour of the light under the
+ *  pointer, which is how you can tell what you are about to click.
+ *
+ *  No `title`: native traffic lights carry no tooltip, so `aria-label` is the
+ *  only accessible name — the same contract the caption buttons took in
+ *  ADR-0035. */
+function MacosTrafficLight({ kind, onClick, ariaLabel, inactive }: {
+  kind: keyof typeof MAC_TRAFFIC_LIGHT;
   onClick: () => void;
   ariaLabel: string;
+  inactive: boolean;
 }) {
+  const light = MAC_TRAFFIC_LIGHT[kind];
+  // The restore-on-hover colour only has a job while the window is inactive: a
+  // focused light already paints its own fill, so repeating it would be noise
+  // in a class contract the tests read.
+  const fill = inactive ? `bg-mac-traffic-inactive ${light.restore}` : light.fill;
   return (
     <button
       type="button"
       onClick={onClick}
-      title={ariaLabel}
       aria-label={`${ariaLabel} window`}
       data-testid={`macos-traffic-${kind}`}
-      className={`group w-3 h-3 rounded-full ${MAC_TRAFFIC_LIGHT_CLASSES[kind]} flex items-center justify-center transition-[filter] hover:brightness-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40`}
+      className={`${fill} ${light.pressed} flex h-[12px] w-[12px] items-center justify-center rounded-full focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40`}
     >
+      {/* A 12-unit box rendered at 12px, so the glyph coordinates are real
+          pixels: each symbol spans 3→9 (6px) with a 1.5px stroke — about half
+          the light's diameter, which is what the system's symbols occupy. */}
       <svg
-        viewBox="0 0 8 8"
-        className="w-2 h-2 text-black/70 opacity-0 transition-opacity group-hover:opacity-100"
+        viewBox="0 0 12 12"
+        className={`h-[12px] w-[12px] ${light.glyph} opacity-0 transition-opacity group-hover:opacity-100`}
         fill="none"
         stroke="currentColor"
-        strokeWidth="1"
+        strokeWidth="1.5"
         strokeLinecap="round"
         aria-hidden
       >
         {kind === 'close' && (
           <>
-            <line x1="2" y1="2" x2="6" y2="6" />
-            <line x1="6" y1="2" x2="2" y2="6" />
+            <line x1="3" y1="3" x2="9" y2="9" />
+            <line x1="9" y1="3" x2="3" y2="9" />
           </>
         )}
-        {kind === 'minimize' && <line x1="2" y1="4" x2="6" y2="4" />}
+        {kind === 'minimize' && <line x1="3" y1="6" x2="9" y2="6" />}
         {kind === 'maximize' && (
           <>
-            <line x1="2" y1="4" x2="6" y2="4" />
-            <line x1="4" y1="2" x2="4" y2="6" />
+            <line x1="3" y1="6" x2="9" y2="6" />
+            <line x1="6" y1="3" x2="6" y2="9" />
           </>
         )}
       </svg>
@@ -441,9 +482,10 @@ export function TitleBar() {
   const { hovered: maximizeHovered, pressed: maximizePressed } =
     useWindowControlOverlay(maximizeButtonRef, handleToggleMaximize);
 
-  // Caption glyphs dim while the window is inactive, as native ones do. Applied
-  // only to the Windows/Linux controls — the macOS traffic lights are drawn
-  // unchanged (ADR-0035 keeps that branch out of scope).
+  // Both window-control families carry an inactive state, as the native ones
+  // do: the Windows/Linux caption glyphs dim (ADR-0035) and the macOS traffic
+  // lights fall to the system's flat grey (ADR-0036). One hook feeds both, so
+  // the two branches can never disagree about whether the window has focus.
   const windowFocused = useWindowFocused();
   const captionGlyphs = captionGlyphClass(!windowFocused);
 
@@ -480,16 +522,21 @@ export function TitleBar() {
         {/* Left cell — clusters hug the start edge. */}
         <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
           {isMac && (
+            // `group` lives on the cluster, not on each light: macOS reveals
+            // all three glyphs together as soon as the pointer enters the
+            // strip, and hovering an unfocused window's strip brings the
+            // colours back (ADR-0036).
             <div
-              className="flex items-center gap-2 pr-3"
+              className="group flex items-center gap-2 pr-3"
               data-testid="macos-traffic-lights"
             >
-              <MacosTrafficLight kind="close" onClick={() => appWindow.close()} ariaLabel="Close" />
-              <MacosTrafficLight kind="minimize" onClick={() => appWindow.minimize()} ariaLabel="Minimize" />
+              <MacosTrafficLight kind="close" onClick={() => appWindow.close()} ariaLabel="Close" inactive={!windowFocused} />
+              <MacosTrafficLight kind="minimize" onClick={() => appWindow.minimize()} ariaLabel="Minimize" inactive={!windowFocused} />
               <MacosTrafficLight
                 kind="maximize"
                 onClick={handleToggleMaximize}
                 ariaLabel={isMaximized ? 'Restore' : 'Maximize'}
+                inactive={!windowFocused}
               />
             </div>
           )}
