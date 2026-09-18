@@ -17,7 +17,7 @@
  * Run with: npm test -- --run tests/integration/agent-terminal-auto-spawn.test.tsx
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { render, act, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -361,5 +361,29 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     ).toHaveLength(1);
     expect(terminalManager.getInstance(IDLE_NODE.id)).toBeDefined();
     second.unmount();
+  });
+
+  it('sets ignoreBracketedPasteMode on Command Code terminals so Ink 7 does not swallow keys', async () => {
+    seedAgentNodes([{ ...IDLE_NODE, provider: 'commandcode', status: 'running' }], IDLE_NODE.id);
+    const { container } = render(
+      <AgentTerminal nodeId={IDLE_NODE.id} provider="commandcode" focusOnAttach={false} />,
+    );
+    setContainerSize(container, IDLE_NODE.id, 800, 400);
+
+    await waitFor(() => {
+      expect(terminalManager.getInstance(IDLE_NODE.id)?.term.options.ignoreBracketedPasteMode).toBe(true);
+    });
+  });
+
+  it('leaves bracketed paste enabled for other harnesses', async () => {
+    seedAgentNodes([{ ...IDLE_NODE, provider: 'anthropic', status: 'running' }], IDLE_NODE.id);
+    const { container } = render(
+      <AgentTerminal nodeId={IDLE_NODE.id} provider="anthropic" focusOnAttach={false} />,
+    );
+    setContainerSize(container, IDLE_NODE.id, 800, 400);
+
+    await waitFor(() => {
+      expect(terminalManager.getInstance(IDLE_NODE.id)?.term.options.ignoreBracketedPasteMode).toBe(false);
+    });
   });
 });

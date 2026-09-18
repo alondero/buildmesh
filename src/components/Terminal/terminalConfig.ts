@@ -109,6 +109,17 @@ const BASE_TERMINAL_OPTIONS: Omit<ITerminalOptions, 'fontSize' | 'theme'> = {
   allowProposedApi: true,
 };
 
+/**
+ * Command Code 1.56+ (Ink 7) treats a CSI 200~ without a matching 201~ as
+ * an open bracketed paste and swallows printable keys until Ctrl+C. xterm.js
+ * emits those wrappers whenever the app enables DECSET 2004. Other harnesses
+ * still want the wrappers so a multi-line paste is one prompt, not N submits.
+ */
+export function ignoreBracketedPasteForHarness(provider: string): boolean {
+  const harness = provider.split(':')[0];
+  return harness === 'commandcode';
+}
+
 export function createTerminalOptions(): ITerminalOptions {
   return {
     ...BASE_TERMINAL_OPTIONS,

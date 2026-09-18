@@ -79,10 +79,9 @@ pub struct HarnessLaunchInput<'a> {
     pub sandbox: bool,
 }
 
-/// The environment policy a harness declares for its launch. A future
-/// `env_set` slot is reserved for harness-specific env injections but
-/// is empty for every current adapter — per-profile backend env
-/// continues to flow through `PreparedLaunchRouting::Environment`.
+/// The environment policy a harness declares for its launch. Per-profile
+/// backend env continues to flow through `PreparedLaunchRouting::Environment`.
+/// `env_set` is for harness-specific child env injections.
 pub struct HarnessEnvironmentPolicy {
     /// Reset the cwrap unset list (`CLAUDE_BACKEND_ENV_VARS`) before the
     /// spawn path injects the per-profile backend env. True for the
@@ -93,8 +92,7 @@ pub struct HarnessEnvironmentPolicy {
     /// `OPENAI_API_KEY` / `OPENAI_BASE_URL` so the pairing-scoped
     /// credential reference is the only OpenAI auth path).
     pub env_remove: &'static [&'static str],
-    /// Per-harness extra env to set. Reserved for future harnesses; empty
-    /// for every current adapter.
+    /// Per-harness extra env to set on the child.
     pub env_set: &'static [(&'static str, &'static str)],
 }
 
@@ -310,6 +308,16 @@ pub fn default_prepare(
             env_set: &[],
         };
         &CODEX
+    } else if matches!(adapter.id(), "commandcode") {
+        // Ink's kitty-keyboard probe races ConPTY and swallows keys until
+        // Ctrl+C. VS Code terminals skip that probe; wrap() still forces a
+        // colour-capable TERM so identifying as vscode does not unstyle the TUI.
+        static COMMANDCODE: HarnessEnvironmentPolicy = HarnessEnvironmentPolicy {
+            resets_backend_env: false,
+            env_remove: &[],
+            env_set: &[("TERM_PROGRAM", "vscode")],
+        };
+        &COMMANDCODE
     } else {
         HarnessEnvironmentPolicy::NONE
     };
@@ -715,6 +723,29 @@ mod tests {
         assert!(!p.resets_backend_env);
         assert!(p.env_remove.is_empty());
         assert!(p.env_set.is_empty());
+    }
+
+    #[test]
+    fn commandcode_environment_identifies_as_vscode_to_skip_kitty_probe() {
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: None,
+            sandbox: false,
+        };
+        let prepared = default_prepare(
+            &crate::agent::provider::adapters::commandcode::COMMANDCODE,
+            input,
+        );
+        assert_eq!(
+            prepared.environment.env_set,
+            &[("TERM_PROGRAM", "vscode")],
+            "Command Code must set TERM_PROGRAM=vscode to skip the kitty probe; got {:?}",
+            prepared.environment.env_set
+        );
     }
 
     #[test]
