@@ -30,6 +30,32 @@ fn muse_context_repair_skips_native_wsl_filesystem() {
     }
 }
 
+/// Native Windows Muse (1.3.0+) traverses the same `.agents/skills`
+/// placeholder as the WSL guest, so a Windows-checkout pointer file
+/// fails startup with `os error 267` instead of the WSL `ENOTDIR`.
+/// The preflight must run for the native runtime too.
+#[test]
+fn muse_context_repair_covers_native_windows_runtime() {
+    assert!(!should_prepare_muse_context(
+        Provider::Anthropic,
+        EnvType::Windows,
+        EnvType::Windows
+    ));
+    if cfg!(target_os = "windows") {
+        assert!(should_prepare_muse_context(
+            Provider::Muse,
+            EnvType::Windows,
+            EnvType::Windows
+        ));
+    } else {
+        assert!(!should_prepare_muse_context(
+            Provider::Muse,
+            EnvType::Windows,
+            EnvType::Windows
+        ));
+    }
+}
+
 #[test]
 fn provider_provisioning_runs_hooks_after_trust_failure() {
     let trust_finished = std::cell::Cell::new(false);
