@@ -54,3 +54,35 @@ pub fn exit_application(app: tauri::AppHandle) {
     crate::mark_user_close_requested();
     app.exit(0);
 }
+
+/// Hand the maximise button's measured box to the native Snap Layouts overlay
+/// (ADR-0035).
+///
+/// The frontend measures the button from the DOM instead of the backend
+/// assuming its size, because the overlay has to land exactly on the real
+/// button: a constant that drifts from a Tailwind class stops the Windows 11
+/// flyout appearing and breaks nothing else, which is a failure nobody
+/// notices. Logical (CSS) pixels in — `windowing` applies the window DPI scale,
+/// since the frontend cannot see it.
+///
+/// A no-op off Windows; `HTMAXBUTTON` and Snap Layouts are Windows shell
+/// features. Called on mount and again on resize, so the implementation is
+/// idempotent rather than install-once.
+#[command]
+pub fn set_titlebar_maximize_metrics(
+    window: tauri::WebviewWindow,
+    right_inset: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    crate::windowing::set_maximize_metrics(
+        &window,
+        crate::windowing::MaximizeMetrics {
+            right_inset,
+            top,
+            width,
+            height,
+        },
+    )
+}

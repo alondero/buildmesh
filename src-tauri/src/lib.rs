@@ -24,6 +24,7 @@ pub mod secret_scrubber;
 mod services;
 mod session_capture;
 mod session_naming;
+mod windowing;
 
 use tauri::Manager;
 
@@ -708,6 +709,11 @@ pub fn run() {
             // Confirmed exit (issue #1501): lifecycle-owned shutdown from the
             // modal's "Exit Buildmesh", not an ACL-gated window IPC.
             commands::app::exit_application,
+            // Native Snap Layouts for the bespoke title bar (ADR-0035). The
+            // frontend reports the measured maximise-button box; a no-op off
+            // Windows. Not ACL-gated, like the two window-lifecycle commands
+            // above — event listening needs only `core:default`.
+            commands::app::set_titlebar_maximize_metrics,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,

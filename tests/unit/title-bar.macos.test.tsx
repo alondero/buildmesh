@@ -35,6 +35,12 @@ const windowApi = vi.hoisted(() => ({
   close: vi.fn(),
   isMaximized: vi.fn().mockResolvedValue(false),
   onResized: vi.fn<(cb: () => void) => Promise<() => void>>(),
+  // Focus tracking (ADR-0035) — the macOS branch deliberately does not dim the
+  // traffic lights, but the hook still runs, so the mock has to provide it.
+  isFocused: vi.fn().mockResolvedValue(true),
+  onFocusChanged: vi.fn<
+    (cb: (event: { payload: boolean }) => void) => Promise<() => void>
+  >(),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -90,14 +96,17 @@ describe('TitleBar on macOS', () => {
       expect(lights[0].getAttribute('data-testid')).toBe('macos-traffic-close');
       expect(lights[1].getAttribute('data-testid')).toBe('macos-traffic-minimize');
       expect(lights[2].getAttribute('data-testid')).toBe('macos-traffic-maximize');
-      // The right-side SQUARE controls are gone on macOS — the unique
-      // `w-11` Tailwind class is the WindowControlButton affordance;
-      // the traffic lights themselves are valid `button`s with the same
-      // `Minimize window` / `Maximize window` / `Close window`
-      // accessible names (Apple uses these for VoiceOver too), so the
-      // right test for the suppression is "no w-11 squares", not
-      // "no minimize button at all".
-      expect(container.querySelectorAll('button.w-11').length).toBe(0);
+      // The right-side caption controls are gone on macOS. The marker is
+      // the `data-window-control` attribute the three buttons carry — NOT
+      // a Tailwind class. The old `w-11` sentinel stopped matching the
+      // moment the controls moved to 46px backplates, which silently made
+      // this assertion pass on a render that still had them (ADR-0035).
+      // The traffic lights themselves are valid `button`s with the same
+      // `Minimize window` / `Maximize window` / `Close window` accessible
+      // names (Apple uses these for VoiceOver too), so the right test for
+      // the suppression is "no marked caption controls", not "no minimize
+      // button at all".
+      expect(container.querySelectorAll('[data-window-control]').length).toBe(0);
       // The rest of the chrome is still present.
       expect(screen.getByAltText('Buildmesh')).toBeTruthy();
       expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
