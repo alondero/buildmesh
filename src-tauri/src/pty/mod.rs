@@ -16,3 +16,14 @@ pub fn strip_git_env_vars(cmd: &mut CommandBuilder) {
     cmd.env_remove("GIT_OBJECT_DIRECTORY");
     cmd.env_remove("GIT_COMMON_DIR");
 }
+
+/// Parent processes launched from CI, Grok, or a pipe often carry
+/// `TERM=dumb`, `NO_COLOR=1`, and `FORCE_COLOR=0`. Agent TUIs inherit
+/// that and render without colour. A ConPTY / xterm.js child is a real
+/// terminal, so give it a colour-capable TERM and drop the disable flags.
+pub fn apply_interactive_tty_env(cmd: &mut CommandBuilder) {
+    cmd.env_remove("NO_COLOR");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("FORCE_COLOR", "3");
+}

@@ -18,6 +18,15 @@ Buildmesh only lists a harness it can detect in the selected runtime.
 
 The plain **Terminal** harness can still be used when no agent CLI is found.
 
+## Command Code does not accept typing
+
+Command Code 1.56 and later can draw the prompt and then ignore keys on
+Windows (including inside Buildmesh). This is an upstream CLI regression.
+After updating Buildmesh, spawn a **new** node — typing and colour both work
+on new nodes. If an already-open node is stuck, press Ctrl+C once, then type.
+Downgrading the CLI to 1.55 with `COMMANDCODE_SKIP_UPDATES=1` also restores
+typing outside Buildmesh.
+
 ## An Agent Node will not resume
 
 Terminal nodes and agents that have not captured a session id are

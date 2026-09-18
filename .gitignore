@@ -35,6 +35,10 @@ docs/development/security-standards.md
 # Test artifacts
 test-results/
 
+# Windows reserved device name accidentally created by `> NUL` redirects
+# when cwd is src-tauri (or the repo root). Never a real source file.
+NUL
+
 .playwright-cli/
 
 # Stray review/diff artifacts from agent sessions (e.g. `git diff > /tmp/x.patch`
