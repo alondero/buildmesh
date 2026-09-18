@@ -46,10 +46,14 @@ pub(super) fn should_prepare_muse_context(
     filesystem_env: EnvType,
     runtime_env: EnvType,
 ) -> bool {
+    // Both the WSL guest and the native Windows binary (Muse 1.3.0+)
+    // traverse `.agents/skills` as a directory at startup. A Windows
+    // checkout with `core.symlinks=false` leaves pointer files there,
+    // which fail as ENOTDIR under WSL and os error 267 natively.
     cfg!(target_os = "windows")
         && provider == Provider::Muse
-        && runtime_env == EnvType::Wsl
         && filesystem_env != EnvType::Wsl
+        && matches!(runtime_env, EnvType::Wsl | EnvType::Windows)
 }
 
 /// Run the two provider-owned launch prerequisites in order while preserving
@@ -486,10 +490,11 @@ pub(super) async fn provision_workspace(
         Ok(())
     }).await?;
 
-    // Muse's WSL runtime scans project rules and skills before the PTY is
-    // usable. Windows Git may have checked the tracked symlinks out as plain
-    // pointer files, so repair only the exact committed aliases at this
-    // launch boundary. This is shared by fresh, resume, root and warm paths.
+    // Muse's WSL and native Windows runtimes scan project rules and skills
+    // before the PTY is usable. Windows Git may have checked the tracked
+    // symlinks out as plain pointer files, so repair only the exact
+    // committed aliases at this launch boundary. This is shared by fresh,
+    // resume, root and warm paths.
     if should_prepare_muse_context(provider, filesystem_env, resolved.env_type) {
         let context_path = resolved.host_path.clone();
         crate::blocking::run_blocking("muse_context_links", move || {

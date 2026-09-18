@@ -65,6 +65,23 @@ Check these in order:
 Never work around a certificate warning by disabling browser security on a
 shared network. Remote access exposes terminal content and input.
 
+## Muse fails to start with `os error 267` or `Not a directory`
+
+`AGENTS.md` and `.agents/skills` are Git symlinks. On Windows checkouts
+with `core.symlinks=false`, Git stores them as plain pointer files and Muse
+refuses to start because it cannot traverse `.agents/skills` as a directory.
+
+- Launching through Buildmesh repairs those links automatically before the
+  session starts, on both the native Windows and WSL runtimes.
+- When invoking `muse` manually outside Buildmesh, restore the links
+  yourself (Windows Developer Mode must be on; PowerShell's `New-Item`
+  still requires elevation, so use `python -c "import os, ..."` with
+  `os.symlink`, which does not):
+  `AGENTS.md` → `CLAUDE.md`, `.agents/skills` → `..\.claude\skills`
+  (backslashes — a forward-slash directory target is untraversable on
+  Windows). Confirm `git status --porcelain` shows no change for either
+  path afterwards, then retry.
+
 ## A Mesh is stale or sync fails
 
 Buildmesh's sync path is conservative around changes that an incoming
