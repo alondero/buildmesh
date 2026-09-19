@@ -24,8 +24,12 @@ use crate::agent::spawn::{
     spawn_with_intent, IssueContext, PullRequestContext, SpawnIntent, SpawnOutcome,
     SpawnRequest, TerminalSize,
 };
+use crate::agent::session_lifecycle;
 use crate::db;
+use crate::process_util::panic_message;
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
+use std::panic::AssertUnwindSafe;
 use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
@@ -353,6 +357,148 @@ pub struct IssueNodeDraft {
     pub prefill: String,
 }
 
+// ---------------------------------------------------------------------------
+// Detached-spawn wrapper (issue #1700 — silent fire-and-forget swallowed
+// `SpawnOutcome::Skipped` / `AlreadyActive` and panics, leaving nodes stuck on
+// `pending` forever — and `AgentReviewButton` had no way to start a circuit
+// even when the process was alive).
+//
+// `spawn_with_intent`'s synchronous return path already writes the DB and
+// emits `node-spawn-completed` / `node-spawn-failed` for the
+// `Started` / `Err` cases (`agent::spawn::orchestrator::spawn_agent_inner`,
+// lines 305-336). The remaining silent paths — every `SpawnOutcome::Skipped`
+// short-circuit and `SpawnOutcome::AlreadyActive`, plus any panic that
+// escapes the future before the orchestrator's match — funnel through
+// [`classify_spawn_outcome`] / [`dispatch_spawn_outcome`] /
+// [`dispatch_spawn_panic`] so the row never stays `pending` past one spawn
+// attempt and the frontend `agentNodeStore` always observes a terminal
+// event.
+// ---------------------------------------------------------------------------
+
+/// Per-outcome decision returned by [`classify_spawn_outcome`]. The wrappers
+/// [`dispatch_spawn_outcome`] / [`dispatch_spawn_panic`] materialise it into
+/// session-lifecycle writes + `node-spawn-completed` /
+/// `node-spawn-failed` events.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpawnDispatchAction {
+    /// Orchestrator already emitted `node-spawn-completed`. No-op.
+    AlreadyCompleted,
+    /// `is_agent_already_running` returned true at the orchestrator's guard
+    /// (`orchestrator.rs:254-256`), so a PTY reader is registered for the
+    /// node but no event was emitted. Reconcile DB + frontend to `Running`.
+    ReconcileAlreadyActive,
+    /// Orchestrator returned `SpawnOutcome::Skipped` without firing any
+    /// event (`orchestrator.rs:151, 161, 170, 208`). Surface the skip as a
+    /// user-facing failure so the row doesn't stay stuck on `pending`.
+    ReportSkipped,
+    /// Orchestrator already wrote Error + emitted `node-spawn-failed`.
+    /// No-op (the `Err` branch fires `tracing::error` for log fidelity).
+    AlreadyReportedFailure,
+}
+
+/// Pure classification of `spawn_with_intent`'s return value into the
+/// dispatch action the detached wrapper needs to take. Tested exhaustively
+/// in [`tests::classify_spawn_outcome_*`].
+pub(crate) fn classify_spawn_outcome(
+    outcome: &Result<SpawnOutcome, String>,
+) -> SpawnDispatchAction {
+    match outcome {
+        Ok(SpawnOutcome::Started(_)) => SpawnDispatchAction::AlreadyCompleted,
+        Ok(SpawnOutcome::AlreadyActive(_)) => SpawnDispatchAction::ReconcileAlreadyActive,
+        Ok(SpawnOutcome::Skipped(_)) => SpawnDispatchAction::ReportSkipped,
+        Err(_) => SpawnDispatchAction::AlreadyReportedFailure,
+    }
+}
+
+/// Materialise a [`SpawnDispatchAction`] into session-lifecycle writes +
+/// `node-spawn-completed` / `node-spawn-failed` Tauri events. Mirrors the
+/// synchronous success / failure branches in
+/// `agent::spawn::orchestrator::spawn_agent_inner` (lines 305-336) so the
+/// frontend `agentNodeStore` always receives a terminal event for the
+/// `create_*_node` flows.
+pub(crate) fn dispatch_spawn_outcome(
+    app: &AppHandle,
+    node_id: i64,
+    outcome: Result<SpawnOutcome, String>,
+) {
+    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    match classify_spawn_outcome(&outcome) {
+        SpawnDispatchAction::AlreadyCompleted => {}
+        SpawnDispatchAction::ReconcileAlreadyActive => {
+            tracing::warn!(
+                "create_*_node: node {node_id} already had a live agent process; reconciling UI"
+            );
+            let _ = session_lifecycle::on_spawn_complete(&sink, node_id);
+            let _ = app.emit(
+                "node-spawn-completed",
+                NodeSpawnCompletedPayload { node_id },
+            );
+        }
+        SpawnDispatchAction::ReportSkipped => {
+            tracing::error!(
+                "create_*_node: node {node_id} spawn skipped before process launch"
+            );
+            let _ = session_lifecycle::on_error(&sink, node_id);
+            let _ = app.emit(
+                "node-spawn-failed",
+                NodeSpawnFailedPayload {
+                    node_id,
+                    error: "spawn skipped before process launch (another spawn holds the lease)"
+                        .to_string(),
+                },
+            );
+        }
+        SpawnDispatchAction::AlreadyReportedFailure => {
+            if let Err(error) = &outcome {
+                tracing::error!(
+                    "create_*_node: node {node_id} spawn returned Err (event already emitted by orchestrator): {error}"
+                );
+            }
+        }
+    }
+}
+
+/// Convert a panic that escaped the spawn future into a user-visible Error
+/// so the DB row never stays stuck on `pending`. Called from the
+/// detached-task wrapper [`run_detached_spawn`].
+pub(crate) fn dispatch_spawn_panic(
+    app: &AppHandle,
+    node_id: i64,
+    panic_msg: String,
+) {
+    tracing::error!(
+        "create_*_node: node {node_id} spawn future panicked: {panic_msg}"
+    );
+    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    let _ = session_lifecycle::on_error(&sink, node_id);
+    let _ = app.emit(
+        "node-spawn-failed",
+        NodeSpawnFailedPayload {
+            node_id,
+            error: format!("spawn panicked: {panic_msg}"),
+        },
+    );
+}
+
+/// Run `spawn_with_intent` inside `catch_unwind`, then dispatch its outcome
+/// (or the captured panic) to the session-lifecycle sink + Tauri events.
+/// Replaces the bare `tauri::async_runtime::spawn(...).await` blocks in
+/// `create_issue_node` / `create_pr_node`, both of which used to swallow
+/// `SpawnOutcome::Skipped` / `AlreadyActive` and panic paths — leaving the
+/// node stuck on `pending` forever (issue #1700).
+pub(crate) async fn run_detached_spawn(app: AppHandle, node_id: i64, request: SpawnRequest) {
+    let result = AssertUnwindSafe(spawn_with_intent(&app, request))
+        .catch_unwind()
+        .await;
+    match result {
+        Ok(outcome) => dispatch_spawn_outcome(&app, node_id, outcome),
+        Err(payload) => {
+            let msg = panic_message(&payload);
+            dispatch_spawn_panic(&app, node_id, msg.to_string());
+        }
+    }
+}
+
 /// Fast acceptance of a GitHub-issue spawn. The row is committed and returned
 /// immediately; the same backend intent seam owns the slow worktree/PTY launch
 /// and emits the completion/failure event.
@@ -426,16 +572,17 @@ pub fn create_issue_node(
     let _ = app.emit("node-created", NodeCreatedPayload { id: node.id });
     let app_for_spawn = app.clone();
     let node_id = node.id;
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = spawn_with_intent(
-            &app_for_spawn,
-            SpawnRequest::new(node_id, intent, TerminalSize::default()),
-        )
-        .await
-        {
-            tracing::error!("create_issue_node: node {} failed: {}", node_id, error);
-        }
-    });
+    // Detached task: the previous bare `if let Err(...)` wrapper silently
+    // dropped every `SpawnOutcome::Skipped` / `AlreadyActive` and any panic
+    // that escaped the future — leaving the row stuck on `pending` until the
+    // user restarted the app (issue #1700). `run_detached_spawn` routes all
+    // four outcomes + panic through session-lifecycle + Tauri events so the
+    // DB and the frontend `agentNodeStore` both observe a terminal state.
+    tauri::async_runtime::spawn(run_detached_spawn(
+        app_for_spawn,
+        node_id,
+        SpawnRequest::new(node_id, intent, TerminalSize::default()),
+    ));
 
     tracing::info!(
         "create_issue_node: accepted pending node {} for issue #{} on mesh {}",
@@ -635,16 +782,14 @@ pub fn create_pr_node(
 
     let app_for_spawn = app.clone();
     let node_id = draft.node.id;
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = spawn_with_intent(
-            &app_for_spawn,
-            SpawnRequest::new(node_id, intent, TerminalSize::default()),
-        )
-        .await
-        {
-            tracing::error!("create_pr_node: node {} failed: {}", node_id, error);
-        }
-    });
+    // See `create_issue_node` for the rationale — `run_detached_spawn` handles
+    // every silent outcome (`Skipped`, `AlreadyActive`, panic) so the row
+    // never stays stuck on `pending`.
+    tauri::async_runtime::spawn(run_detached_spawn(
+        app_for_spawn,
+        node_id,
+        SpawnRequest::new(node_id, intent, TerminalSize::default()),
+    ));
 
     Ok(draft)
 }
@@ -1348,6 +1493,71 @@ mod tests {
         assert!(loop_.get("initial_prompt").is_some());
         assert!(fresh.get("initial_prompt").is_none());
         assert!(resume.get("initial_prompt").is_none());
+    }
+
+    // ----- detached-spawn dispatch (issue #1700) -----------------------
+    //
+    // The `create_*_node` flows used to drop every `SpawnOutcome::Skipped`
+    // / `AlreadyActive` and any panic that escaped the spawn future —
+    // leaving the row stuck on `pending` until app restart. The dispatch
+    // helpers funnel every outcome (and panics) through the
+    // session-lifecycle sink + `node-spawn-{completed,failed}` events.
+    // `classify_spawn_outcome` is the pure decision surface; pin each
+    // variant so a refactor that drops one fails review.
+
+    fn dummy_node() -> crate::models::AgentNode {
+        crate::models::AgentNode::default()
+    }
+
+    #[test]
+    fn classify_spawn_outcome_started_is_already_completed() {
+        let outcome: Result<SpawnOutcome, String> = Ok(SpawnOutcome::Started(dummy_node()));
+        assert_eq!(
+            classify_spawn_outcome(&outcome),
+            SpawnDispatchAction::AlreadyCompleted,
+        );
+    }
+
+    #[test]
+    fn classify_spawn_outcome_already_active_reconciles() {
+        let outcome: Result<SpawnOutcome, String> = Ok(SpawnOutcome::AlreadyActive(dummy_node()));
+        assert_eq!(
+            classify_spawn_outcome(&outcome),
+            SpawnDispatchAction::ReconcileAlreadyActive,
+        );
+    }
+
+    #[test]
+    fn classify_spawn_outcome_skipped_reports_failure() {
+        let outcome: Result<SpawnOutcome, String> = Ok(SpawnOutcome::Skipped(dummy_node()));
+        assert_eq!(
+            classify_spawn_outcome(&outcome),
+            SpawnDispatchAction::ReportSkipped,
+        );
+    }
+
+    #[test]
+    fn classify_spawn_outcome_err_is_already_reported() {
+        let outcome: Result<SpawnOutcome, String> = Err("worktree provisioning failed".into());
+        assert_eq!(
+            classify_spawn_outcome(&outcome),
+            SpawnDispatchAction::AlreadyReportedFailure,
+        );
+    }
+
+    /// `panic_message` is the seam between the async catch_unwind payload
+    /// and the `dispatch_spawn_panic` log/error string. A panic with a
+    /// `String` payload must surface verbatim — a `&'static str` likewise —
+    /// and unknown payloads degrade to a recognisable placeholder rather
+    /// than panicking the test or the worker.
+    #[test]
+    fn panic_message_extracts_string_and_str_payloads() {
+        let s_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("boom"));
+        assert_eq!(panic_message(&s_payload), "boom");
+        let str_payload: Box<dyn std::any::Any + Send> = Box::new("kaboom");
+        assert_eq!(panic_message(&str_payload), "kaboom");
+        let i_payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
+        assert_eq!(panic_message(&i_payload), "<non-string panic payload>");
     }
 }
 

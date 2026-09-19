@@ -6,11 +6,12 @@ import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeSto
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 
-const { trigger, list } = vi.hoisted(() => ({ trigger: vi.fn(), list: vi.fn() }));
+const { trigger, list, isRunning } = vi.hoisted(() => ({ trigger: vi.fn(), list: vi.fn(), isRunning: vi.fn() }));
 vi.mock('../../src/lib/tauri', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/lib/tauri')>(),
   triggerCircuitFromNode: trigger,
   listCircuits: list,
+  isAgentRunning: isRunning,
 }));
 
 function spawnOption(id: string, label: string): SpawnOption {
@@ -50,6 +51,10 @@ describe('agent workflow title-bar control', () => {
   beforeEach(() => {
     trigger.mockReset().mockResolvedValue(91);
     list.mockReset().mockResolvedValue([]);
+    // Default: no live agent process. Existing tests use status: 'ready' so
+    // the DB status alone makes the button eligible; the liveness check is
+    // only consulted for transient statuses (pending/spawning).
+    isRunning.mockReset().mockResolvedValue(false);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
     useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
   });
@@ -205,5 +210,41 @@ describe('agent workflow title-bar control', () => {
   it.each(['suspended', 'archived', 'error'])('disables starting for %s agents', status => {
     renderButton({ ...node, status: status as AgentNode['status'] });
     expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // Liveness-based eligibility: the backend's `trigger_circuit_from_node`
+  // gate trusts `PROCESS_REGISTRY.is_alive()` over the DB status. A node whose
+  // row is still `pending`/`spawning` (in-flight, or stranded by an upstream
+  // fire-and-forget swallow) is still eligible if its PTY reader is actually
+  // registered — see commands::circuit::trigger_circuit_from_node.
+  it.each(['pending', 'spawning'])('enables a %s node whose process is alive', async status => {
+    isRunning.mockResolvedValue(true);
+    renderButton({ ...node, status: status as AgentNode['status'] });
+    // The hook polls the backend; wait for the resolution to land.
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
+
+  it.each(['pending', 'spawning'])('keeps a %s node disabled while its process is not yet alive', status => {
+    isRunning.mockResolvedValue(false);
+    renderButton({ ...node, status: status as AgentNode['status'] });
+    // Default mock returns false synchronously, so the initial state shows disabled.
+    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('does not poll liveness once the node reaches a terminal status', async () => {
+    // A `running` row is eligible purely by status; the liveness check is
+    // only consulted while the status is transient. Pin this so a future
+    // refactor doesn't waste IPC on every button render.
+    const callCount = { n: 0 };
+    isRunning.mockImplementation(() => {
+      callCount.n += 1;
+      return Promise.resolve(true);
+    });
+    renderButton({ ...node, status: 'running' });
+    // Let any pending microtask resolve so we can compare counts after.
+    await Promise.resolve();
+    expect(callCount.n).toBe(0);
   });
 });

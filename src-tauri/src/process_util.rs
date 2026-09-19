@@ -391,7 +391,7 @@ pub fn run_worker_pass<F: FnOnce()>(name: &str, f: F) -> bool {
 /// Best-effort message extraction from a `catch_unwind` payload. Mirrors
 /// the logic in `lib::setup`'s panic hook so the log line reads the same
 /// way whether the panic hits the hook or this helper.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         s
     } else if let Some(s) = payload.downcast_ref::<String>() {
