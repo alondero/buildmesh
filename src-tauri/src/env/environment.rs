@@ -637,6 +637,42 @@ pub fn commandcode_dir() -> PathBuf {
     }
 }
 
+/// The MiniMax Code data directory: `$MINIMAX_DATA_DIR` else
+/// `$MAVIS_DATA_DIR` else `<home>/.minimax`. Sessions land under
+/// `<dataDir>/v2/sessions/` (one dated directory per session carrying
+/// `manifest.json` + `messages.jsonl`). The `~/.minimax-code` install
+/// directory is a separate choice and never holds sessions. Mirrors the
+/// CLI's own resolution (verified against the shipped `@minimax-ai/code`
+/// 0.4.12 data-dir chunk).
+///
+/// Note: under WSL the spawn-aware lookup (`cli_dir_for_spawn`) resolves
+/// the guest `$HOME/.minimax` and ignores a host-side `$MINIMAX_DATA_DIR`
+/// override — same convention as the other harness home helpers.
+pub fn minimax_data_dir() -> PathBuf {
+    let override_dir = env::var("MINIMAX_DATA_DIR")
+        .or_else(|_| env::var("MAVIS_DATA_DIR"))
+        .map(|dir| dir.trim().to_string())
+        .ok()
+        .filter(|dir| !dir.is_empty());
+    if let Some(dir) = override_dir {
+        return PathBuf::from(dir);
+    }
+    match current_env() {
+        Environment::Wsl => env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/root"))
+            .join(".minimax"),
+        Environment::Windows => env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}"))
+            })
+            .join(".minimax"),
+    }
+}
+
 /// The Command Code CLI home for an agent environment.
 pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
     match env_type {

@@ -12,6 +12,7 @@ pub mod codex;
 pub mod commandcode;
 pub mod cursor;
 pub mod grok;
+pub mod mcode;
 pub mod muse;
 pub mod opencode;
 
@@ -21,5 +22,6 @@ pub(crate) use codex::CodexAdapter;
 pub(crate) use commandcode::CommandCodeAdapter;
 pub(crate) use cursor::CursorAdapter;
 pub(crate) use grok::GrokAdapter;
+pub(crate) use mcode::McodeAdapter;
 pub(crate) use muse::MuseAdapter;
 pub(crate) use opencode::OpenCodeAdapter;
