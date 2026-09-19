@@ -221,7 +221,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
               focusRequest={focusRequest} />
           </Suspense>
         ) : (
-          <AgentTerminal key={node.id} nodeId={node.id} focusOnAttach={focusOnAttach} focusRequest={focusRequest} />
+          <AgentTerminal key={node.id} nodeId={node.id} provider={node.provider} focusOnAttach={focusOnAttach} focusRequest={focusRequest} />
         )}
       </div>
       {draggable && <NodeDropCue nodeId={nodeId} />}

@@ -4,7 +4,7 @@ import '@xterm/xterm/css/xterm.css';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import * as api from '../../lib/tauri';
-import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
+import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS, ignoreBracketedPasteForHarness } from './terminalConfig';
 import { resolveZoomKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
@@ -90,9 +90,11 @@ export function resetTerminalZoomListenerForTests(): void {
   terminalZoomListenerInstalled = false;
 }
 
-export function AgentTerminal({ nodeId, focusOnAttach = true, focusRequest = 0 }: { nodeId: number; focusOnAttach?: boolean; focusRequest?: number }) {
+export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusRequest = 0 }: { nodeId: number; provider?: string; focusOnAttach?: boolean; focusRequest?: number }) {
   const focusOnAttachRef = useRef(focusOnAttach);
   focusOnAttachRef.current = focusOnAttach;
+  const providerRef = useRef(provider);
+  providerRef.current = provider;
 
   // Node activity tabs own the focus intent, while the terminal owns the
   // actual xterm focus. This effect handles a mounted terminal when a pointer
@@ -374,6 +376,8 @@ export function AgentTerminal({ nodeId, focusOnAttach = true, focusRequest = 0 }
       if (signal.aborted || !inst) return;
       instRef.current = inst;
       inst.onFindRequest = () => setSearchOpen(true);
+      const harness = providerRef.current ?? useAgentNodeStore.getState().nodesById[nodeId]?.provider ?? '';
+      inst.term.options.ignoreBracketedPasteMode = ignoreBracketedPasteForHarness(harness);
 
       const updateAtBottom = () => {
         const buf = inst.term.buffer.active;

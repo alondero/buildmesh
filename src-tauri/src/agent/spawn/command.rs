@@ -127,9 +127,9 @@ pub fn build_spawn_command_prepared(
     );
 
     // Apply the harness's environment policy (CLAUDE_BACKEND_ENV_VARS
-    // reset + per-harness env_remove). The adapter owns this — the
-    // Claude-backed anthropic adapter sets the reset, Codex sets
-    // OPENAI_* strip; every other adapter uses HarnessEnvironmentPolicy::NONE.
+    // reset + per-harness env_remove + env_set). The adapter owns this —
+    // the Claude-backed anthropic adapter sets the reset, Codex sets
+    // OPENAI_* strip, Command Code sets TERM_PROGRAM=vscode.
     if prepared.environment.resets_backend_env {
         for k in CLAUDE_BACKEND_ENV_VARS {
             cmd.env_remove(k);
@@ -138,11 +138,16 @@ pub fn build_spawn_command_prepared(
     for k in prepared.environment.env_remove {
         cmd.env_remove(k);
     }
+    let mut command_wsl_env: Vec<&str> = Vec::new();
+    for (k, v) in prepared.environment.env_set {
+        cmd.env(*k, *v);
+        command_wsl_env.push(*k);
+    }
 
     // Inject the per-profile backend env + Codex Proxy credential. WSLENV is
     // assembled once after all command-defined variables are known, avoiding
     // one routing branch overwriting another branch's entries.
-    let mut command_wsl_env = apply_routing_env(&mut cmd, routing);
+    command_wsl_env.extend(apply_routing_env(&mut cmd, routing));
     if let Some(key) = apply_codex_proxy_credential(&mut cmd, routing, provider_enum) {
         command_wsl_env.push(key);
     }
@@ -152,6 +157,7 @@ pub fn build_spawn_command_prepared(
             command_wsl_env.push("CODEX_HOME");
         }
     }
+    command_wsl_env.extend(["TERM", "COLORTERM", "FORCE_COLOR"]);
     spawn_environment::apply_wsl_env(
         &mut cmd,
         resolved.env_type,

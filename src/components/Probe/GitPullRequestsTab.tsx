@@ -61,7 +61,7 @@
  */
 
 import { formatError } from '../../lib/errorUtils';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import {
   getRepoPulls,
   mergePr,
@@ -268,6 +268,10 @@ export function GitPullRequestsTab() {
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [spawnError, setSpawnError] = useState<Record<number, string>>({});
   const [providerList, setProviderList] = useState<SpawnOption[]>([]);
+  // Client-side search over the loaded list — mirrors GitIssuesTab and
+  // ArchivedNodesTab. Matches title, body, and head_ref so a branch name
+  // finds its PR. No debounce needed; the list is in memory.
+  const [search, setSearch] = useState('');
   // Per-row expand state (issue #461) — Set keyed by PR number so two
   // long PRs can stay expanded side-by-side. Reset on every load
   // below (mesh + open/closed filter both change the visible set of
@@ -306,6 +310,20 @@ export function GitPullRequestsTab() {
   // between the two probes on the same mesh.
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
+
+  // Client-side filter over the loaded list. Matches title, body, and
+  // head_ref so a user who knows the branch name can jump straight to
+  // its PR. Case-insensitive; no debounce — the list is already in memory.
+  const filteredPrs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (q === '') return prs;
+    return prs.filter(
+      (pr) =>
+        pr.title.toLowerCase().includes(q) ||
+        pr.body.toLowerCase().includes(q) ||
+        pr.head_ref.toLowerCase().includes(q),
+    );
+  }, [prs, search]);
 
   // Re-arm the re-poll budget and refetch. The toolbar Refresh is a hard
   // reload (row state clears in the effect); a row's own Unknown-retry is
@@ -616,6 +634,14 @@ export function GitPullRequestsTab() {
           </>
         }
       >
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter PRs…"
+          aria-label="Filter pull requests"
+          className="flex-1 min-w-0 bg-bg-input border border-border-default rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan transition-colors"
+        />
         <RefreshControl
           onRefresh={retryListLoad}
           isRefreshing={loading && prs.length > 0}
@@ -629,11 +655,14 @@ export function GitPullRequestsTab() {
           <LoadingState label="Loading pull requests..." />
         ) : error ? (
           <ErrorState title="Failed to load pull requests" detail={error} />
-        ) : prs.length === 0 ? (
-          <EmptyState label={`No ${stateFilter} pull requests`} />
+        ) : filteredPrs.length === 0 ? (
+          <EmptyState
+            label={prs.length === 0 ? `No ${stateFilter} pull requests` : 'No matches'}
+            hint={prs.length === 0 ? undefined : `Nothing matches "${search}"`}
+          />
         ) : (
           <div className="space-y-1">
-            {prs.map((pr) => {
+            {filteredPrs.map((pr) => {
               const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
               const isConfirming = confirming === pr.number;
@@ -654,6 +683,67 @@ export function GitPullRequestsTab() {
                   isExpanded={isExpanded}
                   onToggle={() => expanded.toggle(pr.number)}
                   body={pr.body}
+                  status={
+                    pr.draft || status.kind === 'blocked' ? 'blocked' : 'default'
+                  }
+                  metaSlot={(() => {
+                    const chips: React.ReactNode[] = [];
+                    // Branch ref — the one piece of context a reviewer
+                    // needs to locate the work locally. font-mono matches
+                    // the app's code-identifier idiom.
+                    if (pr.head_ref) {
+                      chips.push(
+                        <span
+                          key="head-ref"
+                          title={`Branch: ${pr.head_ref}`}
+                          className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs font-mono text-text-secondary min-w-0 max-w-full"
+                        >
+                          <svg
+                            width="9"
+                            height="9"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                            className="shrink-0"
+                          >
+                            <circle cx="6" cy="6" r="3" />
+                            <circle cx="6" cy="18" r="3" />
+                            <circle cx="18" cy="6" r="3" />
+                            <path d="M18 9a9 9 0 0 1-9 9" />
+                            <line x1="6" y1="9" x2="6" y2="15" />
+                          </svg>
+                          <span className="min-w-0 flex-1 break-all">{pr.head_ref}</span>
+                        </span>,
+                      );
+                    }
+                    // Fork badge — only when the PR's head repo owner
+                    // differs from the destination repo's owner. For
+                    // same-repo PRs `head_repo_owner` IS the destination
+                    // owner (see the GitHubPullRequest type doc), so a
+                    // naive truthiness check would stamp every row with
+                    // an extraneous chip. When the mesh's GitHub URL
+                    // hasn't resolved (non-GitHub mesh) the comparison
+                    // can't be made — hide the badge rather than guess.
+                    const destOwner = githubUrl
+                      ? (githubUrl.match(/github\.com\/([^/]+)/)?.[1] ?? null)
+                      : null;
+                    if (pr.head_repo_owner && destOwner && pr.head_repo_owner !== destOwner) {
+                      chips.push(
+                        <span
+                          key="fork"
+                          title={`From fork: ${pr.head_repo_owner}`}
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
+                        >
+                          {pr.head_repo_owner}
+                        </span>,
+                      );
+                    }
+                    return chips.length > 0 ? <>{chips}</> : null;
+                  })()}
                   rightSlot={
                     // Three action groups, all gated to the open filter
                     // (closed PRs are read-only — no merge / spawn). The
@@ -715,19 +805,36 @@ export function GitPullRequestsTab() {
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse" title="GitHub hasn't computed mergeability yet — retrying automatically">Checking…</span>
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-1 text-2xs text-text-muted"
+                              title="GitHub hasn't computed mergeability yet — retrying automatically"
+                            >
+                              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-text-muted" aria-hidden="true" />
+                              Checking…
+                            </span>
                           ) : status.kind === 'unknown' ? (
                             <button
                               type="button"
                               onClick={retryUnknownRow}
                               aria-label={`Retry mergeability check for pull request #${pr.number}`}
                               title="GitHub hasn't reported mergeability — click to retry"
-                              className="px-2 py-1 text-2xs rounded border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors" /* allow-bare-rounded */
+                              className="px-2 py-1 text-2xs rounded-md border border-dashed border-border-subtle text-text-muted hover:text-accent-cyan hover:border-accent-cyan/40 transition-colors"
                             >
                               Unknown
                             </button>
+                          ) : pr.draft ? (
+                            // Draft PRs can't be merged — render a
+                            // proper chip so the disabled-merge state
+                            // reads as intentional, not as a missing
+                            // button.
+                            <span className="rounded-md border border-border-subtle bg-bg-card px-2 py-1 text-2xs font-medium text-text-muted">
+                              Draft
+                            </span>
                           ) : (
-                            <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded */}
+                            <span
+                              className="px-2 py-1 text-2xs rounded-md bg-bg-card text-text-muted"
+                              title="This pull request can't be merged"
+                            >
                               {status.label}
                             </span>
                           )}
@@ -809,10 +916,10 @@ export function GitPullRequestsTab() {
                     // which was almost certainly accidental anyway).
                     <>
                       {rowError && (
-                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowError}</p>
+                        <p role="alert" className="text-2xs text-status-error mt-1 max-w-[260px] break-words">{rowError}</p>
                       )}
                       {rowSpawnError && (
-                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowSpawnError}</p>
+                        <p role="alert" className="text-2xs text-status-error mt-1 max-w-[260px] break-words">{rowSpawnError}</p>
                       )}
                     </>
                   }

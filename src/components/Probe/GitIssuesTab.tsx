@@ -116,6 +116,10 @@ export function GitIssuesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
+  // Client-side search over the loaded list. Mirrors the pattern
+  // `ArchivedNodesTab` already uses (`useState('')` + memo filter on
+  // title/body). No debounce needed — the list is already in memory.
+  const [search, setSearch] = useState('');
   // Issue #979 — trigger-label toggle state. Two pieces (a third,
   // `toggleError`, was retired with issue #1001 — failures now surface
   // through the shared toast pipeline instead of inline state):
@@ -176,6 +180,21 @@ export function GitIssuesTab() {
   // dedupes the IPC across mount + mesh switches within the session.
   const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
   const issuesListUrl = githubUrl ? `${githubUrl}/issues` : '';
+
+  // Client-side filter over the loaded list. Title, body, and label
+  // names are all matched so a user searching for a label name finds
+  // the issues carrying it. Case-insensitive, no debounce — the list
+  // is already in memory (GitHub caps at 100 per page anyway).
+  const filteredIssues = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (q === '') return issues;
+    return issues.filter(
+      (issue) =>
+        issue.title.toLowerCase().includes(q) ||
+        issue.body.toLowerCase().includes(q) ||
+        issue.labels.some((l) => l.toLowerCase().includes(q)),
+    );
+  }, [issues, search]);
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -408,6 +427,14 @@ export function GitIssuesTab() {
           </SafeLink>
         }
       >
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter issues…"
+          aria-label="Filter issues"
+          className="flex-1 min-w-0 bg-bg-input border border-border-default rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan transition-colors"
+        />
         <RefreshControl
           onRefresh={() => setReloadKey((k) => k + 1)}
           isRefreshing={loading && issues.length > 0}
@@ -421,11 +448,14 @@ export function GitIssuesTab() {
           <LoadingState label="Loading issues..." />
         ) : error ? (
           <ErrorState title="Failed to load issues" detail={error} />
-        ) : issues.length === 0 ? (
-          <EmptyState label="No open issues" />
+        ) : filteredIssues.length === 0 ? (
+          <EmptyState
+            label={issues.length === 0 ? 'No open issues' : 'No matches'}
+            hint={issues.length === 0 ? undefined : `Nothing matches "${search}"`}
+          />
         ) : (
           <div className="space-y-1">
-            {issues.map(issue => {
+            {filteredIssues.map(issue => {
               const isExpanded = expanded.isExpanded(issue.number);
               return (
                   <ProbeRow
@@ -443,6 +473,81 @@ export function GitIssuesTab() {
                   isExpanded={isExpanded}
                   onToggle={() => expanded.toggle(issue.number)}
                   body={issue.body}
+                  status={issue.blocked_by.some((n) => issuesByNumber.has(n)) ? 'blocked' : 'default'}
+                  metaSlot={(() => {
+                    const chips: React.ReactNode[] = [];
+                    // Blocked-by flag — promoted from a cramped under-button
+                    // text link to a proper warning chip so it's scannable at
+                    // a glance. The left-edge stripe (via `status`) already
+                    // signals "attention" — the chip names the blocker.
+                    const stillBlockedBy = issue.blocked_by.filter((n) => issuesByNumber.has(n));
+                    if (stillBlockedBy.length > 0) {
+                      const tooltip = buildBlockedByTooltip(stillBlockedBy, issuesByNumber);
+                      const firstBlocker = stillBlockedBy[0];
+                      const firstBlockerUrl = issuesByNumber.get(firstBlocker)?.url ?? '';
+                      chips.push(
+                        <button
+                          key="blocked-by"
+                          data-blocked-by
+                          type="button"
+                          title={tooltip ?? undefined}
+                          aria-label={tooltip ?? `Blocked by #${firstBlocker}`}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md border border-status-warning/30 bg-status-warning/10 px-1.5 py-px text-2xs font-medium text-status-warning hover:bg-status-warning/20 transition-colors"
+                        >
+                          <svg
+                            width="10"
+                            height="10"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+                            <line x1="4" y1="22" x2="4" y2="15" />
+                          </svg>
+                          Blocked by #{firstBlocker}
+                        </button>,
+                      );
+                    }
+                    // Label chips — first-class metadata the wire already
+                    // carries but the old UI never rendered. Capped at 3 +
+                    // "+N more" so a heavily-labelled issue doesn't wrap
+                    // into a second row of noise.
+                    const labels = (optimisticLabels.get(issue.number) ?? issue.labels);
+                    const visible = labels.slice(0, 3);
+                    const overflow = labels.length - visible.length;
+                    for (const label of visible) {
+                      chips.push(
+                        <span
+                          key={`label-${label}`}
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-secondary"
+                        >
+                          {label}
+                        </span>,
+                      );
+                    }
+                    if (overflow > 0) {
+                      chips.push(
+                        <span
+                          key="label-overflow"
+                          title={labels.slice(3).join(', ')}
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
+                        >
+                          +{overflow}
+                        </span>,
+                      );
+                    }
+                    return chips.length > 0 ? <>{chips}</> : null;
+                  })()}
                   rightSlot={
                     // Canonical `+ ▾` Spawn Menu cluster (ADR-0016 §2). The
                     // sidebar's `NodeCreationForm` renders the same cluster;
@@ -453,8 +558,8 @@ export function GitIssuesTab() {
                     // opens the same `ProviderDropdown` → `GroupedProviderMenu`
                     // ladder the sidebar uses, with `isSpawning` flipping the
                     // `+` to "Spawning…" while this row's stage-2 IPC is in
-                    // flight. Wrapped in flex-col so the blocked-by flag can
-                    // stack directly under it (issue #481 follow-up).
+                    // flight. Wrapped in flex-col so the trigger-label
+                    // toggle can stack directly under it.
                     // shrink-0 keeps the right column from being squeezed
                     // by long titles in the left column. `onMouseDown` stop
                     // propagates the click so the row's expand-toggle on
@@ -482,61 +587,17 @@ export function GitIssuesTab() {
                         disabled={spawning !== null}
                         isSpawning={spawning === issue.number}
                       />
+                      {/* Blocked-by indicator has moved to `metaSlot`
+                          (a proper warning chip + left-edge stripe) so
+                          it's scannable at a glance — the old under-button
+                          text link was too cramped to notice in a busy
+                          list. */}
                       {(() => {
-                        // Cross-reference the parsed blocked_by list against
-                        // the loaded open-issues set. If at least one blocker
-                        // is still open, surface the red flag below the spawn
-                        // button. This is a warn, not a gate — the Spawn
-                        // button stays enabled so a user who's intentionally
-                        // unblocking something can still proceed.
-                        const stillBlockedBy = issue.blocked_by.filter(n => issuesByNumber.has(n));
-                        if (stillBlockedBy.length === 0) return null;
-                        const tooltip = buildBlockedByTooltip(stillBlockedBy, issuesByNumber);
-                        if (!tooltip) return null;
-                        const firstBlocker = stillBlockedBy[0];
-                        const firstBlockerUrl = issuesByNumber.get(firstBlocker)?.url ?? '';
-                        return (
-                          <button
-                            data-blocked-by
-                            type="button"
-                            title={tooltip}
-                            aria-label={tooltip}
-                            onMouseDown={e => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
-                            }}
-                            className="mt-1 inline-flex items-center gap-1 text-status-error hover:text-status-error/80 transition-colors"
-                          >
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden="true"
-                            >
-                              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
-                              <line x1="4" y1="22" x2="4" y2="15" />
-                            </svg>
-                            <span className="text-2xs font-medium leading-none">
-                              Blocked by #{firstBlocker}
-                            </span>
-                          </button>
-                        );
-                      })()}
-                      {(() => {
-                        // Trigger-label toggle (issue #979). Sits in the
-                        // same right-column flex slot as the blocked-by
-                        // flag, so the two stack vertically and the visual
-                        // pattern reads as "warnings/affordances under
-                        // the Spawn button". Renders whenever the active
-                        // mesh has a non-empty `autopilot_trigger_label`
-                        // — decision #5: independent of autopilot enabled.
+                        // Trigger-label toggle (issue #979). Renders in the
+                        // right-column slot under the Spawn button whenever
+                        // the active mesh has a non-empty
+                        // `autopilot_trigger_label` — decision #5:
+                        // independent of autopilot enabled.
                         if (!triggerLabel) return null;
                         // Source of truth: optimistic override during a
                         // pending toggle, else the loaded issue's labels.
@@ -579,7 +640,7 @@ export function GitIssuesTab() {
                               className={
                                 present
                                   ? 'inline-flex items-center gap-1 text-status-success hover:text-status-success/80 transition-colors disabled:opacity-60'
-                                  : 'inline-flex items-center gap-1 text-fg-muted hover:text-fg transition-colors disabled:opacity-60'
+                                  : 'inline-flex items-center gap-1 text-text-muted hover:text-text-primary transition-colors disabled:opacity-60'
                               }
                             >
                               <svg

@@ -18,6 +18,15 @@ Buildmesh only lists a harness it can detect in the selected runtime.
 
 The plain **Terminal** harness can still be used when no agent CLI is found.
 
+## Command Code does not accept typing
+
+Command Code 1.56 and later can draw the prompt and then ignore keys on
+Windows (including inside Buildmesh). This is an upstream CLI regression.
+After updating Buildmesh, spawn a **new** node — typing and colour both work
+on new nodes. If an already-open node is stuck, press Ctrl+C once, then type.
+Downgrading the CLI to 1.55 with `COMMANDCODE_SKIP_UPDATES=1` also restores
+typing outside Buildmesh.
+
 ## An Agent Node will not resume
 
 Terminal nodes and agents that have not captured a session id are
@@ -64,6 +73,23 @@ Check these in order:
 
 Never work around a certificate warning by disabling browser security on a
 shared network. Remote access exposes terminal content and input.
+
+## Muse fails to start with `os error 267` or `Not a directory`
+
+`AGENTS.md` and `.agents/skills` are Git symlinks. On Windows checkouts
+with `core.symlinks=false`, Git stores them as plain pointer files and Muse
+refuses to start because it cannot traverse `.agents/skills` as a directory.
+
+- Launching through Buildmesh repairs those links automatically before the
+  session starts, on both the native Windows and WSL runtimes.
+- When invoking `muse` manually outside Buildmesh, restore the links
+  yourself (Windows Developer Mode must be on; PowerShell's `New-Item`
+  still requires elevation, so use `python -c "import os, ..."` with
+  `os.symlink`, which does not):
+  `AGENTS.md` → `CLAUDE.md`, `.agents/skills` → `..\.claude\skills`
+  (backslashes — a forward-slash directory target is untraversable on
+  Windows). Confirm `git status --porcelain` shows no change for either
+  path afterwards, then retry.
 
 ## A Mesh is stale or sync fails
 

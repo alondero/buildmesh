@@ -207,6 +207,7 @@ pub fn wrap(
         cmd.env("BUILDMESH_HOOK_TOKEN", token);
     }
     pty::strip_git_env_vars(&mut cmd);
+    pty::apply_interactive_tty_env(&mut cmd);
 
     cmd
 }

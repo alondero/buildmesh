@@ -207,6 +207,47 @@ describe('GitPullRequestsTab', () => {
     });
   });
 
+  it('filters PRs by the search query across title, body, and branch ref', async () => {
+    // The toolbar search narrows the loaded list in place. Matching the
+    // head_ref matters: a user who knows the branch name can jump
+    // straight to its PR. Clearing the box restores the full list.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    const search = screen.getByLabelText('Filter pull requests');
+
+    // Branch-ref match narrows to that PR only.
+    await userEvent.type(search, 'refactor/202-core');
+    expect(screen.getByText('Refactor core')).toBeTruthy();
+    expect(screen.queryByText('Add widget')).toBeNull();
+
+    // Non-matching query shows the no-matches empty state.
+    await userEvent.clear(search);
+    await userEvent.type(search, 'zzz-no-such-pr');
+    expect(screen.getByText('No matches')).toBeTruthy();
+
+    // Clearing restores all rows.
+    await userEvent.clear(search);
+    expect(await screen.findByText('Add widget')).toBeTruthy();
+    expect(screen.getByText('Refactor core')).toBeTruthy();
+  });
+
+  it('renders the branch-ref chip under the title', async () => {
+    // The head ref is the one piece of context a reviewer needs to
+    // locate the work locally. It renders as a quiet chip with the
+    // full ref on the tooltip — the full text is never truncated
+    // away (probe-ui-checklist §2: branch names wrap, never clip).
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    const chip = row.querySelector('[title="Branch: feat/201-add-widget"]');
+    expect(chip).toBeTruthy();
+    expect(chip!.textContent).toContain('feat/201-add-widget');
+  });
+
   it('toggling to Closed refetches with state: "closed"', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);

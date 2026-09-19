@@ -1139,6 +1139,90 @@ mod tests {
         );
     }
 
+    /// wrap() gives every agent PTY a colour-capable TERM, including harnesses
+    /// that do not impersonate VS Code. Pins the every-agent path so a
+    /// Command Code-only assertion cannot hide a wrap() regression.
+    #[test]
+    fn agent_pty_gets_colour_capable_env() {
+        for resolved in [windows_resolved(), wsl_resolved()] {
+            let cmd = cmd_for(
+                &resolved,
+                Provider::Anthropic,
+                &SessionIdMode::None,
+                SESSION_ID,
+                None,
+                None,
+                None,
+                false,
+            );
+            assert_eq!(env_of(&cmd, "TERM").as_deref(), Some("xterm-256color"));
+            assert_eq!(env_of(&cmd, "COLORTERM").as_deref(), Some("truecolor"));
+            assert_eq!(env_of(&cmd, "FORCE_COLOR").as_deref(), Some("3"));
+            assert_eq!(env_of(&cmd, "NO_COLOR"), None);
+            assert_ne!(env_of(&cmd, "TERM_PROGRAM").as_deref(), Some("vscode"));
+            if resolved.env_type == EnvType::Wsl {
+                let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
+                for key in ["TERM", "COLORTERM", "FORCE_COLOR"] {
+                    assert!(
+                        wslenv.split(':').any(|entry| entry.split('/').next() == Some(key)),
+                        "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Command Code skips its kitty keyboard probe when TERM_PROGRAM=vscode.
+    /// Colour still works because wrap() forces TERM / COLORTERM / FORCE_COLOR
+    /// and strips NO_COLOR (the B&W failure was TERM=dumb + NO_COLOR=1, not vscode).
+    #[test]
+    fn commandcode_spawn_skips_kitty_probe_and_keeps_colour_env() {
+        let cmd = cmd_for(
+            &windows_resolved(),
+            Provider::CommandCode,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(env_of(&cmd, "TERM_PROGRAM").as_deref(), Some("vscode"));
+        assert_eq!(env_of(&cmd, "TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(env_of(&cmd, "COLORTERM").as_deref(), Some("truecolor"));
+        assert_eq!(env_of(&cmd, "FORCE_COLOR").as_deref(), Some("3"));
+        assert_eq!(env_of(&cmd, "NO_COLOR"), None);
+    }
+
+    /// WSL Command Code must carry the vscode skip and colour keys across
+    /// the Windows/Linux boundary. wrap() sets TERM/COLORTERM/FORCE_COLOR on
+    /// the outer command; without WSLENV the guest still inherits TERM=dumb.
+    #[test]
+    fn commandcode_wsl_spawn_propagates_colour_and_vscode_env() {
+        let cmd = cmd_for(
+            &wsl_resolved(),
+            Provider::CommandCode,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(env_of(&cmd, "TERM_PROGRAM").as_deref(), Some("vscode"));
+        assert_eq!(env_of(&cmd, "TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(env_of(&cmd, "COLORTERM").as_deref(), Some("truecolor"));
+        assert_eq!(env_of(&cmd, "FORCE_COLOR").as_deref(), Some("3"));
+        assert_eq!(env_of(&cmd, "NO_COLOR"), None);
+        let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
+        for key in ["TERM_PROGRAM", "TERM", "COLORTERM", "FORCE_COLOR"] {
+            assert!(
+                wslenv.split(':').any(|entry| entry.split('/').next() == Some(key)),
+                "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
+            );
+        }
+    }
+
     // ----- validate_pr_spawn_inputs (issue #471) -------------------------
     //
     // Regression: the previous fork-info gate in `create_pr_node` had two

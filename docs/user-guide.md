@@ -74,7 +74,7 @@ The current built-in catalog is:
 | Kimi Code | Yes | None | Use the terminal when no lifecycle signal is available |
 | MiniMax Code | Yes | None | Model/effort controls depend on the selected harness configuration |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
-| Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available |
+| Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
 | Cline | Yes | None | Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |

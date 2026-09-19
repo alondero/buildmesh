@@ -1,8 +1,10 @@
-//! Runtime repair for Git symlink placeholders used by Muse in WSL.
+//! Runtime repair for Git symlink placeholders used by Muse on Windows.
 //!
 //! Windows Git can check out a tracked symlink as a regular file when
-//! `core.symlinks=false`. Muse needs to traverse those entries as links before
-//! its workspace host starts. This module repairs only the two exact links
+//! `core.symlinks=false`. Both the WSL guest and the native Windows binary
+//! (Muse 1.3.0+) need to traverse those entries as links before the
+//! workspace host starts (ENOTDIR under WSL, os error 267 natively).
+//! This module repairs only the two exact links
 //! Buildmesh's AI-context portability command records, and only when every
 //! identity check proves that the checkout is an untouched placeholder.
 
@@ -14,11 +16,12 @@ const SKILLS_PATH: &str = ".agents/skills";
 const SKILLS_TARGET: &[u8] = b"../.claude/skills";
 const TRANSACTION_PREFIX: &str = ".buildmesh-muse-context-";
 
-/// Restore the exact AI-context symlinks needed by a Muse WSL launch.
+/// Restore the exact AI-context symlinks needed by a Muse launch on Windows.
 ///
-/// On non-Windows hosts WSL is not a Windows interoperability launch, so this
-/// is intentionally a no-op. The Windows implementation uses native NT links
-/// and a recoverable sibling transaction; it never changes the Git index.
+/// On non-Windows hosts there is no Windows-checkout placeholder to repair,
+/// so this is intentionally a no-op. The Windows implementation uses native
+/// NT links and a recoverable sibling transaction; it never changes the Git
+/// index.
 pub fn prepare_muse_context(host_path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -611,6 +614,9 @@ mod windows {
                 candidate.temp.display()
             ));
         }
+        // Windows traverses forward-slash directory-link targets as invalid
+        // (error 123) even though Git reports them clean, so store the
+        // candidate with native separators; comparison normalises back.
         let target = std::str::from_utf8(candidate.spec.target)
             .unwrap()
             .replace('/', "\\");
