@@ -120,8 +120,8 @@ export interface ProbeRowProps {
    * identically in collapsed and expanded states so a busy list
    * keeps its vertical rhythm — the badges never disappear when
    * a row opens. Chips use the app-wide 10px `text-2xs` token
-   * with a 1px hairline border (`border-border-subtle`) and
-   * `rounded` pill — see `probe-ui-checklist.md` §2.
+   * with a 1px hairline border (`border-border-subtle`) — see
+   * `probe-ui-checklist.md` §2.
    */
   metaSlot?: ReactNode;
   /**

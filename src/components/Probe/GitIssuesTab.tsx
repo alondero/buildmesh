@@ -498,7 +498,7 @@ export function GitIssuesTab() {
                             e.stopPropagation();
                             if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
                           }}
-                          className="inline-flex items-center gap-1 rounded border border-status-warning/30 bg-status-warning/10 px-1.5 py-px text-2xs font-medium text-status-warning hover:bg-status-warning/20 transition-colors"
+                          className="inline-flex items-center gap-1 rounded-md border border-status-warning/30 bg-status-warning/10 px-1.5 py-px text-2xs font-medium text-status-warning hover:bg-status-warning/20 transition-colors"
                         >
                           <svg
                             width="10"
@@ -529,7 +529,7 @@ export function GitIssuesTab() {
                       chips.push(
                         <span
                           key={`label-${label}`}
-                          className="rounded border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-secondary"
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-secondary"
                         >
                           {label}
                         </span>,
@@ -540,7 +540,7 @@ export function GitIssuesTab() {
                         <span
                           key="label-overflow"
                           title={labels.slice(3).join(', ')}
-                          className="rounded border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
                         >
                           +{overflow}
                         </span>,

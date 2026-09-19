@@ -684,9 +684,7 @@ export function GitPullRequestsTab() {
                   onToggle={() => expanded.toggle(pr.number)}
                   body={pr.body}
                   status={
-                    pr.draft || status.kind === 'blocked' || status.kind === 'unknown'
-                      ? 'blocked'
-                      : 'default'
+                    pr.draft || status.kind === 'blocked' ? 'blocked' : 'default'
                   }
                   metaSlot={(() => {
                     const chips: React.ReactNode[] = [];
@@ -698,7 +696,7 @@ export function GitPullRequestsTab() {
                         <span
                           key="head-ref"
                           title={`Branch: ${pr.head_ref}`}
-                          className="inline-flex items-center gap-1 rounded border border-border-subtle bg-bg-card px-1.5 py-px text-2xs font-mono text-text-secondary min-w-0 max-w-full"
+                          className="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs font-mono text-text-secondary min-w-0 max-w-full"
                         >
                           <svg
                             width="9"
@@ -722,14 +720,23 @@ export function GitPullRequestsTab() {
                         </span>,
                       );
                     }
-                    // Fork badge — only when the PR comes from a fork
-                    // (head_repo_owner differs from the destination repo).
-                    if (pr.head_repo_owner) {
+                    // Fork badge — only when the PR's head repo owner
+                    // differs from the destination repo's owner. For
+                    // same-repo PRs `head_repo_owner` IS the destination
+                    // owner (see the GitHubPullRequest type doc), so a
+                    // naive truthiness check would stamp every row with
+                    // an extraneous chip. When the mesh's GitHub URL
+                    // hasn't resolved (non-GitHub mesh) the comparison
+                    // can't be made — hide the badge rather than guess.
+                    const destOwner = githubUrl
+                      ? (githubUrl.match(/github\.com\/([^/]+)/)?.[1] ?? null)
+                      : null;
+                    if (pr.head_repo_owner && destOwner && pr.head_repo_owner !== destOwner) {
                       chips.push(
                         <span
                           key="fork"
                           title={`From fork: ${pr.head_repo_owner}`}
-                          className="rounded border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
+                          className="rounded-md border border-border-subtle bg-bg-card px-1.5 py-px text-2xs text-text-muted"
                         >
                           {pr.head_repo_owner}
                         </span>,
