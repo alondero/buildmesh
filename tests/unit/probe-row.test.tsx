@@ -350,6 +350,84 @@ describe('ProbeRow (#463)', () => {
     expect(container.querySelector('div.max-h-48')).toBeNull();
   });
 
+  it('hides the chevron and expand affordance when there is no body to expand', () => {
+    // An empty-body row with a chevron implies expandability that doesn't
+    // exist. The row keeps its title link but drops the chevron, the
+    // pointer cursor, and the expand toggle — clicking the column body
+    // no longer fires onToggle.
+    const onToggle = vi.fn();
+    const { container } = render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={103}
+        number={103}
+        title="No body"
+        url="https://github.com/acme/demo/issues/103"
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={false}
+        onToggle={onToggle}
+        body=""
+      />,
+    );
+
+    // No chevron glyph.
+    expect(container.textContent).not.toContain('▸');
+    // The clickable column is no longer pointer-styled...
+    const clickable = container.querySelector('[role="button"]')!;
+    expect(clickable.className).not.toMatch(/cursor-pointer/);
+    expect(clickable.className).toMatch(/cursor-default/);
+    // ...and clicking the column (outside the title link) does nothing.
+    fireEvent.click(clickable);
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it('renders the metaSlot chips between the title and the body', () => {
+    // The metadata row (label chips, branch refs) renders identically
+    // in collapsed and expanded states — pin the rhythm so a future
+    // refactor can't hide the chips behind a disclosure.
+    const meta = (
+      <>
+        <span>bug</span>
+        <span>feat/201-add-widget</span>
+      </>
+    );
+    const { container, rerender } = render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={false}
+        onToggle={noop}
+        body="The widget wobbles."
+        metaSlot={meta}
+      />,
+    );
+
+    const collapsedChips = container.textContent;
+    expect(collapsedChips).toContain('bug');
+    expect(collapsedChips).toContain('feat/201-add-widget');
+
+    rerender(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={true}
+        onToggle={noop}
+        body="The widget wobbles."
+        metaSlot={meta}
+      />,
+    );
+    expect(container.textContent).toContain('bug');
+    expect(container.textContent).toContain('feat/201-add-widget');
+  });
+
   // ---- Data attribute -------------------------------------------------
 
   it('emits the data-attribute prefix as ${dataAttr}-row={rowKey}', () => {
@@ -432,9 +510,13 @@ describe('ProbeRow (#463)', () => {
 
     const button = screen.getByRole('button', { name: 'Spawn' });
     // The button is NOT inside the clickable column. Find the row, then
-    // find the clickable column, then assert the button is outside.
+    // find the clickable column (the `[role="button"]` column), then
+    // assert the button is outside. The column carries `role="button"`
+    // regardless of cursor styling, so query that — not `cursor-pointer`
+    // (empty-body rows are `cursor-default` by design, see the chevron
+    // test above).
     const row = button.closest('[data-issue-row]')!;
-    const clickableColumn = row.querySelector('.cursor-pointer')!;
+    const clickableColumn = row.querySelector('[role="button"]')!;
     expect(clickableColumn.contains(button)).toBe(false);
     expect(row.contains(button)).toBe(true);
   });

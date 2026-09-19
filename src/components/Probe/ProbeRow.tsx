@@ -114,6 +114,24 @@ export interface ProbeRowProps {
    * ProbeRow.
    */
   belowSlot?: ReactNode;
+  /**
+   * Optional metadata rendered as quiet badges directly under the
+   * title line (label chips, branch refs, state flags). Rendered
+   * identically in collapsed and expanded states so a busy list
+   * keeps its vertical rhythm — the badges never disappear when
+   * a row opens. Chips use the app-wide 10px `text-2xs` token
+   * with a 1px hairline border (`border-border-subtle`) — see
+   * `probe-ui-checklist.md` §2.
+   */
+  metaSlot?: ReactNode;
+  /**
+   * Optional left-edge status stripe. `'blocked'` paints a 3px
+   * `status-warning` vertical bar; `'error'` paints `status-error`.
+   * The default renders a transparent stripe of the same width so
+   * the row's content never shifts horizontally when a flag appears
+   * or disappears on a live refresh. Opaque to the caller.
+   */
+  status?: 'default' | 'blocked' | 'error';
   /** Ref for the interactive row body used by cross-surface navigation. */
   focusRef?: Ref<HTMLDivElement>;
 }
@@ -130,9 +148,18 @@ export function ProbeRow({
   body,
   rightSlot,
   belowSlot,
+  metaSlot,
+  status = 'default',
   focusRef,
 }: ProbeRowProps) {
   const hasBody = body !== null && body !== undefined && body !== '';
+
+  const stripeClass =
+    status === 'blocked'
+      ? 'bg-status-warning'
+      : status === 'error'
+        ? 'bg-status-error'
+        : 'bg-transparent';
 
   return (
     // The outer wrapper is a `flex flex-col gap-1` even when there's
@@ -144,9 +171,17 @@ export function ProbeRow({
     <div
       data-issue-row={dataAttr === 'issue' ? rowKey : undefined}
       data-pr-row={dataAttr === 'pr' ? rowKey : undefined}
-      className="flex flex-col gap-1 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
+      className="relative flex flex-col gap-1 rounded-md transition-colors hover:bg-bg-card focus-within:bg-bg-card"
     >
-      <div className="flex items-start gap-2">
+      {/* Left-edge status stripe. Always rendered so the row never
+          reflows horizontally when a flag appears/disappears on
+          live refresh — the stripe is transparent in the default
+          state. `rounded-l-md` clips it to the row's corner. */}
+      <span
+        aria-hidden="true"
+        className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-md ${stripeClass}`}
+      />
+      <div className="flex items-start gap-2 px-2.5 py-2 pl-3">
         {/* Left column — clickable to expand/collapse. The title
             `<a>` and the ↗ icon `<a>` (both via `<SafeLink>`) live
             here, each with stopPropagation so the row handler
@@ -155,27 +190,38 @@ export function ProbeRow({
           ref={focusRef}
           role="button"
           tabIndex={0}
-          aria-expanded={isExpanded}
-          className="flex-1 min-w-0 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
-          onClick={onToggle}
+          aria-expanded={hasBody ? isExpanded : undefined}
+          aria-disabled={!hasBody || undefined}
+          className={`flex-1 min-w-0 rounded-sm focus-visible:outline-none ${
+            hasBody
+              ? 'cursor-pointer focus-visible:ring-1 focus-visible:ring-accent-cyan'
+              : 'cursor-default'
+          }`}
+          onClick={hasBody ? onToggle : undefined}
           onKeyDown={(e) => {
+            if (!hasBody) return;
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               onToggle();
             }
           }}
         >
-          <div className="flex items-center gap-1 min-w-0">
-            <span
-              aria-hidden
-              className={
-                'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform ' +
-                (isExpanded ? 'rotate-90' : '')
-              }
-            >
-              ▸
-            </span>
-            <span className="text-xs text-accent-cyan font-mono">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {/* Chevron only renders when there IS a body to expand —
+                an empty-body row with a chevron implies expandability
+                that doesn't exist (affordance lie). */}
+            {hasBody && (
+              <span
+                aria-hidden
+                className={
+                  'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform duration-150 ' +
+                  (isExpanded ? 'rotate-90' : '')
+                }
+              >
+                ▸
+              </span>
+            )}
+            <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
               #{number}
             </span>
             {/* Title link. `min-w-0 flex-1` on the link AND `min-w-0`
@@ -186,7 +232,7 @@ export function ProbeRow({
                 into the action buttons. */}
             <SafeLink
               url={url}
-              className="text-sm text-text-primary hover:underline ml-1 truncate min-w-0 flex-1"
+              className="text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 truncate min-w-0 flex-1 transition-colors"
               title="Open on GitHub"
             >
               {title}
@@ -195,31 +241,41 @@ export function ProbeRow({
               <SafeLink
                 url={url}
                 ariaLabel={iconAriaLabel}
-                className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0"
+                className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0 leading-none"
                 title="Open on GitHub"
               >
                 ↗
               </SafeLink>
             )}
           </div>
+          {/* Metadata chips — label badges, branch refs, state flags.
+              Rendered identically collapsed/expanded so vertical
+              rhythm never jumps. */}
+          {metaSlot && (
+            <div className="flex flex-wrap items-center gap-1 mt-1.5 min-w-0">
+              {metaSlot}
+            </div>
+          )}
           {hasBody &&
             (isExpanded ? (
               <div
                 data-issue-body-expanded={dataAttr === 'issue' ? true : undefined}
                 data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
-                className="mt-1 max-h-48 overflow-y-auto text-2xs text-text-muted whitespace-pre-wrap break-words"
+                className="mt-1.5 max-h-48 overflow-y-auto text-2xs leading-relaxed text-text-secondary whitespace-pre-wrap break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5"
               >
                 {body}
               </div>
             ) : (
-              <p className="text-2xs text-text-muted mt-1 line-clamp-2">
+              <p className="text-2xs text-text-muted mt-1 line-clamp-2 leading-relaxed">
                 {body}
               </p>
             ))}
         </div>
         {rightSlot}
       </div>
-      {belowSlot}
+      {belowSlot && (
+        <div className="px-2.5 pb-1.5 pl-3">{belowSlot}</div>
+      )}
     </div>
   );
 }

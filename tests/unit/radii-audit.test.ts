@@ -31,35 +31,6 @@ const ALLOWED_BARE_ROUNDED = [
     requiredClasses: ["px-1", "py-px", "rounded", "text-2xs"],
     escape: "allow-bare-rounded",
   },
-  {
-    file: "Probe/GitPullRequestsTab.tsx",
-    // 2xs "this PR can't be merged" status pill — no interaction.
-    // Token was `text-[10px]` pre-#733 modernization; now `text-2xs`.
-    requiredClasses: [
-      "px-2",
-      "py-1",
-      "text-2xs",
-      "rounded",
-      "bg-bg-card",
-      "text-text-muted",
-    ],
-    escape: "allow-bare-rounded",
-  },
-  {
-    file: "Probe/GitPullRequestsTab.tsx",
-    // 2xs retry control — preserve the existing bare radius for this
-    // deliberately compact probe action.
-    requiredClasses: [
-      "px-2",
-      "py-1",
-      "text-2xs",
-      "rounded",
-      "border",
-      "border-dashed",
-      "border-border-subtle",
-    ],
-    escape: "allow-bare-rounded",
-  },
 ];
 
 // Classes that are already token-bound and never need flagging.
@@ -202,7 +173,9 @@ describe("radii audit — no stray bare `rounded` in src/components (#733)", () 
   });
 
   it("ALLOWED_BARE_ROUNDED is itself minimal (regression: don't silently grow the list)", () => {
-    // Two intentional decorative chips plus the compact retry control.
-    expect(ALLOWED_BARE_ROUNDED.length).toBe(3);
+    // The one intentional decorative chip (WorktreeManagerTab status
+    // badge). The two GitPullRequestsTab entries were removed when the
+    // merge-status pill and retry control moved to `rounded-md`.
+    expect(ALLOWED_BARE_ROUNDED.length).toBe(1);
   });
 });
