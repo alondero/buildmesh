@@ -1,5 +1,7 @@
 //! Prepared provider routing resolved before command construction (issue #1098).
 
+use std::path::PathBuf;
+
 use crate::agent::provider::adapters::codex;
 use crate::agent::provider::LaunchRuntime;
 use crate::env::ResolvedPath;
@@ -16,7 +18,13 @@ use crate::preferences;
 // accept the lint rather than pay the indirection cost.
 #[allow(clippy::large_enum_variant)]
 pub enum PreparedLaunchRouting {
-    Native,
+    /// Native harness with no proxy and no env injection. `executable`
+    /// carries the resolved absolute path from the profile when the harness
+    /// was detected off-`PATH` (e.g. Cline's `CLINE_BIN_PATH` or
+    /// `@cline/cli-windows-{x64,arm64}\bin\cline.exe` walk — issue #1773
+    /// review); `None` keeps `spawn_environment::wrap` falling back to its
+    /// normal `recipe.binary` lookup.
+    Native { executable: Option<PathBuf> },
     Environment(Vec<(String, String)>),
     CodexProxy {
         harness_id: String,
@@ -34,7 +42,10 @@ pub enum PreparedLaunchRouting {
 impl std::fmt::Debug for PreparedLaunchRouting {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Native => formatter.write_str("Native"),
+            Self::Native { executable } => formatter
+                .debug_struct("Native")
+                .field("executable", executable)
+                .finish(),
             Self::Environment(values) => formatter
                 .debug_tuple("Environment")
                 .field(&format_args!("{} values (redacted)", values.len()))
@@ -68,7 +79,7 @@ impl std::fmt::Debug for PreparedLaunchRouting {
 impl PreparedLaunchRouting {
     pub fn environment(values: &[(String, String)]) -> Self {
         if values.is_empty() {
-            Self::Native
+            Self::Native { executable: None }
         } else {
             Self::Environment(values.to_vec())
         }
@@ -83,7 +94,24 @@ impl PreparedLaunchRouting {
                 harness_home: Some(install.codex_home.clone()),
                 wsl_distro: install.wsl_distro.clone(),
             },
-            Self::Native | Self::Environment(_) => LaunchRuntime::default(),
+            Self::Native { .. } | Self::Environment(_) => LaunchRuntime::default(),
+        }
+    }
+
+    /// The resolved absolute path to spawn, when the harness's detection
+    /// yielded something the `PATH` lookup wouldn't find. Returns `None`
+    /// for the common case (PATH-resolvable binary or Codex proxy, which
+    /// carries its own `install.executable` plumbing).
+    ///
+    /// Unified across variants so [`super::command::build_spawn_command`]
+    /// has one place to read it. Codex's `install.executable` wins over the
+    /// profile's `executable` because it's the verified npm-shim path,
+    /// whereas the profile's `executable` is the bare-detection result.
+    pub fn executable_override(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::CodexProxy { install, .. } => Some(std::path::Path::new(&install.executable)),
+            Self::Native { executable } => executable.as_deref(),
+            Self::Environment(_) => None,
         }
     }
 }
@@ -96,14 +124,21 @@ pub fn prepare(
     if resolved.env_type == crate::models::EnvType::WindowsInterop && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none()) {
         return Err("Windows harnesses require an interoperable WSL host with powershell.exe on PATH.".into());
     }
-    if let Some(distro) = preferences::resolved_harness_profile(spawn_option_id)
-        .and_then(|profile| profile.wsl_distro)
-    {
+    let profile_for_distro = preferences::resolved_harness_profile(spawn_option_id);
+    if let Some(distro) = profile_for_distro.as_ref().and_then(|profile| profile.wsl_distro.clone()) {
         if resolved.env_type == crate::models::EnvType::Wsl
             && crate::env::get_default_wsl_distro().as_deref() != Some(distro.as_str()) {
             return Err(format!("This harness belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh, or select a harness from the current default distribution."));
         }
     }
+    // Carry the resolved absolute path (issue #1773 review). The profile's
+    // `executable` is `None` for every harness whose binary is on `PATH`
+    // (Claude Code, native Codex, Antigravity, OpenCode on PATH, etc.) —
+    // the spawn path skips the absolute-path override in that case.
+    let executable_override = profile_for_distro
+        .as_ref()
+        .and_then(|profile| profile.executable.clone());
+
     let Some((pairing, account)) =
         preferences::resolve_stored_pairing_and_account(spawn_option_id)?
     else {
@@ -112,7 +147,7 @@ pub fn prepare(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
             ));
         }
-        return Ok(PreparedLaunchRouting::Native);
+        return Ok(PreparedLaunchRouting::Native { executable: executable_override });
     };
 
     match provider {
@@ -130,6 +165,10 @@ pub fn prepare(
                 &account.name,
                 &verified.descriptor.endpoint,
             )?;
+            // Codex's verified install path wins over the profile's bare
+            // `executable` — it carries the npm-shim location after
+            // verification, which is what Codex's actual binary is.
+            let _ = executable_override;
             Ok(PreparedLaunchRouting::CodexProxy {
                 harness_id: pairing.harness_id,
                 provider_id: pairing.provider_id,

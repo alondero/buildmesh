@@ -19,6 +19,7 @@
 
 pub mod agy;
 pub mod anthropic;
+pub mod cline;
 pub mod codex;
 pub mod cursor;
 pub mod commandcode;
@@ -33,6 +34,7 @@ pub mod terminal;
 
 pub use agy::AGY;
 pub use anthropic::ANTHROPIC;
+pub use cline::CLINE;
 pub use codex::CODEX;
 pub use commandcode::COMMANDCODE;
 pub use cursor::CURSOR;

@@ -415,7 +415,7 @@ mod tests {
         let cmd = build_spawn_command_prepared(
             &wsl_resolved(),
             Provider::Codex,
-            &PreparedLaunchRouting::Native,
+            &PreparedLaunchRouting::Native { executable: None },
             &SessionIdMode::None,
             SESSION_ID,
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
@@ -426,6 +426,64 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--profile"));
         assert!(!args.iter().any(|arg| arg == "--model"));
         assert!(env_of(&cmd, "BUILDMESH_CODEX_PROVIDER_KEY").is_none());
+    }
+
+    /// Issue #1773 review — when a profile carries a resolved absolute
+    /// path (off-`PATH` install of Cline, e.g. `CLINE_BIN_PATH` or the
+    /// `node_modules\@cline\cli-windows-{x64,arm64}\bin` walk), the spawn
+    /// path must thread it through `spawn_environment::wrap` as
+    /// `executable_override`. Otherwise `cmd.exe /c cline` fails with
+    /// `'cline' is not recognized`. On Windows the resolved path lands
+    /// at `argv[2]` (after `cmd.exe /c`); on Unix direct spawn it lands
+    /// at `argv[0]`.
+    #[test]
+    fn native_routing_threads_resolved_executable_into_spawn_argv() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fake_binary = temp.path().join("cline-fake.exe");
+        std::fs::write(&fake_binary, b"placeholder").unwrap();
+        let fake_binary_str = fake_binary.to_string_lossy().into_owned();
+
+        let cmd = build_spawn_command_prepared(
+            &windows_resolved(),
+            Provider::Cline,
+            &PreparedLaunchRouting::Native {
+                executable: Some(fake_binary.clone()),
+            },
+            &SessionIdMode::None,
+            SESSION_ID,
+            &crate::agent::capabilities::ResolvedAgentConfig::default(),
+            None,
+            false,
+        );
+        let args = argv(&cmd);
+        // `cmd.exe /c <resolved> <base_args...>` — the resolved path
+        // must replace the bare `cline` stem so cmd.exe's `cmd.exe /c`
+        // wrapper can find the binary off-`PATH`.
+        assert!(
+            args.windows(2).any(|pair| {
+                pair[0] == "/c" && pair[1] == fake_binary_str
+            }),
+            "the resolved absolute path must follow `/c`; got {:?}",
+            args
+        );
+        // And the Cline recipe's `-i` base arg must survive intact.
+        let after_binary = args
+            .iter()
+            .position(|a| a == &fake_binary_str)
+            .expect("resolved path position");
+        assert_eq!(
+            args.get(after_binary + 1).map(String::as_str),
+            Some("-i"),
+            "Cline recipe base_args must survive the override; got {:?}",
+            args
+        );
+        // And the bare `cline` stem (which `cmd.exe` could resolve only
+        // when it's on `PATH`) must NOT appear as a separate token.
+        assert!(
+            !args.contains(&"cline".to_string()),
+            "the bare stem must not appear when an executable_override is set; got {:?}",
+            args
+        );
     }
 
     #[test]
@@ -661,10 +719,16 @@ mod tests {
 
         let args = argv(&cmd);
         let pos = args.iter().position(|a| a == "--prefill").expect("--prefill present in argv");
+        // Issue #1773 review — `cmd.exe /c` requires newlines in the
+        // prefill to be flattened to single spaces (the bare-newline
+        // end-of-command trap). The empty middle segment from the
+        // consecutive `\n\n` is filtered, so the join produces one
+        // space, not two. macOS/Linux preserves the original line
+        // structure (covered by the WSL sibling test).
         assert_eq!(
             args.get(pos + 1).map(String::as_str),
-            Some("Title\n\nLine 1\nLine 2"),
-            "full multi-line prefill must ride on argv (native claude.exe, no cmd.exe to truncate it): {:?}",
+            Some("Title Line 1 Line 2"),
+            "full prefill must be flattened to single spaces on Windows: {:?}",
             args
         );
         assert!(

@@ -30,7 +30,7 @@ fn harness_profiles_round_trips_a_stored_user_profile() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -46,7 +46,7 @@ fn harness_profiles_user_overrides_default_by_id() {
             id: "terminal".to_string(),
             name: "Shell".to_string(),
             harness: "terminal".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -63,7 +63,7 @@ fn harness_profiles_new_id_appends() {
             id: "custom".to_string(),
             name: "Custom".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         let profiles = harness_profiles();
@@ -88,7 +88,7 @@ fn resolve_harness_provider_uses_profile_harness_field() {
             id: "deepseek-via-claude".to_string(),
             name: "DeepSeek (via Claude)".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         assert!(matches!(
@@ -114,7 +114,7 @@ fn merge_detected_profiles_appends_new_and_reports_count() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }])
         .unwrap();
         assert_eq!(added, 1);
@@ -130,14 +130,14 @@ fn merge_detected_profiles_is_idempotent() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }])
         .unwrap();
         let added = merge_detected_profiles(vec![HarnessProfile {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }])
         .unwrap();
         assert_eq!(added, 0);
@@ -153,7 +153,7 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
             id: "claude".to_string(),
             name: "Renamed".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         // Detection sees the default name.
@@ -161,12 +161,94 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "claude".to_string(),
-            runtime: None, wsl_distro: None,
+            runtime: None, wsl_distro: None, executable: None,
         }])
         .unwrap();
         let profiles = harness_profiles();
         let claude = profiles.iter().find(|p| p.id == "claude").unwrap();
         assert_eq!(claude.name, "Renamed");
+    });
+}
+
+/// Issue #1773 review — a stored profile from the prior commit
+/// (`166fcd83`) carries `executable: None`. When the next launch detects
+/// Cline via `CLINE_BIN_PATH` or the `node_modules` walk, the merge
+/// step must refresh the stored `executable` so the user isn't stuck.
+/// User-owned fields (`name`, `runtime`, `wsl_distro`) stay untouched.
+#[test]
+fn merge_detected_profiles_refreshes_stored_executable() {
+    with_temp_dir(|_| {
+        let mut prefs = AppPreferences::default();
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline (renamed by user)".to_string(),
+            harness: "cline".to_string(),
+            runtime: Some(crate::models::EnvType::Windows),
+            wsl_distro: None,
+            executable: None,
+        });
+        super::super::storage::save(prefs).unwrap();
+
+        // The next detection picks up a resolved path.
+        let resolved = std::path::PathBuf::from("D:/tools/cline.exe");
+        let _ = merge_detected_profiles(vec![HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        }])
+        .unwrap();
+
+        let stored = super::super::storage::load().unwrap();
+        let cline = stored
+            .harness_profiles
+            .iter()
+            .find(|p| p.id == "cline")
+            .expect("cline profile still present");
+        assert_eq!(cline.executable.as_deref(), Some(resolved.as_path()));
+        // User-owned fields must NOT have been clobbered.
+        assert_eq!(cline.name, "Cline (renamed by user)");
+        assert_eq!(cline.runtime, Some(crate::models::EnvType::Windows));
+    });
+}
+
+/// If the stored entry already has the same `executable` as detection,
+/// the merge must leave the stored value alone — keeps the steady-state
+/// case quiet (no log noise, no spurious mtime churn).
+#[test]
+fn merge_detected_profiles_preserves_identical_executable() {
+    with_temp_dir(|_| {
+        let resolved = std::path::PathBuf::from("D:/tools/cline.exe");
+        let mut prefs = AppPreferences::default();
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        });
+        super::super::storage::save(prefs).unwrap();
+
+        let _ = merge_detected_profiles(vec![HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        }])
+        .unwrap();
+
+        let stored = super::super::storage::load().unwrap();
+        let cline = stored
+            .harness_profiles
+            .iter()
+            .find(|p| p.id == "cline")
+            .unwrap();
+        assert_eq!(cline.executable.as_deref(), Some(resolved.as_path()));
     });
 }
 
@@ -254,7 +336,7 @@ fn runtime_profile_round_trips_and_resolves_composite_and_canonical_ids() {
         prefs.harness_profiles.push(HarnessProfile {
             id: "muse-wsl-test".into(), name: "Muse (WSL: Ubuntu)".into(),
             harness: "muse".into(), runtime: Some(crate::models::EnvType::Wsl),
-            wsl_distro: Some("Ubuntu".into()),
+            wsl_distro: Some("Ubuntu".into()), executable: None,
         });
         super::super::storage::save(prefs).unwrap();
         for id in ["muse-wsl-test", "muse-wsl-test:account"] {

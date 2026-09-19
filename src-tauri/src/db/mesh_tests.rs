@@ -54,7 +54,7 @@ mod tests {
         crate::preferences::init_for_tests(temp.path().to_path_buf());
         crate::preferences::merge_detected_profiles(vec![crate::preferences::HarnessProfile {
             id: "muse-wsl-test".into(), name: "Muse (WSL)".into(), harness: "muse".into(),
-            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Ubuntu".into()),
+            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Ubuntu".into()), executable: None,
         }]).unwrap();
         let path = format!("C:/buildmesh-runtime-{}", uuid::Uuid::new_v4());
         let mesh = crate::db::create_mesh("Runtime test", &path).unwrap();

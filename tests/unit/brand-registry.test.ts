@@ -84,6 +84,18 @@ describe('brandFor', () => {
     });
   });
 
+  it('registers Cline with its mascot-green brand treatment', () => {
+    // Issue #1773: the native `cline` harness id resolves to its own inline
+    // mark (the official CC0 Simple Icons path), not the wire fallback glyph.
+    const cline = brandFor('cline');
+    expect(cline).toMatchObject({
+      id: 'cline',
+      chipHex: '#3DDC84',
+      chipClass: 'bg-emerald-400',
+    });
+    expect(cline?.icon.kind).toBe('inline');
+  });
+
   it('returns undefined for an unregistered provider', () => {
     expect(brandFor('claude:custom-account')).toBeUndefined();
     expect(brandFor('mystery')).toBeUndefined();

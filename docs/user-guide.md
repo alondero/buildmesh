@@ -76,7 +76,8 @@ The current built-in catalog is:
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
-| Meta Muse | Yes | Passive watcher | Linux and macOS only |
+| Cline | Yes | None | Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
+| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides

@@ -2,7 +2,7 @@
 
 ![Buildmesh Wordmark](./src/assets/wordmark.png)
 
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
@@ -99,7 +99,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 ## Features
 
 ### Multi-agent orchestration
-- **Thirteen harnesses, one workflow**: Claude Code, Codex, Antigravity, OpenCode, Grok Code, Cursor, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Meta Muse, and a plain `Terminal` harness — switch harnesses per Agent Node. Some harnesses pair with a *Model Provider* (Anthropic, MiniMax, Kimi) so each Agent Node can carry live quota / balance widgets; custom Claude-compatible endpoints attach as proxied providers.
+- **Fourteen harnesses, one workflow**: Claude Code, Codex, Antigravity, OpenCode, Grok Code, Cursor, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse, and a plain `Terminal` harness — switch harnesses per Agent Node. Some harnesses pair with a *Model Provider* (Anthropic, MiniMax, Kimi) so each Agent Node can carry live quota / balance widgets; custom Claude-compatible endpoints attach as proxied providers.
 - **Multi-mesh workspaces**: open several meshes side by side. Each mesh is its own grid of agent terminals.
 - **Tiled grid view**: split each mesh into a 1–6 pane grid. Layouts are saved per mesh.
 - **Persistent terminals**: agents run as durable background processes and their PTY state survives mesh and pane switches. Quitting the app prompts you to confirm when there are non-resumable sessions; on relaunch anything still running is restored automatically and anything suspended shows up in the Resume menu. The plain `Terminal` harness and any harness that hasn't yet captured a session id are **non-resumable** — exiting loses their progress.

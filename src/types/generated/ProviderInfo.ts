@@ -105,7 +105,7 @@ group_key: string,
  * offering settings it would silently drop. Generated to
  * `src/types/generated/ProviderInfo.ts`.
  */
-capabilities: HarnessCapabilities,
+capabilities: HarnessCapabilities, 
 /**
  * Saved configurations offered under this Spawn Option on every client.
  */

@@ -437,6 +437,11 @@ pub const GROK_EFFORT_ALLOWED: &[&str] = &[
 /// `https://commandcode.ai/docs/reference/cli`).
 pub const COMMANDCODE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high"];
 
+/// The closed vocabulary Cline's `--thinking` flag accepts (verified against
+/// `cline` 3.0.62 `--help`, issue #1773). Kept here (not in the adapter) so the
+/// resolver and the capability descriptor agree on the same vocabulary.
+pub const CLINE_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -501,6 +506,10 @@ mod tests {
         // turn watcher) flipped `supports_passive_turn_watcher` to true;
         // both invariants land in the merged inventory pin below.
         capabilities_for(&crate::agent::provider::adapters::MUSE)
+    }
+
+    fn cline_caps() -> HarnessCapabilities {
+        capabilities_for(&crate::agent::provider::adapters::CLINE)
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
@@ -794,6 +803,35 @@ mod tests {
             muse.available_on,
             vec!["linux".to_string(), "macos".to_string(), "windows".to_string()]
         );
+
+        // Issue #1773 — Cline is a Native Provider: it owns its own auth
+        // (`cline auth`) and Buildmesh only injects the user's Model Provider
+        // credentials through the spawn env-var seam. Attention (#1775) and the
+        // transcript reader (#1776) are not shipped yet, so those flags stay
+        // honest-empty. Effort is Cline's closed `--thinking` vocabulary.
+        let cline = cline_caps();
+        assert_eq!(cline.harness_id, "cline");
+        assert!(cline.supports_resume);
+        assert!(cline.auto_resume_on_startup);
+        assert!(!cline.requires_attention_hook);
+        assert_eq!(cline.attention_capability, AttentionCapability::None);
+        assert!(!cline.supports_passive_turn_watcher);
+        assert!(!cline.produces_readable_transcript);
+        assert!(cline.supports_model_override);
+        assert!(cline.supports_effort_override);
+        assert!(cline.supports_extra_args);
+        assert!(cline.supports_prefill);
+        assert!(!cline.is_plain_terminal);
+        assert_eq!(
+            cline.effort_control,
+            EffortControlKind::Closed {
+                allowed: CLINE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+            }
+        );
+        assert_eq!(
+            cline.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
     }
 
     /// `supports_effort_override` must mirror `effort_control != None`. The
@@ -816,7 +854,7 @@ mod tests {
             commandcode_caps(),
             muse_caps(),
             freebuff_caps(),
-            muse_caps(),
+            cline_caps(),
         ] {
             let has_effort_control = !matches!(caps.effort_control, EffortControlKind::None);
             assert_eq!(
@@ -854,7 +892,7 @@ mod tests {
             &crate::agent::provider::adapters::COMMANDCODE,
             &crate::agent::provider::adapters::MUSE,
             &crate::agent::provider::adapters::FREEBUFF,
-            &crate::agent::provider::adapters::MUSE,
+            &crate::agent::provider::adapters::CLINE,
         ] {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;

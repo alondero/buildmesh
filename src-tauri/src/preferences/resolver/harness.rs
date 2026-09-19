@@ -18,7 +18,7 @@ pub fn default_harness_profiles() -> Vec<HarnessProfile> {
         id: "terminal".to_string(),
         name: "Terminal".to_string(),
         harness: "terminal".to_string(),
-        runtime: None, wsl_distro: None,
+        runtime: None, wsl_distro: None, executable: None,
     }]
 }
 
@@ -151,11 +151,21 @@ fn merge_harness_order(stored: &[String], incoming: Vec<String>) -> Vec<String> 
 
 /// Merge startup-detected harness profiles into stored preferences (issue #536).
 ///
-/// Additive and idempotent: a detected profile whose `id` is not already stored
-/// is appended; existing entries are never overwritten or removed. So a profile
-/// the user renamed survives, and re-running the scan every launch (the chosen
-/// cadence) only ever *adds* newly-installed tools. Returns the number of
-/// profiles added; disk is written only when that is non-zero.
+/// Additive and idempotent for the **id list**: a detected profile whose `id`
+/// is not already stored is appended; existing entries are never removed.
+/// User-renamed profiles survive, and re-running the scan every launch (the
+/// chosen cadence) only ever *adds* newly-installed tools.
+///
+/// The **resolved `executable` field is refreshed in-place** when detection
+/// supplies one and the stored entry has none (or a different value) — that
+/// is, after a stored profile with `executable: None` already exists from
+/// an earlier detection, the next startup populates the resolved path on
+/// disk instead of leaving the user stuck forever. The user-visible fields
+/// (`name`, `runtime`, `wsl_distro`) are never overwritten — those stay
+/// whatever the user has saved.
+///
+/// Returns the number of profiles added; disk is written only when something
+/// changed.
 ///
 /// Detected ids never collide with the code-defined defaults (Terminal), which
 /// live outside the stored `harness_profiles` list and are re-merged on read by
@@ -163,13 +173,24 @@ fn merge_harness_order(stored: &[String], incoming: Vec<String>) -> Vec<String> 
 pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, String> {
     let mut prefs = load()?;
     let before = prefs.harness_profiles.len();
+    let mut executable_updated = false;
     for profile in detected {
-        if !prefs.harness_profiles.iter().any(|p| p.id == profile.id) {
+        if let Some(existing) = prefs.harness_profiles.iter_mut().find(|p| p.id == profile.id) {
+            // Refresh only the resolved executable. Never touch the
+            // user's `name` / `runtime` / `wsl_distro` — those are
+            // user-owned (issue #1773 review: a stored
+            // `executable: None` from an earlier detection must not
+            // permanently strand the user).
+            if profile.executable.is_some() && existing.executable != profile.executable {
+                existing.executable = profile.executable;
+                executable_updated = true;
+            }
+        } else {
             prefs.harness_profiles.push(profile);
         }
     }
     let added = prefs.harness_profiles.len() - before;
-    if added > 0 {
+    if added > 0 || executable_updated {
         save(prefs)?;
     }
     Ok(added)

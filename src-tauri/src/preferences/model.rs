@@ -13,6 +13,7 @@ use crate::agent::provider::compatibility::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::collections::HashMap;
 use ts_rs::TS;
 
@@ -45,6 +46,16 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub wsl_distro: Option<String>,
+    /// Absolute path to the harness binary when discovery resolved one that
+    /// is **not on `PATH`** (issue #1773 review). `cmd.exe /c <name>` would
+    /// fail with `'name' is not recognized` for off-PATH installs, so the
+    /// spawn path threads this through `spawn_environment::wrap` as
+    /// `executable_override`. `None` for PATH-resolvable harnesses (every
+    /// native provider on macOS/Linux, npm-shim Cline on Windows, etc.) —
+    /// the spawn keeps its normal `recipe.binary` lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executable: Option<PathBuf>,
 }
 
 /// How a [`ProviderAccount`] is billed — drives how usage is rendered (issue #537).

@@ -135,15 +135,55 @@ pub fn harness_default_for(prefs: &AppPreferences, profile_id: &str) -> Option<H
 /// Resolve the **stored** pairing for spawn / env (ADR-0025). Spawn is
 /// stored-only — a composite spawn id without a stored attach yields `None`
 /// (empty env), so a keyless account never auto-spawns.
+///
+/// **Surface-level fallback** (issue #1777 / #1773): Cline is a Native
+/// Provider with no Buildmesh-side pairing UI — users add providers through
+/// `cline auth`. For a `cline:<account>` spawn Option there is therefore no
+/// `cline`-specific pairing to find, so when the exact `(harness, provider)`
+/// attach is absent we fall back to *any* stored pairing for the same account
+/// whose [`ApiSurface`] the harness speaks. Cline reads both the Anthropic and
+/// OpenAI key env vars, so a `claude:<account>` (Anthropic) or
+/// `codex:<account>` (OpenAI) attach supplies its credential without the user
+/// duplicating the pairing per harness. Preference order follows
+/// [`fallback_surfaces`] (Anthropic first). Every other harness returns an
+/// empty fallback set, so its exact-match contract is unchanged.
 fn resolve_pairing(
     harness_id: &str,
     account: &ProviderAccount,
     stored: &[ProviderPairing],
 ) -> Option<ProviderPairing> {
-    stored
+    if let Some(exact) = stored
         .iter()
         .find(|p| p.harness_id == harness_id && p.provider_id == account.id)
+    {
+        return Some(exact.clone());
+    }
+    let surfaces = fallback_surfaces(harness_id);
+    if surfaces.is_empty() {
+        return None;
+    }
+    stored
+        .iter()
+        .filter(|p| p.provider_id == account.id && surfaces.contains(&p.surface))
+        .min_by_key(|p| {
+            surfaces
+                .iter()
+                .position(|surface| *surface == p.surface)
+                .unwrap_or(usize::MAX)
+        })
         .cloned()
+}
+
+/// The surfaces a harness can consume when no harness-specific pairing exists.
+/// Only `cline` opts in today (issue #1777): it is a Native Provider that reads
+/// the standard provider key env vars for both surfaces. Order is the
+/// preference order for [`resolve_pairing`]'s fallback.
+fn fallback_surfaces(harness_id: &str) -> &'static [ApiSurface] {
+    if harness_id == "cline" {
+        &[ApiSurface::Anthropic, ApiSurface::OpenAI]
+    } else {
+        &[]
+    }
 }
 
 /// Build the backend-selecting environment for a **Spawn Option** (issue #576 /
@@ -166,31 +206,57 @@ fn resolve_pairing(
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so empty
 /// means a clean slate, not a leaked override.
 pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
+    resolve_provider_env_with(spawn_option_id, &provider_accounts(), &provider_pairings())
+}
+
+/// Pure helper split out of [`resolve_provider_env`] so the consumer-aware
+/// branch (Cline — issue #1773 review) is unit-testable without touching the
+/// global preferences cache. Reads `accounts` and `pairings` as inputs and
+/// returns the env list the spawn path should inject.
+fn resolve_provider_env_with(
+    spawn_option_id: &str,
+    accounts: &[ProviderAccount],
+    pairings: &[ProviderPairing],
+) -> Vec<(String, String)> {
     let id = crate::agent::provider::SpawnOptionId::from(spawn_option_id);
     let harness_id = id.harness_id();
     let provider_id = id.provider_id();
-    let accounts = provider_accounts();
-    let pairings = provider_pairings();
     match provider_id {
         Some(provider_id) => {
             let Some(account) = accounts.iter().find(|a| a.id == provider_id) else {
                 return Vec::new();
             };
-            let Some(pairing) = resolve_pairing(harness_id, account, &pairings) else {
+            let Some(pairing) = resolve_pairing(harness_id, account, pairings) else {
                 return Vec::new();
             };
-            surface_env(
-                pairing.surface,
-                pairing.base_url.as_deref(),
-                account.api_key.as_deref(),
-                &pairing.model_tiers,
-            )
+            // Issue #1773 review — Cline reads different env vars than
+            // Claude Code. Surface fallback resolves a `cline:<account>`
+            // spawn to an Anthropic or OpenAI pairing stored against
+            // Claude Code / Codex; the surface emitter must therefore
+            // branch on the **consumer harness**, not just on the
+            // resolved pairing's surface, because the Anthropic emitter
+            // otherwise blanks `ANTHROPIC_API_KEY` to force Claude Code
+            // through `ANTHROPIC_AUTH_TOKEN` (the OpenRouter trap), which
+            // strands Cline's own `ANTHROPIC_API_KEY` reader with an
+            // empty string and breaks authentication.
+            if harness_id == "cline" {
+                cline_consumer_env(pairing.surface, pairing.base_url.as_deref(), account.api_key.as_deref(), &pairing.model_tiers)
+            } else {
+                surface_env(
+                    pairing.surface,
+                    pairing.base_url.as_deref(),
+                    account.api_key.as_deref(),
+                    &pairing.model_tiers,
+                )
+            }
         }
         None => {
             let Some(account) = accounts.iter().find(|a| a.id == spawn_option_id) else {
                 return Vec::new();
             };
-            provider_account_env(account, &pairings, &claude_harness_id())
+            // Bare-id path is the Anthropic-claude shape only — the legacy
+            // Claude Code convention. Cline spawns are always composite.
+            provider_account_env(account, pairings, &claude_harness_id())
         }
     }
 }
@@ -291,6 +357,76 @@ fn provider_account_env(
         account.api_key.as_deref(),
         &pairing.model_tiers,
     )
+}
+
+/// Emit spawn env for a **Cline** spawn whose surface fallback resolved to
+/// an Anthropic or OpenAI pairing stored against Claude Code / Codex
+/// (issue #1773 / #1777 review).
+///
+/// Cline's consumer contract differs from Claude Code's:
+///
+/// * Cline reads **`ANTHROPIC_API_KEY`** as its API key, NOT
+///   `ANTHROPIC_AUTH_TOKEN`. The Anthropic emitter for Claude Code
+///   deliberately emits `ANTHROPIC_AUTH_TOKEN=<key>` and blanks
+///   `ANTHROPIC_API_KEY` for custom endpoints (the OpenRouter trap — it
+///   forces Claude Code through the third-party token instead of
+///   leaking a shell-set Anthropic key). For Cline that exact contract
+///   strands the `ANTHROPIC_API_KEY` reader with an empty string and
+///   breaks auth.
+/// * Cline reads **`OPENAI_API_KEY`** the same way Codex does — the
+///   OpenAI emitter is already correct for it.
+///
+/// Per-surface rules:
+///
+/// * **Anthropic surface** — emit `ANTHROPIC_API_KEY=<key>` (never
+///   blanked), `ANTHROPIC_BASE_URL=<base>` when set, `ANTHROPIC_MODEL=<primary>`
+///   when configured. Skip the per-tier model alias pin — Cline ignores
+///   the alias env vars (only the primary model is honoured).
+/// * **OpenAI surface** — delegate to the platform emitter (already
+///   correct).
+fn cline_consumer_env(
+    surface: ApiSurface,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    tiers: &ModelTiers,
+) -> Vec<(String, String)> {
+    match surface {
+        ApiSurface::Anthropic => cline_anthropic_env(base_url, api_key, tiers),
+        ApiSurface::OpenAI => openai_surface_env(base_url, api_key, tiers),
+    }
+}
+
+/// Cline-shaped env for the Anthropic surface. See [`cline_consumer_env`].
+fn cline_anthropic_env(
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    tiers: &ModelTiers,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let base_url = base_url.filter(|s| !s.is_empty());
+    if let Some(base) = base_url {
+        env.push(("ANTHROPIC_BASE_URL".to_string(), base.to_string()));
+    }
+    if let Some(key) = api_key.filter(|s| !s.is_empty()) {
+        // Cline reads `ANTHROPIC_API_KEY` — set it non-empty for both
+        // the default-Anthropic and custom-endpoint paths. The
+        // Claude Code emitter blanks it for custom endpoints; we do
+        // not, because the empty value would propagate straight to
+        // Cline's auth reader (issue #1773 review).
+        env.push(("ANTHROPIC_API_KEY".to_string(), key.to_string()));
+    }
+    let model = |v: &Option<String>| v.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(primary) = model(&tiers.default) {
+        // Cline honours only the primary model env var; the per-tier
+        // alias env vars (`ANTHROPIC_DEFAULT_SONNET_MODEL` etc.) are
+        // Claude-Code-only and would be ignored.
+        env.push(("ANTHROPIC_MODEL".to_string(), primary));
+    } else if base_url.is_some() {
+        tracing::warn!(
+            "Cline pairing sets a custom base_url but no model — cline will send its default model id to the custom endpoint and likely be rejected"
+        );
+    }
+    env
 }
 
 /// Emit the spawn env for a pairing's **Compatible API surface** (issue #576).
@@ -422,4 +558,311 @@ fn openai_surface_env(
         env.push(("OPENAI_MODEL".to_string(), model.to_string()));
     }
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preferences::model::{BillingMode, ModelTiers};
+
+    fn account(id: &str) -> ProviderAccount {
+        ProviderAccount {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some(format!("sk-{id}")),
+        }
+    }
+
+    fn pairing(harness: &str, provider: &str, surface: ApiSurface) -> ProviderPairing {
+        ProviderPairing {
+            harness_id: harness.to_string(),
+            provider_id: provider.to_string(),
+            surface,
+            base_url: Some(format!("https://api.example.com/{harness}")),
+            model_tiers: ModelTiers::default(),
+        }
+    }
+
+    /// Issue #1773 / #1777 — Cline is a Native Provider with no Buildmesh-side
+    /// pairing UI, so an Anthropic-surface attach under Claude Code supplies a
+    /// `cline:<account>` spawn's env.
+    #[test]
+    fn cline_falls_back_to_an_anthropic_pairing() {
+        let acct = account("minimax");
+        let stored = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.harness_id, "claude");
+        assert_eq!(resolved.surface, ApiSurface::Anthropic);
+    }
+
+    #[test]
+    fn cline_falls_back_to_an_openai_pairing() {
+        let acct = account("minimax");
+        let stored = vec![pairing("codex", "minimax", ApiSurface::OpenAI)];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.harness_id, "codex");
+        assert_eq!(resolved.surface, ApiSurface::OpenAI);
+    }
+
+    /// When both surfaces are attached, the fallback preference order
+    /// (Anthropic first, mirroring `fallback_surfaces`) is deterministic.
+    #[test]
+    fn cline_prefers_the_anthropic_pairing_when_both_are_attached() {
+        let acct = account("minimax");
+        let stored = vec![
+            pairing("codex", "minimax", ApiSurface::OpenAI),
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+        ];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("surface fallback");
+        assert_eq!(resolved.surface, ApiSurface::Anthropic);
+    }
+
+    /// An exact `cline:<account>` pairing (if one is ever stored) always wins
+    /// over the surface fallback.
+    #[test]
+    fn cline_exact_pairing_wins_over_fallback() {
+        let acct = account("minimax");
+        let stored = vec![
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+            pairing("cline", "minimax", ApiSurface::OpenAI),
+        ];
+        let resolved = resolve_pairing("cline", &acct, &stored).expect("exact pairing");
+        assert_eq!(resolved.harness_id, "cline");
+    }
+
+    /// Mixed surfaces fall through cleanly: a pairing belonging to a different
+    /// account never leaks into another account's env.
+    #[test]
+    fn cline_ignores_pairings_for_other_accounts() {
+        let acct = account("deepseek");
+        let stored = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        assert!(resolve_pairing("cline", &acct, &stored).is_none());
+    }
+
+    /// No pairing at all → no env (the existing stored-only contract).
+    #[test]
+    fn cline_without_any_pairing_resolves_to_none() {
+        assert!(resolve_pairing("cline", &account("minimax"), &[]).is_none());
+    }
+
+    /// Regression guard for the existing harnesses: the fallback set is empty
+    /// for every non-Cline harness, so their exact-match contract is unchanged.
+    /// A `claude:<account>` lookup must not pick up the `codex:<account>`
+    /// (OpenAI) pairing, and vice versa.
+    #[test]
+    fn non_cline_harnesses_keep_exact_match_only() {
+        let acct = account("minimax");
+        let cross = vec![
+            pairing("claude", "minimax", ApiSurface::Anthropic),
+            pairing("codex", "minimax", ApiSurface::OpenAI),
+        ];
+        assert_eq!(
+            resolve_pairing("claude", &acct, &cross).map(|p| p.surface),
+            Some(ApiSurface::Anthropic)
+        );
+        assert_eq!(
+            resolve_pairing("codex", &acct, &cross).map(|p| p.surface),
+            Some(ApiSurface::OpenAI)
+        );
+        // Cross-surface lookups fall through rather than borrowing the other
+        // harness's attach.
+        let only_claude = vec![pairing("claude", "minimax", ApiSurface::Anthropic)];
+        assert!(resolve_pairing("codex", &acct, &only_claude).is_none());
+        let only_codex = vec![pairing("codex", "minimax", ApiSurface::OpenAI)];
+        assert!(resolve_pairing("claude", &acct, &only_codex).is_none());
+        // Anthropic/OpenCode/etc. never inherit an unrelated harness's pairing.
+        assert!(resolve_pairing("opencode", &acct, &cross).is_none());
+    }
+
+    /// The fallback set is what gates the whole mechanism — pin it so a future
+    /// "while we're here" harness addition is a deliberate act.
+    #[test]
+    fn only_cline_declares_fallback_surfaces() {
+        assert_eq!(
+            fallback_surfaces("cline"),
+            &[ApiSurface::Anthropic, ApiSurface::OpenAI]
+        );
+        for harness in ["anthropic", "claude", "codex", "opencode", "terminal"] {
+            assert!(fallback_surfaces(harness).is_empty(), "{harness} must not fall back");
+        }
+    }
+
+    // ----- Issue #1773 review — Cline consumer-aware env emission -----
+
+    fn anthropic_pairing(base_url: Option<&str>) -> ProviderPairing {
+        let mut tiers = ModelTiers::default();
+        tiers.default = Some("anthropic/claude-3-5-sonnet-latest".into());
+        ProviderPairing {
+            harness_id: "claude".into(),
+            provider_id: "minimax".into(),
+            surface: ApiSurface::Anthropic,
+            base_url: base_url.map(str::to_string),
+            model_tiers: tiers,
+        }
+    }
+
+    fn openai_pairing(base_url: Option<&str>) -> ProviderPairing {
+        let mut tiers = ModelTiers::default();
+        tiers.default = Some("gpt-4o-mini".into());
+        ProviderPairing {
+            harness_id: "codex".into(),
+            provider_id: "minimax".into(),
+            surface: ApiSurface::OpenAI,
+            base_url: base_url.map(str::to_string),
+            model_tiers: tiers,
+        }
+    }
+
+    /// Issue #1773 review — Cline falling back to a default-Anthropic
+    /// pairing (no `base_url`) must still receive a non-empty
+    /// `ANTHROPIC_API_KEY`. The Claude Code emitter sets
+    /// `ANTHROPIC_AUTH_TOKEN` only; Cline doesn't read that.
+    #[test]
+    fn cline_anthropic_default_endpoint_sets_anthropic_api_key() {
+        let stored = vec![anthropic_pairing(None)];
+        let env = resolve_provider_env_with(
+            "cline:minimax",
+            &[account("minimax")],
+            &stored,
+        );
+        let key = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_API_KEY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            key,
+            Some("sk-minimax"),
+            "Cline must receive ANTHROPIC_API_KEY non-empty for default-Anthropic; got {:?}",
+            env
+        );
+        // The Claude Code alias should NOT be present — Cline ignores it,
+        // and emitting it would leak the Claude-Code-only contract.
+        assert!(
+            env.iter().all(|(k, _)| k != "ANTHROPIC_AUTH_TOKEN"),
+            "Cline must not receive ANTHROPIC_AUTH_TOKEN (Claude Code only); got {:?}",
+            env
+        );
+        assert!(
+            env.iter().all(|(k, _)| k != "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            "Cline must not receive Claude Code per-tier alias env; got {:?}",
+            env
+        );
+    }
+
+    /// Issue #1773 review — Cline falling back to a custom-Anthropic
+    /// endpoint (OpenRouter, MiniMax, etc.) must still receive a
+    /// non-empty `ANTHROPIC_API_KEY`. The Claude Code emitter blanks
+    /// the key here to force routing through `ANTHROPIC_AUTH_TOKEN`; that
+    /// contract strands Cline's `ANTHROPIC_API_KEY` reader with `""`.
+    #[test]
+    fn cline_anthropic_custom_endpoint_sets_anthropic_api_key_not_blank() {
+        let stored = vec![anthropic_pairing(Some("https://openrouter.ai/api/v1"))];
+        let env = resolve_provider_env_with(
+            "cline:minimax",
+            &[account("minimax")],
+            &stored,
+        );
+        let key = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_API_KEY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            key,
+            Some("sk-minimax"),
+            "Cline must NOT receive a blank ANTHROPIC_API_KEY for custom endpoints; got {:?}",
+            env
+        );
+        let base = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_BASE_URL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            base,
+            Some("https://openrouter.ai/api/v1"),
+            "Cline must receive the custom Anthropic base_url; got {:?}",
+            env
+        );
+        let model = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_MODEL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            model,
+            Some("anthropic/claude-3-5-sonnet-latest"),
+            "Cline must receive the primary model pinned; got {:?}",
+            env
+        );
+        assert!(
+            env.iter().all(|(k, _)| k != "ANTHROPIC_AUTH_TOKEN"),
+            "Cline must not receive ANTHROPIC_AUTH_TOKEN (Claude Code only); got {:?}",
+            env
+        );
+    }
+
+    /// Issue #1773 review — Cline falling back to an OpenAI-surface
+    /// pairing (custom OpenAI-compatible endpoint) receives the standard
+    /// `OPENAI_API_KEY`, which is what Cline reads.
+    #[test]
+    fn cline_openai_custom_endpoint_sets_openai_api_key() {
+        let stored = vec![openai_pairing(Some("https://api.deepseek.com/v1"))];
+        let env = resolve_provider_env_with(
+            "cline:minimax",
+            &[account("minimax")],
+            &stored,
+        );
+        let key = env
+            .iter()
+            .find(|(k, _)| k == "OPENAI_API_KEY")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            key,
+            Some("sk-minimax"),
+            "Cline must receive OPENAI_API_KEY for OpenAI-surface fallback; got {:?}",
+            env
+        );
+        let base = env
+            .iter()
+            .find(|(k, _)| k == "OPENAI_BASE_URL")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            base,
+            Some("https://api.deepseek.com/v1"),
+            "Cline must receive the OpenAI base_url; got {:?}",
+            env
+        );
+    }
+
+    /// Regression guard — Claude Code's Anthropic contract is unchanged.
+    /// The OpenRouter trap (`ANTHROPIC_API_KEY=""`, `ANTHROPIC_AUTH_TOKEN=<key>`)
+    /// still applies because Claude Code reads `ANTHROPIC_AUTH_TOKEN` natively.
+    #[test]
+    fn claude_anthropic_custom_endpoint_still_uses_auth_token_trap() {
+        let stored = vec![anthropic_pairing(Some("https://openrouter.ai/api/v1"))];
+        let env = resolve_provider_env_with(
+            "claude:minimax",
+            &[account("minimax")],
+            &stored,
+        );
+        let api_key = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_API_KEY")
+            .map(|(_, v)| v.as_str());
+        let auth_token = env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            api_key,
+            Some(""),
+            "Claude Code's ANTHROPIC_API_KEY must be blanked for custom endpoints (OpenRouter trap)"
+        );
+        assert_eq!(
+            auth_token,
+            Some("sk-minimax"),
+            "Claude Code's ANTHROPIC_AUTH_TOKEN must carry the real key"
+        );
+    }
 }

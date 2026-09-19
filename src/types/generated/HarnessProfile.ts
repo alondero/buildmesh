@@ -35,4 +35,14 @@ runtime?: EnvType,
 /**
  * Distribution that owned discovery. Never silently substitute another.
  */
-wsl_distro?: string, };
+wsl_distro?: string, 
+/**
+ * Absolute path to the harness binary when discovery resolved one that
+ * is **not on `PATH`** (issue #1773 review). `cmd.exe /c <name>` would
+ * fail with `'name' is not recognized` for off-PATH installs, so the
+ * spawn path threads this through `spawn_environment::wrap` as
+ * `executable_override`. `None` for PATH-resolvable harnesses (every
+ * native provider on macOS/Linux, npm-shim Cline on Windows, etc.) —
+ * the spawn keeps its normal `recipe.binary` lookup.
+ */
+executable?: string, };

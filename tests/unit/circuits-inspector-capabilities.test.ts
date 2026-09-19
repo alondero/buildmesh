@@ -36,6 +36,7 @@ const REQUIRED_HARNESSES: InspectorHarnessId[] = [
   'commandcode',
   'freebuff',
   'muse',
+  'cline',
   'terminal',
 ];
 
@@ -251,6 +252,30 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     // Order mirrors `MuseAdapter::available_on()` in Rust:
     // `[Platform::Linux, Platform::Macos]`.
     expect(c.available_on).toEqual(['linux', 'macos']);
+  });
+
+  // Cline (issue #1773) — Native Provider: resume + model + effort + prefill.
+  // Attention (#1775) and the transcript reader (#1776) are not shipped in
+  // this slice, so those flags stay honest-empty. Effort is the closed
+  // `--thinking` vocabulary verified against Cline 3.0.62.
+  it('Cline matches the Rust inventory', () => {
+    const c = HARNESS_CAPABILITIES.cline;
+    expect(c.harness_id).toBe('cline');
+    expect(c.supports_resume).toBe(true);
+    expect(c.auto_resume_on_startup).toBe(true);
+    expect(c.supports_passive_turn_watcher).toBe(false);
+    expect(c.requires_attention_hook).toBe(false);
+    expect(c.attention_capability).toEqual({ kind: 'none' });
+    expect(c.produces_readable_transcript).toBe(false);
+    expect(c.supports_model_override).toBe(true);
+    expect(c.supports_effort_override).toBe(true);
+    expect(c.supports_extra_args).toBe(true);
+    expect(c.supports_prefill).toBe(true);
+    expect(c.is_plain_terminal).toBe(false);
+    expect(c.effort_control.kind).toBe('closed');
+    expect(effortAllowedFor(c)).toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
+    // Order mirrors `ClineAdapter::available_on()` in Rust.
+    expect(c.available_on).toEqual(['windows', 'linux', 'macos']);
   });
 
   // Terminal — plain shell; every override OFF. The issue #1362 review

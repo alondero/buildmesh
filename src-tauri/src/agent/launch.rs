@@ -128,6 +128,33 @@ fn normalize_prefill_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Platform-aware prefill normalisation. Wraps [`normalize_prefill_newlines`]
+/// with the shell-side concerns:
+///
+/// * On **Windows** (`WindowsShell::Cmd`) — `cmd.exe /c` treats a bare
+///   newline inside a quoted argument as end-of-command, so all newlines
+///   must be collapsed to single spaces. The CLI receives one argv
+///   element with the full hand-off as a single line.
+/// * On **macOS / Linux** (`WindowsShell::Direct`) — the binary is
+///   spawned directly and argv elements preserve embedded newlines, so
+///   the hand-off keeps its original line structure. CRLF is still
+///   normalised to LF so cross-platform callers don't accidentally pass
+///   `\r\n`.
+///
+/// Hoisted out of the Cline adapter (issue #1773 review) — flattening
+/// was unconditional there, destroying multi-line prompts on Unix.
+fn normalize_prefill_for_platform(platform: Platform, text: &str) -> String {
+    match platform {
+        Platform::Windows => text
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        Platform::Macos | Platform::Linux => normalize_prefill_newlines(text),
+    }
+}
+
 /// Delivery path for an automated node's first turn. A non-empty prompt uses
 /// the harness's startup prefill when available and otherwise falls back to
 /// the same two-phase PTY injection used for later automated turns.
@@ -274,7 +301,9 @@ pub fn default_prepare(
 
     if capabilities.supports_prefill {
         if let Some(text) = input.prefill.filter(|s| !s.is_empty()) {
-            let normalized = normalize_prefill_newlines(text);
+            // Platform-aware: `cmd.exe /c` flattens to single space on Windows;
+            // direct spawn on macOS/Linux preserves line structure.
+            let normalized = normalize_prefill_for_platform(input.platform, text);
             let args = adapter.prefill_args(&normalized);
             // Prefill after a trailing session id is also positional
             // (`codex resume [OPTIONS] <id> [PROMPT]`). Flag-shaped prefill
@@ -379,9 +408,10 @@ mod tests {
         assert!(prepared.environment.env_remove.is_empty());
     }
 
-    /// Prefill text with CRLF must be normalised to LF before reaching
-    /// the adapter, mirroring the prior inline behaviour in
-    /// `build_spawn_command_prepared`.
+    /// Prefill text with CRLF must be normalised before reaching the
+    /// adapter. Windows flattens to single space (the `cmd.exe /c`
+    /// end-of-command trap; issue #1773 review); macOS/Linux preserves
+    /// the line structure and only normalises CRLF→LF.
     #[test]
     fn default_prepare_normalises_prefill_crlf() {
         let adapter = &crate::agent::provider::adapters::ANTHROPIC as &dyn AgentProvider;
@@ -400,7 +430,87 @@ mod tests {
             .base_args
             .last()
             .expect("prefill should produce a trailing arg");
-        assert_eq!(last, "first\nsecond\nthird");
+        assert_eq!(last, "first second third");
+    }
+
+    /// Issue #1773 — Cline's base recipe already carries `-i`, so the
+    /// adapter's `prefill_args` returns just the positional text and
+    /// `default_prepare` extends the base with it. The composed argv must
+    /// contain exactly one `-i` and the prefill text as its trailing
+    /// argument. Regression-pin for a previous draft that re-emitted `-i`
+    /// inside `prefill_args`, producing `cline -i -i "<text>"`.
+    #[test]
+    fn cline_prefill_composes_without_repeating_the_tui_flag() {
+        let adapter = &crate::agent::provider::adapters::CLINE as &dyn AgentProvider;
+        let config = ResolvedAgentConfig::default();
+        let input = HarnessLaunchInput {
+            platform: Platform::Windows,
+            runtime: EnvType::Windows,
+            session: SessionIdModeRef::None,
+            config: &config,
+            prefill: Some("fix the auth bug"),
+            sandbox: false,
+        };
+        let prepared = default_prepare(adapter, input);
+        let args: Vec<&str> = prepared.recipe.argv().collect();
+        assert_eq!(
+            args.iter().filter(|a| **a == "-i").count(),
+            1,
+            "exactly one -i must survive the prefill composition; got {args:?}"
+        );
+        assert_eq!(
+            args.last().copied(),
+            Some("fix the auth bug"),
+            "prefill text must be the trailing argument; got {args:?}"
+        );
+    }
+
+    /// Issue #1773 review — prefill newlines must be flattened on Windows
+    /// (`cmd.exe /c` end-of-command trap) but **preserved on macOS/Linux**
+    /// (direct spawn, argv elements preserve `\n`). The previous draft
+    /// flattened unconditionally inside the Cline adapter, destroying
+    /// multi-line prompts on Unix.
+    #[test]
+    fn prefill_newlines_are_flattended_on_windows_and_preserved_on_unix() {
+        let adapter = &crate::agent::provider::adapters::CLINE as &dyn AgentProvider;
+        let config = ResolvedAgentConfig::default();
+        let prefill = "first\nsecond\r\nthird";
+
+        let windows = default_prepare(
+            adapter,
+            HarnessLaunchInput {
+                platform: Platform::Windows,
+                runtime: EnvType::Windows,
+                session: SessionIdModeRef::None,
+                config: &config,
+                prefill: Some(prefill),
+                sandbox: false,
+            },
+        );
+        let windows_args: Vec<&str> = windows.recipe.argv().collect();
+        assert_eq!(
+            windows_args.last().copied(),
+            Some("first second third"),
+            "Windows prefill must be flattened to single space; got {windows_args:?}"
+        );
+
+        let linux = default_prepare(
+            adapter,
+            HarnessLaunchInput {
+                platform: Platform::Linux,
+                runtime: EnvType::Wsl,
+                session: SessionIdModeRef::None,
+                config: &config,
+                prefill: Some(prefill),
+                sandbox: false,
+            },
+        );
+        let linux_args: Vec<&str> = linux.recipe.argv().collect();
+        assert_eq!(
+            linux_args.last().copied(),
+            Some("first\nsecond\nthird"),
+            "Unix prefill must preserve line structure (CRLF→LF only); got {linux_args:?}"
+        );
     }
 
     /// Assign mode must forward the adapter's `session_assign_args`.
