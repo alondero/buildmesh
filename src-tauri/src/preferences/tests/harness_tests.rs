@@ -170,6 +170,88 @@ fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
     });
 }
 
+/// Issue #1773 review — a stored profile from the prior commit
+/// (`166fcd83`) carries `executable: None`. When the next launch detects
+/// Cline via `CLINE_BIN_PATH` or the `node_modules` walk, the merge
+/// step must refresh the stored `executable` so the user isn't stuck.
+/// User-owned fields (`name`, `runtime`, `wsl_distro`) stay untouched.
+#[test]
+fn merge_detected_profiles_refreshes_stored_executable() {
+    with_temp_dir(|_| {
+        let mut prefs = AppPreferences::default();
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline (renamed by user)".to_string(),
+            harness: "cline".to_string(),
+            runtime: Some(crate::models::EnvType::Windows),
+            wsl_distro: None,
+            executable: None,
+        });
+        super::super::storage::save(prefs).unwrap();
+
+        // The next detection picks up a resolved path.
+        let resolved = std::path::PathBuf::from("D:/tools/cline.exe");
+        let _ = merge_detected_profiles(vec![HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        }])
+        .unwrap();
+
+        let stored = super::super::storage::load().unwrap();
+        let cline = stored
+            .harness_profiles
+            .iter()
+            .find(|p| p.id == "cline")
+            .expect("cline profile still present");
+        assert_eq!(cline.executable.as_deref(), Some(resolved.as_path()));
+        // User-owned fields must NOT have been clobbered.
+        assert_eq!(cline.name, "Cline (renamed by user)");
+        assert_eq!(cline.runtime, Some(crate::models::EnvType::Windows));
+    });
+}
+
+/// If the stored entry already has the same `executable` as detection,
+/// the merge must leave the stored value alone — keeps the steady-state
+/// case quiet (no log noise, no spurious mtime churn).
+#[test]
+fn merge_detected_profiles_preserves_identical_executable() {
+    with_temp_dir(|_| {
+        let resolved = std::path::PathBuf::from("D:/tools/cline.exe");
+        let mut prefs = AppPreferences::default();
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        });
+        super::super::storage::save(prefs).unwrap();
+
+        let _ = merge_detected_profiles(vec![HarnessProfile {
+            id: "cline".to_string(),
+            name: "Cline".to_string(),
+            harness: "cline".to_string(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(resolved.clone()),
+        }])
+        .unwrap();
+
+        let stored = super::super::storage::load().unwrap();
+        let cline = stored
+            .harness_profiles
+            .iter()
+            .find(|p| p.id == "cline")
+            .unwrap();
+        assert_eq!(cline.executable.as_deref(), Some(resolved.as_path()));
+    });
+}
+
 #[test]
 fn set_harness_order_round_trips() {
     with_temp_dir(|_| {

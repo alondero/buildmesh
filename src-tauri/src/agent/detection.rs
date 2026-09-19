@@ -303,27 +303,9 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         &|path| path.exists(),
     );
     if let Some(cline_path) = cline_install {
+        let cline_override_active = std::env::var_os("CLINE_BIN_PATH").is_some();
         for list in [&mut profiles, &mut executable_profiles] {
-            if !list.iter().any(|profile| profile.id == "cline") {
-                list.push(HarnessProfile {
-                    id: "cline".into(),
-                    name: "Cline".into(),
-                    harness: "cline".into(),
-                    runtime: None,
-                    wsl_distro: None,
-                    // The resolved absolute path (issue #1773 review —
-                    // previously discarded, which made every Cline spawn
-                    // `cmd.exe /c cline` and fail for off-PATH installs).
-                    // `cmd.exe` resolves `cline.cmd` when the npm prefix is
-                    // on PATH, so the shim path can stay `None` in that
-                    // specific case — but the npm-shim and node_modules
-                    // paths are otherwise not on the orchestrator's PATH,
-                    // so we propagate the resolved path unconditionally
-                    // and let `wrap` decide between binary-name lookup and
-                    // absolute-path spawn (issue #1773).
-                    executable: Some(cline_path.clone()),
-                });
-            }
+            apply_resolved_cline_executable(list, &cline_path, cline_override_active);
         }
     }
     if cfg!(windows) {
@@ -367,6 +349,42 @@ fn is_automatic_profile(p: &HarnessProfile) -> bool {
     DETECTABLE.iter().any(|tool| p.harness == tool.harness && (p.id == tool.id || p.id == format!("{}-windows", tool.id) || p.id.starts_with(&format!("{}-wsl-", tool.id))))
 }
 
+/// Apply the Cline resolver's resolved absolute path onto the profile
+/// lists returned by `detect_profiles` (issue #1773 review).
+///
+/// The generic sweep may already have produced a `cline` row — via the
+/// `~/.cline` config-dir probe or a `cline` stem on `PATH` — but with
+/// `executable: None`. We don't want to skip the resolver result in that
+/// case (the resolved path is the only piece of state the sweep didn't
+/// have), so the helper either updates the existing row's `executable`
+/// or pushes a fresh row when no entry exists yet.
+///
+/// `override_active` is `true` when `CLINE_BIN_PATH` was set; the spec
+/// says the env override wins unconditionally, so the helper overwrites
+/// an existing path even if it was already set. Without the override,
+/// the helper only fills in a missing path — it never clobbers an
+/// already-resolved one.
+fn apply_resolved_cline_executable(
+    list: &mut Vec<HarnessProfile>,
+    cline_path: &std::path::Path,
+    override_active: bool,
+) {
+    if let Some(existing) = list.iter_mut().find(|p| p.id == "cline") {
+        if override_active || existing.executable.is_none() {
+            existing.executable = Some(cline_path.to_path_buf());
+        }
+    } else {
+        list.push(HarnessProfile {
+            id: "cline".into(),
+            name: "Cline".into(),
+            harness: "cline".into(),
+            runtime: None,
+            wsl_distro: None,
+            executable: Some(cline_path.to_path_buf()),
+        });
+    }
+}
+
 fn runtime_profile(profile: &HarnessProfile, runtime: crate::models::EnvType) -> HarnessProfile {
     let label = match runtime {
         crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop => "Windows",
@@ -376,7 +394,14 @@ fn runtime_profile(profile: &HarnessProfile, runtime: crate::models::EnvType) ->
         id: format!("{}-{}", profile.id, label.to_ascii_lowercase()),
         name: format!("{} ({label})", profile.name),
         harness: profile.harness.clone(),
-        runtime: Some(runtime), wsl_distro: None, executable: None,
+        runtime: Some(runtime), wsl_distro: None,
+        // Propagate the source profile's resolved executable (issue
+        // #1773 review). `cline-windows` is the profile
+        // `preferred_profiles` picks on a Windows host — if we leave
+        // this `None`, the Routes layer at launch time can't see
+        // `CLINE_BIN_PATH` or the node_modules walk we resolved
+        // earlier and the spawn fails with `'cline' is not recognized`.
+        executable: profile.executable.clone(),
     }
 }
 
@@ -1080,5 +1105,127 @@ mod tests {
         assert_eq!(ids, vec!["codex"], "only the on-disk binary is detected");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ----- Issue #1773 review: executable plumbing -----
+
+    use std::path::PathBuf;
+
+    fn cline_profile(id: &str, executable: Option<PathBuf>) -> HarnessProfile {
+        HarnessProfile {
+            id: id.into(),
+            name: "Cline".into(),
+            harness: "cline".into(),
+            runtime: None,
+            wsl_distro: None,
+            executable,
+        }
+    }
+
+    /// Issue #1773 review — when `detect_profiles` already produced a
+    /// `cline` row (e.g. via the `~/.cline` config-dir probe) and the
+    /// resolver returns an absolute path, that path must be patched onto
+    /// the existing row rather than dropped on the floor (the prior
+    /// code skipped the patch when the id was already present, leaving
+    /// the row with `executable: None` and the spawn silently failing
+    /// with `'cline' is not recognized`).
+    #[test]
+    fn apply_resolved_cline_executable_patches_existing_profile() {
+        let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
+        let mut list = vec![cline_profile("cline", None)];
+        super::apply_resolved_cline_executable(&mut list, &resolved, false);
+        assert_eq!(
+            list.len(),
+            1,
+            "the helper must mutate the existing row, not push a duplicate"
+        );
+        assert_eq!(list[0].executable.as_deref(), Some(resolved.as_path()));
+    }
+
+    /// Issue #1773 review — `CLINE_BIN_PATH` wins unconditionally, even
+    /// when the existing profile already had a previously-resolved
+    /// path (the spec is unambiguous: the env override always wins).
+    /// Without the override, an existing path is left alone — the
+    /// resolver is only consulted when there's a path to record.
+    #[test]
+    fn apply_resolved_cline_executable_always_overwrites_when_override_active() {
+        let prior = PathBuf::from("/old/path/cline.exe");
+        let override_path = PathBuf::from("/Users/me/bin/cline");
+        let mut list = vec![cline_profile("cline", Some(prior.clone()))];
+        super::apply_resolved_cline_executable(&mut list, &override_path, true);
+        assert_eq!(list[0].executable.as_deref(), Some(override_path.as_path()));
+    }
+
+    #[test]
+    fn apply_resolved_cline_executable_preserves_existing_when_no_override() {
+        let prior = PathBuf::from("/old/path/cline.exe");
+        let fresh = PathBuf::from("/new/path/cline.exe");
+        let mut list = vec![cline_profile("cline", Some(prior.clone()))];
+        super::apply_resolved_cline_executable(&mut list, &fresh, false);
+        assert_eq!(list[0].executable.as_deref(), Some(prior.as_path()));
+    }
+
+    #[test]
+    fn apply_resolved_cline_executable_pushes_when_id_absent() {
+        let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
+        let mut list: Vec<HarnessProfile> = vec![];
+        super::apply_resolved_cline_executable(&mut list, &resolved, false);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "cline");
+        assert_eq!(list[0].executable.as_deref(), Some(resolved.as_path()));
+    }
+
+    /// Issue #1773 review — `runtime_profile` produced the
+    /// `cline-windows` profile that `preferred_profiles` selects on a
+    /// Windows host, but its hardcoded `executable: None` discarded the
+    /// resolved path before it could reach the launch router. The fix
+    /// propagates the source profile's executable onto the
+    /// runtime-derived copy.
+    #[test]
+    fn runtime_profile_propagates_executable() {
+        use crate::models::EnvType;
+        let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
+        let source = cline_profile("cline", Some(resolved.clone()));
+        let derived = super::runtime_profile(&source, EnvType::Windows);
+        assert_eq!(derived.id, "cline-windows");
+        assert_eq!(
+            derived.executable.as_deref(),
+            Some(resolved.as_path()),
+            "runtime-derived profile must carry the resolved executable; got {:?}",
+            derived
+        );
+    }
+
+    /// End-to-end pin: on a Windows host, `preferred_profiles` selects
+    /// the `cline-windows` variant (rank 0) over the bare `cline` row
+    /// (rank 1), and the chosen profile carries the executable the
+    /// resolver filled in. The canonical-id rewrite path renames
+    /// `id` back to the bare `cline` while keeping `runtime` /
+    /// `executable`, so we assert on the latter two.
+    #[test]
+    fn preferred_profiles_preserves_executable_on_windows_runtime_variant() {
+        use crate::agent::provider::Platform;
+        use crate::models::EnvType;
+        let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
+        // Bare `cline` (PATH-resolvable) + `cline-windows` synthesised
+        // from it via `runtime_profile`. The Windows variant wins on a
+        // Windows host; the resolved path must survive both the
+        // synthesis and the canonical-id rewrite.
+        let mut profiles = vec![cline_profile("cline", Some(resolved.clone()))];
+        let derived = super::runtime_profile(&profiles[0], EnvType::Windows);
+        profiles.push(derived);
+        let chosen = super::preferred_profiles(&profiles, Platform::Windows, None);
+        let cline_row = chosen.iter().find(|p| p.harness == "cline").unwrap();
+        assert_eq!(
+            cline_row.runtime,
+            Some(EnvType::Windows),
+            "Windows-runtime variant must win on a Windows host; got {:?}",
+            chosen
+        );
+        assert_eq!(
+            cline_row.executable.as_deref(),
+            Some(resolved.as_path()),
+            "the Windows-runtime variant must carry the resolved executable"
+        );
     }
 }

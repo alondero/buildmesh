@@ -77,7 +77,7 @@ The current built-in catalog is:
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available |
 | Freebuff | Yes | None | Model and effort overrides are not available |
 | Cline | Yes | None | Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
-| Meta Muse | Yes | Passive watcher | Linux and macOS only |
+| Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
 Capabilities can change with the installed CLI and runtime. Buildmesh hides
