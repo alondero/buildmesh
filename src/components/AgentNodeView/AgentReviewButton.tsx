@@ -5,7 +5,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
-import { cancelCircuitRun, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
+import { cancelCircuitRun, isAgentRunning, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
@@ -33,8 +33,21 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
     ? ownership
     : null;
-  const eligible = node.provider !== 'terminal'
-    && ['running', 'ready', 'awaiting_input', 'completed'].includes(node.status);
+  // The backend's gate (`commands::circuit::trigger_circuit_from_node`) trusts
+  // `PROCESS_REGISTRY.is_alive(&node_id)` over the DB status, so a node whose
+  // process is up but whose status is still `pending`/`spawning` (transient
+  // row, or one stuck on `Starting…` because of a fire-and-forget swallow
+  // upstream) is still eligible. We poll `isAgentRunning` while the node is in
+  // a transient state so the button flips enabled the moment the process is
+  // actually registered. Outside transient states the DB status is the
+  // cheaper source of truth.
+  const statusEligible = node.status === 'running'
+    || node.status === 'ready'
+    || node.status === 'awaiting_input'
+    || node.status === 'completed';
+  const pollingLiveness = node.status === 'pending' || node.status === 'spawning';
+  const processAlive = useAgentProcessAlive(node.id, pollingLiveness);
+  const eligible = node.provider !== 'terminal' && (statusEligible || processAlive);
 
   useEffect(() => {
     if (!open) return;
@@ -168,4 +181,61 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
         </div>
       </Modal>, document.body)}
   </>;
+}
+
+/**
+ * Reactively reports whether `nodeId` has a live agent process, polled while
+ * `active` is true and skipped entirely otherwise. Used by
+ * [`AgentReviewButton`] to mirror the backend's actual safety gate
+ * (`PROCESS_REGISTRY.is_alive`) instead of the DB status alone — a row
+ * stranded on `pending`/`spawning` by an upstream fire-and-forget swallow
+ * still lights up as eligible the instant its PTY reader is registered.
+ *
+ * Polling has a hard ceiling so a node that genuinely never reaches a live
+ * process doesn't keep the IPC round-tripping forever: after
+ * [`LIVENESS_POLL_TIMEOUT_MS`] the interval stops, the returned value
+ * freezes at its last known state, and the consumer (`AgentReviewButton`)
+ * correctly keeps the review button disabled. The status badge itself
+ * still drives the UI — a stuck row keeps showing "Starting…" (or "Error"
+ * once the backend's detached-spawn wrapper surfaces the failure), and a
+ * status-becomes-`running` change re-arms polling via the `active` dep.
+ */
+const LIVENESS_POLL_TIMEOUT_MS = 60_000;
+
+export function useAgentProcessAlive(nodeId: number, active: boolean): boolean {
+  const [alive, setAlive] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!active) {
+      // Reset to the safe default when polling stops so a transient-to-stable
+      // transition cannot leave the previous poll's `true` lingering past the
+      // point where the consumer stops trusting it.
+      setAlive(false);
+      return;
+    }
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const result = await isAgentRunning(nodeId);
+        if (!cancelled) setAlive(result);
+      } catch {
+        // The backend may transiently reject during startup races; treat as
+        // "unknown, not alive" and let the next poll retry.
+        if (!cancelled) setAlive(false);
+      }
+    };
+    void check();
+    const intervalId = window.setInterval(check, 1000);
+    const timeoutId = window.setTimeout(() => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    }, LIVENESS_POLL_TIMEOUT_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [nodeId, active]);
+
+  return alive;
 }
