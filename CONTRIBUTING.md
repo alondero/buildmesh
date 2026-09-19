@@ -27,6 +27,15 @@ others are welcome. This document is the contract for contributing.
 listed in the Tauri 2 prerequisites, Git CLI, and (optionally) the `gh` CLI
 for the GitHub Issues / PR features.
 
+The first Windows Cargo build also downloads a pinned Microsoft ConPTY package
+from `api.nuget.org` using Node.js, verifies its SHA-256 checksum, and stages the
+DLL and matching console hosts for development, tests, and installers. Later
+builds reuse `src-tauri/target/conpty/1.24.260710001/package.zip` and can run
+offline. If download access is blocked, allow that NuGet endpoint and retry the
+build. If checksum verification fails, delete only the cached `package.zip` and
+retry; do not bypass verification or substitute a DLL from another version.
+The runtime's MIT license is included in Windows bundles.
+
 ```bash
 npm install
 npm run tauri dev        # launches the Tauri shell + Vite dev server

@@ -84,6 +84,11 @@ Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
 CLI, restart Buildmesh so detection and runtime identity are refreshed.
 
+On Windows, Buildmesh bundles Microsoft's ConPTY runtime so animated terminal
+updates keep the text caret in place. Codex's Astra glitter and other harness
+animations remain enabled. After upgrading Buildmesh, restart the app to use
+the updated terminal runtime.
+
 ## Worktrees, branches, and review
 
 By default, a new node receives a separate worktree. This prevents parallel

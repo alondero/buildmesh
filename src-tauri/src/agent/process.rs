@@ -1495,9 +1495,15 @@ mod tests {
 
         let watcher = watch_child_exit(child_arc.clone(), master_arc.clone());
 
-        // The watcher polls every 500ms. With a 0-byte command the
-        // child exits well inside the first poll, so the master
-        // should be dropped well within 2s.
+        // ConPTY startup may negotiate terminal capabilities before launching
+        // the child. Measure the teardown deadline from observed child exit,
+        // not from spawn (this test deliberately has no terminal responder).
+        let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child_arc.lock().unwrap().try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < exit_deadline, "probe child did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The watcher polls every 500ms, so retain the original 2s bound.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while master_arc.lock().unwrap().is_some() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));

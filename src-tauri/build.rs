@@ -34,6 +34,19 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
         println!("cargo:rustc-link-lib=delayimp");
+
+        println!("cargo:rerun-if-changed=../scripts/prepare-conpty.mjs");
+        println!("cargo:rerun-if-changed=../scripts/conpty-LICENSE.txt");
+        let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+        let profile_dir = out_dir.ancestors().nth(3).expect("Cargo profile directory");
+        let status = std::process::Command::new("node")
+            .arg("../scripts/prepare-conpty.mjs")
+            .arg(std::env::var("CARGO_CFG_TARGET_ARCH").unwrap())
+            .arg(profile_dir)
+            .status()
+            .expect("Node.js is required to stage the Windows ConPTY runtime");
+        assert!(status.success(), "failed to prepare the pinned Microsoft ConPTY runtime");
+        println!("cargo:rustc-link-search=native={}", profile_dir.display());
     }
 
     tauri_build::build()

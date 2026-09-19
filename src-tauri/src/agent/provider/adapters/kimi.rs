@@ -238,6 +238,8 @@ mod tests {
                     Err(error) => panic!("Kimi hook did not reach listener: {error}"),
                 }
             };
+            // Windows accepted sockets inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut headers = Vec::new();
             let mut byte = [0];
