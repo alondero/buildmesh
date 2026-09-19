@@ -190,7 +190,18 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
  * (`PROCESS_REGISTRY.is_alive`) instead of the DB status alone — a row
  * stranded on `pending`/`spawning` by an upstream fire-and-forget swallow
  * still lights up as eligible the instant its PTY reader is registered.
+ *
+ * Polling has a hard ceiling so a node that genuinely never reaches a live
+ * process doesn't keep the IPC round-tripping forever: after
+ * [`LIVENESS_POLL_TIMEOUT_MS`] the interval stops, the returned value
+ * freezes at its last known state, and the consumer (`AgentReviewButton`)
+ * correctly keeps the review button disabled. The status badge itself
+ * still drives the UI — a stuck row keeps showing "Starting…" (or "Error"
+ * once the backend's detached-spawn wrapper surfaces the failure), and a
+ * status-becomes-`running` change re-arms polling via the `active` dep.
  */
+const LIVENESS_POLL_TIMEOUT_MS = 60_000;
+
 export function useAgentProcessAlive(nodeId: number, active: boolean): boolean {
   const [alive, setAlive] = useState<boolean>(false);
 
@@ -214,8 +225,16 @@ export function useAgentProcessAlive(nodeId: number, active: boolean): boolean {
       }
     };
     void check();
-    const id = window.setInterval(check, 1000);
-    return () => { cancelled = true; window.clearInterval(id); };
+    const intervalId = window.setInterval(check, 1000);
+    const timeoutId = window.setTimeout(() => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    }, LIVENESS_POLL_TIMEOUT_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+    };
   }, [nodeId, active]);
 
   return alive;

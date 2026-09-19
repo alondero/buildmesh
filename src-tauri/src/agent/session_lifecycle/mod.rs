@@ -598,6 +598,40 @@ pub fn on_spawn_complete(
     Ok(promoted)
 }
 
+/// Reconcile a stale DB row to `Running` when the orchestrator discovers
+/// the process registry already has a live entry for the node at its
+/// pre-launch guard (`orchestrator.rs:254-256`,
+/// `is_agent_already_running`). The row is typically `Pending` — written
+/// by `create_issue_node` / `create_pr_node` before their detached task
+/// ran — and [`on_spawn_complete`] gates on the prior `Spawning` write
+/// that never happened for this row, so calling it would silently no-op
+/// and the frontend's next refetch would observe `Pending` again,
+/// ping-ponging the badge back to "Starting…".
+///
+/// Unlike [`on_spawn_complete`], the write is unconditional modulo the
+/// `FORBIDDEN_TERMINAL` guard (issue #654): the process registry already
+/// proves the node is live, so we don't gate on a `Spawning` write that
+/// may not have happened. The detached-spawn wrapper in `commands::agent`
+/// emits `node-spawn-completed` alongside this so the frontend refetches
+/// and observes the reconciled `Running` row.
+pub fn on_already_active(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+) -> Result<bool, String> {
+    let wrote = sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_TERMINAL)?;
+    if wrote {
+        tracing::info!(
+            "SessionLifecycle::on_already_active: reconciled session {node_id} to Running \
+             (process registry alive, DB row was stale)"
+        );
+    } else {
+        tracing::debug!(
+            "SessionLifecycle::on_already_active: session {node_id} already in terminal set; skipping"
+        );
+    }
+    Ok(wrote)
+}
+
 /// The PTY reader thread exited cleanly with no error — mark the node
 /// `Idle`. Used to be `db::update_agent_node_status(.., Idle)` in the
 /// reader thread's `PostExitAction::MarkIdle` arm
@@ -813,6 +847,36 @@ pub fn on_error_with_detail(
     Ok(())
 }
 
+/// Conditional [`on_error`] variant: only flips a `Pending` row to
+/// `Error`. Used by the detached-spawn wrapper in `commands::agent` for
+/// the `SpawnOutcome::Skipped` arm, where the orchestrator chose to
+/// leave the row alone on purpose — typically `Suspended`, so the user's
+/// Resume / Regenerate affordances stay reachable
+/// (`orchestrator.rs:117-122`). An unconditional `on_error` would
+/// corrupt that recoverable state.
+///
+/// Reads the current status; if it isn't `Pending` (e.g. `Suspended`,
+/// `Running`, `Ready`, `AwaitingInput`) the write is skipped and a
+/// debug-level log is emitted. The caller still emits a
+/// `node-spawn-failed` Tauri event for UI awareness — surfacing that
+/// this attempt was deferred, without changing the recoverable DB row.
+pub fn on_error_if_pending(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+) -> Result<bool, String> {
+    let current = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if current.status != SessionStatus::Pending {
+        tracing::debug!(
+            "SessionLifecycle::on_error_if_pending: node {node_id} is {:?}; \
+             skipping Error write to preserve recoverable state",
+            current.status
+        );
+        return Ok(false);
+    }
+    on_error(sink, node_id)?;
+    Ok(true)
+}
+
 /// Autopilot finish verified — mark `Completed`. Replaces
 /// `autopilot/pipeline.rs:646`. Emits kind `AutopilotCompleted` — a distinct
 /// normalized kind, so "terminal PR-opened" is never confused with an
@@ -981,6 +1045,27 @@ mod tests {
         let w = sink.writes_if();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0], (7, SessionStatus::Running, SessionStatus::Spawning));
+    }
+
+    /// `on_already_active` is the `Pending → Running` (or any non-terminal
+    /// state → Running) reconcile the detached-spawn wrapper uses when the
+    /// orchestrator's pre-launch guard discovers a live PTY reader. Unlike
+    /// `on_spawn_complete`, the write is unconditional modulo the terminal
+    /// set — there is no prior `Spawning` write to gate on, so a
+    /// `write_status_if(.., Spawning)` would silently no-op and the row
+    /// would stay `Pending`. The forbidden set is the same as
+    /// `on_spawn_started`'s — `Error` / `Archived` — so a stopped node
+    /// never gets revived.
+    #[test]
+    fn on_already_active_writes_running_unless_terminal() {
+        let sink = RecordingSink::new();
+        let wrote = on_already_active(&sink, 7).unwrap();
+        assert!(wrote, "non-terminal sink must accept the Running write");
+        let w = sink.writes_unless();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].0, 7);
+        assert_eq!(w[0].1, SessionStatus::Running);
+        assert_eq!(w[0].2, vec![SessionStatus::Error, SessionStatus::Archived]);
     }
 
     #[test]
