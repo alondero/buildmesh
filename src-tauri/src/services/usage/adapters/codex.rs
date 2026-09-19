@@ -9,8 +9,7 @@ use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
-    home_dir, logged_out, unavailable, BillingBalance, ProviderUsage, UsageAmount, UsageError,
-    UsageMeter, UsageWindow,
+    home_dir, BillingBalance, UsageAmount, UsageError, UsageMeter, UsageWindow,
 };
 use serde::Deserialize;
 use std::env;
@@ -18,6 +17,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+/// Remediation shown when the ChatGPT quota endpoint rejects the credential
+/// (HTTP 401/403).
+const SESSION_EXPIRED: &str = "Codex session expired — run 'codex' in your terminal to log in";
 
 /// Drop-in [`UsageAdapter`] for `codex`.
 pub(crate) struct CodexAdapter;
@@ -31,18 +34,20 @@ impl UsageAdapter for CodexAdapter {
         Some("codex")
     }
 
+    // Issue #1745 phase 2 step 13: codex migrated to the outcome seam.
+    // Missing credential → `NoCredential`. 401/403 → `Rejected` with the
+    // session-expired remediation. 429 → `RateLimited`. Transport /
+    // non-2xx / parse → `Unavailable`. The ladder stays hand-rolled (the
+    // kimi precedent): the shared `fetch_usage` driver cannot carry codex's
+    // balance + meters reading.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        // TODO(#1745 phase 2): rewrite `codex_usage` with the shared driver
-        // so its hand-rolled status ladder (`codex_usage_with_paths` ~lines
-        // 533–565) centralises. The shim preserves the wire triple until
-        // then.
-        codex_usage().into()
+        codex_usage()
     }
 }
 
 /// Public Codex fetcher. Walks the discovery list, hits the ChatGPT quota
-/// endpoint, and reports the wire contract.
-pub(crate) fn codex_usage() -> ProviderUsage {
+/// endpoint, and reports the outcome taxonomy.
+pub(crate) fn codex_usage() -> UsageOutcome {
     let candidates = auth_candidates();
     let endpoint = usage_endpoint();
     codex_usage_with_paths(&candidates, &endpoint)
@@ -503,29 +508,23 @@ fn parse_codex_response(body: &str) -> Result<CodexParsed, UsageError> {
     })
 }
 
-fn parsed_to_usage(parsed: CodexParsed) -> ProviderUsage {
-    ProviderUsage {
-        provider: "codex".to_string(),
-        logged_in: true,
-        windows: parsed.windows,
-        balance: parsed.balance,
-        meters: parsed.meters,
-        detail: parsed.detail,
-        error: None,
-    }
-}
-
 /// Test seam: pass an explicit candidate list + endpoint so the WSL fallback
 /// and the live HTTP round-trip can be exercised in isolation.
-fn codex_usage_with_paths(candidates: &[PathBuf], live_url: &str) -> ProviderUsage {
+fn codex_usage_with_paths(candidates: &[PathBuf], live_url: &str) -> UsageOutcome {
     let creds = match read_codex_credentials(candidates) {
         Ok((_, c)) => c,
-        Err(e) => return logged_out("codex", e.to_string()),
+        Err(e) => {
+            return UsageOutcome::NoCredential {
+                hint: e.to_string(),
+            }
+        }
     };
 
     let client = match shared_client() {
         Ok(c) => c,
-        Err(e) => return unavailable("codex", e),
+        Err(e) => {
+            return UsageOutcome::Unavailable { reason: e };
+        }
     };
 
     let mut req = client
@@ -537,36 +536,48 @@ fn codex_usage_with_paths(candidates: &[PathBuf], live_url: &str) -> ProviderUsa
 
     let resp = match req.send() {
         Ok(r) => r,
-        Err(e) => return unavailable("codex", format!("Request failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {e}"),
+            }
+        }
     };
 
     let status = resp.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return logged_out(
-            "codex",
-            "Codex session expired — run 'codex' in your terminal to log in".to_string(),
-        );
+        return UsageOutcome::Rejected {
+            hint: SESSION_EXPIRED.to_string(),
+        };
     }
     if status.as_u16() == 429 {
-        return unavailable(
-            "codex",
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        );
+        return UsageOutcome::RateLimited {
+            reason: "Rate limited — usage data temporarily unavailable".to_string(),
+        };
     }
     if !status.is_success() {
-        return unavailable(
-            "codex",
-            format!("API error {}: usage endpoint failed", status.as_u16()),
-        );
+        return UsageOutcome::Unavailable {
+            reason: format!("API error {}: usage endpoint failed", status.as_u16()),
+        };
     }
 
     let body = match resp.text() {
         Ok(b) => b,
-        Err(e) => return unavailable("codex", format!("Failed to read response: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {e}"),
+            }
+        }
     };
     match parse_codex_response(&body) {
-        Ok(parsed) => parsed_to_usage(parsed),
-        Err(e) => unavailable("codex", format!("Failed to parse response: {}", e)),
+        Ok(parsed) => UsageOutcome::Reading {
+            windows: parsed.windows,
+            balance: parsed.balance,
+            meters: parsed.meters,
+            detail: parsed.detail,
+        },
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {e}"),
+        },
     }
 }
 
@@ -982,14 +993,17 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert_eq!(usage.provider, "codex");
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.windows.len(), 2);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(usage.windows[0].used_percent, Some(18.5));
-        assert!(usage.detail.is_none());
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::Reading {
+                windows, detail, ..
+            } => {
+                assert_eq!(windows.len(), 2);
+                assert_eq!(windows[0].label, "5-hour");
+                assert_eq!(windows[0].used_percent, Some(18.5));
+                assert!(detail.is_none());
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1005,18 +1019,30 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = with_adapter_loopback(vec![auth_path], url, || {
-            CodexAdapter.fetch(&[]).into_usage("codex")
+        let outcome = with_adapter_loopback(vec![auth_path], url, || {
+            crate::services::usage::catalog::dispatch("codex")
+                .expect("codex adapter registered")
+                .fetch(&[])
         });
 
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert!(usage.windows.is_empty());
-        assert_eq!(usage.balance.as_ref().map(|b| b.remaining), Some(17000.50));
-        assert!(matches!(
-            usage.meters.first(),
-            Some(UsageMeter::Metered { .. })
-        ));
+        // Seam contract through `dispatch("codex").fetch`: the enterprise
+        // spend-only reading keeps its balance + metered spend control.
+        match outcome {
+            UsageOutcome::Reading {
+                windows,
+                balance,
+                meters,
+                ..
+            } => {
+                assert!(windows.is_empty());
+                assert_eq!(balance.as_ref().map(|b| b.remaining), Some(17000.50));
+                assert!(matches!(
+                    meters.first(),
+                    Some(UsageMeter::Metered { .. })
+                ));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1032,14 +1058,27 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = with_adapter_loopback(vec![auth_path], url, || {
-            CodexAdapter.fetch(&[]).into_usage("codex")
+        let outcome = with_adapter_loopback(vec![auth_path], url, || {
+            crate::services::usage::catalog::dispatch("codex")
+                .expect("codex adapter registered")
+                .fetch(&[])
         });
 
-        assert!(usage.logged_in);
-        assert_eq!(usage.windows.len(), 3);
-        assert!(usage.balance.is_some());
-        assert_eq!(usage.meters.len(), 1);
+        // Seam contract through `dispatch("codex").fetch`: mixed business
+        // keeps windows + budget.
+        match outcome {
+            UsageOutcome::Reading {
+                windows,
+                balance,
+                meters,
+                ..
+            } => {
+                assert_eq!(windows.len(), 3);
+                assert!(balance.is_some());
+                assert_eq!(meters.len(), 1);
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1069,15 +1108,17 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert!(usage.logged_in);
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::Reading { .. } => {}
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         assert_eq!(*observed_header.lock().unwrap(), "acc-xyz");
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_401_returns_logged_out_with_remediation() {
+    fn codex_usage_with_paths_401_returns_rejected_with_remediation() {
         let home = codex_temp_home();
         let auth_path = home.join("auth.json");
         fs::write(&auth_path, r#"{"access_token":"sk-expired"}"#).unwrap();
@@ -1091,20 +1132,21 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert!(!usage.logged_in);
-        let err = usage.error.unwrap_or_default();
-        assert!(
-            err.contains("codex") && err.contains("terminal"),
-            "remediation message must mention `codex` and `terminal`, got: {err:?}"
-        );
-        assert!(usage.windows.is_empty());
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("codex") && hint.contains("terminal"),
+                    "remediation message must mention `codex` and `terminal`, got: {hint:?}"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_403_returns_logged_out_with_remediation() {
+    fn codex_usage_with_paths_403_returns_rejected_with_remediation() {
         let home = codex_temp_home();
         let auth_path = home.join("auth.json");
         fs::write(&auth_path, r#"{"access_token":"sk-revoked"}"#).unwrap();
@@ -1115,19 +1157,21 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert!(!usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .map(|e| e.contains("terminal"))
-            .unwrap_or(false));
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("terminal"),
+                    "remediation message must mention `terminal`, got: {hint:?}"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_429_preserves_logged_in_and_surfaces_unavailable() {
+    fn codex_usage_with_paths_429_returns_rate_limited() {
         let home = codex_temp_home();
         let auth_path = home.join("auth.json");
         fs::write(&auth_path, r#"{"access_token":"sk-test"}"#).unwrap();
@@ -1138,50 +1182,58 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert!(usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .map(|e| e.contains("Rate limited"))
-            .unwrap_or(false));
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::RateLimited { reason } => {
+                assert!(
+                    reason.contains("Rate limited"),
+                    "rate-limit copy must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_network_failure_preserves_logged_in() {
+    fn codex_usage_with_paths_network_failure_returns_unavailable() {
         let home = codex_temp_home();
         let auth_path = home.join("auth.json");
         fs::write(&auth_path, r#"{"access_token":"sk-test"}"#).unwrap();
         let candidates = vec![auth_path];
 
-        let usage = codex_usage_with_paths(&candidates, "http://127.0.0.1:1/wham/usage");
-        assert!(usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .map(|e| e.contains("Request failed"))
-            .unwrap_or(false));
+        match codex_usage_with_paths(&candidates, "http://127.0.0.1:1/wham/usage") {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("Request failed"),
+                    "transport envelope must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_no_credential_returns_logged_out() {
+    fn codex_usage_with_paths_no_credential_returns_no_credential() {
         let home = codex_temp_home();
         let candidates = vec![home.join(".codex").join("auth.json")];
 
-        let usage = codex_usage_with_paths(&candidates, "http://127.0.0.1:1/wham/usage");
-        assert!(!usage.logged_in);
-        assert!(usage.error.is_some());
-        assert!(usage.windows.is_empty());
+        // Seam contract: no auth file means no network round-trip — the
+        // unreachable loopback URL below would fail loudly if hit.
+        match codex_usage_with_paths(&candidates, "http://127.0.0.1:1/wham/usage") {
+            UsageOutcome::NoCredential { hint } => {
+                assert!(!hint.is_empty());
+            }
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn codex_usage_with_paths_malformed_body_returns_unavailable() {
+    fn codex_usage_with_paths_malformed_body_returns_unavailable_with_parse_hint() {
         let home = codex_temp_home();
         let auth_path = home.join("auth.json");
         fs::write(&auth_path, r#"{"access_token":"sk-test"}"#).unwrap();
@@ -1192,13 +1244,40 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/wham/usage");
 
-        let usage = codex_usage_with_paths(&candidates, &url);
-        assert!(usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .map(|e| e.contains("parse"))
-            .unwrap_or(false));
+        match codex_usage_with_paths(&candidates, &url) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("parse"),
+                    "parse envelope must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn adapter_seam_contract_codex_no_credential_without_network() {
+        // `dispatch("codex").fetch` with no discoverable credential must
+        // report `NoCredential` without touching the network. Point the
+        // candidate override at an absent path so any network round-trip
+        // would fail loudly against the unreachable URL.
+        let home = codex_temp_home();
+        let candidates = vec![home.join(".codex").join("auth.json")];
+        let outcome = with_adapter_loopback(
+            candidates,
+            "http://127.0.0.1:1/wham/usage".to_string(),
+            || {
+                crate::services::usage::catalog::dispatch("codex")
+                    .expect("codex adapter registered")
+                    .fetch(&[])
+            },
+        );
+        match outcome {
+            UsageOutcome::NoCredential { .. } => {}
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&home);
     }

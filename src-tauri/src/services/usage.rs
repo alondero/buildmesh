@@ -43,9 +43,9 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 // Internal fetcher-only helpers: imported by their defining module so the
 // `usage::` namespace stays clean for the seam surface (issue #1657).
-use crate::services::usage::adapter::fetch_usage;
+use crate::services::usage::adapter::{fetch_usage, shared_client};
 use crate::services::usage::cache::cached_age;
-use crate::services::usage::types::{home_dir, logged_out, unavailable};
+use crate::services::usage::types::home_dir;
 // `Datelike` powers the month-start computation in
 // [`current_month_start_epoch`] (spec §3.1). `Timelike` is only used by the
 // test mod for `current_month_start_epoch_is_first_of_utc_month` and is
@@ -1062,7 +1062,13 @@ fn parse_commandcode_credits_response(
 /// Public Command Code fetcher. Reads the CLI-managed credential and queries
 /// its billing API directly; spawning the CLI would make a usage refresh wait
 /// on an interactive process startup.
-pub fn commandcode_usage() -> ProviderUsage {
+///
+/// Issue #1745 phase 2 step 14: migrated to the outcome seam. Missing
+/// credential → `NoCredential`. 401/403 → `Rejected` with the session-expired
+/// remediation. 429 → `RateLimited`. Other → `Unavailable`. The ladder stays
+/// hand-rolled (the kimi precedent): the shared `fetch_usage` driver cannot
+/// carry the dual-fetch quota + subscription-enrichment reading.
+pub fn commandcode_usage() -> UsageOutcome {
     commandcode_usage_with_path(
         &commandcode_auth_path(),
         "https://api.commandcode.ai/alpha/billing/credits",
@@ -1070,14 +1076,22 @@ pub fn commandcode_usage() -> ProviderUsage {
 }
 
 /// Test seam for the CLI-owned credential path and the HTTP endpoint.
-fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsage {
+fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> UsageOutcome {
     let token = match read_commandcode_token(auth_path) {
         Ok(token) => token,
-        Err(error) => return logged_out("commandcode", error.to_string()),
+        Err(error) => {
+            return UsageOutcome::NoCredential {
+                hint: error.to_string(),
+            }
+        }
     };
     let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(client) => client,
-        Err(error) => return unavailable("commandcode", format!("Client error: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {error}"),
+            }
+        }
     };
     let response = match client
         .get(live_url)
@@ -1085,16 +1099,14 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
         .send()
     {
         Ok(response) if response.status().as_u16() == 401 || response.status().as_u16() == 403 => {
-            return logged_out(
-                "commandcode",
-                "Command Code session expired — run 'cmdc login' to log in".to_string(),
-            );
+            return UsageOutcome::Rejected {
+                hint: "Command Code session expired — run 'cmdc login' to log in".to_string(),
+            };
         }
         Ok(response) if response.status().as_u16() == 429 => {
-            return unavailable(
-                "commandcode",
-                "Rate limited — usage data temporarily unavailable".to_string(),
-            );
+            return UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            };
         }
         Ok(response) if !response.status().is_success() => {
             let code = response.status().as_u16();
@@ -1104,35 +1116,38 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
             } else {
                 body.trim()
             };
-            return unavailable("commandcode", format!("API error {code}: {detail}"));
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {code}: {detail}"),
+            };
         }
         Ok(response) => response,
-        Err(error) => return unavailable("commandcode", format!("Request failed: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {error}"),
+            }
+        }
     };
     let body = match response.text() {
         Ok(body) => body,
-        Err(error) => return unavailable("commandcode", format!("Failed to read response: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {error}"),
+            }
+        }
     };
     match parse_commandcode_credits_response(&body) {
-        Ok((windows, credits)) => {
-            let mut usage = ProviderUsage {
-                provider: "commandcode".to_string(),
-                logged_in: true,
-                windows,
-                balance: Some(credits.balance()),
-                meters: vec![],
-                detail: None,
-                error: None,
-            };
+        Ok((mut windows, credits)) => {
+            let mut balance = Some(credits.balance());
+            let mut detail = None;
             // Enrichment is optional: a failed subscription request must not discard
             // successfully fetched windows or credits. Keep the extra wait bounded.
-            let reported_monthly = usage.windows.iter().any(|window| {
+            let reported_monthly = windows.iter().any(|window| {
                 window.used_percent.is_some()
                     && window.label.trim().to_ascii_lowercase().starts_with("monthly")
             });
             if reported_monthly {
-                usage.balance = None;
-                usage.detail = commandcode_extra_credits_detail(&credits);
+                balance = None;
+                detail = commandcode_extra_credits_detail(&credits);
             } else {
                 let monthly = commandcode_fetch_monthly_window(&client, &token, live_url, &credits);
                 let monthly = match monthly {
@@ -1154,14 +1169,21 @@ fn commandcode_usage_with_path(auth_path: &Path, live_url: &str) -> ProviderUsag
                     }
                 };
                 if let Some(monthly) = monthly {
-                    usage.windows.push(monthly);
-                    usage.balance = None;
-                    usage.detail = commandcode_extra_credits_detail(&credits);
+                    windows.push(monthly);
+                    balance = None;
+                    detail = commandcode_extra_credits_detail(&credits);
                 }
             }
-            usage
+            UsageOutcome::Reading {
+                windows,
+                balance,
+                meters: vec![],
+                detail,
+            }
         }
-        Err(error) => unavailable("commandcode", format!("Failed to parse response: {error}")),
+        Err(error) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {error}"),
+        },
     }
 }
 
@@ -1355,7 +1377,9 @@ struct GrokBillingResp {
     config: GrokBillingConfig,
 }
 
-fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
+fn parse_grok_response(
+    body: &str,
+) -> Result<(Vec<UsageWindow>, Option<BillingBalance>), UsageError> {
     let resp: GrokBillingResp = serde_json::from_str(body)
         .map_err(|e| UsageError::Shape(e.to_string()))?;
     let config = resp.config;
@@ -1419,34 +1443,45 @@ fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
         }
     }
 
-    Ok(ProviderUsage {
-        provider: "grok".to_string(),
-        logged_in: true,
-        windows,
-        balance,
-        meters: vec![],
-        detail: None,
-        error: None,
-    })
+    Ok((windows, balance))
 }
 
-pub fn grok_usage() -> ProviderUsage {
-    let (token, user_id) = match read_grok_token(grok_auth_path()) {
-        Ok(t) => t,
-        Err(e) => return logged_out("grok", e.to_string()),
-    };
-
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return unavailable("grok", format!("Client error: {}", e)),
-    };
-
+/// Public Grok fetcher. Reads the CLI-managed OIDC credential and queries
+/// the Grok proxy billing endpoint with the `xai-grok-cli` headers.
+///
+/// Issue #1745 phase 2 step 17: migrated to the outcome seam. Missing
+/// credential → `NoCredential` (as before). 401/403 → `Rejected` with
+/// the "Invalid API key" affordance. 429 → `RateLimited`. Client-build /
+/// transport / non-2xx / parse → `Unavailable`. The ladder stays
+/// hand-rolled (the kimi precedent): the shared `fetch_usage` driver
+/// cannot carry grok's prepaid-balance reading (the custom headers
+/// would fit the driver's request builder; the balance does not fit
+/// its `(windows, detail)` parse shape).
+pub fn grok_usage() -> UsageOutcome {
     let base_url = env::var("GROK_CLI_CHAT_PROXY_BASE_URL")
         .unwrap_or_else(|_| "https://cli-chat-proxy.grok.com".to_string());
-    let url = format!("{}/v1/billing?format=credits", base_url);
+    grok_usage_with(&grok_auth_path(), &base_url)
+}
+
+/// Test seam for the CLI-owned credential path and the proxy base URL.
+fn grok_usage_with(auth_path: &Path, base_url: &str) -> UsageOutcome {
+    let (token, user_id) = match read_grok_token(auth_path.to_path_buf()) {
+        Ok(t) => t,
+        Err(e) => {
+            return UsageOutcome::NoCredential {
+                hint: e.to_string(),
+            }
+        }
+    };
+
+    let client = match shared_client() {
+        Ok(c) => c,
+        Err(e) => {
+            return UsageOutcome::Unavailable { reason: e };
+        }
+    };
+
+    let url = format!("{base_url}/v1/billing?format=credits");
 
     let resp = match client
         .get(&url)
@@ -1461,29 +1496,47 @@ pub fn grok_usage() -> ProviderUsage {
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
             if code == 401 || code == 403 {
-                return logged_out("grok", "Invalid API key".to_string());
+                return UsageOutcome::Rejected {
+                    hint: "Invalid API key".to_string(),
+                };
             }
             if code == 429 {
-                return unavailable(
-                    "grok",
-                    "Rate limited — usage data temporarily unavailable".to_string(),
-                );
+                return UsageOutcome::RateLimited {
+                    reason: "Rate limited — usage data temporarily unavailable".to_string(),
+                };
             }
             let body = r.text().unwrap_or_default();
-            return unavailable("grok", format!("API error {}: {}", code, body));
+            return UsageOutcome::Unavailable {
+                reason: format!("API error {code}: {body}"),
+            };
         }
         Ok(r) => r,
-        Err(e) => return unavailable("grok", format!("Request failed: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {e}"),
+            }
+        }
     };
 
     let body = match resp.text() {
         Ok(b) => b,
-        Err(e) => return unavailable("grok", format!("Failed to read response body: {}", e)),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response body: {e}"),
+            }
+        }
     };
 
     match parse_grok_response(&body) {
-        Ok(usage) => usage,
-        Err(e) => unavailable("grok", format!("Failed to parse response: {}", e)),
+        Ok((windows, balance)) => UsageOutcome::Reading {
+            windows,
+            balance,
+            meters: vec![],
+            detail: None,
+        },
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {e}"),
+        },
     }
 }
 
@@ -1623,24 +1676,20 @@ fn parse_opencode_billing_response(
     Ok((windows, detail))
 }
 
-/// Pure assembly: combines a live fetch result with the SQLite fallback to
-/// produce the final [`ProviderUsage`]. The live path wins when it returns
-/// a usable envelope (no `error`); any failure — `None` = no credential,
-/// or `Some` carrying an error — falls through to the SQLite result so a
-/// user mid-OAuth always sees SOMETHING (issue #957 sub-spec point 4).
-fn choose_opencode_usage(
-    live: Option<&ProviderUsage>,
-    sqlite: ProviderUsage,
-) -> ProviderUsage {
-    if let Some(usage) = live {
-        if usage.error.is_none() {
-            return usage.clone();
-        }
+/// Pure assembly: combines a live fetch outcome with the SQLite fallback
+/// to produce the final [`UsageOutcome`]. The live path wins when it
+/// returns `Reading`; any failure — `None` = no credential, or `Some`
+/// carrying a non-`Reading` outcome — falls through to the SQLite result
+/// so a user mid-OAuth always sees SOMETHING (issue #957 sub-spec
+/// point 4).
+fn choose_opencode_usage(live: Option<UsageOutcome>, sqlite: UsageOutcome) -> UsageOutcome {
+    match live {
+        Some(outcome @ UsageOutcome::Reading { .. }) => outcome,
+        _ => sqlite,
     }
-    sqlite
 }
 
-fn opencode_usage_impl(home: &std::path::Path) -> ProviderUsage {
+fn opencode_usage_impl(home: &std::path::Path) -> UsageOutcome {
     opencode_usage_impl_with_hosts(
         home,
         "https://opencode.ai/_server",
@@ -1680,7 +1729,7 @@ fn opencode_usage_impl_with_hosts(
     live_url: &str,
     refresh_url: &str,
     cred: Option<&OpenCodeConsoleCred>,
-) -> ProviderUsage {
+) -> UsageOutcome {
     let opencode_dir = home.join(".local").join("share").join("opencode");
     let auth_path = opencode_dir.join("auth.json");
     let db_path = opencode_dir.join("opencode.db");
@@ -1729,14 +1778,14 @@ fn opencode_usage_impl_with_hosts(
     // ── Live probe (first attempt) ──────────────────────────────────
     //
     // Reads the Buildmesh-owned OAuth credential (#956) and POSTs
-    // `billing.get` to SolidStart. The `Result::ok` collapse means any
-    // error (NoCredential, Shape, transport) is treated identically:
-    // fall through to the SQLite path. The returned ProviderUsage
-    // carries an `error` for HTTP-level failures (401, 5xx, shape
-    // mismatch) which `choose_opencode_usage` checks below. The
-    // `X-Server-Id` header is sourced from the persisted credential's
-    // `server_id` field (issue #972); pre-#956 blobs fall through to
-    // the legacy default and trigger a process-wide warn-once.
+    // `billing.get` to SolidStart. A missing credential part collapses
+    // to `None` via `opencode_live_request_parts`, and HTTP-level
+    // failures (401, 5xx, shape mismatch) surface as non-`Reading`
+    // outcomes — either way `choose_opencode_usage` falls through to
+    // the SQLite path below. The `X-Server-Id` header is sourced from
+    // the persisted credential's `server_id` field (issue #972);
+    // pre-#956 blobs fall through to the legacy default and trigger a
+    // process-wide warn-once.
     let mut live = current_cred
         .as_ref()
         .and_then(|c| opencode_live_request_at(live_url, c));
@@ -1770,27 +1819,31 @@ fn opencode_usage_impl_with_hosts(
     //
     // Same auth.json gate as before — a user mid-OAuth (live path
     // failed but auth.json present) still gets real numbers; a user
-    // who hasn't run any auth returns logged_out here.
+    // who hasn't run any auth reports `NoCredential` here (the gate
+    // drops the row, as the old `logged_out` envelope did).
     let _token = match read_opencode_token(auth_path) {
         Ok(t) => t,
-        Err(e) => return logged_out("opencode", e.to_string()),
+        Err(e) => {
+            return UsageOutcome::NoCredential {
+                hint: e.to_string(),
+            }
+        }
     };
 
     let sqlite = match calculate_opencode_windows(&db_path) {
-        Ok(windows) => ProviderUsage {
-            provider: "opencode".to_string(),
-            logged_in: true,
+        Ok(windows) => UsageOutcome::Reading {
             windows,
             balance: None,
             meters: vec![],
             detail: None,
-            error: None,
         },
-        Err(e) => unavailable("opencode", format!("Failed to query opencode.db: {}", e)),
+        Err(e) => UsageOutcome::Unavailable {
+            reason: format!("Failed to query opencode.db: {e}"),
+        },
     };
     // Pure assembly pins the degradation contract: live wins when it returns
-    // a usable envelope, anything else falls through to SQLite.
-    choose_opencode_usage(live.as_ref(), sqlite)
+    // `Reading`, anything else falls through to SQLite.
+    choose_opencode_usage(live, sqlite)
 }
 
 /// Fires the live `_server billing.get` probe against a parameterized
@@ -1801,7 +1854,7 @@ fn opencode_usage_impl_with_hosts(
 fn opencode_live_request_at(
     live_url: &str,
     cred: &OpenCodeConsoleCred,
-) -> Option<ProviderUsage> {
+) -> Option<UsageOutcome> {
     let (token, workspace_id, server_id) = opencode_live_request_parts(cred)?;
     let live_url_owned = live_url.to_string();
     Some(fetch_usage(
@@ -1814,19 +1867,17 @@ fn opencode_live_request_at(
                 .json(&[workspace_id])
         },
         parse_opencode_billing_response,
-    )
-    .into_usage("opencode"))
+    ))
 }
 
-/// True when the live probe returned an HTTP 401 (the "refresh-on-the-
-/// spot" trigger). The error string carries the status code via the
-/// `fetch_usage` formatter (`"API error 401: ..."`); substring matching
-/// is enough because the only 401 this fetcher produces is from the
-/// `_server billing.get` endpoint, not a cloud-hosted generic 401.
-fn needs_retry_on_401(live: Option<&ProviderUsage>) -> bool {
-    live.and_then(|u| u.error.as_deref())
-        .map(|e| e.contains("401"))
-        .unwrap_or(false)
+/// True when the live probe's credential was rejected (the
+/// "refresh-on-the-spot" trigger). Issue #1758: matches on the
+/// `Rejected` outcome instead of substring-matching the wire error
+/// string for `"401"` — the outcome is set by the shared driver's
+/// 401/403 arm, so a body that merely mentions "401" can no longer
+/// trigger a spurious refresh round-trip.
+fn needs_retry_on_401(live: Option<&UsageOutcome>) -> bool {
+    matches!(live, Some(UsageOutcome::Rejected { .. }))
 }
 
 /// Composes a fresh [`OpenCodeConsoleCred`] from a refresh response.
@@ -1867,7 +1918,14 @@ fn cred_from_token(
     }
 }
 
-pub fn opencode_usage() -> ProviderUsage {
+/// Public OpenCode fetcher.
+///
+/// Issue #1745 phase 2 step 18: migrated to the outcome seam. The live
+/// `_server billing.get` probe already classified through the shared
+/// driver; the SQLite fallback now builds `Reading` directly, and the
+/// reactive refresh-on-401 gate matches on the `Rejected` outcome
+/// instead of substring-matching the wire error string.
+pub fn opencode_usage() -> UsageOutcome {
     opencode_usage_impl(&home_dir())
 }
 
@@ -2277,8 +2335,8 @@ fn agy_http_auth_failure(err: &UsageError) -> bool {
 
 /// One-token attempt: quota summary, then model-API fallback. Returns
 /// `Err` on auth rejection or hard failure so the caller can try the next
-/// credential source.
-fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsage, UsageError> {
+/// credential source; success and model-API outcomes return directly.
+fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<UsageOutcome, UsageError> {
     // retrieveUserQuotaSummary is the HTTP surface behind `agy /usage`: both
     // the 5-hour and weekly shared buckets, without booting the CLI. Empty
     // body is enough (project is optional). Fall back to fetchAvailableModels
@@ -2286,14 +2344,11 @@ fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsag
     // the five-hour meter.
     match agy_quota_summary(client, token) {
         Ok((windows, detail)) => {
-            return Ok(ProviderUsage {
-                provider: "agy".to_string(),
-                logged_in: true,
+            return Ok(UsageOutcome::Reading {
                 windows,
                 balance: None,
                 meters: vec![],
                 detail,
-                error: None,
             });
         }
         Err(error) if agy_http_auth_failure(&error) => return Err(error),
@@ -2317,35 +2372,65 @@ fn try_agy_usage_with_token(client: &Client, token: &str) -> Result<ProviderUsag
                 .json(&serde_json::json!({ "project": project }))
         },
         parse_agy_models,
-    )
-    .into_usage("agy"))
+    ))
 }
 
-pub fn agy_usage() -> ProviderUsage {
+/// Classify a per-source fetch failure into the outcome taxonomy (issue
+/// #1758): an auth rejection means the Bearer [REDACTED] gone/bad (`Rejected`, so the
+/// gate drops the native row); anything else is transport-class
+/// (`Unavailable`, so the row stays visible with red error copy).
+fn agy_outcome_from_source_error(error: UsageError) -> UsageOutcome {
+    if agy_http_auth_failure(&error) {
+        UsageOutcome::Rejected {
+            hint: error.to_string(),
+        }
+    } else {
+        UsageOutcome::Unavailable {
+            reason: error.to_string(),
+        }
+    }
+}
+
+/// Public Antigravity fetcher. Collects the CLI oauth-file and keyring
+/// tokens, then tries each in order until one succeeds.
+///
+/// Issue #1745 phase 2 step 12: migrated to the outcome seam. Missing
+/// tokens → `NoCredential` (the gate drops the row, as before). The
+/// client-build failure and non-auth source failures are transport-class →
+/// `Unavailable` (previously `logged_out`, which silently dropped the row).
+pub fn agy_usage() -> UsageOutcome {
     use crate::services::usage::adapters::agy::collect_agy_access_tokens_default;
 
     let tokens = match collect_agy_access_tokens_default() {
         Ok(t) => t,
-        Err(e) => return logged_out("agy", e.to_string()),
+        Err(e) => {
+            return UsageOutcome::NoCredential {
+                hint: e.to_string(),
+            }
+        }
     };
     let client = match Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return logged_out("agy", format!("Client error: {e}")),
+        Err(e) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {e}"),
+            }
+        }
     };
 
     let last = tokens.len().saturating_sub(1);
     for (idx, cred) in tokens.iter().enumerate() {
         match try_agy_usage_with_token(&client, &cred.access_token) {
-            Ok(usage) => {
+            Ok(outcome) => {
                 tracing::debug!(
                     target: "services::usage::agy",
                     source = cred.source.as_str(),
                     "Antigravity usage fetch succeeded"
                 );
-                return usage;
+                return outcome;
             }
             Err(error) if agy_http_auth_failure(&error) && idx < last => {
                 tracing::debug!(
@@ -2359,18 +2444,18 @@ pub fn agy_usage() -> ProviderUsage {
             }
             Err(error) => {
                 // Auth rejection on the last source, or loadCodeAssist failure
-                // after quota-summary fell through — logged-out so
-                // assemble_meters can drop an unauthenticated row.
-                return logged_out("agy", error.to_string());
+                // after quota-summary fell through — classified by
+                // `agy_outcome_from_source_error` so rejections drop the row
+                // and transport failures stay visible.
+                return agy_outcome_from_source_error(error);
             }
         }
     }
 
-    logged_out(
-        "agy",
-        "Antigravity OAuth token not found (antigravity-oauth-token or gemini:antigravity)"
+    UsageOutcome::NoCredential {
+        hint: "Antigravity OAuth token not found (antigravity-oauth-token or gemini:antigravity)"
             .to_string(),
-    )
+    }
 }
 
 // Freebuff (`freebuff`) implementation lives in `services::freebuff_usage`
@@ -2865,6 +2950,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn agy_source_error_classifies_auth_rejection_as_rejected() {
+        // Issue #1758: auth rejection on the last source means the Bearer [REDACTED]
+        // gone/bad — `Rejected` so the gate drops the native row (same
+        // user-visible result as the old `logged_out` envelope).
+        match agy_outcome_from_source_error(UsageError::Shape(
+            "retrieveUserQuotaSummary HTTP 401".into(),
+        )) {
+            UsageOutcome::Rejected { hint } => {
+                assert!(hint.contains("401"), "hint must carry the status, got: {hint:?}");
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agy_source_error_classifies_transport_failure_as_unavailable() {
+        // Issue #1758: a non-auth source failure (e.g. loadCodeAssist
+        // transport error) is transport-class — `Unavailable` keeps the row
+        // visible with red error copy instead of silently dropping it.
+        match agy_outcome_from_source_error(UsageError::Shape(
+            "loadCodeAssist failed: connection refused".into(),
+        )) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("loadCodeAssist"),
+                    "reason must carry the cause, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_agy_quota_summary_puts_five_hour_before_weekly_in_each_group() {
         // retrieveUserQuotaSummary returns weekly then 5-hour in each group.
         // Every other Usage Meter (Anthropic, Codex, OpenCode) lists the 5-hour
@@ -3177,14 +3295,12 @@ pub(crate) mod tests {
                 "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
             }
         }"#;
-        let usage = parse_grok_response(json).unwrap();
-        assert_eq!(usage.provider, "grok");
-        assert!(usage.logged_in);
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Weekly Pool");
-        assert_eq!(usage.windows[0].used_percent, Some(25.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
-        assert!(usage.balance.is_none());
+        let (windows, balance) = parse_grok_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Weekly Pool");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
+        assert!(balance.is_none());
     }
 
     #[test]
@@ -3207,10 +3323,10 @@ pub(crate) mod tests {
                 "billingPeriodEnd": "2026-08-31T00:00:00+00:00"
             }
         }"#;
-        let usage = parse_grok_response(json).unwrap();
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Weekly Pool");
-        assert_eq!(usage.windows[0].used_percent, Some(37.0));
+        let (windows, _) = parse_grok_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Weekly Pool");
+        assert_eq!(windows[0].used_percent, Some(37.0));
     }
 
     #[test]
@@ -3223,12 +3339,11 @@ pub(crate) mod tests {
                 "billingPeriodEnd": "2026-08-01T00:00:00+00:00"
             }
         }"#;
-        let usage = parse_grok_response(json).unwrap();
-        assert_eq!(usage.provider, "grok");
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Monthly Limit");
-        assert_eq!(usage.windows[0].used_percent, Some(20.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-08-01T00:00:00+00:00"));
+        let (windows, _) = parse_grok_response(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Monthly Limit");
+        assert_eq!(windows[0].used_percent, Some(20.0));
+        assert_eq!(windows[0].resets_at.as_deref(), Some("2026-08-01T00:00:00+00:00"));
     }
 
     #[test]
@@ -3239,9 +3354,8 @@ pub(crate) mod tests {
                 "onDemandUsed": { "val": 4.25 }
             }
         }"#;
-        let usage = parse_grok_response(json).unwrap();
-        assert!(usage.balance.is_some());
-        let balance = usage.balance.unwrap();
+        let (_, balance) = parse_grok_response(json).unwrap();
+        let balance = balance.expect("prepaid balance present");
         assert_eq!(balance.remaining, 15.75);
         assert_eq!(balance.monthly_spend, Some(4.25));
         assert_eq!(balance.currency, "USD");
@@ -3252,6 +3366,124 @@ pub(crate) mod tests {
         // Force an empty path to trigger logged_out path
         let usage = read_grok_token(PathBuf::from("")).map(|(t, _u)| t).unwrap_or_else(|e| e.to_string());
         assert!(usage.contains("No credential found"));
+    }
+
+    /// Helper: write a `~/.grok/auth.json`-shaped credential file into a
+    /// tempdir so `grok_usage_with` tests stay hermetic.
+    fn write_grok_auth(dir: &tempfile::TempDir) -> PathBuf {
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            r#"{"https://auth.x.ai::test": {"key": "sk-grok-test", "user_id": "user-1"}}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn adapter_seam_contract_grok_no_credential_without_network() {
+        // A missing credential file must report `NoCredential` without
+        // touching the network — the unreachable base URL below would
+        // fail loudly if hit. (`dispatch("grok").fetch` is not hermetic
+        // here: it reads the real `~/.grok/auth.json`.)
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("auth.json");
+        match grok_usage_with(&missing, "http://127.0.0.1:1") {
+            UsageOutcome::NoCredential { .. } => {}
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_usage_with_401_returns_rejected_with_invalid_key_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = write_grok_auth(&dir);
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(401));
+        });
+        match grok_usage_with(&auth_path, &format!("http://127.0.0.1:{port}")) {
+            UsageOutcome::Rejected { hint } => {
+                assert_eq!(hint, "Invalid API key");
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_usage_with_429_returns_rate_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = write_grok_auth(&dir);
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::empty(429));
+        });
+        match grok_usage_with(&auth_path, &format!("http://127.0.0.1:{port}")) {
+            UsageOutcome::RateLimited { reason } => {
+                assert!(
+                    reason.contains("Rate limited"),
+                    "rate-limit copy must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_usage_with_transport_failure_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = write_grok_auth(&dir);
+        match grok_usage_with(&auth_path, "http://127.0.0.1:1") {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("Request failed"),
+                    "transport envelope must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_usage_with_live_loopback_returns_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = write_grok_auth(&dir);
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::from_string(
+                r#"{
+                    "config": {
+                        "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
+                        "creditUsagePercent": 37.0,
+                        "isUnifiedBillingUser": true,
+                        "billingPeriodEnd": "2026-08-31T00:00:00+00:00"
+                    }
+                }"#,
+            ));
+        });
+        match grok_usage_with(&auth_path, &format!("http://127.0.0.1:{port}")) {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "Weekly Pool");
+                assert_eq!(windows[0].used_percent, Some(37.0));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grok_usage_with_malformed_body_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = write_grok_auth(&dir);
+        let port = spawn_loopback(1, |req| {
+            let _ = req.respond(tiny_http::Response::from_string("not-json"));
+        });
+        match grok_usage_with(&auth_path, &format!("http://127.0.0.1:{port}")) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("Failed to parse response"),
+                    "parse envelope must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     // ─── OpenCode ─────────────────────────────────────────────────────────
@@ -3446,10 +3678,8 @@ pub(crate) mod tests {
 
     // ── choose_opencode_usage — the heart of the degradation chain ────────
 
-    fn fake_usage(used_percent: f64) -> ProviderUsage {
-        ProviderUsage {
-            provider: "opencode".to_string(),
-            logged_in: true,
+    fn fake_reading(used_percent: f64) -> UsageOutcome {
+        UsageOutcome::Reading {
             windows: vec![UsageWindow {
                 label: "5-hour".to_string(),
                 used_percent: Some(used_percent),
@@ -3458,19 +3688,12 @@ pub(crate) mod tests {
             balance: None,
             meters: vec![],
             detail: None,
-            error: None,
         }
     }
 
-    fn fake_unavailable(msg: &str) -> ProviderUsage {
-        ProviderUsage {
-            provider: "opencode".to_string(),
-            logged_in: true,
-            windows: Vec::new(),
-            balance: None,
-            meters: vec![],
-            detail: None,
-            error: Some(msg.to_string()),
+    fn fake_unavailable(msg: &str) -> UsageOutcome {
+        UsageOutcome::Unavailable {
+            reason: msg.to_string(),
         }
     }
 
@@ -3479,23 +3702,30 @@ pub(crate) mod tests {
         // Live returned real numbers → SQLite is ignored. The 75% figure is
         // the live value; the 50% figure is the SQLite value — neither
         // matches the other's source, so the assertion is unambiguous.
-        let live = fake_usage(75.0);
-        let sqlite = fake_usage(50.0);
-        let result = choose_opencode_usage(Some(&live), sqlite);
-        assert_eq!(result.windows[0].used_percent, Some(75.0));
+        let live = fake_reading(75.0);
+        let sqlite = fake_reading(50.0);
+        match choose_opencode_usage(Some(live), sqlite) {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows[0].used_percent, Some(75.0));
+            }
+            other => panic!("expected live Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
     fn choose_opencode_usage_live_error_falls_back_to_sqlite() {
         // THE pin: live attempted AND failed (HTTP 401 / 5xx / shape) →
         // SQLite is returned. A future refactor that drops the
-        // `error.is_none()` guard would surface the 401 in the Probe UI
+        // `Reading`-only guard would surface the failure in the Probe UI
         // instead of the SQLite windows; this test catches it.
         let live = fake_unavailable("API error 401: Unauthorized");
-        let sqlite = fake_usage(50.0);
-        let result = choose_opencode_usage(Some(&live), sqlite);
-        assert!(result.error.is_none(), "sqlite fallback must clear live error");
-        assert_eq!(result.windows[0].used_percent, Some(50.0));
+        let sqlite = fake_reading(50.0);
+        match choose_opencode_usage(Some(live), sqlite) {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows[0].used_percent, Some(50.0));
+            }
+            other => panic!("expected sqlite Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -3504,10 +3734,36 @@ pub(crate) mod tests {
         // NoCredential, collapsed to None) → SQLite is returned. The user
         // who has run `opencode auth login` but not yet finished #956's
         // device flow lands here.
-        let sqlite = fake_usage(50.0);
-        let result = choose_opencode_usage(None, sqlite);
-        assert!(result.error.is_none());
-        assert_eq!(result.windows[0].used_percent, Some(50.0));
+        let sqlite = fake_reading(50.0);
+        match choose_opencode_usage(None, sqlite) {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows[0].used_percent, Some(50.0));
+            }
+            other => panic!("expected sqlite Reading outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn needs_retry_on_401_matches_rejected_outcome_not_error_text() {
+        // Issue #1758: the reactive retry gate matches on the `Rejected`
+        // outcome. A `Rejected` 403 (revocation by another name) retries;
+        // an `Unavailable` whose body merely mentions "401" does not —
+        // the old substring match fired a spurious refresh there.
+        assert!(needs_retry_on_401(Some(
+            &UsageOutcome::Rejected {
+                hint: "API error 401: Unauthorized".to_string(),
+            }
+        )));
+        assert!(needs_retry_on_401(Some(
+            &UsageOutcome::Rejected {
+                hint: "API error 403: Forbidden".to_string(),
+            }
+        )));
+        assert!(!needs_retry_on_401(Some(&fake_unavailable(
+            "API error 500: error 401 in body"
+        ))));
+        assert!(!needs_retry_on_401(Some(&fake_reading(25.0))));
+        assert!(!needs_retry_on_401(None));
     }
 
     // ── opencode_usage_impl — end-to-end fallback integration ──────────────
@@ -3666,18 +3922,18 @@ pub(crate) mod tests {
         // Live path will fail with NoCredential (no Windows Credential
         // Manager entry exists in this test) — but the SQLite fallback
         // MUST still produce real windows. Pin that.
-        let usage = opencode_usage_impl(&temp);
-
-        assert_eq!(usage.provider, "opencode");
-        assert!(usage.logged_in, "sqlite fallback should be logged_in");
-        assert!(usage.error.is_none(), "sqlite fallback must not carry an error: {:?}", usage.error);
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(
-            usage.windows[0].used_percent,
-            Some(50.0),
-            "$6 of $12 5-hour limit should yield 50%"
-        );
+        match opencode_usage_impl(&temp) {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "5-hour");
+                assert_eq!(
+                    windows[0].used_percent,
+                    Some(50.0),
+                    "$6 of $12 5-hour limit should yield 50%"
+                );
+            }
+            other => panic!("expected sqlite Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -3944,7 +4200,7 @@ pub(crate) mod tests {
             "wrk_q",
             "srv_v1",
         );
-        let usage = opencode_usage_impl_with_hosts(
+        let outcome = opencode_usage_impl_with_hosts(
             &temp,
             &live_url,
             &refresh_url,
@@ -3961,11 +4217,14 @@ pub(crate) mod tests {
             1,
             "live probe is called once with the refreshed bearer"
         );
-        assert!(usage.logged_in, "live result wins over the SQLite fallback");
-        assert!(usage.error.is_none(), "live path carries no error: {:?}", usage.error);
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        match outcome {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "5-hour");
+                assert_eq!(windows[0].used_percent, Some(25.0));
+            }
+            other => panic!("expected live Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -4040,19 +4299,18 @@ pub(crate) mod tests {
         );
         // SQLite fallback wins — the live path's 401 is suppressed,
         // and the seeded `$6 of $12` 5-hour window shows through at 50%.
-        assert!(usage.logged_in, "sqlite fallback is logged_in");
-        assert!(
-            usage.error.is_none(),
-            "sqlite fallback must clear the live 401 error: {:?}",
-            usage.error
-        );
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(
-            usage.windows[0].used_percent,
-            Some(50.0),
-            "sqlite fallback returns the seeded 50% 5-hour window"
-        );
+        match usage {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "5-hour");
+                assert_eq!(
+                    windows[0].used_percent,
+                    Some(50.0),
+                    "sqlite fallback returns the seeded 50% 5-hour window"
+                );
+            }
+            other => panic!("expected sqlite Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -4118,10 +4376,13 @@ pub(crate) mod tests {
             1,
             "live probe runs once with the existing bearer"
         );
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none(), "live success: {:?}", usage.error);
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        match usage {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].used_percent, Some(25.0));
+            }
+            other => panic!("expected live Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -4199,14 +4460,17 @@ pub(crate) mod tests {
             2,
             "live probe is called twice: first 401, then 200 after refresh"
         );
-        assert!(usage.logged_in, "live result wins over the SQLite fallback");
-        assert!(usage.error.is_none(), "live eventually succeeds: {:?}", usage.error);
         // Three windows from the retry's success body — proves the
         // second live call's token was accepted (the seeded SQLite
         // fallback would have been 50%/...).
-        assert_eq!(usage.windows.len(), 3);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        match usage {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "5-hour");
+                assert_eq!(windows[0].used_percent, Some(25.0));
+            }
+            other => panic!("expected live Reading outcome, got: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -4465,21 +4729,28 @@ pub(crate) mod tests {
             ));
         });
 
-        let usage = commandcode_usage_with_path(
+        let outcome = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port}/alpha/billing/credits"),
         );
 
-        assert!(usage.logged_in);
-        assert_eq!(usage.provider, "commandcode");
+        let (windows, balance) = match outcome {
+            UsageOutcome::Reading {
+                windows, balance, ..
+            } => (windows, balance),
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        };
         assert_eq!(*observed.lock().unwrap(), "Bearer cmd_live_test");
-        assert_eq!(usage.windows.len(), 2);
-        assert_eq!(usage.windows[0].label, "5-hour");
-        assert_eq!(usage.windows[0].used_percent, Some(25.0));
-        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
-        assert_eq!(usage.windows[1].label, "Weekly");
-        assert_eq!(usage.windows[1].used_percent, Some(20.0));
-        let balance = usage.balance.expect("credits must surface as a balance");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-01-01T00:00:00+00:00")
+        );
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, Some(20.0));
+        let balance = balance.expect("credits must surface as a balance");
         assert_eq!(balance.remaining, 15.0);
         assert_eq!(balance.monthly_spend, None);
         assert_eq!(balance.currency, "USD");
@@ -4612,20 +4883,25 @@ pub(crate) mod tests {
             };
             req.respond(tiny_http::Response::from_string(body)).unwrap();
         });
-        let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/alpha/billing/credits"));
+        let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/alpha/billing/credits"));
         assert_eq!(*observed.lock().unwrap(), vec![
             ("/alpha/billing/credits".to_string(), "Bearer cmd_live_test".to_string()),
             ("/alpha/billing/subscriptions?withPending=true".to_string(), "Bearer cmd_live_test".to_string()),
         ]);
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), vec!["5-hour", "Weekly", "Monthly"]);
-        assert_eq!(usage.windows[0].used_percent, Some(0.0));
-        assert_eq!(usage.windows[1].used_percent, Some(20.0));
-        assert_eq!(usage.windows[2].used_percent, Some(50.0));
-        assert_eq!(usage.windows[2].resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
-        assert!(usage.balance.is_none());
-        assert_eq!(usage.detail.as_deref(), Some("Additional credits: USD 5.00"));
+        match outcome {
+            UsageOutcome::Reading {
+                windows, balance, detail, ..
+            } => {
+                assert_eq!(windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), vec!["5-hour", "Weekly", "Monthly"]);
+                assert_eq!(windows[0].used_percent, Some(0.0));
+                assert_eq!(windows[1].used_percent, Some(20.0));
+                assert_eq!(windows[2].used_percent, Some(50.0));
+                assert_eq!(windows[2].resets_at.as_deref(), Some("2026-09-30T13:13:19+00:00"));
+                assert!(balance.is_none());
+                assert_eq!(detail.as_deref(), Some("Additional credits: USD 5.00"));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -4644,14 +4920,19 @@ pub(crate) mod tests {
             }"#)).unwrap();
         });
 
-        let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+        let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
         assert_eq!(*observed.lock().unwrap(), vec!["/credits"]);
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Monthly Limit");
-        assert!(usage.balance.is_none());
-        assert_eq!(usage.detail.as_deref(), Some("Additional credits: USD 5.00"));
+        match outcome {
+            UsageOutcome::Reading {
+                windows, balance, detail, ..
+            } => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "Monthly Limit");
+                assert!(balance.is_none());
+                assert_eq!(detail.as_deref(), Some("Additional credits: USD 5.00"));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -4673,13 +4954,18 @@ pub(crate) mod tests {
                 };
                 req.respond(response).unwrap();
             });
-            let usage = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
-            assert!(usage.logged_in, "{status}: {body}");
-            assert!(usage.error.is_none(), "{status}: {body}");
-            assert_eq!(usage.windows.len(), 2);
-            assert_eq!(usage.windows[1].used_percent, Some(20.0));
-            assert_eq!(usage.balance.unwrap().remaining, 40.0);
-            assert!(usage.detail.is_none());
+            let outcome = commandcode_usage_with_path(&auth_path, &format!("http://127.0.0.1:{port}/credits"));
+            match outcome {
+                UsageOutcome::Reading {
+                    windows, balance, detail, ..
+                } => {
+                    assert_eq!(windows.len(), 2, "{status}: {body}");
+                    assert_eq!(windows[1].used_percent, Some(20.0), "{status}: {body}");
+                    assert_eq!(balance.unwrap().remaining, 40.0, "{status}: {body}");
+                    assert!(detail.is_none(), "{status}: {body}");
+                }
+                other => panic!("{status}: {body}: expected Reading outcome, got: {other:?}"),
+            }
         }
     }
 
@@ -4772,66 +5058,93 @@ pub(crate) mod tests {
         let port_401 = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(401));
         });
-        let usage_401 = commandcode_usage_with_path(
+        let outcome_401 = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port_401}/credits"),
         );
-        assert!(!usage_401.logged_in);
-        assert!(usage_401
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("session expired") && error.contains("—")));
+        let hint_401 = match outcome_401 {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("session expired") && hint.contains("—"),
+                    "session-expired remediation must be preserved, got: {hint:?}"
+                );
+                hint
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        };
 
         let port_403 = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(403));
         });
-        let usage_403 = commandcode_usage_with_path(
+        let outcome_403 = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port_403}/credits"),
         );
-        assert!(!usage_403.logged_in);
-        assert_eq!(usage_403.error, usage_401.error);
+        match outcome_403 {
+            UsageOutcome::Rejected { hint } => assert_eq!(hint, hint_401),
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
 
         let port_429 = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(429));
         });
-        let usage_429 = commandcode_usage_with_path(
+        let outcome_429 = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port_429}/credits"),
         );
-        assert!(usage_429.logged_in);
-        assert!(usage_429
-            .error
-            .as_deref()
-            .is_some_and(|error| error == "Rate limited — usage data temporarily unavailable"));
+        match outcome_429 {
+            UsageOutcome::RateLimited { reason } => assert_eq!(
+                reason,
+                "Rate limited — usage data temporarily unavailable"
+            ),
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
 
         let port_500 = spawn_loopback(1, |req| {
             let _ = req.respond(
                 tiny_http::Response::from_string("backend unavailable").with_status_code(500),
             );
         });
-        let usage_500 = commandcode_usage_with_path(
+        let outcome_500 = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port_500}/credits"),
         );
-        assert!(usage_500.logged_in);
-        assert_eq!(
-            usage_500.error.as_deref(),
-            Some("API error 500: backend unavailable")
-        );
+        match outcome_500 {
+            UsageOutcome::Unavailable { reason } => assert_eq!(
+                reason,
+                "API error 500: backend unavailable"
+            ),
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
 
         let port_malformed = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::from_string("not-json"));
         });
-        let usage_malformed = commandcode_usage_with_path(
+        let outcome_malformed = commandcode_usage_with_path(
             &auth_path,
             &format!("http://127.0.0.1:{port_malformed}/credits"),
         );
-        assert!(usage_malformed.logged_in);
-        assert!(usage_malformed
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("Failed to parse response")));
+        match outcome_malformed {
+            UsageOutcome::Unavailable { reason } => assert!(
+                reason.contains("Failed to parse response"),
+                "parse envelope must be preserved, got: {reason:?}"
+            ),
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_seam_contract_commandcode_no_credential_without_network() {
+        // A missing CLI credential must report `NoCredential` without
+        // touching the network — the unreachable loopback URL below would
+        // fail loudly if hit. (`dispatch("commandcode").fetch` is not
+        // hermetic here: it reads the real `~/.commandcode/auth.json`.)
+        let auth_dir = tempfile::tempdir().unwrap();
+        let missing = auth_dir.path().join("missing.json");
+        match commandcode_usage_with_path(&missing, "http://127.0.0.1:1/credits") {
+            UsageOutcome::NoCredential { .. } => {}
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
     }
 }
 

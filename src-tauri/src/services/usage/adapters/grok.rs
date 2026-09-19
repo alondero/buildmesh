@@ -17,12 +17,13 @@ impl UsageAdapter for GrokAdapter {
         Some("grok")
     }
 
-    // TODO(#1745 phase 2): migrate `grok_usage` out of the legacy fetcher
-    // so its hand-rolled status ladder (no credential / 401 / 403 / 429 /
-    // transport / parse) centralises in the shared driver. Today its
-    // no-credential case correctly returns `logged_out()` (the row is dropped
-    // by the gate) — preserve that on migration.
+    // Issue #1745 phase 2 step 17: grok migrated to the outcome seam.
+    // Missing credential → `NoCredential` (gate drops, as before).
+    // 401/403 → `Rejected` ("Invalid API key" affordance). 429 →
+    // `RateLimited`. Client-build / transport / non-2xx / parse →
+    // `Unavailable`. The ladder stays hand-rolled (the kimi precedent —
+    // the shared driver cannot carry the prepaid-balance reading).
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        crate::services::usage::grok_usage().into()
+        crate::services::usage::grok_usage()
     }
 }

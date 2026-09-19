@@ -22,11 +22,11 @@ impl UsageAdapter for OpencodeAdapter {
         Some("opencode")
     }
 
-    // TODO(#1745 phase 2): migrate `opencode_usage` to return `UsageOutcome`
-    // directly so the retry-on-401 logic can switch from "substring-match
-    // the wire error string for `401`" (fragile) to "outcome is `Rejected`".
-    // Today the shim preserves the wire triple.
+    // Issue #1745 phase 2 step 18: opencode migrated to the outcome
+    // seam. The retry-on-401 gate matches on the `Rejected` outcome
+    // (strictly stronger than the old wire-error substring match), and
+    // the SQLite fallback builds `Reading` directly.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        crate::services::usage::opencode_usage().into()
+        crate::services::usage::opencode_usage()
     }
 }
