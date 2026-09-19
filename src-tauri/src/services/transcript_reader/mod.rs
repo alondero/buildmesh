@@ -5,7 +5,7 @@
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Eight harness formats are supported, selected by [`TranscriptFormat`]:
+//! Nine harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
@@ -16,7 +16,9 @@
 //! #1500), Muse Code's
 //! `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` (issue
 //! #1708, indexed by `~/.local/share/muse/session-index.db`), and
-//! OpenCode's local `opencode.db` SQLite store (issue #1296).
+//! OpenCode's local `opencode.db` SQLite store (issue #1296), and MiniMax
+//! Code's `<dataDir>/v2/sessions/…/messages.jsonl` canonical history
+//! (manifest-indexed, `~/.minimax` by default).
 //! All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the Coordinator
 //! never learns which harness wrote the file.
 //!
@@ -223,6 +225,18 @@ pub enum TranscriptFormat {
     /// file-based pattern as AGY (issue #1283), not the database-
     /// short-circuit pattern used by OpenCode (#1296).
     Muse,
+    /// MiniMax Code persists canonical history under
+    /// `<dataDir>/v2/sessions/<YYYY>/<MM>/<DD>/<time>-session_<base64url-id>/`
+    /// carrying `manifest.json` (v1: `sessionId`, `createdAtMs`) plus
+    /// `messages.jsonl` — one `{message_id, turn_id, message: {role,
+    /// content}}` record per line with typed content items (`text` /
+    /// `thinking` / `toolCall` / `image`). The locator walks
+    /// `v2/sessions/` newest-first for a `sessionId` manifest match because
+    /// the directory name never carries the raw id, never descends into
+    /// session artifact dirs, and returns on the first valid match. Data
+    /// dir mirrors the CLI: `$MINIMAX_DATA_DIR` → `$MAVIS_DATA_DIR` →
+    /// `~/.minimax`.
+    Mcode,
     /// OpenCode (issue #1296) stores all session messages in a single local
     /// SQLite database (`~/.local/share/opencode/opencode.db`), not in
     /// per-session JSONL files. The reader pulls messages by `session_id`
@@ -257,6 +271,7 @@ impl TranscriptFormat {
             "agy" => TranscriptFormat::Agy,
             "grok" => TranscriptFormat::Grok,
             "muse" => TranscriptFormat::Muse,
+            "mcode" => TranscriptFormat::Mcode,
             "opencode" => TranscriptFormat::OpenCode,
             _ => TranscriptFormat::ClaudeCode,
         }
@@ -429,6 +444,7 @@ fn adapter_id_for_format(format: TranscriptFormat) -> &'static str {
         TranscriptFormat::CommandCode => "commandcode",
         TranscriptFormat::Grok => "grok",
         TranscriptFormat::Muse => "muse",
+        TranscriptFormat::Mcode => "mcode",
         // OpenCode's adapter's `parse` is unreachable (the reader
         // short-circuits to `read_opencode_*` before `parse_transcript`
         // runs); routing through the registry still resolves correctly.
@@ -1471,6 +1487,7 @@ mod tests {
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
         assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
+        assert_eq!(TranscriptFormat::for_harness("mcode"), TranscriptFormat::Mcode);
         assert_eq!(TranscriptFormat::for_harness("opencode"), TranscriptFormat::OpenCode);
         for id in ["anthropic", "claude", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);

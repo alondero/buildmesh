@@ -239,7 +239,7 @@ const KIMI_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
-// mcode — interactive TUI; model OFF (issue #1179), effort OFF, prefill yes
+// mcode — interactive TUI; model OFF (issue #1179), effort OFF, prefill yes; readable transcript wired
 const MCODE_CAPS: HarnessCapabilities = {
   harness_id: 'mcode',
   supports_resume: true,
@@ -247,7 +247,7 @@ const MCODE_CAPS: HarnessCapabilities = {
   requires_attention_hook: false,
   attention_capability: { kind: 'none' },
   supports_passive_turn_watcher: false,
-  produces_readable_transcript: false,
+  produces_readable_transcript: true,
   supports_model_override: false,
   supports_effort_override: false,
   supports_extra_args: true,

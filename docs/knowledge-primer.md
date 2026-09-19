@@ -13,7 +13,7 @@
 - `tests/e2e/` — Playwright: webServer boots Vite on 1420; `verify-smoke` uses mock IPC, while chromium specs have additional real-runtime requirements. See `docs/agents/engineering.md` before launching.
 - `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/SKILL.md`
 - `docs/adr/` — Architecture Decision Records
-- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `opencode-harness-capabilities.md`)
+- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `mcode-harness-capabilities.md`, `opencode-harness-capabilities.md`)
 
 ## Key Conventions
 
@@ -421,8 +421,11 @@ request fallback), and child sessions cannot overwrite their parent. Codex has
 no permission-result hook, so its tool result or identified terminal `Stop`
 resolves the approval marker. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
-Freebuff, and unvalidated MiniMax/DeepSeek profiles retain explicit
-capability gaps rather than guessing from PTY output. Muse has no native hook
+Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
+rather than guessing from PTY output. MiniMax keeps an explicit attention
+gap (no provisioned hook) while its `messages.jsonl` transcript is wired
+(`TranscriptFormat::Mcode`) — digest, picker, and circuit reports work, but
+Autopilot still gates on the missing hook. Muse has no native hook
 either: `services::muse_watcher` tails the interactive TUI's durable
 `~/.local/share/muse/sessions/…/session.jsonl` run boundaries (`runtime.session`
 records with `payload.kind == "run"` and `event.kind == "terminal"`) and

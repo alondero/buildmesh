@@ -30,6 +30,17 @@
 //! Windows (`mcode.cmd`), which `CreateProcess` won't run directly; the recipe
 //! wraps with `WindowsShell::Cmd` -> `cmd.exe /c mcode …` on Windows. On macOS /
 //! Linux it is an executable on PATH so `WindowsShell::Direct` is used.
+//!
+//! **Attention**: honest-empty — no attention hook is provisioned
+//! (`requires_attention_hook = false`, `attention_capability = None`), so
+//! Autopilot's turn-driven pipeline still gates mcode out via
+//! `MissingAttentionHook`. mcode ≥0.2.4 does expose an Agent-Plugin hook
+//! surface (`hook_event_name` stdin JSON incl. `transcript_path`); wiring
+//! Buildmesh provisioning to it is the follow-up that unlocks Autopilot.
+//!
+//! **Transcript**: `messages.jsonl` canonical history is parsed via
+//! `TranscriptFormat::Mcode`, so the Coordinator Node Digest rich layer,
+//! the archived-node resume picker, and circuit assistant reports all work.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
@@ -79,8 +90,14 @@ impl AgentProvider for McodeAdapter {
         false
     }
 
+    /// `true` — mcode persists canonical history under
+    /// `<dataDir>/v2/sessions/…/messages.jsonl` (manifest-indexed) which
+    /// `services::transcript_reader` parses via `TranscriptFormat::Mcode`,
+    /// so the Node Digest rich layer hydrates and the archived-node picker
+    /// surfaces mcode (`resumable = supports_resume &&
+    /// produces_readable_transcript` in `provider_menu.rs`).
     fn produces_readable_transcript(&self) -> bool {
-        false
+        true
     }
 
     /// `false` — the interactive TUI recipe (`mcode [--session <id>]
@@ -258,7 +275,7 @@ mod tests {
         assert!(!caps.supports_model_override);
         assert!(!caps.supports_effort_override);
         assert!(!caps.requires_attention_hook);
-        assert!(!caps.produces_readable_transcript);
+        assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
             caps.effort_control,
@@ -329,6 +346,9 @@ mod tests {
 
     #[test]
     fn produces_readable_transcript() {
-        assert!(!MCODE.produces_readable_transcript());
+        // mcode's canonical `messages.jsonl` history is parsed via
+        // `TranscriptFormat::Mcode` (see
+        // `services::transcript_reader::adapters::mcode`).
+        assert!(MCODE.produces_readable_transcript());
     }
 }

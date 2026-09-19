@@ -429,7 +429,9 @@ mod tests {
         // archived-node resume picker (provider_menu derives
         // `resumable` from `supports_resume && produces_readable_transcript`).
         assert!(Provider::Grok.adapter().produces_readable_transcript());
-        assert!(!Provider::Mcode.adapter().produces_readable_transcript());
+        // MiniMax Code's canonical `messages.jsonl` history is parsed via
+        // TranscriptFormat::Mcode, so the archive resume picker surfaces it.
+        assert!(Provider::Mcode.adapter().produces_readable_transcript());
         assert!(!Provider::Dsh.adapter().produces_readable_transcript());
         // Issue #1283: AGY's per-conversation JSONL is parsed via
         // TranscriptFormat::Agy, so the archive resume picker surfaces it.

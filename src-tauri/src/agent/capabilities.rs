@@ -710,6 +710,12 @@ mod tests {
         // CLI flags as positional args; permissive on extras.
         assert!(mcode.supports_extra_args);
         assert!(mcode.supports_prefill);
+        // mcode's canonical `messages.jsonl` history is parsed via
+        // TranscriptFormat::Mcode, so the digest rich layer hydrates.
+        // Attention stays honest-empty (no provisioned hook) — Autopilot
+        // still gates mcode out via MissingAttentionHook.
+        assert!(!mcode.requires_attention_hook);
+        assert!(mcode.produces_readable_transcript);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
 
         let dsh = dsh_caps();

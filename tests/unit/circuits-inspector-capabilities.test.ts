@@ -177,10 +177,12 @@ describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', (
     expect(c.effort_control.kind).toBe('none');
   });
 
-  // mcode — interaction TUI; model OFF (issue #1179), effort OFF, prefill yes.
+  // mcode — interaction TUI; model OFF (issue #1179), effort OFF, prefill yes;
+  // readable messages.jsonl transcript wired (TranscriptFormat::Mcode).
   it('mcode matches the Rust inventory', () => {
     const c = HARNESS_CAPABILITIES.mcode;
     expect(c.harness_id).toBe('mcode');
+    expect(c.produces_readable_transcript).toBe(true);
     expect(c.supports_passive_turn_watcher).toBe(false);
     expect(c.supports_model_override).toBe(false);
     expect(c.supports_effort_override).toBe(false);
