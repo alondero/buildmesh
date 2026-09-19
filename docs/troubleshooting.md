@@ -91,6 +91,19 @@ refuses to start because it cannot traverse `.agents/skills` as a directory.
   Windows). Confirm `git status --porcelain` shows no change for either
   path afterwards, then retry.
 
+## Git and `gh` fail with 401 inside a Muse node
+
+Older Buildmesh releases started Muse with its built-in OS sandbox enabled.
+That sandbox blocks the system credential store `gh` and git use for GitHub
+sign-in, so `gh` reported no credential and https push/fetch returned 401
+while every other agent worked.
+
+- Buildmesh now launches Muse with the sandbox disabled. Start a **new** Muse
+  node; existing sandboxed sessions must finish their work and be re-spawned.
+- If you must finish work in an old node, run its git/gh commands from a
+  terminal outside the Muse session — the credential store is reachable
+  there.
+
 ## A Mesh is stale or sync fails
 
 Buildmesh's sync path is conservative around changes that an incoming

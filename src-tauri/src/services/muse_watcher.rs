@@ -25,7 +25,8 @@
 //! same turn signal the Command Code transcript watcher provides.
 //!
 //! **Launch mode is `SkipPermissions`.** Buildmesh launches with
-//! `--disable-approval`; every observed `approval_disabled` session log carries
+//! `--disable-approval` (the sandbox flag is issue #1788's separate concern); every
+//! observed `approval_disabled` session log carries
 //! zero `approval/requested` records, so a `PermissionRequested` signal is
 //! impossible by construction and is deliberately not classified here.
 

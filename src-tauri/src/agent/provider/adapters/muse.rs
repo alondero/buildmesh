@@ -20,8 +20,8 @@
 //!
 //! - `--approval-mode <untrusted|on-request|never>` — explicit mode
 //!   (default `on-request`).
-//! - `--disable-approval` — disables tool approval only; outer sandbox stays
-//!   on. Sibling-harness precedent: matches OpenCode `--auto` and
+//! - `--disable-approval` — disables tool approval only. Sibling-harness
+//!   precedent: matches OpenCode `--auto` and
 //!   AGY / Claude `--dangerously-skip-permissions` in spirit (one flag, one
 //!   policy, adapter-owned). Confirmed supported on the Windows build
 //!   via `muse.exe --help` ("Disable tool approval prompts for this
@@ -32,6 +32,25 @@
 //!
 //! The chosen policy is **`--disable-approval`** (maintainer decision,
 //! issue #1705). `--yolo` is never baked in.
+//!
+//! **Inner OS sandbox (issue #1788).** Muse is the only harness Buildmesh
+//! spawns that ships its own always-on OS sandbox: its help states
+//! "Safety (approval and the sandbox are ON by default)", so with only
+//! `--disable-approval` baked the agent's shell runs OS-constrained while
+//! every other harness runs unconstrained. That confinement denies the
+//! agent shell access to the OS credential store (Windows Credential
+//! Manager / keychain / secret service), which is where gh and git
+//! credential helpers resolve github.com auth on default installs —
+//! Muse sessions saw an empty credential store and every gh/git network
+//! operation returned 401 while sibling harnesses on the same host and
+//! user worked. `--disable-sandbox` is Muse's own narrow knob for this
+//! ("Disable shell filesystem/network sandboxing for this run"; verified
+//! accepted by both the installed Windows 1.3.0 and WSL builds). It is
+//! baked on every platform: macOS and Linux Muse also default credentials
+//! to the OS keyring, so the same 401 awaits there. This changes only the
+//! sandbox half of Muse's "Safety ON" pair — the approval policy above is
+//! untouched and workspace trust is not forced, so the issue #1705
+//! rejection of `--yolo` still stands.
 //!
 //! **Attention (issue #1709).** Muse exposes no interactive attention-hook
 //! registration: `muse --help` has no hook/event flag, there is no workspace
@@ -74,6 +93,12 @@ impl AgentProvider for MuseAdapter {
         // for the rationale (sibling-harness precedent; `--yolo` rejected
         // as too wide; outer sandbox stays on).
         //
+        // Issue #1788: bake `--disable-sandbox` alongside `--disable-approval`.
+        // Muse's own OS sandbox stays on with the approval flag alone and
+        // blocks the agent shell from the OS credential keyring, breaking
+        // gh/git auth that every other harness inherits. See the module
+        // docstring "Inner OS sandbox" section.
+        //
         // Binary stem branches on `Platform::Windows` to `muse.exe`,
         // mirroring `claude_direct_recipe` at `provider/mod.rs:145-156`.
         // The branch is defensive + convention-following: Windows
@@ -90,7 +115,7 @@ impl AgentProvider for MuseAdapter {
         };
         SpawnRecipe {
             binary,
-            base_args: vec!["--disable-approval".into()],
+            base_args: vec!["--disable-approval".into(), "--disable-sandbox".into()],
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
         }
@@ -370,7 +395,8 @@ mod tests {
         assert_eq!(MUSE.model_args("model-id"), ["--model", "model-id"]);
         assert!(!MUSE.captures_session_id_from_pty());
         assert!(MUSE.prefill_requires_pty("follow-up"));
-        // The baked `--disable-approval` policy (issue #1705) is pinned
+        // The baked `--disable-approval` + `--disable-sandbox` policy
+        // (issues #1705 + #1788) is pinned
         // exhaustively by `spawn_recipe_carries_disable_approval_on_supported_platforms`
         // below — that test iterates every supported host and adds the
         // `--yolo` negative assertion. Keeping the assertion only there
@@ -378,12 +404,13 @@ mod tests {
         // focused.
     }
 
-    /// Issue #1705 — per-platform pin of the baked approval flag.
+    /// Issue #1705 + #1788 — per-platform pin of the baked policy flags.
     /// Mirrors OpenCode's `spawn_recipe_carries_auto_flag_on_every_platform`:
     /// iterate over `available_on()` (not every `Platform` variant) and
     /// assert the exact base_args vector + per-platform binary name so a
-    /// future flag smuggle (e.g. `--approval-mode never` slipping in
-    /// alongside `--disable-approval`) trips here, not at runtime.
+    /// future flag smuggle (e.g. `--approval-mode never` or `--yolo`
+    /// slipping in alongside `--disable-approval` + `--disable-sandbox`)
+    /// trips here, not at runtime.
     ///
     /// Each platform variant is paired with the canonical `EnvType` for
     /// that host (see [`env_type_for`]) so the test reads as "the host
@@ -412,9 +439,10 @@ mod tests {
             );
             assert_eq!(
                 recipe.base_args,
-                vec!["--disable-approval".to_string()],
-                "muse base recipe must be exactly `[\"--disable-approval\"]` \
-                 on {platform:?}; got {:?}",
+                vec!["--disable-approval".to_string(), "--disable-sandbox".to_string()],
+                "muse base recipe must be exactly \n                `[\"--disable-approval\", \"--disable-sandbox\"]` \
+                 on {platform:?} (approval policy #1705; sandbox off so the \
+                 agent shell reaches the OS credential keyring, #1788); got {:?}",
                 recipe.base_args
             );
             assert!(
@@ -426,7 +454,9 @@ mod tests {
             // `--yolo` is the explicit no-go for issue #1705: it disables
             // approval AND sandboxing AND trusts the workspace. A future
             // "while we're here" edit that adds it would silently widen the
-            // policy beyond the maintainer-approved scope.
+            // policy beyond the maintainer-approved scope. `--disable-sandbox`
+            // (#1788) is the narrow, adapter-owned replacement for the
+            // sandboxing half; workspace trust stays untouched.
             assert!(
                 !recipe.base_args.iter().any(|a| a == "--yolo"),
                 "muse base recipe must never bake --yolo (issue #1705): \
@@ -475,11 +505,12 @@ mod tests {
     // (`docs/agents/engineering.md`) requires testing fresh AND resume paths
     // for changed launch recipes.
 
-    /// Issue #1705 fresh launch: the baked `--disable-approval` must land
-    /// ahead of the model override and the prefill text in the final argv.
-    /// Pin the exact `base_args` vector so a future reorder that pushes
-    /// `--disable-approval` past `--model` (or drops it during layer
-    /// composition) trips here, not in production.
+    /// Issue #1705 + #1788 fresh launch: the baked `--disable-approval` +
+    /// `--disable-sandbox` must land ahead of the model override and the
+    /// prefill text in the final argv. Pin the exact `base_args` vector so a
+    /// future reorder that pushes `--disable-approval` past `--model` (or
+    /// drops either flag during layer composition) trips here, not in
+    /// production.
     #[test]
     fn default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -507,12 +538,13 @@ mod tests {
             prepared.recipe.base_args,
             vec![
                 "--disable-approval".to_string(),
+                "--disable-sandbox".to_string(),
                 "--model".to_string(),
                 "claude-sonnet-4-5".to_string(),
                 "fix the auth bug".to_string(),
             ],
-            "fresh launch argv must keep --disable-approval ahead of --model \
-             and the prefill text; got {:?}",
+            "fresh launch argv must keep --disable-approval + --disable-sandbox \
+             ahead of --model and the prefill text; got {:?}",
             prepared.recipe.base_args
         );
         // Negative guards: no session-assign flag (muse self-assigns), no
@@ -529,12 +561,12 @@ mod tests {
         );
     }
 
-    /// Issue #1705 resume launch: the baked `--disable-approval` must land
-    /// ahead of the resume subcommand + session id, matching the order the
-    /// OpenCode adapter uses for `--auto --session <id>`. Pin the exact
-    /// vector so a future edit that orders the resume subcommand before
-    /// the baked flag (or that drops the flag during composition) trips
-    /// here.
+    /// Issue #1705 + #1788 resume launch: the baked `--disable-approval` +
+    /// `--disable-sandbox` must land ahead of the resume subcommand + session
+    /// id, matching the order the OpenCode adapter uses for
+    /// `--auto --session <id>`. Pin the exact vector so a future edit that
+    /// orders the resume subcommand before the baked flags (or that drops
+    /// either flag during composition) trips here.
     #[test]
     fn default_prepare_resume_launch_carries_disable_approval_then_resume_uuid() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -554,16 +586,17 @@ mod tests {
             prepared.recipe.base_args,
             vec![
                 "--disable-approval".to_string(),
+                "--disable-sandbox".to_string(),
                 "resume".to_string(),
                 "12345678-1234-4234-8234-123456789abc".to_string(),
             ],
             "resume launch argv must be exactly \
-             `--disable-approval resume <uuid>`; got {:?}",
+             `--disable-approval --disable-sandbox resume <uuid>`; got {:?}",
             prepared.recipe.base_args
         );
         assert!(
             !prepared.recipe.base_args.iter().any(|a| a == "--yolo"),
-            "resume launch must never bake --yolo (issue #1705); got {:?}",
+            "resume launch must never bake --yolo (issues #1705 + #1788); got {:?}",
             prepared.recipe.base_args
         );
     }
