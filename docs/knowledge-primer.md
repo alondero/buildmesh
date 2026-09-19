@@ -415,7 +415,11 @@ records with `payload.kind == "run"` and `event.kind == "terminal"`) and
 publishes each as a Node Turn — a passive watcher like Command Code's, with
 `requires_attention_hook = false` and `attention_capability = None`. Because
 Buildmesh launches `muse --disable-approval`, a `PermissionRequested` signal is
-impossible by construction and is not classified. See
+impossible by construction and is not classified. Muse is additionally the only
+harness shipped with its own always-on OS sandbox: Buildmesh bakes
+`--disable-sandbox` next to the approval flag so the agent shell reaches the OS
+credential store gh and git credential helpers resolve GitHub auth from (issue
+#1788). See
 `docs/learning/harness-attention-reliability.md` for the evidence matrix and
 remaining limitations.
 
