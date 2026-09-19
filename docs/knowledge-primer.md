@@ -174,6 +174,20 @@ Startup identity recovery (#1555) lives in `services/session_recovery.rs`. List 
 Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracketed-paste wrapper, or when the CLI's kitty-keyboard probe races ConPTY. Agent terminals for the `commandcode` harness set xterm.js `ignoreBracketedPasteMode`; other harnesses keep bracketed paste so a multi-line paste stays one prompt. Spawn sets `TERM_PROGRAM=vscode` so Command Code skips the probe. Every agent PTY is a real terminal: `wrap()` drops inherited `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR=0` and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, and `FORCE_COLOR=3` (and puts those keys on `WSLENV`).
 
 ### PTY output streaming (issue #1385 / #1393)
+
+Windows builds ship a pinned Microsoft ConPTY DLL and its matching native console
+hosts. `build.rs` runs `scripts/prepare-conpty.mjs` to verify the NuGet package
+checksum and stage the runtime beside Cargo binaries (including test binaries);
+`tauri.windows.conf.json` packages the same files beside the installed executable.
+The first Windows build needs Node.js and access to NuGet; subsequent builds use
+the verified archive under `src-tauri/target/conpty/`. The sandbox's owned ConPTY
+links the bundled DLL's Create/Resize/Close exports, while `portable-pty` loads
+the same DLL for ordinary terminals. Keep the DLL and host versions together.
+The inbox Windows console can forward DEC 2026 frame-end markers before flushing
+its rendered text and cursor restoration, exposing intermediate cursor positions
+in xterm. Do not compensate by disabling harness animations or delaying all PTY
+output. Live Windows frame-order tests cover both PTY creation paths.
+
 The PTY reader thread still sees every OS `read()` (session-id capture, auto-naming, autopilot). A sibling batcher coalesces those slices (8 ms window or 32 KiB = four 8 KiB PTY fills) and pushes **raw bytes** over a per-session Tauri `Channel`. The sink type lives in `pty::sink` (`OutputSink` / `OutputSinks`). Agent terminals use `pty::sink::AGENT` via `subscribe_agent_output` / `unsubscribe_agent_output` (`agent::output`). Build/Run terminals use a **sibling map** `pty::sink::BUILD_RUN` via `subscribe_build_run_output` / `unsubscribe_build_run_output` — both surfaces key by the same node id, so sharing a map would paint agent bytes into a Build/Run xterm. Bytes that arrive before subscribe are buffered on `OutputSink` and flushed in order — never mixed with the JSON event (those two IPC paths have no ordering). `agent-output` `line` and `build-run-output-{sessionId}` are test injection only. `pty::batch::with_batcher` drops the producer before join (otherwise the reader deadlocks on EOF). The Channel subscription belongs to the persistent terminal, not to one process incarnation: stale-process cleanup, PTY EOF, retry, resume, regenerate, and Build/Run `close_build_run` must preserve it. Agent Node deletion and explicit terminal disposal unregister it. Don't put production PTY bytes back on the JSON event.
 
 The first-spawn path is the load-bearing one. The frontend subscribes as soon as the xterm exists, then `prepare_context` calls `kill_agent` even when there is no process. Unregistering there drops the Channel; the new reader's `ensure()` creates a disconnected pending sink and the viewport shows a cursor with no text. `kill_session` / the PTY-reader epilogue / `close_build_run` must not unregister. Pins: `kill_session_without_process_preserves_output_subscription`, `replacement_reader_reuses_the_live_channel`, `process_lifecycle_does_not_unregister_node_output_subscription`, `agent_and_build_run_maps_do_not_cross_talk`. Frontend: subscribe on `TerminalRegistry` / `BuildRunTerminalRegistry` create, unsubscribe only on `dispose` (never on remount, auto-spawn, detach, or `getOrCreate` reuse).

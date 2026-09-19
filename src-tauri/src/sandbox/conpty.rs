@@ -105,6 +105,24 @@ mod ffi {
         pub dwThreadId: DWORD,
     }
 
+    // Use the same bundled runtime that portable-pty loads for unconfined
+    // sessions. Mixing the inbox Create/Resize/Close with its HPCON is invalid.
+    #[link(name = "conpty")]
+    extern "system" {
+        #[link_name = "ConptyCreatePseudoConsole"]
+        pub fn CreatePseudoConsole(
+            size: COORD,
+            hInput: HANDLE,
+            hOutput: HANDLE,
+            dwFlags: DWORD,
+            phPC: *mut HANDLE,
+        ) -> HRESULT;
+        #[link_name = "ConptyResizePseudoConsole"]
+        pub fn ResizePseudoConsole(hPC: HANDLE, size: COORD) -> HRESULT;
+        #[link_name = "ConptyClosePseudoConsole"]
+        pub fn ClosePseudoConsole(hPC: HANDLE);
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         pub fn CreatePipe(
@@ -114,15 +132,6 @@ mod ffi {
             nSize: DWORD,
         ) -> BOOL;
         pub fn SetHandleInformation(hObject: HANDLE, dwMask: DWORD, dwFlags: DWORD) -> BOOL;
-        pub fn CreatePseudoConsole(
-            size: COORD,
-            hInput: HANDLE,
-            hOutput: HANDLE,
-            dwFlags: DWORD,
-            phPC: *mut HANDLE,
-        ) -> HRESULT;
-        pub fn ResizePseudoConsole(hPC: HANDLE, size: COORD) -> HRESULT;
-        pub fn ClosePseudoConsole(hPC: HANDLE);
         pub fn InitializeProcThreadAttributeList(
             lpAttributeList: *mut c_void,
             dwAttributeCount: DWORD,

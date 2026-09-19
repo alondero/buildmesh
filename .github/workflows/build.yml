@@ -303,6 +303,11 @@ jobs:
       - name: Compile Tauri app without installers
         run: npm run tauri build -- --debug --no-bundle
 
+      - name: Verify Windows ConPTY frame ordering
+        if: runner.os == 'Windows'
+        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames -- --test-threads=1
+        working-directory: src-tauri
+
   wsl-profile-smoke:
     name: WSL Codex profile contract (opt-in)
     if: github.event_name == 'workflow_dispatch'
