@@ -17,10 +17,13 @@ impl UsageAdapter for CommandcodeAdapter {
         Some("commandcode")
     }
 
-    // TODO(#1745 phase 2): migrate `commandcode_usage` to return `UsageOutcome`
-    // directly so its hand-rolled status ladder centralises in the shared
-    // driver. Until then the shim preserves the wire triple.
+    // Issue #1745 phase 2 step 14: commandcode migrated to the outcome
+    // seam. Missing credential → `NoCredential`. 401/403 → `Rejected` with
+    // the session-expired remediation. 429 → `RateLimited`. Other →
+    // `Unavailable`. The dual-fetch quota + subscription-enrichment ladder
+    // stays hand-rolled (the kimi precedent — the shared driver cannot
+    // carry it); enrichment failures stay best-effort.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        crate::services::usage::commandcode_usage().into()
+        crate::services::usage::commandcode_usage()
     }
 }

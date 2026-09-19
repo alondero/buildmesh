@@ -36,12 +36,13 @@ impl UsageAdapter for AgyAdapter {
         Some("agy")
     }
 
-    // TODO(#1745 phase 2): migrate `agy_usage` to return `UsageOutcome`
-    // directly so the bug at `services::usage.rs:2265` (client-build failure
-    // mapped to `logged_out`) and the line 2293 non-auth `logged_out`
-    // classification are fixed together.
+    // Issue #1745 phase 2 step 12: agy migrated to the outcome seam.
+    // Missing tokens → `NoCredential` (gate drops). Auth rejection on the
+    // last source → `Rejected`. Client-build and non-auth source failures
+    // are transport-class → `Unavailable` (previously `logged_out`, which
+    // silently dropped the row).
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        crate::services::usage::agy_usage().into()
+        crate::services::usage::agy_usage()
     }
 }
 

@@ -37,10 +37,11 @@
 //! AND the catalog entry.
 //!
 //! Migration cadence (#1657 precedent): adapters migrate one per commit.
-//! As of #1745 phase 1, every adapter's `fetch` returns `UsageOutcome`;
-//! adapters that still build `ProviderUsage` literals internally wrap their
-//! final value via `outcome.into_usage(provider_id)` at the adapter
-//! boundary.
+//! As of issue #1758 every adapter's `fetch` returns `UsageOutcome`
+//! directly; the `From<ProviderUsage>` migration shim is removed, so no
+//! adapter builds `ProviderUsage` literals anymore — the
+//! [`super::outcome::UsageOutcome::into_usage`] projection (invoked by the
+//! catalog) is the sole mint site of the wire shape.
 
 use super::outcome::{AuthPolicy, UsageOutcome};
 use super::types::{UsageError, UsageWindow};

@@ -22,9 +22,12 @@ impl UsageAdapter for FreebuffAdapter {
         Some("freebuff")
     }
 
-    // TODO(#1745 phase 2): migrate `freebuff_usage` to return `UsageOutcome`
-    // directly so the adapter is fully seam-owned.
+    // Issue #1745 phase 2 step 16: freebuff migrated to the outcome
+    // seam. Missing credential → `NoCredential`. 401 / banned →
+    // `Rejected`. 429 → `RateLimited`. Other → `Unavailable`. The
+    // bespoke `StatusOutcome` classifier stays in
+    // [`crate::services::freebuff_usage`].
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        crate::services::freebuff_usage::freebuff_usage().into()
+        crate::services::freebuff_usage::freebuff_usage()
     }
 }

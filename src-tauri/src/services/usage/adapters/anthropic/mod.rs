@@ -10,7 +10,6 @@ mod parse;
 use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
-use crate::services::usage::types::{logged_out, unavailable, ProviderUsage, UsageMeter};
 
 use auth::{
     active_user_oauth, anthropic_config_dir_for, cache_identity_from, resolve_claude_auth,
@@ -72,18 +71,18 @@ impl UsageAdapter for AnthropicAdapter {
         cache_identity_from(&resolve_claude_auth(&ProductionLookup))
     }
 
+    // Issue #1745 phase 2 step 19: anthropic migrated to the outcome
+    // seam. The bespoke `classify_oauth_auth_failure` scope-403-vs-401
+    // distinction stays in the adapter (provider-side body parsing, not
+    // a seam concern); it now classifies into `UsageOutcome` variants.
+    // Externally managed auth (Bedrock / Vertex / Foundry) reports
+    // `ManagedExternally`; missing credential reports `NoCredential`.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        // TODO(#1745 phase 2): the Anthropic adapter has a bespoke scope-403
-        // vs 401 distinction (`classify_oauth_auth_failure` below). On
-        // migration the scope-403 branch lands as `UsageOutcome::Reading`
-        // with `detail` set (matches today's `logged_in: true + detail` wire
-        // triple); the bare 401/403 branch lands as `UsageOutcome::Rejected`.
-        // Until then the shim preserves the wire triple.
-        anthropic_usage_with(&ProductionLookup, USAGE_URL).into()
+        anthropic_usage_with(&ProductionLookup, USAGE_URL)
     }
 }
 
-fn anthropic_usage_with(lookup: &impl AuthLookup, usage_url: &str) -> ProviderUsage {
+fn anthropic_usage_with(lookup: &impl AuthLookup, usage_url: &str) -> UsageOutcome {
     anthropic_usage_with_urls(lookup, usage_url, &profile_url_for(usage_url))
 }
 
@@ -91,25 +90,19 @@ fn anthropic_usage_with_urls(
     lookup: &impl AuthLookup,
     usage_url: &str,
     profile_url: &str,
-) -> ProviderUsage {
+) -> UsageOutcome {
     match resolve_claude_auth(lookup) {
-        ClaudeAuthSource::Managed { platform, .. } => ProviderUsage {
-            provider: PROVIDER.to_string(),
-            logged_in: true,
-            windows: vec![],
-            balance: None,
-            meters: vec![UsageMeter::ManagedExternally {
-                platform: platform.to_string(),
-            }],
-            detail: None,
-            error: None,
+        ClaudeAuthSource::Managed { platform, .. } => UsageOutcome::ManagedExternally {
+            platform: platform.to_string(),
         },
-        ClaudeAuthSource::Missing { error } => logged_out(PROVIDER, error.to_string()),
+        ClaudeAuthSource::Missing { error } => UsageOutcome::NoCredential {
+            hint: error.to_string(),
+        },
         ClaudeAuthSource::Oauth {
             token, origin, ..
         } => {
-            let usage = fetch_oauth_usage(usage_url, profile_url, &token, origin.clone());
-            if !usage.logged_in && origin == OauthOrigin::Login {
+            let outcome = fetch_oauth_usage(usage_url, profile_url, &token, origin.clone());
+            if matches!(outcome, UsageOutcome::Rejected { .. }) && origin == OauthOrigin::Login {
                 if let Some(ClaudeAuthSource::Oauth {
                     token: fallback_token,
                     origin: fallback_origin,
@@ -126,7 +119,7 @@ fn anthropic_usage_with_urls(
                     }
                 }
             }
-            usage
+            outcome
         }
     }
 }
@@ -149,10 +142,10 @@ fn fetch_oauth_usage(
     profile_url: &str,
     token: &str,
     origin: OauthOrigin,
-) -> ProviderUsage {
+) -> UsageOutcome {
     let client = match shared_client() {
         Ok(client) => client,
-        Err(error) => return unavailable(PROVIDER, error),
+        Err(error) => return UsageOutcome::Unavailable { reason: error },
     };
 
     let request = client
@@ -166,20 +159,16 @@ fn fetch_oauth_usage(
             let body = response.text().unwrap_or_default();
             classify_oauth_auth_failure(status, &body, &origin)
         }
-        Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => unavailable(
-            PROVIDER,
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        ),
+        Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            UsageOutcome::RateLimited {
+                reason: "Rate limited — usage data temporarily unavailable".to_string(),
+            }
+        }
         Ok(response) if !response.status().is_success() => {
             let code = response.status().as_u16();
-            unavailable(
-                PROVIDER,
-                format!(
-                    "API error {}: {}",
-                    code,
-                    response.text().unwrap_or_default()
-                ),
-            )
+            UsageOutcome::Unavailable {
+                reason: format!("API error {}: {}", code, response.text().unwrap_or_default()),
+            }
         }
         Ok(response) => match parse_anthropic_usage(&response.text().unwrap_or_default()) {
             Ok(parsed) => {
@@ -195,19 +184,20 @@ fn fetch_oauth_usage(
                 } else {
                     None
                 };
-                ProviderUsage {
-                    provider: PROVIDER.to_string(),
-                    logged_in: true,
+                UsageOutcome::Reading {
                     windows: parsed.windows,
                     balance: None,
                     meters: parsed.meters,
                     detail,
-                    error: None,
                 }
             }
-            Err(error) => unavailable(PROVIDER, format!("Failed to parse response: {error}")),
+            Err(error) => UsageOutcome::Unavailable {
+                reason: format!("Failed to parse response: {error}"),
+            },
         },
-        Err(error) => unavailable(PROVIDER, format!("Request failed: {error}")),
+        Err(error) => UsageOutcome::Unavailable {
+            reason: format!("Request failed: {error}"),
+        },
     }
 }
 
@@ -238,17 +228,22 @@ fn oauth_profile_scope_failure(
 }
 
 /// Distinguish expired/revoked credentials from missing `user:profile` scope.
-/// Scope failures are HTTP 403 with the explicit scope message and keep the
-/// account logged in; 401 (even with similar text) remains `logged_out` so
+/// Scope failures are HTTP 403 with the explicit scope message and surface
+/// as `Reading` with `detail` (the meter keeps working; only the plan
+/// lookup is limited); 401 (even with similar text) is `Rejected` so the
 /// active-profile retry can run.
-fn classify_oauth_auth_failure(status: u16, body: &str, origin: &OauthOrigin) -> ProviderUsage {
+fn classify_oauth_auth_failure(status: u16, body: &str, origin: &OauthOrigin) -> UsageOutcome {
     if is_oauth_scope_failure(status, body) {
-        let detail = scope_limitation_detail(origin);
-        let mut usage = unavailable(PROVIDER, detail.clone());
-        usage.detail = Some(detail);
-        return usage;
+        return UsageOutcome::Reading {
+            windows: vec![],
+            balance: None,
+            meters: vec![],
+            detail: Some(scope_limitation_detail(origin)),
+        };
     }
-    logged_out(PROVIDER, auth_failure_detail(origin))
+    UsageOutcome::Rejected {
+        hint: auth_failure_detail(origin),
+    }
 }
 
 fn is_oauth_scope_failure(status: u16, body: &str) -> bool {
@@ -327,15 +322,21 @@ mod tests {
             let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
 
-        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
-        assert!(usage.logged_in);
-        assert_eq!(usage.windows.len(), 2);
-        assert!(usage.meters.is_empty());
+        let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading {
+                windows, meters, detail, ..
+            } => {
+                assert_eq!(windows.len(), 2);
+                assert!(meters.is_empty());
+                // /profile returned 200, so detail stays unset.
+                assert!(detail.is_none());
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         // /usage + /profile both succeed.
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(!format!("{usage:?}").contains("sk-ant-"));
-        // /profile returned 200, so detail stays unset.
-        assert!(usage.detail.is_none());
+        assert!(!format!("{outcome:?}").contains("sk-ant-"));
     }
 
     #[test]
@@ -348,17 +349,24 @@ mod tests {
             };
             let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
-        let usage = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
-        assert!(usage.windows.is_empty());
-        match &usage.meters[..] {
-            [UsageMeter::Metered { amount }] => {
-                assert_eq!(amount.used, 25.0);
-                assert_eq!(amount.limit, Some(100.0));
-                assert_eq!(amount.remaining, Some(75.0));
+        let outcome = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading {
+                windows, meters, detail, ..
+            } => {
+                assert!(windows.is_empty());
+                match &meters[..] {
+                    [UsageMeter::Metered { amount }] => {
+                        assert_eq!(amount.used, 25.0);
+                        assert_eq!(amount.limit, Some(100.0));
+                        assert_eq!(amount.remaining, Some(75.0));
+                    }
+                    other => panic!("expected enterprise spend, got {other:?}"),
+                }
+                assert!(detail.is_none());
             }
-            other => panic!("expected enterprise spend, got {other:?}"),
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
-        assert!(usage.detail.is_none());
     }
 
     #[test]
@@ -386,13 +394,18 @@ mod tests {
         lookup
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        match &usage.meters[..] {
-            [UsageMeter::Metered { amount }] => {
-                assert_eq!(amount.used, 25.0);
-                assert_eq!(amount.limit, Some(100.0));
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[..] {
+                    [UsageMeter::Metered { amount }] => {
+                        assert_eq!(amount.used, 25.0);
+                        assert_eq!(amount.limit, Some(100.0));
+                    }
+                    other => panic!("expected enterprise spend for env token, got {other:?}"),
+                }
             }
-            other => panic!("expected enterprise spend for env token, got {other:?}"),
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
     }
 
@@ -421,21 +434,20 @@ mod tests {
             "CLAUDE_CODE_OAUTH_TOKEN".into(),
             "sk-ant-oat01-setup".into(),
         );
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
-        assert!(
-            usage
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("user:profile"),
-            "detail={:?}",
-            usage.detail
-        );
-        assert!(matches!(
-            usage.meters.first(),
-            Some(UsageMeter::Metered { .. })
-        ));
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { meters, detail, .. } => {
+                assert!(
+                    detail.as_deref().unwrap_or_default().contains("user:profile"),
+                    "detail={detail:?}"
+                );
+                assert!(matches!(
+                    meters.first(),
+                    Some(UsageMeter::Metered { .. })
+                ));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -493,13 +505,17 @@ mod tests {
             r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
         );
 
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                assert!(matches!(
+                    meters.first(),
+                    Some(UsageMeter::Metered { .. })
+                ));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         assert_eq!(hits.load(Ordering::SeqCst), 3);
-        assert!(matches!(
-            usage.meters.first(),
-            Some(UsageMeter::Metered { .. })
-        ));
     }
 
     // Spec test for #1689: /usage may return 200 with valid data while
@@ -524,15 +540,19 @@ mod tests {
                 );
             }
         });
-        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
-        assert!(usage.logged_in, "scope failure must stay logged in");
-        let detail = usage.detail.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("user:profile"),
-            "detail should name the missing scope; got detail={detail:?}"
-        );
-        // The windows from the successful /usage call are still surfaced.
-        assert_eq!(usage.windows.len(), 2);
+        let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { windows, detail, .. } => {
+                let detail = detail.as_deref().unwrap_or_default();
+                assert!(
+                    detail.contains("user:profile"),
+                    "detail should name the missing scope; got detail={detail:?}"
+                );
+                // The windows from the successful /usage call are still surfaced.
+                assert_eq!(windows.len(), 2);
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     // Negative companion: /profile returns 200 with a body that does NOT
@@ -547,10 +567,14 @@ mod tests {
             };
             let _ = request.respond(tiny_http::Response::from_string(body).with_status_code(200));
         });
-        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
-        assert!(usage.logged_in);
-        assert!(usage.detail.is_none());
-        assert_eq!(usage.windows.len(), 2);
+        let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { windows, detail, .. } => {
+                assert!(detail.is_none());
+                assert_eq!(windows.len(), 2);
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -570,13 +594,18 @@ mod tests {
             };
             let _ = request.respond(tiny_http::Response::from_string(b).with_status_code(200));
         });
-        let usage = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
-        match &usage.meters[..] {
-            [UsageMeter::Metered { amount }] => {
-                assert_eq!(amount.used, 3.25);
-                assert_eq!(amount.limit, Some(20.5));
+        let outcome = anthropic_usage_with(&with_file(ENTERPRISE_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[..] {
+                    [UsageMeter::Metered { amount }] => {
+                        assert_eq!(amount.used, 3.25);
+                        assert_eq!(amount.limit, Some(20.5));
+                    }
+                    other => panic!("expected extra_usage fallback, got {other:?}"),
+                }
             }
-            other => panic!("expected extra_usage fallback, got {other:?}"),
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
     }
 
@@ -593,16 +622,14 @@ mod tests {
         lookup
             .env
             .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            usage.meters,
-            vec![UsageMeter::ManagedExternally {
-                platform: "AWS Bedrock".to_string()
-            }]
-        );
-        assert!(usage.windows.is_empty());
-        assert!(usage.error.is_none());
+        match &outcome {
+            UsageOutcome::ManagedExternally { platform } => {
+                assert_eq!(platform, "AWS Bedrock");
+            }
+            other => panic!("expected ManagedExternally outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -613,34 +640,33 @@ mod tests {
         ] {
             let mut lookup = with_file(OAUTH_JSON);
             lookup.env.insert(flag.into(), "1".into());
-            let usage = anthropic_usage_with(&lookup, "http://127.0.0.1:1/unused");
-            assert_eq!(
-                usage.meters,
-                vec![UsageMeter::ManagedExternally {
-                    platform: platform.to_string()
-                }]
-            );
+            let outcome = anthropic_usage_with(&lookup, "http://127.0.0.1:1/unused");
+            match &outcome {
+                UsageOutcome::ManagedExternally { platform: actual } => {
+                    assert_eq!(actual, platform);
+                }
+                other => panic!("expected ManagedExternally outcome, got: {other:?}"),
+            }
         }
     }
 
     #[test]
-    fn authentication_failures_are_logged_out() {
+    fn authentication_failures_are_rejected() {
         for status in [401_u16, 403] {
             let port = spawn_loopback(1, move |request| {
                 let _ = request
                     .respond(tiny_http::Response::from_string("denied").with_status_code(status));
             });
-            let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
-            assert!(!usage.logged_in, "status {status} should log out");
-            assert!(
-                usage
-                    .error
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("login expired"),
-                "{status}: {:?}",
-                usage.error
-            );
+            let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+            match &outcome {
+                UsageOutcome::Rejected { hint } => {
+                    assert!(
+                        hint.contains("login expired"),
+                        "{status}: {hint:?}"
+                    );
+                }
+                other => panic!("status {status}: expected Rejected outcome, got: {other:?}"),
+            }
         }
     }
 
@@ -654,17 +680,20 @@ mod tests {
         lookup
             .env
             .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "sk-ant-oat01-env".into());
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(!usage.logged_in);
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            error.contains("CLAUDE_CODE_OAUTH_TOKEN"),
-            "env-token 401 must mention the env var; error={error:?}"
-        );
-        assert!(
-            !error.contains("run /login"),
-            "env-token 401 must not claim /login repairs CLAUDE_CODE_OAUTH_TOKEN"
-        );
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+                    "env-token 401 must mention the env var; hint={hint:?}"
+                );
+                assert!(
+                    !hint.contains("run /login"),
+                    "env-token 401 must not claim /login repairs CLAUDE_CODE_OAUTH_TOKEN"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -684,17 +713,20 @@ mod tests {
             cfg.join("credentials").join("work.json"),
             r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
         );
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(!usage.logged_in);
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            error.contains("ant auth login --profile work"),
-            "named-profile 401 must name the profile; error={error:?}"
-        );
-        assert!(
-            !error.contains("run /login"),
-            "/login cannot repair ANTHROPIC_PROFILE credentials"
-        );
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("ant auth login --profile work"),
+                    "named-profile 401 must name the profile; hint={hint:?}"
+                );
+                assert!(
+                    !hint.contains("run /login"),
+                    "/login cannot repair ANTHROPIC_PROFILE credentials"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -715,18 +747,18 @@ mod tests {
             "CLAUDE_CODE_OAUTH_TOKEN".into(),
             "sk-ant-oat01-setup".into(),
         );
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(
-            usage.logged_in,
-            "scope failure must not look like a logged-out/expired credential"
-        );
-        let detail = usage.detail.as_deref().unwrap_or_default();
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("setup-token") || error.contains("setup-token"),
-            "env-token scope failure should mention setup-token; detail={detail:?} error={error:?}"
-        );
-        assert!(!error.contains("login expired"));
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { detail, .. } => {
+                let detail = detail.as_deref().unwrap_or_default();
+                assert!(
+                    detail.contains("setup-token"),
+                    "env-token scope failure should mention setup-token; detail={detail:?}"
+                );
+                assert!(!detail.contains("login expired"));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -739,18 +771,21 @@ mod tests {
                 .with_status_code(403),
             );
         });
-        let usage = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
-        assert!(usage.logged_in);
-        let detail = usage.detail.as_deref().unwrap_or_default();
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("run /login") || error.contains("run /login"),
-            "stored login scope failure should recommend /login; detail={detail:?} error={error:?}"
-        );
-        assert!(
-            !detail.contains("setup-token") && !error.contains("setup-token"),
-            "stored login must not claim the setup-token limitation"
-        );
+        let outcome = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { detail, .. } => {
+                let detail = detail.as_deref().unwrap_or_default();
+                assert!(
+                    detail.contains("run /login"),
+                    "stored login scope failure should recommend /login; detail={detail:?}"
+                );
+                assert!(
+                    !detail.contains("setup-token"),
+                    "stored login must not claim the setup-token limitation"
+                );
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -774,23 +809,25 @@ mod tests {
             cfg.join("credentials").join("work.json"),
             r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
         );
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
-        let detail = usage.detail.as_deref().unwrap_or_default();
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("ant auth login --profile work")
-                || error.contains("ant auth login --profile work"),
-            "named profile must include the actual profile name; detail={detail:?} error={error:?}"
-        );
-        assert!(
-            !detail.contains("<name>") && !error.contains("<name>"),
-            "must not leave a placeholder profile name"
-        );
-        assert!(
-            !detail.contains("run /login") && !error.contains("run /login"),
-            "/login cannot repair ANTHROPIC_PROFILE credentials"
-        );
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { detail, .. } => {
+                let detail = detail.as_deref().unwrap_or_default();
+                assert!(
+                    detail.contains("ant auth login --profile work"),
+                    "named profile must include the actual profile name; detail={detail:?}"
+                );
+                assert!(
+                    !detail.contains("<name>"),
+                    "must not leave a placeholder profile name"
+                );
+                assert!(
+                    !detail.contains("run /login"),
+                    "/login cannot repair ANTHROPIC_PROFILE credentials"
+                );
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -816,15 +853,17 @@ mod tests {
             cfg.join("credentials").join("agents.json"),
             r#"{"access_token":"sk-ant-oat01-agents","subscriptionType":"enterprise"}"#.into(),
         );
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
-        let detail = usage.detail.as_deref().unwrap_or_default();
-        let error = usage.error.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("ant auth login --profile agents")
-                || error.contains("ant auth login --profile agents"),
-            "active non-default profile must name itself; detail={detail:?} error={error:?}"
-        );
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { detail, .. } => {
+                let detail = detail.as_deref().unwrap_or_default();
+                assert!(
+                    detail.contains("ant auth login --profile agents"),
+                    "active non-default profile must name itself; detail={detail:?}"
+                );
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -867,14 +906,17 @@ mod tests {
             r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
         );
 
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { detail, .. } => {
+                assert!(
+                    !detail.as_deref().unwrap_or_default().contains("user:profile"),
+                    "401-with-scope-text must retry as expired, not surface a scope limitation"
+                );
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(!usage
-            .detail
-            .as_deref()
-            .unwrap_or_default()
-            .contains("user:profile"));
     }
 
     #[test]
@@ -918,45 +960,52 @@ mod tests {
             r#"{"access_token":"sk-ant-oat01-profile","subscriptionType":"enterprise"}"#.into(),
         );
 
-        let usage = anthropic_usage_with(&lookup, &loopback_url(port));
-        assert!(usage.logged_in);
+        let outcome = anthropic_usage_with(&lookup, &loopback_url(port));
+        match &outcome {
+            UsageOutcome::Reading { meters, detail, .. } => {
+                assert!(
+                    !detail.as_deref().unwrap_or_default().contains("setup-token"),
+                    "generic permission error must not surface a scope limitation"
+                );
+                assert!(matches!(
+                    meters.first(),
+                    Some(UsageMeter::Metered { .. })
+                ));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(!usage
-            .detail
-            .as_deref()
-            .unwrap_or_default()
-            .contains("setup-token"));
-        assert!(matches!(
-            usage.meters.first(),
-            Some(UsageMeter::Metered { .. })
-        ));
     }
 
     #[test]
-    fn rate_limit_and_parse_failures_stay_unavailable() {
+    fn rate_limit_returns_rate_limited_parse_failure_returns_unavailable() {
         let port_429 = spawn_loopback(1, |request| {
             let _ = request
                 .respond(tiny_http::Response::from_string("slow down").with_status_code(429));
         });
-        let limited = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_429));
-        assert!(limited.logged_in);
-        assert!(limited
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Rate limited"));
+        match anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_429)) {
+            UsageOutcome::RateLimited { reason } => {
+                assert!(
+                    reason.contains("Rate limited"),
+                    "rate-limit copy must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
 
         let port_bad = spawn_loopback(1, |request| {
             let _ =
                 request.respond(tiny_http::Response::from_string("{nope").with_status_code(200));
         });
-        let bad = anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_bad));
-        assert!(bad.logged_in);
-        assert!(bad
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Failed to parse"));
+        match anthropic_usage_with(&with_file(OAUTH_JSON), &loopback_url(port_bad)) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("Failed to parse"),
+                    "parse envelope must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -967,8 +1016,13 @@ mod tests {
             hits_thread.fetch_add(1, Ordering::SeqCst);
             let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
         });
-        let usage = anthropic_usage_with(&FakeLookup::default(), &loopback_url(port));
-        assert!(!usage.logged_in);
+        // (`dispatch("anthropic").fetch` is not hermetic here: it reads
+        // the real production credential sources. `anthropic_usage_with`
+        // with a `FakeLookup` is the hermetic seam-level equivalent.)
+        match anthropic_usage_with(&FakeLookup::default(), &loopback_url(port)) {
+            UsageOutcome::NoCredential { .. } => {}
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
         assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 

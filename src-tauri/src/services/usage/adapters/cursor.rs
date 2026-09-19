@@ -34,8 +34,7 @@ use crate::preferences::ProviderAccount;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
-    home_dir, logged_out, unavailable, ProviderUsage, UsageAmount, UsageError, UsageMeter,
-    UsageWindow,
+    home_dir, UsageAmount, UsageError, UsageMeter, UsageWindow,
 };
 use base64::Engine as _;
 use reqwest::blocking::{Client, RequestBuilder};
@@ -69,12 +68,16 @@ impl UsageAdapter for CursorAdapter {
         Some("cursor")
     }
 
+    // Issue #1745 phase 2 step 15: cursor migrated to the outcome seam.
+    // The bespoke `CurrentFlow` (unauthorized / fallback / usage) is
+    // preserved; each branch now classifies into `UsageOutcome` variants
+    // instead of constructing `ProviderUsage` directly. Missing credential
+    // → `NoCredential`. Required-period 401/403 → `Rejected` with the
+    // session-expired remediation (no legacy retry on the same
+    // credential). Legacy 401/403 → `Rejected`, 429 → `RateLimited`,
+    // other → `Unavailable`.
     fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
-        // TODO(#1745 phase 2): preserve Cursor's bespoke `CurrentFlow`
-        // (unauthorized / fallback / usage) on migration; map each branch
-        // to the right outcome variant. The shim preserves the wire triple
-        // until then.
-        cursor_usage().into()
+        cursor_usage()
     }
 }
 
@@ -97,7 +100,7 @@ impl CursorEndpoints {
 
 /// Public Cursor fetcher. Reads the credential from the environment, Cursor's
 /// `state.vscdb`, or `~/.cursor/auth.json`, then walks the Dashboard flow.
-pub(crate) fn cursor_usage() -> ProviderUsage {
+pub(crate) fn cursor_usage() -> UsageOutcome {
     #[cfg(test)]
     if let Some(token) = TOKEN_OVERRIDE.with(|cell| cell.borrow().clone()) {
         let endpoints = CursorEndpoints {
@@ -114,7 +117,11 @@ pub(crate) fn cursor_usage() -> ProviderUsage {
     let (env_token, candidates) = discover_cursor_auth_sources();
     let token = match read_cursor_token_from_candidates(env_token, &candidates) {
         Ok(token) => token,
-        Err(error) => return logged_out("cursor", error.to_string()),
+        Err(error) => {
+            return UsageOutcome::NoCredential {
+                hint: error.to_string(),
+            }
+        }
     };
     cursor_usage_with_token(&token, &CursorEndpoints::production())
 }
@@ -160,7 +167,7 @@ where
 enum CurrentFlow {
     /// A usable meter was built from the Dashboard response. Boxed so the
     /// error side of `Result<_, CurrentFlow>` stays small.
-    Usage(Box<ProviderUsage>),
+    Usage(Box<UsageOutcome>),
     /// The credential was rejected by the required period call — do not attempt
     /// the legacy fallback, which would use the same credential.
     Unauthorized,
@@ -169,15 +176,17 @@ enum CurrentFlow {
     Fallback,
 }
 
-fn cursor_usage_with_token(token: &str, endpoints: &CursorEndpoints) -> ProviderUsage {
+fn cursor_usage_with_token(token: &str, endpoints: &CursorEndpoints) -> UsageOutcome {
     let client = match shared_client() {
         Ok(client) => client,
-        Err(error) => return unavailable("cursor", error),
+        Err(error) => return UsageOutcome::Unavailable { reason: error },
     };
 
     match fetch_current_flow(&client, token, endpoints) {
-        CurrentFlow::Usage(usage) => *usage,
-        CurrentFlow::Unauthorized => logged_out("cursor", SESSION_EXPIRED.to_string()),
+        CurrentFlow::Usage(outcome) => *outcome,
+        CurrentFlow::Unauthorized => UsageOutcome::Rejected {
+            hint: SESSION_EXPIRED.to_string(),
+        },
         CurrentFlow::Fallback => fetch_legacy_usage(&client, token, endpoints),
     }
 }
@@ -212,7 +221,7 @@ fn fetch_current_flow(client: &Client, token: &str, endpoints: &CursorEndpoints)
     };
 
     match map_current_usage(plan.as_deref(), &period, aggregate_spend_cents, &cycle) {
-        Some(mapped) => CurrentFlow::Usage(Box::new(mapped.into_provider_usage())),
+        Some(mapped) => CurrentFlow::Usage(Box::new(mapped.into_outcome())),
         None => CurrentFlow::Fallback,
     }
 }
@@ -295,7 +304,7 @@ fn fetch_aggregate_spend_cents(
 
 /// The legacy `GET /auth/usage` endpoint, retained as the fallback after the
 /// current flow fails or is absent.
-fn fetch_legacy_usage(client: &Client, token: &str, endpoints: &CursorEndpoints) -> ProviderUsage {
+fn fetch_legacy_usage(client: &Client, token: &str, endpoints: &CursorEndpoints) -> UsageOutcome {
     let url = format!("{}{}", endpoints.api, LEGACY_USAGE_PATH);
     let response = match client
         .get(&url)
@@ -304,41 +313,48 @@ fn fetch_legacy_usage(client: &Client, token: &str, endpoints: &CursorEndpoints)
         .send()
     {
         Ok(response) => response,
-        Err(error) => return unavailable("cursor", format!("Request failed: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {error}"),
+            }
+        }
     };
 
     let status = response.status().as_u16();
     if status == 401 || status == 403 {
-        return logged_out("cursor", SESSION_EXPIRED.to_string());
+        return UsageOutcome::Rejected {
+            hint: SESSION_EXPIRED.to_string(),
+        };
     }
     if status == 429 {
-        return unavailable(
-            "cursor",
-            "Rate limited — usage data temporarily unavailable".to_string(),
-        );
+        return UsageOutcome::RateLimited {
+            reason: "Rate limited — usage data temporarily unavailable".to_string(),
+        };
     }
     if !(200..300).contains(&status) {
-        return unavailable(
-            "cursor",
-            format!("API error {status}: usage endpoint failed"),
-        );
+        return UsageOutcome::Unavailable {
+            reason: format!("API error {status}: usage endpoint failed"),
+        };
     }
 
     let body = match response.text() {
         Ok(body) => body,
-        Err(error) => return unavailable("cursor", format!("Failed to read response: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {error}"),
+            }
+        }
     };
     match parse_legacy_usage_response(&body) {
-        Ok((windows, detail)) => ProviderUsage {
-            provider: "cursor".to_string(),
-            logged_in: true,
+        Ok((windows, detail)) => UsageOutcome::Reading {
             windows,
             balance: None,
             meters: vec![],
             detail,
-            error: None,
         },
-        Err(error) => unavailable("cursor", format!("Failed to parse response: {error}")),
+        Err(error) => UsageOutcome::Unavailable {
+            reason: format!("Failed to parse response: {error}"),
+        },
     }
 }
 
@@ -596,15 +612,12 @@ struct CursorMapped {
 }
 
 impl CursorMapped {
-    fn into_provider_usage(self) -> ProviderUsage {
-        ProviderUsage {
-            provider: "cursor".to_string(),
-            logged_in: true,
+    fn into_outcome(self) -> UsageOutcome {
+        UsageOutcome::Reading {
             windows: vec![],
             balance: None,
             meters: self.meters,
             detail: self.detail,
-            error: None,
         }
     }
 }
@@ -1801,13 +1814,15 @@ mod tests {
             ],
             2,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.provider, "cursor");
-        assert_eq!(usage.meters.len(), 1, "one allowance meter");
-        assert!(usage.windows.is_empty());
+        match outcome {
+            UsageOutcome::Reading { meters, windows, .. } => {
+                assert_eq!(meters.len(), 1, "one allowance meter");
+                assert!(windows.is_empty());
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         let requests = captured(&recorder);
         assert_eq!(requests.len(), 2, "plan + period, no legacy: {requests:?}");
@@ -1840,12 +1855,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        match &usage.meters[0] {
-            UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-            other => panic!("expected no-individual-limit spend, got {other:?}"),
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[0] {
+                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                    other => panic!("expected no-individual-limit spend, got {other:?}"),
+                }
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
         let requests = captured(&recorder);
         assert!(requests
@@ -1867,12 +1886,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        match &usage.meters[0] {
-            UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-            other => panic!("expected no-individual-limit spend, got {other:?}"),
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[0] {
+                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                    other => panic!("expected no-individual-limit spend, got {other:?}"),
+                }
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)
             .iter()
@@ -1891,11 +1914,14 @@ mod tests {
             ],
             2,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.meters.len(), 1);
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                assert_eq!(meters.len(), 1);
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         let requests = captured(&recorder);
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().any(|r| r.path.ends_with(PERIOD_USAGE_PATH)));
@@ -1903,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_period_stays_logged_out_without_the_legacy_endpoint() {
+    fn unauthorized_period_returns_rejected_without_the_legacy_endpoint() {
         let (port, recorder) = loopback(
             vec![
                 (PLAN_INFO_PATH, 200, PLAN_ENTERPRISE),
@@ -1912,13 +1938,17 @@ mod tests {
             ],
             2,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(!usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("cursor-agent login")));
+        match outcome {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("cursor-agent login"),
+                    "session-expired remediation must be preserved, got: {hint:?}"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
         assert!(
             !captured(&recorder)
                 .iter()
@@ -1937,12 +1967,15 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Fast Requests");
+        match outcome {
+            UsageOutcome::Reading { windows, .. } => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "Fast Requests");
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         let requests = captured(&recorder);
         let period_index = requests
@@ -1975,12 +2008,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token(&token, &endpoints(port));
+        let outcome = cursor_usage_with_token(&token, &endpoints(port));
 
-        assert!(usage.logged_in);
-        match &usage.meters[0] {
-            UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-            other => panic!("expected no-individual-limit spend, got {other:?}"),
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[0] {
+                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                    other => panic!("expected no-individual-limit spend, got {other:?}"),
+                }
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
 
         let aggregate = find(&recorder, AGGREGATED_EVENTS_PATH);
@@ -2014,12 +2051,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        match &usage.meters[0] {
-            UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
-            other => panic!("expected no-individual-limit spend, got {other:?}"),
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[0] {
+                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 987.65),
+                    other => panic!("expected no-individual-limit spend, got {other:?}"),
+                }
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)
             .iter()
@@ -2037,13 +2078,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        assert!(usage.error.is_none());
-        match &usage.meters[0] {
-            UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 0.0),
-            other => panic!("expected zero no-individual-limit spend, got {other:?}"),
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                match &meters[0] {
+                    UsageMeter::NoIndividualLimit { amount } => assert_eq!(amount.used, 0.0),
+                    other => panic!("expected zero no-individual-limit spend, got {other:?}"),
+                }
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
         }
         assert!(!captured(&recorder)
             .iter()
@@ -2051,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_fetch_returns_the_current_flow_result_end_to_end() {
+    fn adapter_seam_contract_cursor_reading_end_to_end() {
         let (port, recorder) = loopback(
             vec![
                 (PLAN_INFO_PATH, 200, PLAN_ENTERPRISE),
@@ -2063,13 +2107,20 @@ mod tests {
         );
         let base = format!("http://127.0.0.1:{port}");
 
-        let usage = with_cursor_loopback("test-token", &base, &base, || {
-            CursorAdapter.fetch(&[]).into_usage("cursor")
+        let outcome = with_cursor_loopback("test-token", &base, &base, || {
+            crate::services::usage::catalog::dispatch("cursor")
+                .expect("cursor adapter registered")
+                .fetch(&[])
         });
 
-        assert_eq!(usage.provider, "cursor");
-        assert!(usage.logged_in);
-        assert_eq!(usage.meters.len(), 1);
+        // Seam contract through `dispatch("cursor").fetch`: the current
+        // flow result carries the provider projection's meter.
+        match outcome {
+            UsageOutcome::Reading { meters, .. } => {
+                assert_eq!(meters.len(), 1);
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
         assert!(!captured(&recorder)
             .iter()
             .any(|r| r.path.ends_with(LEGACY_USAGE_PATH)));
@@ -2085,15 +2136,21 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in, "credential present but the fetch failed");
-        assert!(usage.error.is_some());
-        assert_eq!(usage.provider, "cursor");
+        match outcome {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    !reason.is_empty(),
+                    "credential present but the fetch failed without a reason"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn legacy_rate_limit_preserves_logged_in_state() {
+    fn legacy_rate_limit_returns_rate_limited() {
         let (port, _recorder) = loopback(
             vec![
                 (PLAN_INFO_PATH, 500, "{}"),
@@ -2102,12 +2159,16 @@ mod tests {
             ],
             3,
         );
-        let usage = cursor_usage_with_token("test-token", &endpoints(port));
+        let outcome = cursor_usage_with_token("test-token", &endpoints(port));
 
-        assert!(usage.logged_in);
-        assert!(usage
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("Rate limited")));
+        match outcome {
+            UsageOutcome::RateLimited { reason } => {
+                assert!(
+                    reason.contains("Rate limited"),
+                    "rate-limit copy must be preserved, got: {reason:?}"
+                );
+            }
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
     }
 }

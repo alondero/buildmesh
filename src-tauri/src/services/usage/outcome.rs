@@ -35,13 +35,9 @@ use std::collections::HashSet;
 /// `#[allow(dead_code)]` silences `clippy::variant_size_differences` false
 /// positives for `NoCredential` and `ManagedExternally`: both are
 /// constructed in `into_usage_table_per_variant` (the table-test enforcing
-/// the projection across all 7 variants) and `NoCredential` is also
-/// constructed by the migration shim's `logged_in: false` arm
-/// (round-1 review: this is the structural fix for the Muse Code bug).
-/// `ManagedExternally` will be constructed in production by Anthropic
-/// after issue #1758 phase 2 migrates the bespoke `ManagedExternally` path
-/// from `meters: vec![UsageMeter::ManagedExternally]` to a direct
-/// `UsageOutcome::ManagedExternally { platform }` return.
+/// the projection across all 7 variants); `NoCredential` is constructed
+/// by every adapter's missing-credential path, and `ManagedExternally`
+/// by the Anthropic adapter's cloud/API-platform arm (issue #1758).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum UsageOutcome {
@@ -100,65 +96,25 @@ pub(crate) enum AuthPolicy {
     /// (e.g. Muse Code: an OAuth token's absence cannot be distinguished from
     /// "API key configured" via HTTP status alone — the auth source is
     /// separate from the API key path).
-    // Constructed in the migration shim's `logged_in: false` arm
-    // (`From<ProviderUsage> for UsageOutcome`) and in the table-test
-    // `into_usage_table_per_variant`. Clippy can't see test construction
-    // as "production use" — the allow is a false-positive suppression.
+    // No adapter passes this today (every `fetch_usage` call site passes
+    // `AuthPolicy` explicitly, all `Rejected`); it stays as the
+    // documented second classifier for credential-store/API-decoupled
+    // providers. Clippy can't see the driver match arm as construction —
+    // the allow is a false-positive suppression.
     #[allow(dead_code)]
     NoCredential,
 }
 
-/// Migration shim for adapters that have not yet been ported to return
-/// [`UsageOutcome`] directly (issue #1745, phase 2 — one adapter per
-/// commit per the #1657 precedent). The shim preserves the load-bearing
-/// signal the gate keys on:
-///
-/// - `logged_in: false, error: Some(..)` (the legacy `logged_out()` envelope)
-///   → [`UsageOutcome::NoCredential`]. This is the structural fix the issue
-///   exists for: pre-#1745, Muse Code's `unavailable() + meters: [Unavailable]`
-///   bypassed the no-credential affordance. With the shim, any legacy
-///   adapter that constructs `logged_out()` lands in the gate's drop branch
-///   exactly the way Grok and Agy's no-credential cases do.
-/// - `logged_in: true, error: Some(..)` (the legacy `unavailable()` envelope —
-///   transport / non-2xx / parse failure with credential presumed present)
-///   → [`UsageOutcome::Unavailable`]. Round-1 review found the previous
-///   `logged_in: true` → [`UsageOutcome::Reading`] collapse silently lost
-///   the failure reason (the round-trip `ProviderUsage → UsageOutcome →
-///   ProviderUsage` set `error: None` in the projection). Mapping to
-///   `Unavailable` preserves it; the panel renders the red error copy
-///   and the gate keeps the row.
-/// - `logged_in: true` (success path) → [`UsageOutcome::Reading`].
-///
-/// **Do not** rely on this for new code. It exists only so the seam
-/// compiles while adapters migrate.
-impl From<ProviderUsage> for UsageOutcome {
-    fn from(usage: ProviderUsage) -> Self {
-        if !usage.logged_in {
-            return UsageOutcome::NoCredential {
-                hint: usage.error.unwrap_or_default(),
-            };
-        }
-        if usage.error.is_some() {
-            return UsageOutcome::Unavailable {
-                reason: usage.error.unwrap_or_default(),
-            };
-        }
-        UsageOutcome::Reading {
-            windows: usage.windows,
-            balance: usage.balance,
-            meters: usage.meters,
-            detail: usage.detail,
-        }
-    }
-}
-
-// Reverse shim removed: `From<UsageOutcome> for ProviderUsage` cannot
-// know the provider id, so a `.into()` projection would mint a
-// `ProviderUsage` with an empty `provider` field — a wire invariant
-// violation (round-1 Non-Blocking #1). Legacy `*_usage()` functions
-// in `crate::services::usage` that still return `ProviderUsage` call
-// `.into_usage(provider_id)` directly on the outcome they receive
-// from `fetch_usage`. New code returns `UsageOutcome` directly.
+// Migration shim removed (issue #1758): `From<ProviderUsage> for
+// UsageOutcome` existed only so the seam compiled while adapters migrated
+// one per commit. All 14 adapters now return `UsageOutcome` directly, so
+// the impl had no callers left and is deleted rather than kept as a
+// footgun (either direction of the conversion loses information: the
+// forward shim collapsed `logged_in: true + error` into `Unavailable`
+// and could not distinguish `NoCredential` from `Rejected`; the reverse
+// shim cannot know the provider id, so a `.into()` projection would mint
+// a `ProviderUsage` with an empty `provider` field — a wire invariant
+// violation). New code returns `UsageOutcome` directly.
 
 impl UsageOutcome {
     /// Project to the wire shape. The **only** place a [`ProviderUsage`] is
@@ -602,59 +558,4 @@ mod tests {
         }
     }
 
-    /// Round-1 review finding #2: the migration shim's previous
-    /// implementation collapsed `logged_in: true, error: Some(reason)`
-    /// (the legacy `unavailable()` envelope) into
-    /// `UsageOutcome::Reading { detail: error }`, silently losing the
-    /// failure reason (the round-trip `ProviderUsage → UsageOutcome →
-    /// ProviderUsage` set `error: None` in the projection). Pin the
-    /// shim's `Unavailable` branch so a future regression re-introducing
-    /// the silent loss is caught here.
-    #[test]
-    fn from_provider_usage_unavailable_envelope_preserves_error_as_unavailable_outcome() {
-        let usage = ProviderUsage {
-            provider: "codex".into(),
-            logged_in: true,
-            windows: vec![],
-            balance: None,
-            meters: vec![],
-            detail: None,
-            error: Some("API error 500: upstream down".into()),
-        };
-        let outcome: UsageOutcome = usage.into();
-        match outcome {
-            UsageOutcome::Unavailable { reason } => {
-                assert_eq!(reason, "API error 500: upstream down");
-            }
-            other => panic!(
-                "expected Unavailable outcome (round-1 review fix), got: {other:?}"
-            ),
-        }
-    }
-
-    /// Round-1 review finding #2 — symmetric: the shim's
-    /// `logged_in: false` arm classifies legacy `logged_out()`
-    /// envelopes as `NoCredential` so the gate drops the row (no
-    /// silent row-keeping for genuinely-no-credential providers).
-    #[test]
-    fn from_provider_usage_logged_out_envelope_classifies_as_no_credential() {
-        let usage = ProviderUsage {
-            provider: "grok".into(),
-            logged_in: false,
-            windows: vec![],
-            balance: None,
-            meters: vec![],
-            detail: None,
-            error: Some("Antigravity OAuth missing.".into()),
-        };
-        let outcome: UsageOutcome = usage.into();
-        match outcome {
-            UsageOutcome::NoCredential { hint } => {
-                assert_eq!(hint, "Antigravity OAuth missing.");
-            }
-            other => panic!(
-                "expected NoCredential outcome (round-1 review sanity check), got: {other:?}"
-            ),
-        }
-    }
 }

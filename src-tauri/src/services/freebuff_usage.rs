@@ -29,9 +29,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::services::usage::types::{
-    logged_out, unavailable, BillingBalance, ProviderUsage, UsageError, UsageWindow,
-};
+use crate::services::usage::outcome::UsageOutcome;
+use crate::services::usage::types::{BillingBalance, UsageError, UsageWindow};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -229,7 +228,7 @@ struct FreebuffUsageResponse {
 }
 
 /// Parse the Freebuff usage body into the `(Vec<UsageWindow>,
-/// Option<BillingBalance>)` pair that [`ProviderUsage`] consumes.
+/// Option<BillingBalance>)` pair that the `Reading` outcome carries.
 /// Returns `Result` (not `Option`) so a malformed body surfaces a
 /// `Shape` error rather than silently zeroing every meter — same
 /// contract as `parse_kimi_response` / `parse_openrouter_response`
@@ -312,7 +311,14 @@ fn clamp_error_body(body: &str) -> String {
 /// queries the upstream quota endpoint directly — spawning the CLI
 /// would make a usage refresh wait on an interactive process startup
 /// (same rationale that drives `commandcode_usage`).
-pub fn freebuff_usage() -> ProviderUsage {
+///
+/// Issue #1745 phase 2 step 16: migrated to the outcome seam. Missing
+/// credential → `NoCredential`. 401 / banned → `Rejected`. 429 →
+/// `RateLimited`. Other → `Unavailable`. The bespoke [`StatusOutcome`]
+/// classifier is preserved (freebuff's 403/404 rules are provider-side
+/// body-parsing, not a seam concern); it now maps into `UsageOutcome`
+/// variants instead of minting the wire envelope.
+pub fn freebuff_usage() -> UsageOutcome {
     freebuff_usage_with(&freebuff_credential_paths(), FREEBUFF_USAGE_URL)
 }
 
@@ -321,17 +327,22 @@ pub fn freebuff_usage() -> ProviderUsage {
 /// loopback URL (so the live HTTP fetch can run against a `tiny_http`
 /// listener without touching the network). Mirrors
 /// `cursor_usage_with_token` / `commandcode_usage_with_path`.
-pub(crate) fn freebuff_usage_with(
-    candidates: &[PathBuf],
-    live_url: &str,
-) -> ProviderUsage {
+pub(crate) fn freebuff_usage_with(candidates: &[PathBuf], live_url: &str) -> UsageOutcome {
     let auth = match read_freebuff_credentials(candidates) {
         Ok(auth) => auth,
-        Err(error) => return logged_out("freebuff", error.to_string()),
+        Err(error) => {
+            return UsageOutcome::NoCredential {
+                hint: error.to_string(),
+            }
+        }
     };
     let client = match Client::builder().timeout(Duration::from_secs(15)).build() {
         Ok(client) => client,
-        Err(error) => return unavailable("freebuff", format!("Client error: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Client error: {error}"),
+            }
+        }
     };
     let response = match client
         .get(live_url)
@@ -342,40 +353,45 @@ pub(crate) fn freebuff_usage_with(
         .send()
     {
         Ok(response) => response,
-        Err(error) => return unavailable("freebuff", format!("Request failed: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Request failed: {error}"),
+            }
+        }
     };
     let status = response.status().as_u16();
     let body = match response.text() {
         Ok(body) => body,
-        Err(error) => return unavailable("freebuff", format!("Failed to read response: {error}")),
+        Err(error) => {
+            return UsageOutcome::Unavailable {
+                reason: format!("Failed to read response: {error}"),
+            }
+        }
     };
 
     // Status classification is split so a WAF / CDN 403 (HTML body,
     // unparseable envelope) cannot wipe the user's login state -- only a
-    // genuine 401 surfaces as `logged_out` on an unparseable body.
+    // genuine 401 surfaces as `Rejected` on an unparseable body.
     match classify_status(status, &body) {
-        StatusOutcome::Logout(msg) => logged_out("freebuff", msg),
-        StatusOutcome::Unavailable(msg) => unavailable("freebuff", msg),
-        StatusOutcome::EmptyCard => ProviderUsage {
-            provider: "freebuff".to_string(),
-            logged_in: true,
+        StatusOutcome::Rejected(hint) => UsageOutcome::Rejected { hint },
+        StatusOutcome::Unavailable(reason) => UsageOutcome::Unavailable { reason },
+        StatusOutcome::RateLimited(reason) => UsageOutcome::RateLimited { reason },
+        StatusOutcome::EmptyCard => UsageOutcome::Reading {
             windows: vec![],
             balance: None,
             meters: vec![],
             detail: Some("no active session".to_string()),
-            error: None,
         },
         StatusOutcome::Parse => match parse_freebuff_response(&body) {
-            Ok((windows, balance)) => ProviderUsage {
-                provider: "freebuff".to_string(),
-                logged_in: true,
+            Ok((windows, balance)) => UsageOutcome::Reading {
                 windows,
                 balance,
                 meters: vec![],
                 detail: None,
-                error: None,
             },
-            Err(error) => unavailable("freebuff", format!("Failed to parse response: {}", error)),
+            Err(error) => UsageOutcome::Unavailable {
+                reason: format!("Failed to parse response: {error}"),
+            },
         },
     }
 }
@@ -384,11 +400,29 @@ pub(crate) fn freebuff_usage_with(
 /// private (not the cross-provider `StatusDecision`) because freebuff
 /// returns `(Vec<UsageWindow>, Option<BillingBalance>)` — its own
 /// shape, not the `(Vec<UsageWindow>, Option<String>)` shape that
-/// the cross-provider driver expects. The fetcher handles each
-/// variant inline.
+/// the cross-provider driver expects. The fetcher maps each variant
+/// into a [`UsageOutcome`] inline.
+///
+/// Freebuff-specific conventions (issue #1758):
+/// - 401 → `Rejected` even on an unparseable body: 401 is genuinely a
+///   credential failure. A `{"status":"banned"}` envelope upgrades the
+///   copy to the account-suspended remediation.
+/// - 403 → `Unavailable` by default (WAF / CDN HTML block, malformed
+///   envelope, or unrecognised `status`): the upstream blocked the
+///   request without stating a credential issue, so login state is
+///   preserved. Only `{"status":"banned"}` is a credential signal
+///   (`Rejected`); `{"status":"country_blocked"}` is regional
+///   (`Unavailable` with the region copy).
+/// - 404 → `Reading` with "no active session" detail ONLY for the
+///   documented empty / `{"status":"none"}` bodies; any other 404 body
+///   is a routing failure (`Unavailable`) so a retired route doesn't
+///   masquerade as a healthy empty session.
+/// - 429 → `RateLimited` (transient; the copy keeps freebuff's `--`
+///   spelling).
 enum StatusOutcome {
-    Logout(String),
+    Rejected(String),
     Unavailable(String),
+    RateLimited(String),
     /// 404 with the documented "no active session" body -- empty OR
     /// `{"status":"none"}`. A generic 404 (HTML page, malformed JSON)
     /// falls through to `Unavailable` so a retired upstream route
@@ -425,10 +459,10 @@ fn is_no_active_session(body: &str) -> bool {
 fn classify_401_error(body: &str) -> StatusOutcome {
     if let Ok(env) = serde_json::from_str::<StatusEnvelope>(body) {
         if env.status == Some("banned") {
-            return StatusOutcome::Logout("Freebuff account suspended".to_string());
+            return StatusOutcome::Rejected("Freebuff account suspended".to_string());
         }
     }
-    StatusOutcome::Logout(
+    StatusOutcome::Rejected(
         "Freebuff session expired -- run 'freebuff login' to log in".to_string(),
     )
 }
@@ -455,7 +489,7 @@ fn classify_403_error(body: &str) -> StatusOutcome {
         return forbidden_default();
     };
     match env.status {
-        Some("banned") => StatusOutcome::Logout("Freebuff account suspended".to_string()),
+        Some("banned") => StatusOutcome::Rejected("Freebuff account suspended".to_string()),
         Some("country_blocked") => StatusOutcome::Unavailable(
             "Freebuff is not available in this region".to_string(),
         ),
@@ -484,7 +518,7 @@ fn classify_status(status: u16, body: &str) -> StatusOutcome {
                 StatusOutcome::Unavailable(format!("API error 404: {}", clamp_error_body(body)))
             }
         }
-        429 => StatusOutcome::Unavailable(
+        429 => StatusOutcome::RateLimited(
             "Rate limited -- usage data temporarily unavailable".to_string(),
         ),
         s => StatusOutcome::Unavailable(format!("API error {s}: {}", clamp_error_body(body))),
@@ -501,8 +535,8 @@ fn classify_status(status: u16, body: &str) -> StatusOutcome {
 //      response into `UsageWindow` (daily quota) + `BillingBalance`
 //      (earned sessions).
 //   3. Graceful degradation on 401/403/429 follows the Kimi / Command
-//      Code contract (logged_out on auth failure, unavailable on rate
-//      limit).
+//      Code contract (`Rejected` on auth failure, `RateLimited` on
+//      rate limit, `Unavailable` otherwise).
 //   4. Detection gating is a separate concern (lives in
 //      `commands/usage.rs`); this module just fetches.
 
@@ -873,31 +907,33 @@ mod tests {
     }
 
     #[test]
-    fn freebuff_usage_no_credential_returns_logged_out() {
-        // No candidate path that exists → `logged_out` envelope so
-        // the UI can render the re-login prompt rather than a blank
-        // gauge.
+    fn freebuff_usage_no_credential_returns_no_credential() {
+        // No candidate path that exists → `NoCredential` so the gate
+        // drops the row rather than rendering a blank gauge. The
+        // loopback server below would fail loudly if hit — no request
+        // may fire without a credential.
         let dir = tempfile::tempdir().unwrap();
         let missing = vec![dir.path().join("nope").join("credentials.json")];
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(204));
         });
-        let usage = freebuff_usage_with(&missing, &format!("http://127.0.0.1:{port}/usage"));
-        assert_eq!(usage.provider, "freebuff");
-        assert!(!usage.logged_in);
-        assert!(
-            usage.error.as_deref().is_some_and(|e| e.contains("No credential")),
-            "expected No credential error, got {:?}",
-            usage.error
-        );
+        match freebuff_usage_with(&missing, &format!("http://127.0.0.1:{port}/usage")) {
+            UsageOutcome::NoCredential { hint } => {
+                assert!(
+                    hint.contains("No credential"),
+                    "expected No credential hint, got {hint:?}"
+                );
+            }
+            other => panic!("expected NoCredential outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn freebuff_usage_401_returns_logged_out_with_relogin_copy() {
+    fn freebuff_usage_401_returns_rejected_with_relogin_copy() {
         // 401 (Unauthorized) signals a bad credential — surface as
-        // `logged_out` with a copy that points the user at
+        // `Rejected` with a copy that points the user at
         // `freebuff login`, matching the kimi_usage 401/403 branch
-        // (`logged_out` so the UI shows the re-enter affordance, not
+        // (`Rejected` so the UI shows the re-enter affordance, not
         // a generic failure card).
         let dir = tempfile::tempdir().unwrap();
         let path = write_freebuff_credentials(
@@ -911,31 +947,28 @@ mod tests {
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(401));
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert_eq!(usage.provider, "freebuff");
-        assert!(!usage.logged_in, "401 must flip to logged_out");
-        assert_eq!(usage.windows.len(), 0);
-        assert!(
-            usage
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("freebuff login")),
-            "401 prompt must reference 'freebuff login', got {:?}",
-            usage.error
-        );
+        ) {
+            UsageOutcome::Rejected { hint } => {
+                assert!(
+                    hint.contains("freebuff login"),
+                    "401 prompt must reference 'freebuff login', got {hint:?}"
+                );
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn freebuff_usage_403_with_unparseable_body_preserves_logged_in() {
+    fn freebuff_usage_403_with_unparseable_body_returns_unavailable() {
         // 403 with an unparseable body (HTML error page from a WAF
-        // / CDN, or an empty body) MUST NOT log the user out --
+        // / CDN, or an empty body) MUST NOT reject the credential --
         // doing so would wipe their login state on a Cloudflare
         // block, which is the wrong UX (PR #1443 review round-4
         // item #2). The fetcher treats unparseable 403 as
-        // `unavailable` and keeps `logged_in = true`.
+        // `Unavailable`.
         let dir = tempfile::tempdir().unwrap();
         let path = write_freebuff_credentials(
             dir.path(),
@@ -948,22 +981,22 @@ mod tests {
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(403));
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in, "403 with unparseable body must NOT log the user out");
-        assert_eq!(
-            usage.error.as_deref(),
-            Some("Access forbidden (HTTP 403)")
-        );
+        ) {
+            UsageOutcome::Unavailable { reason } => {
+                assert_eq!(reason, "Access forbidden (HTTP 403)");
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn freebuff_usage_403_with_country_blocked_body_preserves_logged_in() {
+    fn freebuff_usage_403_with_country_blocked_body_returns_unavailable() {
         // 403 with the documented `{"status":"country_blocked"}` body
         // -- the user IS logged in (token valid), just not available
-        // in this region. Surface as `unavailable`, not `logged_out`.
+        // in this region. Surface as `Unavailable`, not `Rejected`.
         let dir = tempfile::tempdir().unwrap();
         let path = write_freebuff_credentials(
             dir.path(),
@@ -979,19 +1012,19 @@ mod tests {
                     .with_status_code(403),
             );
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in);
-        assert_eq!(
-            usage.error.as_deref(),
-            Some("Freebuff is not available in this region")
-        );
+        ) {
+            UsageOutcome::Unavailable { reason } => {
+                assert_eq!(reason, "Freebuff is not available in this region");
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn freebuff_usage_403_with_banned_body_logs_out() {
+    fn freebuff_usage_403_with_banned_body_returns_rejected() {
         // 403 with a valid JSON `{"status":"banned"}` body -- the
         // upstream IS actively informing us the account is suspended,
         // NOT a WAF block (a Cloudflare HTML block fails JSON parsing
@@ -1013,12 +1046,15 @@ mod tests {
                     .with_status_code(403),
             );
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(!usage.logged_in, "403 banned must log the user out");
-        assert_eq!(usage.error.as_deref(), Some("Freebuff account suspended"));
+        ) {
+            UsageOutcome::Rejected { hint } => {
+                assert_eq!(hint, "Freebuff account suspended");
+            }
+            other => panic!("expected Rejected outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1041,17 +1077,18 @@ mod tests {
         let port_empty = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(404));
         });
-        let usage_empty = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port_empty}/usage"),
-        );
-        assert!(usage_empty.logged_in, "404 must not log the user out");
-        assert!(usage_empty.error.is_none());
-        assert!(usage_empty.windows.is_empty());
-        assert_eq!(
-            usage_empty.detail.as_deref(),
-            Some("no active session")
-        );
+        ) {
+            UsageOutcome::Reading {
+                windows, detail, ..
+            } => {
+                assert!(windows.is_empty());
+                assert_eq!(detail.as_deref(), Some("no active session"));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
 
         // {"status":"none"} body.
         let port_status = spawn_loopback(1, |req| {
@@ -1059,16 +1096,18 @@ mod tests {
                 tiny_http::Response::from_string(r#"{"status":"none"}"#).with_status_code(404),
             );
         });
-        let usage_status = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port_status}/usage"),
-        );
-        assert!(usage_status.logged_in);
-        assert!(usage_status.windows.is_empty());
-        assert_eq!(
-            usage_status.detail.as_deref(),
-            Some("no active session")
-        );
+        ) {
+            UsageOutcome::Reading {
+                windows, detail, ..
+            } => {
+                assert!(windows.is_empty());
+                assert_eq!(detail.as_deref(), Some("no active session"));
+            }
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1091,27 +1130,25 @@ mod tests {
                 tiny_http::Response::from_string("<html>not found</html>").with_status_code(404),
             );
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in);
-        assert!(
-            usage
-                .error
-                .as_deref()
-                .is_some_and(|e| e.starts_with("API error 404:")),
-            "generic 404 must surface as Unavailable, got: {:?}",
-            usage.error
-        );
+        ) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.starts_with("API error 404:"),
+                    "generic 404 must surface as Unavailable, got: {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn freebuff_usage_429_preserves_logged_in() {
-        // 429 is transient (rate limit). We surface `unavailable`
-        // but keep `logged_in = true` so the user doesn't think
-        // their session is bad — same contract as Kimi / OpenRouter
-        // / DeepSeek.
+    fn freebuff_usage_429_returns_rate_limited() {
+        // 429 is transient (rate limit). We surface `RateLimited`
+        // so the user doesn't think their session is bad — same
+        // contract as Kimi / OpenRouter / DeepSeek.
         let dir = tempfile::tempdir().unwrap();
         let path = write_freebuff_credentials(
             dir.path(),
@@ -1124,19 +1161,18 @@ mod tests {
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::empty(429));
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in, "429 must NOT flip to logged_out");
-        assert!(
-            usage
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("Rate limited")),
-            "429 copy must say 'Rate limited', got {:?}",
-            usage.error
-        );
+        ) {
+            UsageOutcome::RateLimited { reason } => {
+                assert!(
+                    reason.contains("Rate limited"),
+                    "429 copy must say 'Rate limited', got {reason:?}"
+                );
+            }
+            other => panic!("expected RateLimited outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1167,24 +1203,26 @@ mod tests {
                 tiny_http::Response::from_string(long_body.clone()).with_status_code(500),
             );
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in, "500 must NOT flip to logged_out");
-        let error = usage.error.as_deref().expect("error string");
-        assert!(
-            error.starts_with("API error 500: "),
-            "expected leading 'API error 500: ' prefix, got {error:?}"
-        );
-        assert!(
-            error.ends_with('…'),
-            "long upstream body must be truncated with '…' suffix, got {error:?}"
-        );
-        assert!(
-            error.contains(&expected_detail),
-            "expected the clamped detail fragment in the error, got {error:?}"
-        );
+        ) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.starts_with("API error 500: "),
+                    "expected leading 'API error 500: ' prefix, got {reason:?}"
+                );
+                assert!(
+                    reason.ends_with('…'),
+                    "long upstream body must be truncated with '…' suffix, got {reason:?}"
+                );
+                assert!(
+                    reason.contains(&expected_detail),
+                    "expected the clamped detail fragment in the error, got {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1232,20 +1270,23 @@ mod tests {
             }"#;
             let _ = req.respond(tiny_http::Response::from_string(body));
         });
-        let usage = freebuff_usage_with(
+        let (windows, balance) = match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert_eq!(usage.provider, "freebuff");
-        assert!(usage.logged_in);
-        assert_eq!(usage.windows.len(), 1);
-        assert_eq!(usage.windows[0].label, "Daily");
-        assert_eq!(usage.windows[0].used_percent, Some(22.5));
+        ) {
+            UsageOutcome::Reading {
+                windows, balance, ..
+            } => (windows, balance),
+            other => panic!("expected Reading outcome, got: {other:?}"),
+        };
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Daily");
+        assert_eq!(windows[0].used_percent, Some(22.5));
         assert_eq!(
-            usage.windows[0].resets_at.as_deref(),
+            windows[0].resets_at.as_deref(),
             Some("2026-09-02T00:00:00Z")
         );
-        let balance = usage.balance.expect("balance present");
+        let balance = balance.expect("balance present");
         assert_eq!(balance.remaining, 7.0);
         assert_eq!(balance.currency, "USD");
         assert_eq!(balance.monthly_spend, None);
@@ -1301,21 +1342,17 @@ mod tests {
         let port = spawn_loopback(1, |req| {
             let _ = req.respond(tiny_http::Response::from_string("not-json"));
         });
-        let usage = freebuff_usage_with(
+        match freebuff_usage_with(
             &one_candidate(&path),
             &format!("http://127.0.0.1:{port}/usage"),
-        );
-        assert!(usage.logged_in, "shape error must NOT flip to logged_out");
-        assert!(
-            usage
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("Failed to parse response")),
-            "expected parse-error copy, got {:?}",
-            usage.error
-        );
-        // Critical: empty meter fields, not bogus zero values.
-        assert!(usage.windows.is_empty());
-        assert!(usage.balance.is_none());
+        ) {
+            UsageOutcome::Unavailable { reason } => {
+                assert!(
+                    reason.contains("Failed to parse response"),
+                    "expected parse-error copy, got {reason:?}"
+                );
+            }
+            other => panic!("expected Unavailable outcome, got: {other:?}"),
+        }
     }
 }
