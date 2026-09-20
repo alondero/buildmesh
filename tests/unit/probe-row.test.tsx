@@ -615,4 +615,80 @@ describe('ProbeRow (#463)', () => {
     expect(titleRow.contains(error)).toBe(false);
     expect(row.contains(error)).toBe(true);
   });
+
+  // ---- Markdown body rendering (expanded container) ---------------------
+
+  it('renders the expanded body as markdown (GFM elements, not raw source)', () => {
+    // Issue/PR bodies are GitHub markdown — the toggled container must
+    // render the syntax, not echo it. Was the raw-text regression this
+    // suite existed to pin; the raw-text behavior is now the COLLAPSED
+    // preview's contract (see the next test).
+    const { container } = render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={true}
+        onToggle={noop}
+        body="**Steps:** run `npm test`"
+      />,
+    );
+
+    const expandedBody = container.querySelector('[data-issue-body-expanded]')!;
+    expect(expandedBody.querySelector('strong')?.textContent).toBe('Steps:');
+    expect(expandedBody.querySelector('code')?.textContent).toBe('npm test');
+    expect(expandedBody.textContent).not.toContain('**');
+  });
+
+  it('keeps the collapsed preview as raw plain text', () => {
+    // The 2-line clamp is a plain <p> — markdown block output can't hold a
+    // clamped height, and parsing every collapsed row would multiply the
+    // render cost by the list length. Pin the asymmetry: raw source shows
+    // collapsed, rendered markdown shows expanded.
+    const { container } = render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={false}
+        onToggle={noop}
+        body="**Steps:** run `npm test`"
+      />,
+    );
+
+    const preview = container.querySelector('p.line-clamp-2')!;
+    expect(preview.textContent).toBe('**Steps:** run `npm test`');
+    expect(preview.querySelector('strong')).toBeNull();
+    expect(preview.querySelector('code')).toBeNull();
+  });
+
+  it('does not toggle the row when a markdown body link is clicked', () => {
+    // The expanded body lives inside the row's click-to-toggle column.
+    // Markdown links route through <SafeLink>, whose stopPropagation must
+    // keep the click from ALSO flipping the row's expand state.
+    const onToggle = vi.fn();
+    render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={true}
+        onToggle={onToggle}
+        body="See [the spec](https://example.com/spec) for details."
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: 'the spec' }));
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(openUrlMock).toHaveBeenCalledWith('https://example.com/spec');
+  });
 });

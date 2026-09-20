@@ -12,8 +12,13 @@
  *
  *   1. Click-to-expand. Clicking the row's body text fires
  *      `onToggle` — the chevron rotates 90° and the body region
- *      swaps between a clamped 2-line preview and a scrollable
- *      full-text container.
+ *      swaps between a clamped 2-line plain-text preview and a
+ *      scrollable markdown container (GitHub bodies ARE markdown,
+ *      so the expanded view renders via `<MarkdownText>`; the
+ *      collapsed preview stays raw text because a 2-line clamp of
+ *      block-level markdown output can't hold its height and
+ *      rendering every collapsed row would multiply the parse
+ *      cost by the list length).
  *   2. Title link. The title is an `<a>` (via `<SafeLink>`) with
  *      `target="_blank"`, `rel="noopener noreferrer"`, and an
  *      onClick that routes through `openUrl` (Tauri 2 drops
@@ -68,6 +73,7 @@
 
 import type { ReactNode, Ref } from 'react';
 import { SafeLink } from '../shared/SafeLink';
+import { MarkdownText } from '../shared/MarkdownText';
 
 export interface ProbeRowProps {
   /**
@@ -107,9 +113,11 @@ export interface ProbeRowProps {
    * Body text. Null/empty hides the body region entirely (no
    * collapsed preview, no expanded panel). Strings of any
    * length render below the title + action columns at full row
-   * width — collapsed = a clickable 2-line preview (`onToggle`),
-   * expanded = a plain inert reading panel (selection / scroll /
-   * keyboard safe; collapse happens from the title column).
+   * width — collapsed = a clickable 2-line raw-text preview
+   * (`onToggle`), expanded = a plain inert reading panel that
+   * renders the body as markdown via `<MarkdownText>`
+   * (issue/PR bodies are GitHub markdown) up to `max-h-48`;
+   * collapse happens from the title column.
    */
   body?: string | null;
 
@@ -294,8 +302,17 @@ export function ProbeRow({
             data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
             className="px-2.5 pb-2 pl-3"
           >
-            <div className="max-h-48 overflow-y-auto text-2xs leading-relaxed text-text-secondary whitespace-pre-wrap break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5">
-              {body}
+            <div className="max-h-48 overflow-y-auto overflow-x-hidden text-2xs leading-relaxed text-text-secondary break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5">
+              {/* Rendered markdown (was raw `whitespace-pre-wrap` text —
+                  GitHub bodies are markdown, not plain text). Markdown
+                  supplies its own block layout, so the panel drops
+                  `whitespace-pre-wrap`; `overflow-x-hidden` keeps a wide
+                  child from scrolling the dock sideways (checklist §1)
+                  and `break-words` wraps unbounded prose (checklist §2).
+                  The panel stays inert — SafeLink's stopPropagation plus
+                  the absent wrapper onClick mean a link click can't
+                  collapse the row. */}
+              <MarkdownText source={body} />
             </div>
           </div>
         ) : (
