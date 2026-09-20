@@ -50,6 +50,7 @@ mod windows {
     pub(crate) const TEST_FAIL_AFTER_CANDIDATES: u8 = 1;
     pub(crate) const TEST_DELETE_SKILLS_TARGET_BEFORE_VALIDATION: u8 = 2;
     pub(crate) const TEST_HOLD_LOCK_AFTER_ACQUIRE: u8 = 3;
+    pub(crate) const TEST_DENY_SYMLINK_CREATION: u8 = 4;
 
     #[cfg(test)]
     thread_local! {
@@ -608,6 +609,21 @@ mod windows {
     }
 
     fn create_candidate(candidate: &Candidate) -> Result<(), String> {
+        // Deterministic stand-in for a host without symlink privilege
+        // (Developer Mode off, no SeCreateSymbolicLinkPrivilege): the real
+        // `symlink_file`/`symlink_dir` calls fail with os error 1314 there.
+        // Surfacing the same message here keeps the no-privilege path
+        // exercised on every host without touching machine policy.
+        if consume_test_fault(TEST_DENY_SYMLINK_CREATION) {
+            return Err(format!(
+                "Muse context: cannot create {} link: A required privilege is not held by the client. (os error 1314) Enable Developer Mode or grant SeCreateSymbolicLinkPrivilege and retry",
+                if candidate.spec.target_is_dir {
+                    "directory"
+                } else {
+                    "file"
+                }
+            ));
+        }
         if candidate.temp.exists() || candidate.backup.exists() {
             return Err(format!(
                 "Muse context transaction name collision at {}",
@@ -849,6 +865,50 @@ mod tests {
                 .collect()
         }
 
+        /// Convert a Windows checkout path to the guest path WSL sees it at.
+        fn wsl_guest_path(root: &Path) -> String {
+            let output = Command::new("wsl.exe")
+                .args([
+                    "-d",
+                    "Ubuntu",
+                    "--exec",
+                    "wslpath",
+                    "-u",
+                    root.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "wslpath failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        /// `git status --porcelain` as the WSL guest sees the checkout.
+        fn wsl_git_porcelain(guest_path: &str) -> String {
+            let output = Command::new("wsl.exe")
+                .args([
+                    "-d",
+                    "Ubuntu",
+                    "--exec",
+                    "git",
+                    "-C",
+                    guest_path,
+                    "status",
+                    "--porcelain",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "WSL git status failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
         #[test]
         fn repairs_exact_windows_checkout_and_is_idempotent() {
             let temp = fixture();
@@ -1012,6 +1072,57 @@ mod tests {
             // The failed transaction's manifest is harmless residue. The next
             // launch removes it and leaves the missing target untouched.
             prepare_muse_context(root.to_str().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn symlink_privilege_denied_leaves_checkout_intact_and_reports_capability() {
+            let temp = fixture();
+            let root = temp.path();
+            arm_windows_fault(super::super::windows::TEST_DENY_SYMLINK_CREATION);
+
+            let error = prepare_muse_context(root.to_str().unwrap()).unwrap_err();
+            assert!(
+                error.contains("privilege is not held"),
+                "denied repair must name the missing capability, got: {error}"
+            );
+            assert!(
+                error.contains("Developer Mode")
+                    && error.contains("SeCreateSymbolicLinkPrivilege"),
+                "denied repair must explain remediation, got: {error}"
+            );
+            for (alias, target) in [
+                ("AGENTS.md", super::super::AGENTS_TARGET),
+                (".agents/skills", super::super::SKILLS_TARGET),
+            ] {
+                assert!(
+                    !std::fs::symlink_metadata(root.join(alias))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink(),
+                    "{alias} must stay a placeholder when links cannot be created"
+                );
+                assert_eq!(
+                    std::fs::read(root.join(alias)).unwrap(),
+                    target,
+                    "{alias} bytes must be untouched when links cannot be created"
+                );
+            }
+            assert!(git(root, &["status", "--porcelain"], None).is_empty());
+            assert!(transaction_files(root, ".", ".candidate").is_empty());
+            assert!(transaction_files(root, ".agents", ".candidate").is_empty());
+
+            // The failure leaves no partial install behind: the next launch
+            // with capability present repairs both aliases.
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+            assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(git(root, &["status", "--porcelain"], None).is_empty());
         }
 
         #[test]
@@ -1267,6 +1378,95 @@ mod tests {
                     .is_symlink()
             );
             assert!(git(temp.path(), &["status", "--porcelain"], None).is_empty());
+            assert!(
+                wsl_git_porcelain(&guest_path).is_empty(),
+                "WSL git must see no changes after the repaired launch"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires native Muse installation on Windows (muse.exe)"]
+        fn live_muse_exec_uses_the_production_native_recipe_after_repair() {
+            let temp = fixture();
+            let root = temp.path();
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+            let mut recipe = crate::agent::provider::adapters::MUSE
+                .spawn_recipe(Platform::Windows, EnvType::Windows);
+            recipe.base_args = vec![
+                "exec".into(),
+                "--provider".into(),
+                "echo".into(),
+                "--trust-workspace".into(),
+                "--disable-shell".into(),
+                "--disable-write".into(),
+                "--no-session-log".into(),
+                "MUSE_PRODUCTION_NATIVE_PREFLIGHT_OK".into(),
+            ];
+            let command = crate::agent::spawn_environment::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                None,
+                root.to_str().unwrap(),
+                0,
+                false,
+            );
+            let argv = command.get_argv();
+            assert_eq!(
+                argv[0].to_string_lossy(),
+                "muse.exe",
+                "native recipe must spawn muse.exe directly (WindowsShell::Direct)"
+            );
+            // Replay the production argv in the production working
+            // directory. Like the WSL live test above, this runs the
+            // binary headless without the PTY layer; the cwd is what
+            // points Muse at the repaired fixture.
+            let mut child = Command::new(&argv[0]);
+            child.args(&argv[1..]);
+            if let Some(cwd) = command.get_cwd() {
+                child.current_dir(cwd);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "native muse.exe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("MUSE_PRODUCTION_NATIVE_PREFLIGHT_OK")
+            );
+            assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(git(root, &["status", "--porcelain"], None).is_empty());
+        }
+
+        #[test]
+        #[ignore = "requires WSL Ubuntu to read the repaired checkout from the guest"]
+        fn native_repair_is_clean_from_windows_and_wsl() {
+            let temp = fixture();
+            let root = temp.path();
+            prepare_muse_context(root.to_str().unwrap()).unwrap();
+            assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(std::fs::symlink_metadata(root.join(".agents/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(git(root, &["status", "--porcelain"], None).is_empty());
+            let guest_path = wsl_guest_path(root);
+            assert!(
+                wsl_git_porcelain(&guest_path).is_empty(),
+                "WSL git must see no changes after a native repair"
+            );
         }
     }
 }
