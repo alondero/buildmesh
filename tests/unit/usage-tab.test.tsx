@@ -748,6 +748,24 @@ it('keeps isRefreshing up when an older Refresh click is dropped as stale and a 
     }
   });
 
+  // ADR-0037: a provider with no usable credential this round is served from
+  // the durable last-known store. The tab must keep the row visible and surface
+  // the "last known" label rather than silently dropping the meter.
+  it('renders a last-known meter through the tab join', async () => {
+    mockBackend({
+      accounts: [{ id: 'grok', name: 'Grok', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null }],
+      meters: [{
+        provider: 'grok',
+        usageTracked: true,
+        cachedAt: Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60,
+        usage: { provider: 'grok', loggedIn: true, windows: [{ label: 'Weekly', usedPercent: 72.5, resetsAt: null }], balance: null, meters: [], detail: null, error: null },
+      }],
+    });
+    render(<UsageTab />);
+    expect(await screen.findByText('72.5%')).toBeTruthy();
+    expect(screen.getByTestId('usage-last-known').textContent).toBe('Last known value · 3d ago');
+  });
+
   // The mount-time IPC path no longer sets `isRefreshing` (review
   // item #3 — the cold-cache `<LoadingState>` early-return wins
   // before the toolbar/body is rendered, so the affordance would be

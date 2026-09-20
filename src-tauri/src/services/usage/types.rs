@@ -136,6 +136,18 @@ pub struct ProviderMeters {
     pub usage_tracked: bool,
     /// The fetched meters; `None` when usage isn't tracked.
     pub usage: Option<ProviderUsage>,
+    /// Epoch seconds the reading was fetched from the provider. Set only when
+    /// `usage` is served from the durable last-known cache instead of a live
+    /// fetch (ADR-0037); `null`/absent means fetched live on this call. The UI
+    /// labels such a row "Last known value · …" so a stale reading is never
+    /// mistaken for a live one.
+    // ts-rs: `optional` keeps the field additive so older fixtures still
+    // typecheck; `as = "Option<i32>"` only pins the *declared* TS type to
+    // `number` (ts-rs would otherwise emit `bigint`, which JSON-over-IPC never
+    // sends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, rename = "cachedAt", as = "Option<i32>")]
+    pub cached_at: Option<i64>,
 }
 
 /// Failures that happen before we ever reach an endpoint: no credential on disk,

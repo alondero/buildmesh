@@ -138,6 +138,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(crate::services::gh_auth_cache::GhAuthCache::new())
+        // Durable last-known Usage Meter readings (ADR-0037). Resolves the app
+        // data dir lazily per call, since `manage` runs before `setup()`.
+        .manage(crate::services::usage::last_known::UsageLastKnownCache::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

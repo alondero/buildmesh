@@ -75,6 +75,20 @@ sources. Fingerprints keep tokens, keys, account identifiers, and credential
 paths out of cache keys and logs. A repeated identity keeps the existing TTL
 hit; changing account or auth source starts a distinct entry.
 
+**Usage Meter last-known fallback.** A second, *durable* tier
+(`services/usage/last_known.rs`) keeps the last reading each provider actually
+reported in `<app_data_dir>/usage_last_known.json`, for seven days from the last
+successful fetch — it survives restarts, unlike the five-minute in-process cache.
+When a fetch cannot produce a reading because no usable credential is available
+(a harness not signed into yet today, an expired native token),
+`assemble_meters` serves that remembered reading instead of hiding the row and
+stamps `ProviderMeters.cachedAt` (epoch seconds, `null` for a live fetch) so the
+Usage tab can render "Last known value · …". It is keyed by **provider id**, not
+the identity fingerprint (which is process-salted, and for Muse *is* the rotating
+access token). It never replaces a live reading, a live transient error, or a
+rejected-key prompt; with nothing remembered the row is hidden as before. See
+[ADR-0037](adr/0037-usage-last-known-fallback.md).
+
 **Claude Code authentication source.** The Anthropic meter follows Claude's
 documented credential precedence rather than always reading
 `~/.claude/.credentials.json`. Cloud flags (`CLAUDE_CODE_USE_BEDROCK`,

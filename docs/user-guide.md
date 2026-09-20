@@ -35,6 +35,11 @@ login, while a compatible provider profile can supply routing or usage data.
 If a CLI is installed in both Windows and WSL, Buildmesh presents separate
 runtime entries; configure credentials in the runtime you select.
 
+A provider that isn't signed in right now keeps showing its last known usage for
+up to seven days, marked **Last known value · …** on the Usage tab — so a fresh
+start does not blank the meters you were watching. If nothing has been recorded
+yet, its meter stays hidden.
+
 ## Your first session
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),

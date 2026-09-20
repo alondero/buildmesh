@@ -1,6 +1,7 @@
 //! Tauri commands for provider usage fetching.
 
 use crate::preferences::{self, HarnessProfile, ProviderAccount};
+use crate::services::usage::last_known::{LastKnown, UsageLastKnownCache};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::{self, ProviderMeters, ProviderUsage};
 use std::collections::{HashMap, HashSet};
@@ -113,12 +114,24 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
 /// drop. We drop the row in that case (matches the "polled but no data
 /// arrived" semantics of a transient fetch failure that didn't produce
 /// even a `logged_out` envelope).
+///
+/// **Last-known fallback (ADR-0037).** The keep/drop predicate above is exactly
+/// the set of cases where the meter is hidden today, which is also the set where
+/// a fallback is wanted: no usable credential right now. So when the predicate
+/// says drop, the row is instead served from `previous` — the durable store of
+/// the last reading each provider reported, read before this round's fan-out —
+/// with `cached_at` stamped so the UI can label it. Deliberately *not* applied to
+/// the kept outcomes: `RateLimited`/`Unavailable` must keep showing their live
+/// error, and a rejected-but-configured key must keep its re-entry affordance.
+/// An empty `previous` (fresh install, or nothing within the 7-day TTL) leaves
+/// behaviour exactly as it was.
 fn assemble_meters(
     accounts: &[ProviderAccount],
     profiles: &[HarnessProfile],
     usages: &HashMap<String, ProviderUsage>,
     outcomes: &HashMap<String, UsageOutcome>,
     configured_keys: &HashSet<String>,
+    previous: &HashMap<String, LastKnown>,
 ) -> Vec<ProviderMeters> {
     accounts
         .iter()
@@ -131,6 +144,7 @@ fn assemble_meters(
                     provider: a.id.clone(),
                     usage_tracked: tracked,
                     usage: None,
+                    cached_at: None,
                 });
             }
             // Generic untracked: keep the "Usage not tracked" card.
@@ -139,6 +153,7 @@ fn assemble_meters(
                     provider: a.id.clone(),
                     usage_tracked: false,
                     usage: None,
+                    cached_at: None,
                 });
             }
             // Enabled + tracked: drop iff no credential is configured AND
@@ -160,13 +175,25 @@ fn assemble_meters(
             // degraded/managed-externally hint.
             let usage = usages.get(&a.id)?;
             let outcome = outcomes.get(&a.id);
-            if !outcome.is_some_and(|o| o.keep(configured_keys, &a.id)) {
-                return None;
+            if outcome.is_some_and(|o| o.keep(configured_keys, &a.id)) {
+                return Some(ProviderMeters {
+                    provider: a.id.clone(),
+                    usage_tracked: tracked,
+                    usage: Some(usage.clone()),
+                    cached_at: None,
+                });
             }
+            // ADR-0037: the row would be hidden this round — no usable
+            // credential, e.g. Antigravity/Grok/Muse not logged into yet today.
+            // Restore the last reading this provider *did* report, stamped with
+            // when it was fetched so the UI labels it as last known. With nothing
+            // remembered the row is dropped exactly as it was before.
+            let last_known = previous.get(&a.id)?;
             Some(ProviderMeters {
                 provider: a.id.clone(),
                 usage_tracked: tracked,
-                usage: Some(usage.clone()),
+                usage: Some(last_known.usage.clone()),
+                cached_at: Some(last_known.cached_at),
             })
         })
         .collect()
@@ -176,17 +203,32 @@ fn assemble_meters(
 /// provider relevant to this host (issue #574). Native subscription meters appear
 /// only for installed harnesses; keyed providers only when enabled; Generic
 /// providers carry `usage_tracked = false`. Reuses the `ProviderUsage` wire shape.
+///
+/// Rows whose fetch yields no usable credential are served from the durable
+/// last-known store instead of being dropped (ADR-0037); see [`assemble_meters`].
 #[command]
-pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMeters>, String> {
-    let (profiles, accounts, ids, configured_keys) =
-        crate::commands::run_blocking("get_provider_meters_ids", || {
+pub async fn get_provider_meters(
+    force_refresh: bool,
+    last_known: tauri::State<'_, UsageLastKnownCache>,
+) -> Result<Vec<ProviderMeters>, String> {
+    // `Clone` is an Arc bump — required to move the cache onto the blocking pool
+    // (same reason `GhAuthCache` is `Clone`).
+    let last_known = last_known.inner().clone();
+    let snapshot_cache = last_known.clone();
+    let (profiles, accounts, ids, configured_keys, previous) =
+        crate::commands::run_blocking("get_provider_meters_ids", move || {
             let profiles = preferences::harness_profiles();
             let accounts = Arc::new(preferences::provider_accounts());
             let ids = poll_ids(&accounts, &profiles);
             // Derive credential presence from the same effective account
             // snapshot the fetch workers receive. No worker reloads preferences.
             let configured_keys = configured_keyed_providers(&accounts);
-            Ok((profiles, accounts, ids, configured_keys))
+            // Read the durable last-known readings BEFORE the fan-out. This is
+            // the cold-start read: it makes a restart work (yesterday's reading
+            // is available before today's first fetch), and it keeps this
+            // round's successful fetches out of this round's own fallback.
+            let previous = snapshot_cache.snapshot();
+            Ok((profiles, accounts, ids, configured_keys, previous))
         })
         .await?;
 
@@ -217,14 +259,28 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
 
     let mut usages: HashMap<String, ProviderUsage> = HashMap::new();
     let mut outcomes: HashMap<String, UsageOutcome> = HashMap::new();
+    let mut readings: Vec<(String, ProviderUsage)> = Vec::new();
     for handle in handles {
         let result = handle
             .await
             .map_err(|e| format!("usage fetch task failed: {}", e))?;
         let (id, outcome, usage) = result?;
+        if matches!(&outcome, UsageOutcome::Reading { .. }) {
+            readings.push((id.clone(), usage.clone()));
+        }
         outcomes.insert(id.clone(), outcome);
         usages.insert(id, usage);
     }
+
+    // Remember what we actually learned, for a future round that cannot fetch.
+    // One blocking hop for the whole batch (disk I/O must stay off the async
+    // worker pool — see the *Command Threading* convention) and one file write
+    // per refresh rather than one per provider.
+    crate::commands::run_blocking("usage_last_known_record", move || {
+        last_known.record_many(&readings);
+        Ok(())
+    })
+    .await?;
 
     Ok(assemble_meters(
         accounts.as_ref(),
@@ -232,6 +288,7 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
         &usages,
         &outcomes,
         &configured_keys,
+        &previous,
     ))
 }
 
@@ -424,7 +481,7 @@ mod tests {
         usages.insert("anthropic".to_string(), usage("anthropic"));
         usages.insert("minimax".to_string(), usage("minimax"));
 
-        let rows = assemble_meters(&accounts, &claude, &usages, &outcomes_from_usages(&usages), &HashSet::new());
+        let rows = assemble_meters(&accounts, &claude, &usages, &outcomes_from_usages(&usages), &HashSet::new(), &HashMap::new());
         let ids: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
         assert_eq!(ids, vec!["anthropic", "minimax", "glm"]);
 
@@ -448,6 +505,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
@@ -470,7 +528,7 @@ mod tests {
         // the user contract for unconfigured providers).
         let mut usages = HashMap::new();
         usages.insert("anthropic".to_string(), usage("anthropic"));
-        let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes_from_usages(&usages), &HashSet::new());
+        let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes_from_usages(&usages), &HashSet::new(), &HashMap::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
     }
@@ -509,6 +567,7 @@ mod tests {
             &usages,
             &outcomes,
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert!(
             rows.is_empty(),
@@ -537,6 +596,7 @@ mod tests {
             &usages,
             &outcomes,
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert!(
             rows.is_empty(),
@@ -585,6 +645,7 @@ mod tests {
             &usages,
             &outcomes,
             &configured_keys,
+            &HashMap::new(),
         );
         assert_eq!(
             rows.len(),
@@ -617,6 +678,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert!(
             rows.is_empty(),
@@ -639,6 +701,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "minimax");
@@ -690,6 +753,7 @@ mod tests {
             &usages,
             &outcomes,
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert!(
             rows.is_empty(),
@@ -771,5 +835,214 @@ mod tests {
                 "field {muse_field} must match across providers: muse {muse_value:?} vs agy {agy_value:?}"
             );
         }
+    }
+
+    // ── Last-known fallback (ADR-0037) ─────────────────────────────────────
+
+    /// A reading the provider reported previously, as the durable store hands it
+    /// back: the wire triple plus the instant it was fetched.
+    fn remembered(provider: &str, used_percent: f64, cached_at: i64) -> (String, LastKnown) {
+        let mut cached = usage(provider);
+        cached.windows.push(usage::UsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: Some(used_percent),
+            resets_at: None,
+        });
+        (
+            provider.to_string(),
+            LastKnown {
+                usage: cached,
+                cached_at,
+            },
+        )
+    }
+
+    fn unavailable_usage(provider: &str, reason: &str) -> ProviderUsage {
+        ProviderUsage {
+            provider: provider.to_string(),
+            logged_in: true,
+            windows: Vec::new(),
+            balance: None,
+            meters: vec![],
+            detail: None,
+            error: Some(reason.to_string()),
+        }
+    }
+
+    /// The load-bearing case: Grok/Antigravity/Muse are not logged into yet
+    /// today, so the fetch returns `NoCredential` and the row would be hidden —
+    /// instead it shows the last reading the provider did report, stamped so the
+    /// UI can label it as last known.
+    #[test]
+    fn assemble_meters_serves_the_last_known_reading_when_the_row_would_be_hidden() {
+        let grok = vec![profile("grok", "grok")];
+        let mut usages = HashMap::new();
+        usages.insert("grok".to_string(), logged_out_usage("grok"));
+        let mut outcomes = HashMap::new();
+        outcomes.insert("grok".to_string(), no_credential_outcome("grok"));
+        let previous: HashMap<String, LastKnown> = [remembered("grok", 72.5, 1_700_000_000)]
+            .into_iter()
+            .collect();
+
+        let rows = assemble_meters(
+            &[account("grok", true)],
+            &grok,
+            &usages,
+            &outcomes,
+            &HashSet::new(),
+            &previous,
+        );
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "a remembered reading must keep the row visible, got: {rows:?}"
+        );
+        let row = &rows[0];
+        assert_eq!(
+            row.cached_at,
+            Some(1_700_000_000),
+            "the row must be stamped with when the reading was fetched, not now"
+        );
+        let shown = row.usage.as_ref().expect("fallback usage");
+        assert!(shown.logged_in);
+        assert!(shown.error.is_none(), "the failure envelope must not leak through");
+        assert_eq!(shown.windows[0].used_percent, Some(72.5));
+    }
+
+    #[test]
+    fn assemble_meters_drops_the_row_when_nothing_was_remembered() {
+        // The documented no-cache behaviour: nothing remembered → hidden, exactly
+        // as before the fallback existed.
+        let grok = vec![profile("grok", "grok")];
+        let mut usages = HashMap::new();
+        usages.insert("grok".to_string(), logged_out_usage("grok"));
+        let mut outcomes = HashMap::new();
+        outcomes.insert("grok".to_string(), no_credential_outcome("grok"));
+
+        let rows = assemble_meters(
+            &[account("grok", true)],
+            &grok,
+            &usages,
+            &outcomes,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert!(rows.is_empty(), "nothing remembered means no row: {rows:?}");
+    }
+
+    /// A transient failure is a live signal the user can act on; the fallback
+    /// must not paper over it with stale numbers.
+    #[test]
+    fn assemble_meters_keeps_the_live_error_for_a_transient_failure() {
+        let grok = vec![profile("grok", "grok")];
+        let mut usages = HashMap::new();
+        usages.insert(
+            "grok".to_string(),
+            unavailable_usage("grok", "API error 500: upstream down"),
+        );
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "grok".to_string(),
+            UsageOutcome::Unavailable {
+                reason: "API error 500: upstream down".into(),
+            },
+        );
+        let previous: HashMap<String, LastKnown> = [remembered("grok", 72.5, 1_700_000_000)]
+            .into_iter()
+            .collect();
+
+        let rows = assemble_meters(
+            &[account("grok", true)],
+            &grok,
+            &usages,
+            &outcomes,
+            &HashSet::new(),
+            &previous,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cached_at, None, "a kept row is not a fallback row");
+        let shown = rows[0].usage.as_ref().unwrap();
+        assert_eq!(shown.error.as_deref(), Some("API error 500: upstream down"));
+        assert!(
+            shown.windows.is_empty(),
+            "the remembered reading must not replace the live error"
+        );
+    }
+
+    /// The "Invalid API key" prompt is the user's route back to Settings. A
+    /// remembered reading must never stand in for it.
+    #[test]
+    fn assemble_meters_does_not_cover_a_rejected_key_with_a_stale_reading() {
+        let mut usages = HashMap::new();
+        let mut rejected = logged_out_usage("kimi");
+        rejected.error = Some("Invalid API key".to_string());
+        usages.insert("kimi".to_string(), rejected);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "kimi".to_string(),
+            UsageOutcome::Rejected {
+                hint: "Invalid API key".into(),
+            },
+        );
+        let configured_keys: HashSet<String> = ["kimi".to_string()].into_iter().collect();
+        let previous: HashMap<String, LastKnown> = [remembered("kimi", 12.0, 1_700_000_000)]
+            .into_iter()
+            .collect();
+
+        let rows = assemble_meters(
+            &[account("kimi", true)],
+            &[],
+            &usages,
+            &outcomes,
+            &configured_keys,
+            &previous,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cached_at, None, "a rejected key is not a fallback row");
+        let shown = rows[0].usage.as_ref().unwrap();
+        assert_eq!(shown.error.as_deref(), Some("Invalid API key"));
+        assert!(
+            shown.windows.is_empty(),
+            "the remembered reading must not stand in for the re-entry prompt"
+        );
+    }
+
+    /// Issue #1073: a cache entry must never gate or discard a successful live
+    /// probe.
+    #[test]
+    fn assemble_meters_never_prefers_a_remembered_reading_over_a_live_one() {
+        let grok = vec![profile("grok", "grok")];
+        let (_, stale) = remembered("grok", 99.0, 1_700_000_000);
+        let mut usages = HashMap::new();
+        usages.insert("grok".to_string(), usage("grok"));
+        usages.get_mut("grok").unwrap().windows.push(usage::UsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: Some(5.0),
+            resets_at: None,
+        });
+        let mut outcomes = HashMap::new();
+        outcomes.insert("grok".to_string(), reading_outcome("grok"));
+        let previous: HashMap<String, LastKnown> = [("grok".to_string(), stale)]
+            .into_iter()
+            .collect();
+
+        let rows = assemble_meters(
+            &[account("grok", true)],
+            &grok,
+            &usages,
+            &outcomes,
+            &HashSet::new(),
+            &previous,
+        );
+
+        assert_eq!(rows[0].cached_at, None, "a live row is never stamped stale");
+        assert_eq!(
+            rows[0].usage.as_ref().unwrap().windows[0].used_percent,
+            Some(5.0),
+            "the live reading wins over the remembered one"
+        );
     }
 }
