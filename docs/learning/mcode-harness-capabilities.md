@@ -41,7 +41,7 @@ interactive TUI over PTY, no harness-owned worktree flag.
 |---|---|---|
 | `supports_resume` | `true` | `resume_args` → `--session <id>` |
 | `auto_resume_on_startup` | `true` | |
-| `self_assigns_session_id` | `true` | mcode mints its own ids; PTY capture is the load-bearing path |
+| `self_assigns_session_id` | `true` | mcode mints its own ids; capture is the post-spawn manifest poller, never PTY |
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
 | `supports_model_override` | `false` | Issue #1179: `--model` exists only on `mcode exec`, never the launched TUI |
 | `effort_control` | `None` | Same reason — the TUI rejects effort flags |
@@ -142,10 +142,15 @@ picker support, but Autopilot circuits stay closed until the follow-up lands:
 4. A passive `mcode_watcher` over `messages.jsonl` run boundaries (Muse /
    Command Code pattern) is the fallback if plugin hooks prove unreliable.
 
-## Session identity — unchanged
+## Session identity — manifest-scan capture (issue #1798)
 
-mcode auto-assigns session ids; PTY-output capture remains the load-bearing
-path (`captures_session_id_from_pty` default). The manifest scan is keyed by
-the *stored* `cli_session_id` and cannot discover an id the spawn never
-captured — same limitation as the Codex rollout poller before its
-`session_meta` fallback. No change in this slice.
+mcode auto-assigns session ids; PTY-output capture is off
+(`captures_session_id_from_pty = false` — no banner shape is verified, and
+leaving it on would risk binding a stray UUID from tool output). Capture is
+driven by the post-spawn manifest poller (`services::mcode_session`, the
+Command Code pattern): `after_fresh_spawn` binds the fresh `sessionId`
+through the shared live recovery, and `recover_suspended_session_id`
+rebinds archived nodes after restart. Matching is time-window only with
+single-candidate binding — the manifest carries no verified workspace
+anchor, so two fresh manifests bind nothing rather than risk cross-wiring
+sessions.

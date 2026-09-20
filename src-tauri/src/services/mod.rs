@@ -15,6 +15,7 @@ pub mod fetch_freshness;
 pub mod freebuff_usage;
 pub mod gh_auth_cache;
 pub mod github;
+pub mod mcode_session;
 pub mod mesh;
 pub mod opencode_oauth;
 pub mod opencode_session;
