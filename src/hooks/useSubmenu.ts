@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Focus a menuitem without scrolling overflow ancestors. The sidebar
@@ -21,6 +21,22 @@ function liveItems(container: HTMLElement | null): HTMLButtonElement[] {
   return Array.from(container.querySelectorAll<HTMLButtonElement>(SUBMENU_ITEM_SELECTOR));
 }
 
+export interface UseSubmenuOptions {
+  disabled: boolean;
+  itemCount: number;
+  /**
+   * Delay, in ms, between the cursor leaving the wrapper and the
+   * submenu actually closing. Cancelled on re-entry into the wrapper
+   * or submenu body. Defaults to 120 ms — long enough to absorb the
+   * 10–30 ms the cursor spends in the L-shaped gap between trigger
+   * and submenu on a diagonal path, short enough that a real "move
+   * away" still feels immediate. Set to 0 to disable (matches the
+   * pre-fix behaviour). The diagonal-cursor test pins the default;
+   * do not lower it without revisiting that test.
+   */
+  closeDelay?: number;
+}
+
 /**
  * Issue #1502 — shared hover/click picker-submenu state + keyboard
  * contract (WAI-ARIA menu-with-menubutton pattern), used by the sidebar
@@ -33,11 +49,21 @@ function liveItems(container: HTMLElement | null): HTMLButtonElement[] {
  * - `step` walks the rows with wrap-around. An unfocused start (`-1`,
  *   focus hasn't settled) goes to the first row on ArrowDown and the
  *   last row on ArrowUp — never the middle.
- * - Hover callers use `setSubmenuOpen` directly, which deliberately does
- *   NOT steal focus.
+ * - Hover callers bind `onPointerOver` / `onMouseEnter` / `onMouseLeave`
+ *   to the wrapper directly. The hook owns:
+ *     - the #1293 arm gate (`pointerover` must precede `mouseenter`
+ *       so a synchronous mount-time `mouseenter` under an existing
+ *       cursor does not pop the picker);
+ *     - a cancellable close delay so a diagonal cursor path from
+ *       trigger into the submenu does not flash the picker shut when
+ *       it crosses the L-shaped hit-area gap.
+ * - `closeSubmenu` stays immediate — pickers, keyboard Escape, and
+ *   `useClickOutside` outside-mousedown all want the close to land
+ *   synchronously with their gesture. Only the hover-leave path goes
+ *   through the delayed arm.
  */
-export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
-  const { disabled, itemCount } = opts;
+export function useSubmenu(opts: UseSubmenuOptions) {
+  const { disabled, itemCount, closeDelay = 120 } = opts;
   const [submenuOpen, setSubmenuOpen] = useState(false);
   const submenuRef = useRef<HTMLDivElement | null>(null);
   // Armed only by `openViaKeyboard`; hover opens leave it false so the
@@ -45,6 +71,13 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
   const focusOnOpenRef = useRef(false);
   const openRef = useRef(submenuOpen);
   openRef.current = submenuOpen;
+  // #1293 — pointerover arms, mouseenter opens only when armed.
+  const armRef = useRef(false);
+  // Hover-leave close is delayed and cancellable so a diagonal cursor
+  // path from trigger to submenu does not flash the picker shut when
+  // it crosses the L-shaped gap. Real closes (pick, Escape, outside
+  // click) go through `closeSubmenu` and are always immediate.
+  const closeTimerRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     if (submenuOpen && focusOnOpenRef.current) {
@@ -52,6 +85,69 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
       focusWithoutScroll(liveItems(submenuRef.current)[0]);
     }
   }, [submenuOpen]);
+
+  const cancelPendingClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const armCloseOnLeave = useCallback(() => {
+    cancelPendingClose();
+    if (closeDelay <= 0) {
+      armRef.current = false;
+      setSubmenuOpen(false);
+      return;
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      armRef.current = false;
+      setSubmenuOpen(false);
+    }, closeDelay);
+  }, [cancelPendingClose, closeDelay]);
+
+  const closeSubmenu = useCallback(() => {
+    cancelPendingClose();
+    armRef.current = false;
+    setSubmenuOpen(false);
+  }, [cancelPendingClose]);
+
+  // Drop any pending close on unmount so a teardown mid-delay cannot
+  // leak a setState into an unmounted component.
+  useEffect(() => cancelPendingClose, [cancelPendingClose]);
+
+  const onPointerOver = useCallback(() => {
+    armRef.current = true;
+  }, []);
+
+  const onMouseEnter = useCallback(() => {
+    cancelPendingClose();
+    if (armRef.current && !disabled) {
+      setSubmenuOpen(true);
+    }
+  }, [cancelPendingClose, disabled]);
+
+  const onMouseLeave = useCallback(() => {
+    armRef.current = false;
+    armCloseOnLeave();
+  }, [armCloseOnLeave]);
+
+  // Bind on the submenu BODY (the picker panel) so the cursor entering
+  // a row inside the picker also cancels a pending close. The
+  // wrapper's own `onMouseEnter` already covers this today (entering
+  // the picker means entering the wrapper, so `mouseenter` fires on
+  // the wrapper and `onMouseEnter` cancels), so the body handler is
+  // strictly redundant for the current geometry. It exists as a
+  // defence-in-depth so the close still cancels if a future refactor
+  // portals the picker outside the wrapper (`SpawnConfigurationMenu`
+  // is already portalled and relies on its own click-outside / Escape
+  // handling rather than this hook — but if a follow-up brings the
+  // Regenerate picker into that shape, this handler stops being
+  // redundant without further work).
+  const onSubmenuMouseEnter = useCallback(() => {
+    cancelPendingClose();
+  }, [cancelPendingClose]);
 
   const openSubmenuViaKeyboard = useCallback(() => {
     if (disabled || itemCount === 0) return;
@@ -64,11 +160,6 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
     focusOnOpenRef.current = true;
     setSubmenuOpen(true);
   }, [disabled, itemCount]);
-
-  const closeSubmenu = useCallback(() => {
-    focusOnOpenRef.current = false;
-    setSubmenuOpen(false);
-  }, []);
 
   // Live open-state read for key handlers. The boolean itself can't sit
   // in a document-listener dep list (hover toggles would churn the
@@ -104,5 +195,13 @@ export function useSubmenu(opts: { disabled: boolean; itemCount: number }) {
     submenuRef,
     stepSubmenuFocus,
     submenuContainsFocus,
+    // Bind these to the wrapper's onPointerOver / onMouseEnter /
+    // onMouseLeave and the submenu body's onMouseEnter respectively —
+    // the hook owns the arm gate (#1293) and the hover-leave delay
+    // (diagonal-cursor UX) so the two picker surfaces never drift.
+    onPointerOver,
+    onMouseEnter,
+    onMouseLeave,
+    onSubmenuMouseEnter,
   };
 }
