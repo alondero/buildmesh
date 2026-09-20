@@ -387,7 +387,9 @@ mod tests {
         // Issue #1179: mcode's interactive TUI rejects `--model`, so the
         // override is no longer advertised.
         assert!(!Provider::Mcode.adapter().supports_model_override());
-        assert!(!Provider::Mcode.adapter().requires_attention_hook());
+        // Issue #1797: the Agent-Plugin attention hook is provisioned and
+        // `Stop` delivery was validated against a live 0.4.12 TUI.
+        assert!(Provider::Mcode.adapter().requires_attention_hook());
         // Issue #1365: `dsh` is a launcher with no validated profile —
         // gates resume + model to false so the Spawn Menu hides the
         // Resume button and the resolver drops `--model`. The
