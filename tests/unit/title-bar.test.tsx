@@ -107,7 +107,7 @@ describe('TitleBar (bespoke window chrome)', () => {
   describe('spec shape', () => {
     it('renders wordmark, view-mode toolbar, navigation cluster, settings/remote icons and the three window controls', async () => {
       await renderTitleBar();
-      expect(screen.getByAltText('Buildmesh')).toBeTruthy();
+      expect(screen.getByRole('img', { name: 'Buildmesh' })).toBeTruthy();
       expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
       // Issue #1375 — labelled navigation cluster.
       expect(screen.getByRole('button', { name: 'Search or open' })).toBeTruthy();
@@ -123,7 +123,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       const { container } = await renderTitleBar();
       const header = container.querySelector('header')!;
       expect(header.hasAttribute('data-tauri-drag-region')).toBe(true);
-      expect(screen.getByAltText('Buildmesh').hasAttribute('data-tauri-drag-region')).toBe(true);
+      expect(screen.getByRole('img', { name: 'Buildmesh' }).hasAttribute('data-tauri-drag-region')).toBe(true);
       // The header is a 1fr/auto/1fr grid; the two side cells carry the
       // drag region so their empty space grabs the window (the centre cell
       // is the palette field and must not).

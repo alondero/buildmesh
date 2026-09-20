@@ -1,14 +1,13 @@
 # Buildmesh brand
 
-The mark, the wordmark, where each asset is used, and how to regenerate them.
+The mark, the wordmark, and how the shipped copies are generated.
 
 ## The mark
 
 **Relay** — an `M` built from a five-node mesh inside a rounded plate, split
-two-tone at the centre hub: cyan on the left, emerald on the right, violet on
-the hub node.
+two-tone at the centre hub.
 
-![Buildmesh mark](../../src/assets/logo.svg)
+![Buildmesh mark](b3-relay-mark.svg)
 
 The split is flat rather than a gradient, deliberately. A gradient spends its
 middle in a low-contrast teal that disappears first when the mark shrinks, and
@@ -17,71 +16,82 @@ hub stay distinguishable all the way down to favicon sizes.
 
 ## Colour
 
-Every value is an app token declared in `src/App.css`. The mark introduces no
-colours of its own.
+The mark and the wordmark draw on different rules. Read this table carefully —
+conflating the two is the easiest way to "fix" the brand into something that no
+longer works.
 
-| Token | Dark | Light |
+| Part | Rule | Values |
 |---|---|---|
-| `--color-accent-cyan` | `#00d4ff` | `#0891b2` |
-| `--color-accent-green` | `#22c55e` | `#16a34a` |
-| `--color-accent-violet` | `#8b5cf6` | `#7c3aed` |
-| `--color-bg-surface` | `#111116` | `#ffffff` |
-| `--color-bg-card` | `#16161d` | `#f5f5f7` |
+| Badge plate | **Fixed dark in every theme** | `#0a0a0e` (compact mark), `#16161d` (full mark) |
+| Wires and nodes | **Fixed neon in every theme** | cyan `#00d4ff`, emerald `#22c55e`, violet `#8b5cf6` |
+| Wordmark text | Follows `[data-theme]` | dark: `#e2e8f0` / `#00d4ff` · light: `#0f172a` / `#0891b2` |
 
-The light column exists because `#00d4ff` sits at roughly 1.7:1 on white — fine
-for dark surfaces, invisible on light ones. The darkened values are the
-smallest step that still reads as the same hue.
+The plate is the reason the badge stays fixed: it is what keeps the neon wires
+legible when the mark sits on a white title bar or a white README page. Do not
+swap it for `--color-bg-surface` — that token is `#ffffff` in the light theme,
+and the mark would dissolve into the surface exactly the way the old raster
+wordmark did.
+
+Only the **wordmark text** carries a light-theme counterpart, because
+`#00d4ff` sits at roughly 1.7:1 on white. In the app the swap is pure CSS: the
+title bar wordmark fills from `text-text-primary` and `text-accent-cyan`, which
+are generated from `--color-text-primary` and `--color-accent-cyan`. Both are
+declared twice in `src/App.css` — once in `@theme`, once in `[data-theme="light"]`
+— and `tests/unit/brand-wordmark.test.tsx` fails if that stops being true.
 
 ## Two marks, by size
 
-| | Asset | Use above | Use |
-|---|---|---|---|
-| Full mark | `src/assets/logo.svg` | 24px | Badge with ring and circular nodes — app icon, avatars |
-| Compact mark | `docs/brand/b3-relay-icon.svg` | 16px | Plate plus heavy square nodes; drops the ring and circular form, which turn to mud when small |
+| Mark | Canonical file | Smallest usable size |
+|---|---|---|
+| Full | `docs/brand/b3-relay-mark.svg` | 24px — badge with ring and circular nodes |
+| Compact | `docs/brand/b3-relay-icon.svg` | 16px — plate plus heavy square nodes |
 
-Any new surface should pick the variant that matches its smallest real render
-size rather than scaling one mark everywhere.
+The compact mark is the full mark reduced to what survives a favicon: the ring
+and the circular node form turn to mud below about 24px, so both are dropped
+and the nodes become squares. Pick by the smallest size the surface will
+actually render at; never scale one mark everywhere.
 
 ## Files
 
-Brand sources live in this folder; the app consumes generated copies.
+`docs/brand/` holds the **sources**. Everything else is **generated** — edit the
+source and re-run the build, never the copy.
 
 | Path | Role |
 |---|---|
-| `docs/brand/b3-relay-mark.svg` | Canonical full mark |
-| `docs/brand/b3-relay-lockup-dark.svg` | Mark plus wordmark, for dark surfaces |
-| `docs/brand/b3-relay-lockup-light.svg` | Mark plus wordmark, for light surfaces |
-| `src-tauri/app-icon.svg` | Source for the platform icon set |
-| `src/assets/logo.svg` | Compact mark shipped to the app |
-| `src/assets/wordmark-on-dark.png` | Title bar (dark theme) and README (dark theme) |
-| `src/assets/wordmark-on-light.png` | Title bar (light theme) and README (light theme) |
-| `src/assets/logo.png`, `src/assets/apple-touch-icon.png` | Favicon fallback, iOS home screen |
-| `mobile/public/` | Favicon and icons for the remote-access SPA |
-| `src-tauri/icons/` | Generated Windows, macOS, and store icons |
+| `docs/brand/b3-relay-mark.svg` | Source — canonical full mark |
+| `docs/brand/b3-relay-icon.svg` | Source — canonical compact mark |
+| `docs/brand/b3-relay-lockup-dark.svg` | Source — lockup for dark surfaces |
+| `docs/brand/b3-relay-lockup-light.svg` | Source — lockup for light surfaces |
+| `docs/brand/wordmark-on-*.png` | Generated — README hero (`prefers-color-scheme`) |
+| `src/assets/logo.svg` | Generated — copy of the compact mark for the desktop bundle |
+| `src/assets/logo.png` | Generated — same, PNG fallback for the favicon |
+| `src/assets/apple-touch-icon.png` | Generated — iOS home screen |
+| `mobile/public/favicon.svg`, `icon-192.png`, `icon-512.png`, `apple-touch-icon.png` | Generated — remote-access SPA |
+| `src-tauri/icons/` | Generated by `tauri icon`, not by `brand:build` |
 
-The `preview.html` and `preview-nexus.html` files in this folder are the review
-sheets the mark was chosen from. They are design history, not current truth.
+The two generated SVG copies carry a "do not edit by hand" banner, and the test
+above fails if either drifts from `b3-relay-icon.svg`.
 
 ## Regenerating
 
 ```sh
-npm run brand:build                              # SVG sources -> PNG rasters
-npx tauri icon src-tauri/app-icon.svg            # PNG -> .ico, .icns, store logos
+npm run brand:build                      # sources -> SVG copies + PNG rasters
+npx tauri icon src-tauri/app-icon.svg    # -> .ico, .icns, store logos
 ```
 
 `brand:build` rasterises with Playwright's Chromium and loads the same Google
-Fonts request `index.html` uses, so the wordmark text matches what the app
-renders. It therefore needs network access; the resulting PNGs are committed so
-ordinary builds never depend on it.
+Fonts request `index.html` uses, so the lockup text matches what the app
+renders. It therefore needs network access; the PNGs it produces are committed
+so ordinary builds never depend on it.
 
-`tauri icon` writes the whole platform set plus Android and iOS folders. This
-project has no Tauri mobile targets — its "mobile" is a web SPA served by the
-embedded HTTP server — so delete the generated `icons/android/` and
-`icons/ios/` directories after running it.
+`tauri icon` also writes `icons/android/` and `icons/ios/`. This project has no
+Tauri mobile targets — its "mobile" is a web SPA served by the embedded HTTP
+server — so delete those two directories after running it.
 
-## Adding a surface
+## Using the mark on a new surface
 
-1. Use a token value, or the light counterpart, never an interpolated shade.
-2. Pick the mark variant by the smallest size it will render at.
-3. If it is a raster, add a job to `scripts/generate-brand-assets.mjs` rather
-   than exporting a file by hand.
+1. Prefer the vector source; only rasterise when the consumer cannot take SVG.
+2. Pick the mark variant by the smallest size the surface renders at.
+3. Let the **wordmark text** follow the theme; keep the **plate** fixed dark.
+4. Never hand-copy artwork between paths — add it to `scripts/generate-brand-assets.mjs`
+   so there is still one source.

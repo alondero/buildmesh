@@ -1,8 +1,8 @@
 # Buildmesh
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./src/assets/wordmark-on-dark.png" />
-  <img alt="Buildmesh" src="./src/assets/wordmark-on-light.png" width="420" />
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/brand/wordmark-on-dark.png" />
+  <img alt="Buildmesh" src="./docs/brand/wordmark-on-light.png" width="420" />
 </picture>
 
 Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok Code, Kimi Code, MiniMax Code, DeepSeek Harness, Command Code, Freebuff, Cline, Meta Muse**, and a plain **Terminal** harness — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.

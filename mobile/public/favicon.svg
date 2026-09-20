@@ -1,5 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" fill="none" role="img" aria-labelledby="bmFaviconTitle">
-  <title id="bmFaviconTitle">Buildmesh</title>
+<!-- Generated from docs/brand/b3-relay-icon.svg by `npm run brand:build` — do not edit by hand. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" fill="none" role="img" aria-labelledby="b3iTitle">
+  <title id="b3iTitle">Buildmesh — compact mark</title>
   <rect x="2" y="2" width="92" height="92" rx="26" fill="#0a0a0e"/>
   <g stroke="#00d4ff" stroke-width="9" stroke-linecap="round">
     <path d="M16 74 L30 24"/>

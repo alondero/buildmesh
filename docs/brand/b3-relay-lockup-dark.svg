@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 96" width="288" height="96" fill="none" role="img" aria-labelledby="b3lTitle">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 336 96" width="336" height="96" fill="none" role="img" aria-labelledby="b3lTitle">
   <title id="b3lTitle">Buildmesh</title>
 
   <g>
@@ -20,5 +20,5 @@
     <circle cx="75" cy="71" r="6.5" fill="#22c55e"/>
   </g>
 
-  <text x="118" y="61" font-family="Geist, Inter, -apple-system, 'Segoe UI', sans-serif" font-size="33" font-weight="800" letter-spacing="-0.03em"><tspan fill="#e2e8f0">build</tspan><tspan fill="#00d4ff">mesh</tspan></text>
+  <text x="118" y="63" font-family="Geist, Inter, -apple-system, 'Segoe UI', sans-serif" font-size="42" font-weight="800" letter-spacing="-0.03em"><tspan fill="#e2e8f0">build</tspan><tspan fill="#00d4ff">mesh</tspan></text>
 </svg>

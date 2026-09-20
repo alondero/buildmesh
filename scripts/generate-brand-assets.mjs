@@ -1,43 +1,58 @@
 #!/usr/bin/env node
 // Brand asset generation.
 //
-// The committed brand sources are SVG (`docs/brand/*.svg`, `src/assets/logo.svg`).
-// The app, the README and the installers need raster PNGs, so this script
-// rasterises them with Playwright's Chromium — already a devDependency — at
-// exact pixel sizes with a transparent background.
+// The brand sources are SVG under `docs/brand/`. Everything the app, the
+// README and the installers actually consume is produced from them by this
+// script, so there is exactly one copy of each piece of artwork to edit:
+//
+//   docs/brand/b3-relay-icon.svg       -> the two SVG copies below
+//                                      -> every small PNG (favicon, touch icons)
+//   docs/brand/b3-relay-lockup-*.svg   -> the README wordmark rasters
+//
+// The SVG copies exist because Vite and the mobile SPA each need the mark at a
+// path they can serve; they are verbatim copies plus a generated-file banner,
+// and `tests/unit/brand-wordmark.test.tsx` fails if they drift from the source.
 //
 // Run:
 //   npm run brand:build
 //
-// The wordmark lockups set their text in Geist, and this script loads the
-// same Google Fonts request `index.html` uses so the rasterised text matches
-// what the app renders. Rasterising therefore needs network access; the
-// resulting PNGs are committed so normal builds never depend on it.
+// Rasterising uses Playwright's Chromium (already a devDependency) and loads
+// the same Google Fonts request `index.html` uses, so the lockup text matches
+// what the app renders. It therefore needs network access; the resulting PNGs
+// are committed so ordinary builds never depend on it.
 //
-// App icons (`.ico` / `.icns` / the store logos) are NOT produced here —
-// `npx tauri icon` owns those, from `src-tauri/app-icon.svg`.
+// App icons (.ico / .icns / store logos) are NOT produced here — `npx tauri
+// icon src-tauri/app-icon.svg` owns those.
 
 import { chromium } from '@playwright/test';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const MARK = 'src/assets/logo.svg';
+/** The single source for the compact mark. Edit this, not its copies. */
+const COMPACT = 'docs/brand/b3-relay-icon.svg';
 const LOCKUP_ON_DARK = 'docs/brand/b3-relay-lockup-dark.svg';
 const LOCKUP_ON_LIGHT = 'docs/brand/b3-relay-lockup-light.svg';
 
-/** Each entry rasterises one source SVG to one PNG at an exact pixel size.
- *  `size` is [width, height] and must match the source viewBox aspect ratio. */
+/** Verbatim copies of COMPACT, for the two bundles that need a served path. */
+const SVG_COPIES = ['src/assets/logo.svg', 'mobile/public/favicon.svg'];
+
+export const GENERATED_BANNER =
+  `<!-- Generated from ${COMPACT} by \`npm run brand:build\` — do not edit by hand. -->`;
+
+/** Each job rasterises one source SVG to one PNG. `size` must match the
+ *  source viewBox aspect ratio. Rasters are sized for their real display use:
+ *  the wordmark is a README hero at width="420", so 840px is exact retina. */
 const JOBS = [
-  { src: MARK, out: 'src/assets/logo.png', size: [256, 256] },
-  { src: MARK, out: 'src/assets/apple-touch-icon.png', size: [180, 180] },
-  { src: MARK, out: 'mobile/public/icon-192.png', size: [192, 192] },
-  { src: MARK, out: 'mobile/public/icon-512.png', size: [512, 512] },
-  { src: MARK, out: 'mobile/public/apple-touch-icon.png', size: [180, 180] },
-  { src: LOCKUP_ON_DARK, out: 'src/assets/wordmark-on-dark.png', size: [1440, 480] },
-  { src: LOCKUP_ON_LIGHT, out: 'src/assets/wordmark-on-light.png', size: [1440, 480] },
+  { src: COMPACT, out: 'src/assets/logo.png', size: [256, 256] },
+  { src: COMPACT, out: 'src/assets/apple-touch-icon.png', size: [180, 180] },
+  { src: COMPACT, out: 'mobile/public/icon-192.png', size: [192, 192] },
+  { src: COMPACT, out: 'mobile/public/icon-512.png', size: [512, 512] },
+  { src: COMPACT, out: 'mobile/public/apple-touch-icon.png', size: [180, 180] },
+  { src: LOCKUP_ON_DARK, out: 'docs/brand/wordmark-on-dark.png', size: [840, 240] },
+  { src: LOCKUP_ON_LIGHT, out: 'docs/brand/wordmark-on-light.png', size: [840, 240] },
 ];
 
 const FONTS =
@@ -57,28 +72,48 @@ function pageFor(svgMarkup, [width, height]) {
 </head><body><div id="shot">${svgMarkup}</div></body></html>`;
 }
 
-async function main() {
-  const browser = await chromium.launch();
-  const page = await browser.newPage({ deviceScaleFactor: 1 });
-
-  for (const job of JOBS) {
-    const srcPath = resolve(repoRoot, job.src);
-    const outPath = resolve(repoRoot, job.out);
-    const svgMarkup = readFileSync(srcPath, 'utf8');
-
-    await page.setContent(pageFor(svgMarkup, job.size), { waitUntil: 'load' });
-    await page.evaluate(() => document.fonts.ready);
-    // `fonts.ready` resolves once the request settles; the lockups need the
-    // 700/800 weights actually rasterised before the screenshot is honest.
-    await page.evaluate(() => document.fonts.load('700 33px Geist'));
-
+/** Write the canonical mark to each served path, with a do-not-edit banner. */
+function writeSvgCopies() {
+  const source = readFileSync(resolve(repoRoot, COMPACT), 'utf8');
+  for (const target of SVG_COPIES) {
+    const outPath = resolve(repoRoot, target);
     mkdirSync(dirname(outPath), { recursive: true });
-    await page.locator('#shot').screenshot({ path: outPath, omitBackground: true });
-    console.log(`  ${job.out}  ${job.size[0]}x${job.size[1]}  <- ${job.src}`);
+    writeFileSync(outPath, `${GENERATED_BANNER}\n${source}`);
+    console.log(`  ${target}  <- ${COMPACT}`);
   }
+}
 
-  await browser.close();
-  console.log(`\nGenerated ${JOBS.length} raster assets.`);
+async function rasterise() {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ deviceScaleFactor: 1 });
+
+    for (const job of JOBS) {
+      const svgMarkup = readFileSync(resolve(repoRoot, job.src), 'utf8');
+      await page.setContent(pageFor(svgMarkup, job.size), { waitUntil: 'load' });
+      await page.evaluate(() => document.fonts.ready);
+      // The lockups set their wordmark at weight 800. `fonts.ready` can settle
+      // before that face is rasterised, which would bake a faux-bold 700, so
+      // the weight is requested explicitly here (and 800 is in FONTS above).
+      await page.evaluate(() => document.fonts.load('800 42px Geist'));
+
+      const outPath = resolve(repoRoot, job.out);
+      mkdirSync(dirname(outPath), { recursive: true });
+      await page.locator('#shot').screenshot({ path: outPath, omitBackground: true });
+      console.log(`  ${job.out}  ${job.size[0]}x${job.size[1]}  <- ${job.src}`);
+    }
+  } finally {
+    // A failed job must not leak a Chromium process.
+    await browser.close();
+  }
+}
+
+async function main() {
+  console.log(`SVG copies from ${COMPACT}:`);
+  writeSvgCopies();
+  console.log('\nRasters:');
+  await rasterise();
+  console.log(`\nDone. Repo root: ${relative(process.cwd(), repoRoot) || '.'}`);
 }
 
 main().catch((err) => {

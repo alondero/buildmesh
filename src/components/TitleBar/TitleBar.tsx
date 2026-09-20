@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import WordmarkOnDark from '../../assets/wordmark-on-dark.png';
-import WordmarkOnLight from '../../assets/wordmark-on-light.png';
 import { isMac } from '../../lib/platform';
-import { currentTheme, onThemeChange, type ThemeName } from '../../lib/theme';
 import { useWindowControlOverlay } from '../../hooks/useWindowControlOverlay';
 import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
 import { HeaderPillButton } from './HeaderPillButton';
+import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -420,33 +418,6 @@ function MacosTrafficLight({ kind, onClick, ariaLabel, inactive }: {
   );
 }
 
-/** The active theme name, re-rendering on flips via the `lib/theme` pub/sub
-    (the same channel TerminalRegistry's ThemeManager uses). The wordmark is a
-    baked raster, so it cannot inherit theme tokens the way an inline SVG
-    would — the title bar sits on `bg-bg-surface`, which is near-black in dark
-    and white in light, so one asset cannot serve both. */
-function useThemeName(): ThemeName {
-  const [theme, setThemeName] = useState<ThemeName>(currentTheme);
-  useEffect(() => onThemeChange(setThemeName), []);
-  return theme;
-}
-
-/** The wordmark <img>, kept as a single source so the macOS and
-    non-macOS branches can't drift on the asset, alt text, or drag-region
-    attribute. Swaps to the light-surface artwork on the light theme —
-    without it the wordmark renders near-white on a white bar. */
-function WordmarkImg() {
-  const theme = useThemeName();
-  return (
-    <img
-      src={theme === 'light' ? WordmarkOnLight : WordmarkOnDark}
-      data-tauri-drag-region
-      className="h-10 w-auto"
-      alt="Buildmesh"
-    />
-  );
-}
-
 export function TitleBar() {
   // Issue #1411 review: the two modals' open state lives in `uiStore` (not
   // local state) so the Omnibar's "Open Settings" / "Open Remote Access"
@@ -555,7 +526,7 @@ export function TitleBar() {
               />
             </div>
           )}
-          <WordmarkImg />
+          <Wordmark />
           <ViewModeSwitcher />
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.
