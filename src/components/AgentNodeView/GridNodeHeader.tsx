@@ -309,7 +309,11 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
   // Issue #1502 — Regenerate picker submenu via the shared `useSubmenu`
   // hook (same hook drives the sidebar `NodeItem` picker): hover/click
   // opens, ArrowRight opens-and-focuses, ArrowLeft closes, ArrowDown/Up
-  // wraps. No local submenu state, refs, or modulo loops.
+  // wraps. PR #1796 folded the #1293 arm gate and the diagonal-cursor
+  // hover-leave delay into the hook so the kebab and sidebar pickers
+  // can't drift on either — the wrapper just binds the four hover
+  // handlers it returns. No local submenu state, refs, or modulo
+  // loops.
   const regenSubmenu = useSubmenu({
     disabled: isRegenerateDisabled,
     itemCount: (providerList ?? []).length,
@@ -436,14 +440,21 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
               top for in-place kick-start. The submenu opens to the LEFT
               (`right-full`) so it does not cover Maximize/Close on the
               trailing edge. Same `data-dropdown-for` scoping as the parent so
-              `useClickOutside` treats both as "inside". */}
+              `useClickOutside` treats both as "inside".
+
+              PR #1796 (diagonal-cursor UX) — the wrapper binds the
+              shared `useSubmenu` hover handlers (arm gate + 120 ms
+              cancellable close delay) and the picker below uses a
+              wider `-mr-2` overlap (mirror of the sidebar's `-ml-2`)
+              so a diagonal cursor path into a higher picker row
+              rarely trips `mouseleave` in the first place. The
+              earlier bridge element was removed after review. */}
           <div
             role="presentation"
             className="relative"
-            onMouseEnter={() => {
-              if (!regenDisabled) regenSubmenu.setSubmenuOpen(true);
-            }}
-            onMouseLeave={() => regenSubmenu.closeSubmenu()}
+            onPointerOver={regenSubmenu.onPointerOver}
+            onMouseEnter={regenSubmenu.onMouseEnter}
+            onMouseLeave={regenSubmenu.onMouseLeave}
           >
             <button
               role="menuitem" data-aria-menu-item
@@ -480,7 +491,14 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
                 aria-label="Pick target provider"
                 data-testid="grid-regenerate-submenu"
                 data-dropdown-for={menuId}
-                className="absolute right-full top-0 mr-1 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
+                // PR #1796 — wider overlap (`-mr-2`, 8 px) absorbs a
+                // shallow horizontal cursor wobble from the trigger
+                // into the picker without crossing the wrapper's
+                // hit-area edge. Mirror of the sidebar picker's
+                // `-ml-2`. Negative margin-right pulls the picker's
+                // right edge 8 px to the RIGHT of `right-full`, into
+                // the trigger's area.
+                className="absolute right-full top-0 -mr-2 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <RegenerateProviderMenu
