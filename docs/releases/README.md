@@ -6,7 +6,7 @@ This directory contains the user-visible release notes for Buildmesh. Each
 release has one file named `vX.Y.Z.md`; the matching Git tag and file are the
 release's versioned source of truth.
 
-The current planned release is [v1.3.0](v1.3.0.md). Update this link when a
+The current planned release is [v1.4.0](v1.4.0.md). Update this link when a
 different release becomes the active draft.
 
 ## Drafting a release

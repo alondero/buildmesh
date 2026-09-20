@@ -59,9 +59,57 @@ describe('agent workflow title-bar control', () => {
     useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
   });
 
-  function renderButton(value: AgentNode = node) {
-    return render(<AgentReviewButton node={value} providerList={PROVIDERS} />);
+  function renderButton(value: AgentNode = node, providers: SpawnOption[] = PROVIDERS) {
+    return render(<AgentReviewButton node={value} providerList={providers} />);
   }
+
+  // A harness with neither a native attention hook nor a passive turn watcher
+  // can never reach a yielded status, so `await_source` and `verdict` would
+  // park forever. The button must not mint that run.
+  it('disables the control and explains why when the node harness cannot yield a turn', () => {
+    renderButton({ ...node, provider: 'cline' });
+    const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain('cannot run a review circuit');
+  });
+
+  it('still enables an attention-capable harness', () => {
+    renderButton({ ...node, provider: 'codex' });
+    const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.title).toBe('Start review or circuit');
+  });
+
+  // `AgentNode.provider` is an opaque string: it carries legacy ids and
+  // user-defined harness profile ids, both of which resolve to a real executor
+  // at the spawn seam. Blocking those would remove a working review from the
+  // user, so the gate only fires on harnesses it can positively judge.
+  it.each(['command-code', 'claude_code', '', 'my-custom-profile'])(
+    'does not disable the control for the non-canonical provider id %p',
+    provider => {
+      renderButton({ ...node, provider });
+      const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+      expect(button.title).toBe('Start review or circuit');
+    },
+  );
+
+  it('disables the control for a legacy id that resolves to a blocked harness', () => {
+    renderButton({ ...node, provider: 'deepseek' });
+    expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('greys out a reviewer harness that cannot yield a turn', () => {
+    renderButton(node, [...PROVIDERS, spawnOption('cline', 'Cline')]);
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
+    const options = Array.from(select.querySelectorAll('option'));
+    expect(options.find(o => o.value === 'codex')?.disabled).toBe(false);
+    expect(options.find(o => o.value === 'cline')?.disabled).toBe(true);
+    expect(options.find(o => o.value === 'cline')?.textContent).toBe('Cline (no review support)');
+    // Terminal stays filtered out entirely — it is not an agent.
+    expect(options.find(o => o.value === 'terminal')).toBeUndefined();
+  });
 
   it('starts review for a finished agent and opens its Mesh Circuits', async () => {
     renderButton();
