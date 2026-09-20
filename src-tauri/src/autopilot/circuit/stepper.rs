@@ -327,6 +327,41 @@ pub struct Capacity {
     pub agent_free_slots: i64,
 }
 
+/// First-observation window for a busy agent (issue #1791). A wait whose
+/// agent has never produced a session identity or a readable report fails
+/// fast after this long instead of burning the full active-wait budget:
+/// a busy-but-unobservable agent is a broken observer or a dead subprocess,
+/// not a slow harness. Once any observation lands, the step keeps its
+/// longer budget so legitimately slow harnesses are not penalised.
+pub const UNOBSERVED_WAIT_MS: i64 = 15 * 60_000;
+
+/// Terminal failure surfaced when a busy agent stays unobservable past
+/// [`UNOBSERVED_WAIT_MS`]. Shared with the worker seam so the failure the
+/// worker reports and the failure the stepper records agree.
+pub const UNOBSERVED_AGENT_REASON: &str =
+    "agent produced no session identity or report within 15 minutes — inspect the agent terminal";
+
+/// Run-context key prefix for a step's wait bookkeeping. One owner so the
+/// worker seam can read the window without re-spelling the format.
+fn wait_prefix(node_id: &str) -> String {
+    format!("node.{node_id}.wait")
+}
+
+/// Milliseconds since this step's wait window began, from the run context the
+/// stepper persists. `None` until the first `WaitObserved` lands, so a caller
+/// reading it for the unobserved fast fail can never trip before the seam has
+/// observed the step once.
+pub(crate) fn wait_elapsed_ms(
+    context: &CircuitContext,
+    node_id: &str,
+    now_ms: i64,
+) -> Option<i64> {
+    context
+        .get(&format!("{}.since_ms", wait_prefix(node_id)))
+        .and_then(|since| since.parse::<i64>().ok())
+        .map(|since| now_ms.saturating_sub(since))
+}
+
 /// One observed fact from outside the pure core. Kept minimal: every
 /// variant maps 1:1 to something the seam can observe cheaply each tick.
 ///
@@ -354,6 +389,11 @@ pub enum CircuitEvent {
         attempt: i32,
         now_ms: i64,
         progress: Option<String>,
+        /// True when the seam has observed a session identity or a readable
+        /// report for this wait's agent. The seam reports `true` for steps
+        /// with nothing to observe (approval gates, prerequisite waits) so
+        /// they keep their own budgets instead of tripping the fast fail.
+        observed: bool,
         reason: String,
         timeout_ms: i64,
     },
@@ -617,12 +657,12 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 finish_run_if_done(run, &mut t);
             }
         }
-        CircuitEvent::WaitObserved { node_id, attempt, now_ms, progress, reason, timeout_ms } => {
+        CircuitEvent::WaitObserved { node_id, attempt, now_ms, progress, observed, reason, timeout_ms } => {
             if run.state != RunState::Running || !run.step(node_id).is_some_and(|s|
                 s.attempt == *attempt && matches!(s.status, StepStatus::Running | StepStatus::Blocked)) {
                 return t;
             }
-            let prefix = format!("node.{node_id}.wait");
+            let prefix = wait_prefix(node_id);
             let same_attempt = run.context.get(&format!("{prefix}.attempt"))
                 .and_then(|s| s.parse::<i32>().ok()) == Some(*attempt);
             let same_mode = run.context.get(&format!("{prefix}.timeout_ms"))
@@ -631,16 +671,40 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.context.get(&format!("{prefix}.progress")) != Some(p));
             let since = run.context.get(&format!("{prefix}.since_ms"))
                 .and_then(|s| s.parse::<i64>().ok());
-            if !same_attempt || !same_mode || changed || since.is_none() {
+            let reset = !same_attempt || !same_mode || changed || since.is_none();
+            if reset {
                 run.context.set(&format!("{prefix}.attempt"), attempt.to_string());
                 run.context.set(&format!("{prefix}.timeout_ms"), timeout_ms.to_string());
                 run.context.set(&format!("{prefix}.since_ms"), now_ms.to_string());
+                // A reset starts a new observation window: the sticky flag is
+                // re-derived from this event rather than carried across an
+                // attempt or budget change.
+                run.context.set(&format!("{prefix}.observed"), if *observed { "1" } else { "0" });
                 if let Some(progress) = progress {
                     run.context.set(&format!("{prefix}.progress"), progress.clone());
                 }
                 t.context_changed = true;
-            } else if run.step(node_id).is_some_and(|s| s.status != StepStatus::Blocked)
-                && since.is_some_and(|since| now_ms.saturating_sub(since) >= *timeout_ms) {
+            } else if *observed && run.context.get(&format!("{prefix}.observed")) != Some("1") {
+                // A late session identity or report still lifts the fast fail
+                // without restarting the budget its original wait began.
+                run.context.set(&format!("{prefix}.observed"), "1");
+                t.context_changed = true;
+            }
+            let ever_observed = run.context.get(&format!("{prefix}.observed")) == Some("1");
+            let elapsed = if reset { 0 } else { now_ms.saturating_sub(since.unwrap_or(*now_ms)) };
+            let watching = run.step(node_id).is_some_and(|s| s.status != StepStatus::Blocked);
+            // A busy agent that has never been observable gets the short
+            // first-observation window, not the full active-wait budget
+            // (issue #1791). This is in addition to — not a replacement
+            // for — the per-step budget enforced below.
+            if watching && !ever_observed && elapsed >= UNOBSERVED_WAIT_MS {
+                fail_step(run, &mut t, node_id, UNOBSERVED_AGENT_REASON.to_string());
+                run.state = RunState::Failed;
+                t.run_state_changed = true;
+                finish_run_if_done(run, &mut t);
+                return t;
+            }
+            if watching && elapsed >= *timeout_ms {
                 let detail = if reason.is_empty() { "Agent produced no new report" } else { reason };
                 fail_step(run, &mut t, node_id, format!("Timed out after {} minutes without progress: {detail}", timeout_ms / 60_000));
                 // A watchdog expiry ends the run even when the graph wires a
@@ -754,7 +818,7 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 t.run_state_changed = true;
                 for step in &run.steps {
                     if !step.status.is_terminal() {
-                        run.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
+                        run.context.set(&format!("{}.attempt", wait_prefix(&step.node_id)), "");
                     }
                 }
                 t.context_changed = true;
@@ -2887,8 +2951,15 @@ mod tests {
     }
 
     fn wait_observed(now_ms: i64, progress: Option<&str>) -> CircuitEvent {
+        wait_observed_with(now_ms, progress, 900_000)
+    }
+
+    /// `observed` follows the report revision: a step that has never produced
+    /// a readable report is the never-observed case the fast fail exists for.
+    fn wait_observed_with(now_ms: i64, progress: Option<&str>, timeout_ms: i64) -> CircuitEvent {
         CircuitEvent::WaitObserved { node_id: "classify".into(), attempt: 1, now_ms,
-            progress: progress.map(str::to_string), reason: "No readable report".into(), timeout_ms: 900_000 }
+            progress: progress.map(str::to_string), observed: progress.is_some(),
+            reason: "No readable report".into(), timeout_ms }
     }
 
     #[test]
@@ -2954,6 +3025,35 @@ mod tests {
         assert_eq!(run.state, RunState::Running);
         advance(&mut run, &wait_observed(2_100_000, None));
         assert_eq!(run.state, RunState::Failed);
+    }
+
+    #[test]
+    fn circuit_unobserved_agent_fails_fast_at_the_first_observation_window() {
+        // A busy agent that never produces a session identity or a readable
+        // report must not burn the full 120-minute active-wait budget
+        // (issue #1791). The explicit 120-minute budget here proves the fast
+        // fail — not the ordinary timeout — ends the run.
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed_with(0, None, 7_200_000));
+        advance(&mut run, &wait_observed_with(899_999, None, 7_200_000));
+        assert_eq!(run.state, RunState::Running, "one millisecond short of the window stays running");
+        advance(&mut run, &wait_observed_with(900_000, None, 7_200_000));
+        assert_eq!(run.state, RunState::Failed);
+        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("no session identity"));
+    }
+
+    #[test]
+    fn circuit_observed_agent_keeps_the_active_budget_after_the_window() {
+        // Any observed report lifts the fast fail and restores the long
+        // budget: a legitimately slow harness is not penalised.
+        let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed_with(0, None, 7_200_000));
+        advance(&mut run, &wait_observed_with(900_000, Some("rev-1"), 7_200_000));
+        assert_eq!(run.state, RunState::Running);
+        advance(&mut run, &wait_observed_with(1_800_000, Some("rev-1"), 7_200_000));
+        assert_eq!(run.state, RunState::Running, "an observed agent keeps the 120-minute budget");
     }
 
     #[test]

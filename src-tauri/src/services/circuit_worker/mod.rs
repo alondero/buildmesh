@@ -53,7 +53,7 @@ use crate::autopilot::circuit::model::{
     CircuitGraph, CircuitNodeKind, StepOutcome as GraphStepOutcome,
 };
 use crate::autopilot::circuit::stepper::{
-    advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
+    advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition, UNOBSERVED_WAIT_MS,
 };
 mod github;
 mod spawn;
@@ -1346,6 +1346,7 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         if !matches!(step.status, StepStatus::Running | StepStatus::Blocked) { continue; }
         if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
         let mut progress = None;
+        let mut unobserved_agent = false;
         let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
             ("Waiting for your approval. This gate does not expire while you are away.".to_string(), APPROVAL_WAIT_MS)
         } else if let Some(id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
@@ -1354,9 +1355,18 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
             crate::autopilot::evaluator::note_circuit_probe(id, &probe, generation);
             let Ok(node) = db::get_agent_node_by_id(id) else { continue; };
             progress = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
+            // #1791: a busy agent is only provably running once it has produced
+            // a session identity or a readable report. A busy status alone does
+            // not prove progress.
+            unobserved_agent = node.cli_session_id.as_deref().is_none_or(str::is_empty)
+                && progress.is_none();
             let yielded = matches!(node.status, SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed);
-            let reason = if node.cli_session_id.as_deref().is_none_or(str::is_empty) && progress.is_none() {
-                "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
+            let reason = if unobserved_agent {
+                match crate::autopilot::circuit::stepper::wait_elapsed_ms(&view.context, &step.node_id, now_ms) {
+                    Some(elapsed) if elapsed >= UNOBSERVED_WAIT_MS =>
+                        crate::autopilot::circuit::stepper::UNOBSERVED_AGENT_REASON.to_string(),
+                    _ => "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string(),
+                }
             } else if !yielded {
                 String::new()
             } else {
@@ -1373,7 +1383,7 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         let timeout_ms = spawn_step_timeout_ms(view.graph.node(&step.node_id).map(|n| &n.kind))
             .unwrap_or(timeout_ms);
         events.push(CircuitEvent::WaitObserved { node_id: step.node_id.clone(), attempt: step.attempt,
-            now_ms, progress, reason, timeout_ms });
+            now_ms, progress, observed: !unobserved_agent, reason, timeout_ms });
     }
 }
 
@@ -4950,5 +4960,126 @@ mod tests {
             YIELDED_WAIT_MS,
             "Some(0) collapses to absent so it can't request instant expiry"
         );
+    }
+
+    /// A Running `SpawnAgentNode` step bound to `agent_node_id`, with a wait
+    /// window that began `since_ms_ago` milliseconds ago.
+    fn spawn_wait_view(agent_node_id: i64, since_ms_ago: i64) -> RunView {
+        let mut context = CircuitContext::new();
+        context.set(
+            "node.worker.wait.since_ms",
+            (chrono::Utc::now().timestamp_millis() - since_ms_ago).to_string(),
+        );
+        RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: CIRCUIT_GRAPH_VERSION,
+                blueprint: None,
+                nodes: vec![CircuitNode {
+                    id: "worker".into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "p".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                        timeout_seconds: None,
+                    },
+                }],
+                edges: vec![],
+            },
+            state: RunState::Running,
+            context,
+            steps: vec![StepView {
+                node_id: "worker".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: Some(agent_node_id),
+                attempt: 1,
+            }],
+        }
+    }
+
+    fn observed_wait_event(events: &[CircuitEvent]) -> (bool, String, i64) {
+        events.iter().find_map(|event| match event {
+            CircuitEvent::WaitObserved { observed, reason, timeout_ms, .. } => {
+                Some((*observed, reason.clone(), *timeout_ms))
+            }
+            _ => None,
+        }).expect("one Running step must yield one WaitObserved")
+    }
+
+    /// #1791: a busy agent that has never produced a session identity or a
+    /// readable report is reported as unobserved once the wait has run past
+    /// the first-observation window. The fast fail is in addition to the
+    /// active budget, so the event still carries `ACTIVE_WAIT_MS`.
+    #[test]
+    fn observe_waits_flags_an_unobserved_agent_past_the_first_observation_window() {
+        init_temp_db_at("wait-unobserved");
+        let mesh = db::create_mesh("wait-unobserved", "/tmp/wait-unobserved").unwrap();
+        let agent = db::create_agent_node(mesh.id, "worker", &mesh.path, "main",
+            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+        crate::autopilot::evaluator::unregister(agent.id);
+        crate::autopilot::evaluator::register_circuit(agent.id);
+        let view = spawn_wait_view(agent.id, 16 * 60_000);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent.id);
+
+        let (observed, reason, timeout_ms) = observed_wait_event(&events);
+        assert!(!observed, "no session identity and no report is the unobserved case");
+        assert_eq!(reason, crate::autopilot::circuit::stepper::UNOBSERVED_AGENT_REASON);
+        assert_eq!(timeout_ms, ACTIVE_WAIT_MS, "the fast fail is in addition to the active budget");
+    }
+
+    /// The fast fail only engages once the wait is past the window; before
+    /// then the seam keeps reporting the discovery reason.
+    #[test]
+    fn observe_waits_keeps_the_discovery_reason_before_the_window() {
+        init_temp_db_at("wait-unobserved-early");
+        let mesh = db::create_mesh("wait-unobserved-early", "/tmp/wait-unobserved-early").unwrap();
+        let agent = db::create_agent_node(mesh.id, "worker", &mesh.path, "main",
+            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+        crate::autopilot::evaluator::unregister(agent.id);
+        crate::autopilot::evaluator::register_circuit(agent.id);
+        let view = spawn_wait_view(agent.id, 60_000);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent.id);
+
+        let (observed, reason, _) = observed_wait_event(&events);
+        assert!(!observed);
+        assert!(reason.contains("session identity"), "still waiting on discovery: {reason}");
+    }
+
+    /// A session identity on its own is an observation: the agent is
+    /// provably running, so the step keeps its active budget. Without this,
+    /// a harness that writes no report until much later would fail fast.
+    #[test]
+    fn observe_waits_marks_a_session_identity_as_observed() {
+        init_temp_db_at("wait-observed");
+        let mesh = db::create_mesh("wait-observed", "/tmp/wait-observed").unwrap();
+        let agent = db::create_agent_node(mesh.id, "worker", &mesh.path, "main",
+            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+        db::write_conn().execute(
+            "UPDATE agent_nodes SET cli_session_id = 'test-session-1791' WHERE id = ?1",
+            rusqlite::params![agent.id],
+        ).unwrap();
+        crate::autopilot::evaluator::unregister(agent.id);
+        crate::autopilot::evaluator::register_circuit(agent.id);
+        let view = spawn_wait_view(agent.id, 16 * 60_000);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent.id);
+
+        let (observed, reason, timeout_ms) = observed_wait_event(&events);
+        assert!(observed, "a captured session identity is an observation");
+        assert!(reason.is_empty(), "observed and not yielded has no diagnostic: {reason}");
+        assert_eq!(timeout_ms, ACTIVE_WAIT_MS);
     }
 }
