@@ -75,15 +75,15 @@ Response shape (one element, abridged):
 }
 ```
 
-A digest whose provider has no readable transcript (OpenCode, Kimi, Terminal,
-etc.):
+A digest whose provider has no readable transcript (Kimi, Terminal, etc. —
+OpenCode now ships one via the SQLite reader from issue #1296):
 
 ```json
 {
   "id": 43,
   "name": "docs-pass",
   "mesh": "core",
-  "provider": "opencode",
+  "provider": "kimi",
   "status": "running",
   "needs_feedback": false,
   "waiting_since": null,
@@ -197,7 +197,7 @@ field is `reason`, which is one of:
 
 | Reason | Meaning | Coordinator action |
 |---|---|---|
-| `unsupported` | The provider does not produce a readable transcript (OpenCode, Kimi, Terminal). | Use the spine only. This is permanent. |
+| `unsupported` | The provider does not produce a readable transcript (Kimi, Terminal). | Use the spine only. This is permanent. |
 | `no_session` | The provider supports transcripts but Buildmesh has not captured a CLI session id for this node yet (e.g. just spawned). | Retry on the next poll. |
 | `no_transcript` | A session id exists but no JSONL file was found on disk where Buildmesh looked. | Retry on the next poll. |
 | `unreadable` | The file exists but the I/O failed. | Retry, then page if persistent. |
@@ -286,10 +286,12 @@ Out of scope for this PRD, deferred by design (see ADR-0008):
   a thin MCP server is the fast-follow once the read model is proven.
 - **Parsing the rendered terminal/TUI.** The transcript is the read source;
   the terminal is for humans.
-- **Transcript enrichment for providers without a reader.** OpenCode, Kimi,
-  and Terminal degrade to a spine-only digest flagged `unsupported`. A
-  bespoke reader for any of them is future work — the capability flag exists
-  to make that a one-place change.
+- **Transcript enrichment for providers without a reader.** Kimi and Terminal
+  degrade to a spine-only digest flagged `unsupported`. (OpenCode's SQLite
+  reader landed in issue #1296 and now hydrates the rich layer; Muse's
+  JSONL reader landed in #1708.) A bespoke reader for the remaining
+  providers is future work — the capability flag exists to make that a
+  one-place change.
 - **Pre-summarising transcripts** for the Coordinator. Summarisation stays
   in the human UI.
 - **Buildmesh opening its own internet-facing port / TLS.** The user owns

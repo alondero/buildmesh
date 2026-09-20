@@ -513,9 +513,14 @@ mod tests {
     }
 
     /// Inventory pin (issue #1149 step 1) — every adapter's capability
-    /// descriptor must match the matrix documented in `docs/knowledge-primer.md`
-    /// and the #1143 research summary. Drift here means a future adapter
-    /// edit changed the capability surface without updating the prefactor.
+    /// descriptor must match the matrix documented in
+    /// `docs/learning/harness-capabilities-matrix.md` and the #1143
+    /// research summary. Drift here means a future adapter edit changed
+    /// the capability surface without updating the prefactor. The TS-side
+    /// mirror at `src/components/Circuits/harnessCapabilities.ts` is
+    /// gated against the same matrix by
+    /// `tests/unit/circuits-inspector-capabilities.test.ts`; a follow-on
+    /// slice will generate the mirror from Rust to close the loop.
     #[test]
     fn inventory_matches_research_matrix() {
         let anthropic = anthropic_caps();
@@ -569,6 +574,10 @@ mod tests {
                 allowed: CODEX_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
             }
         );
+        assert_eq!(
+            codex.available_on,
+            vec!["macos".to_string(), "windows".to_string(), "linux".to_string()]
+        );
 
         let cursor = cursor_caps();
         assert_eq!(cursor.harness_id, "cursor");
@@ -595,6 +604,10 @@ mod tests {
         assert!(cursor.supports_extra_args);
         assert!(cursor.supports_prefill);
         assert_eq!(cursor.effort_control, EffortControlKind::None);
+        assert_eq!(
+            cursor.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let agy = agy_caps();
         assert_eq!(agy.harness_id, "agy");
@@ -623,6 +636,10 @@ mod tests {
                 allowed: vec!["low".into(), "medium".into(), "high".into()],
             }
         );
+        assert_eq!(
+            agy.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let opencode = opencode_caps();
         assert_eq!(opencode.harness_id, "opencode");
@@ -630,11 +647,34 @@ mod tests {
         assert!(opencode.auto_resume_on_startup);
         // Issue #1295: plugin hook unblocks the Autopilot gate.
         assert!(opencode.requires_attention_hook);
+        // Issue #1295 — pin the attention hook shape (events +
+        // permission_ask launch mode, no trust/min_version) so the
+        // descriptor cannot silently revert to `{ kind: "none" }`.
+        assert!(matches!(
+            opencode.attention_capability,
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                trust: None,
+                min_version: None,
+                ..
+            }
+        ));
+        // Issue #1296 — SQLite reader; the descriptor must mirror it
+        // so the Coordinator Node Digest hydrates for OpenCode rows.
+        assert!(opencode.produces_readable_transcript);
         assert!(opencode.supports_model_override);
         assert!(!opencode.supports_effort_override);
         assert!(opencode.supports_extra_args);
         assert!(opencode.supports_prefill);
         assert_eq!(opencode.effort_control, EffortControlKind::None);
+        // `available_on` order matters — it is preserved through the
+        // IPC wire type and the frontend Inspector. Pin it so an
+        // adapter re-order trips the inventory pin test instead of
+        // silently drifting the TS mirror.
+        assert_eq!(
+            opencode.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let terminal = terminal_caps();
         assert!(terminal.is_plain_terminal);
@@ -660,6 +700,10 @@ mod tests {
         assert!(kimi.supports_extra_args);
         assert!(!kimi.supports_prefill);
         assert_eq!(kimi.effort_control, EffortControlKind::None);
+        assert_eq!(
+            kimi.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let grok = grok_caps();
         assert!(grok.supports_resume);
@@ -699,6 +743,10 @@ mod tests {
                 allowed: GROK_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
             }
         );
+        assert_eq!(
+            grok.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let mcode = mcode_caps();
         // Issue #1179: mcode's interactive TUI rejects `--model`, so
@@ -717,6 +765,10 @@ mod tests {
         assert!(!mcode.requires_attention_hook);
         assert!(mcode.produces_readable_transcript);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
+        assert_eq!(
+            mcode.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let dsh = dsh_caps();
         assert_eq!(dsh.harness_id, "dsh");
@@ -733,6 +785,10 @@ mod tests {
         assert!(dsh.supports_extra_args);
         assert!(!dsh.supports_prefill);
         assert_eq!(dsh.effort_control, EffortControlKind::None);
+        assert_eq!(
+            dsh.available_on,
+            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+        );
 
         let commandcode = commandcode_caps();
         assert_eq!(commandcode.harness_id, "commandcode");

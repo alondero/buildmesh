@@ -10,22 +10,33 @@
  * `ProviderInfo.capabilities` for its own controls — we'd rather not
  * add a new Tauri command just to render a circuit author form.
  *
- * **Drift gate.** `tests/unit/circuits-inspector-capabilities.test.ts`
- * asserts TWO properties that, together, prevent the previous
- * "placebo drift gate" flagged in PR #1362 code review:
- *   1. Every adapter id in `BUILTIN_HARNESS_IDS` is present (otherwise
- *      a circuit author who picks an unsupported id silently gets the
- *      mesh-default UI).
- *   2. Every present adapter's boolean fields match the canonical
- *      Rust inventory.
- * CI runs both Rust unit tests (`scripts/check.ps1 rust`) and Vitest
- * (`scripts/check.ps1 unit`) in the same pipeline, so a unilateral
- * change in either source trips the other.
+ * **Drift gate (be honest).** `tests/unit/circuits-inspector-capabilities.test.ts`
+ * asserts that this file matches a static, hand-typed expected literal
+ * — it is an **internal integrity check on the TS mirror only**. It
+ * does not read Rust. So the gate catches:
+ *   - TS-only changes (this file changes, the test fails).
+ *
+ * It does NOT catch:
+ *   - Rust-only changes where the adapter AND its pin test are updated
+ *     together. Both the Rust `inventory_matches_research_matrix` test
+ *     and the TS test pass, but the TS mirror is now stale and the
+ *     Inspector renders the wrong UI.
+ *
+ * That second failure mode is the open loop. Closing it requires
+ * generating this mirror from Rust (e.g. via a `cargo test` step that
+ * serializes the per-adapter `HarnessCapabilities` to
+ * `src/types/generated/harnessCapabilities.json`, with the TS test
+ * asserting equality against that generated artifact). That is the
+ * follow-on slice described in the PR — this slice makes the existing
+ * gate honest without entrenching the mirror further.
+ *
+ * The current matrix of declared fields is documented in
+ * `docs/learning/harness-capabilities-matrix.md`.
  *
  * Issue #1362 review note: when a future slice grows
- * `Provider::adapter()`'s surface (e.g. one of these 10 harnesses
+ * `Provider::adapter()`'s surface (e.g. one of these 14 harnesses
  * changes its capability boolean), both this file AND the Rust
- * inventory must update in lockstep — the test fails closed.
+ * inventory must update in lockstep.
  */
 
 import type { EffortControlKind } from '../../types/generated/EffortControlKind';
@@ -113,9 +124,14 @@ const CODEX_CAPS: HarnessCapabilities = {
     key: 'model_reasoning_effort',
     allowed: ['none', 'low', 'medium', 'high', 'xhigh'],
   },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `CodexAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/codex.rs`:
+  // `[Platform::Macos, Platform::Windows, Platform::Linux]`.
+  available_on: ['macos', 'windows', 'linux'],
 };
 
+// AGY (Antigravity) — skip-permissions hook, stop-only signal,
+// closed `low|medium|high` effort vocabulary.
 const AGY_CAPS: HarnessCapabilities = {
   harness_id: 'agy',
   supports_resume: true,
@@ -139,24 +155,42 @@ const AGY_CAPS: HarnessCapabilities = {
     kind: 'closed',
     allowed: ['low', 'medium', 'high'],
   },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `AgyAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/agy.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 const OPENCODE_CAPS: HarnessCapabilities = {
   harness_id: 'opencode',
   supports_resume: true,
   auto_resume_on_startup: true,
-  requires_attention_hook: false,
-  attention_capability: { kind: 'none' },
+  // Issue #1295 — plugin hook unblocks the Autopilot gate; the hook
+  // emits a turn-completed signal and the interactive permission-ask
+  // for question/permission prompts.
+  requires_attention_hook: true,
+  attention_capability: {
+    kind: 'hook',
+    events: ['turn_completed', 'question_requested', 'permission_requested'],
+    launch_mode: 'permission_ask',
+    trust: null,
+    min_version: null,
+  },
   supports_passive_turn_watcher: false,
-  produces_readable_transcript: false,
+  // Issue #1296 — OpenCode now produces a readable transcript via the
+  // SQLite reader; Coordinator Node Digest hydrates and the archived-
+  // node resume picker surfaces OpenCode rows.
+  produces_readable_transcript: true,
   supports_model_override: true,
   supports_effort_override: false,
   supports_extra_args: true,
   supports_prefill: true,
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `OpencodeAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/opencode.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 const GROK_CAPS: HarnessCapabilities = {
@@ -187,7 +221,10 @@ const GROK_CAPS: HarnessCapabilities = {
     kind: 'closed',
     allowed: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `GrokAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/grok.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 // Cursor — model yes, effort no, prefill yes (issue #1143). Issue
@@ -218,7 +255,10 @@ const CURSOR_CAPS: HarnessCapabilities = {
   supports_prefill: true,
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `CursorAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/cursor.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 // Kimi — interactive TUI like Grok/Anthropic, model yes, no effort, no prefill
@@ -236,7 +276,10 @@ const KIMI_CAPS: HarnessCapabilities = {
   supports_prefill: false,
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `KimiAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/kimi.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 // mcode — interactive TUI; model OFF (issue #1179), effort OFF, prefill yes; readable transcript wired
@@ -254,25 +297,31 @@ const MCODE_CAPS: HarnessCapabilities = {
   supports_prefill: true,
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `McodeAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/mcode.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
-// dsh (DeepSeek Harness) — model yes, no effort, no prefill
+// dsh (DeepSeek Harness) — no resume, no model, no effort, no prefill
 const DSH_CAPS: HarnessCapabilities = {
   harness_id: 'dsh',
-  supports_resume: true,
-  auto_resume_on_startup: true,
+  supports_resume: false,
+  auto_resume_on_startup: false,
   requires_attention_hook: false,
   attention_capability: { kind: 'none' },
   supports_passive_turn_watcher: false,
   produces_readable_transcript: false,
-  supports_model_override: true,
+  supports_model_override: false,
   supports_effort_override: false,
   supports_extra_args: true,
   supports_prefill: false,
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
-  available_on: ['windows', 'macos', 'linux'],
+  // Order matches `DshAdapter::available_on()` in
+  // `src-tauri/src/agent/provider/adapters/dsh.rs`:
+  // `[Platform::Windows, Platform::Linux, Platform::Macos]`.
+  available_on: ['windows', 'linux', 'macos'],
 };
 
 const COMMANDCODE_CAPS: HarnessCapabilities = {
@@ -329,8 +378,10 @@ const TERMINAL_CAPS: HarnessCapabilities = {
   available_on: ['windows', 'macos', 'linux'],
 };
 
-// Muse — Linux + macOS only; durable per-session JSONL reader wired
-// in #1708 (`services::transcript_reader::adapters::muse`). Issue #1709:
+// Muse — Windows landed in Muse 1.3.0 (issue #1708 added the
+// transcript reader; the Windows build of Muse is now usable).
+// Durable per-session JSONL reader wired in
+// `services::transcript_reader::adapters::muse`. Issue #1709:
 // no native attention hook, but the backend session-log watcher supplies
 // the turn signal — mirrors `adapters::MUSE` (passive turn watcher true).
 const MUSE_CAPS: HarnessCapabilities = {
@@ -348,8 +399,9 @@ const MUSE_CAPS: HarnessCapabilities = {
   is_plain_terminal: false,
   effort_control: { kind: 'none' },
   // Order matches `MuseAdapter::available_on()` in
-  // `src-tauri/src/agent/provider/adapters/muse.rs`: `[Linux, Macos]`.
-  available_on: ['linux', 'macos'],
+  // `src-tauri/src/agent/provider/adapters/muse.rs`:
+  // `[Platform::Linux, Platform::Macos, Platform::Windows]`.
+  available_on: ['linux', 'macos', 'windows'],
 };
 
 // Cline (issue #1773) — Native Provider: resume + model + effort + prefill,
