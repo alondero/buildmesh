@@ -1,5 +1,13 @@
+index:idx_agent_nodes_cli_session
+CREATE INDEX idx_agent_nodes_cli_session
+            ON agent_nodes(cli_session_id)
+            WHERE cli_session_id IS NOT NULL
+
 index:idx_agent_nodes_mesh
 CREATE INDEX idx_agent_nodes_mesh ON agent_nodes(mesh_id)
+
+index:idx_agent_nodes_status
+CREATE INDEX idx_agent_nodes_status ON agent_nodes(status)
 
 index:idx_autopilot_circuit_runs_circuit
 CREATE INDEX idx_autopilot_circuit_runs_circuit
@@ -18,6 +26,13 @@ CREATE INDEX idx_autopilot_circuits_preset_mesh ON autopilot_circuits(mesh_id, i
 index:idx_autopilot_runs_mesh
 CREATE INDEX idx_autopilot_runs_mesh ON autopilot_runs(mesh_id)
 
+index:idx_autopilot_runs_mesh_state
+CREATE INDEX idx_autopilot_runs_mesh_state
+            ON autopilot_runs(mesh_id, state)
+
+index:idx_autopilot_runs_state
+CREATE INDEX idx_autopilot_runs_state ON autopilot_runs(state)
+
 index:idx_circuit_runs_mesh_queue
 CREATE INDEX idx_circuit_runs_mesh_queue
             ON autopilot_circuit_runs(mesh_id, state, queue_position)
@@ -34,6 +49,10 @@ CREATE INDEX idx_coordinator_drive_prompts_created_at
 
 index:idx_warm_worktrees_mesh
 CREATE INDEX idx_warm_worktrees_mesh ON warm_worktrees(mesh_id)
+
+index:idx_warm_worktrees_mesh_status_created
+CREATE INDEX idx_warm_worktrees_mesh_status_created
+            ON warm_worktrees(mesh_id, status, created_at)
 
 index:idx_warm_worktrees_status
 CREATE INDEX idx_warm_worktrees_status ON warm_worktrees(status)
