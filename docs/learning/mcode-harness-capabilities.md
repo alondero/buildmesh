@@ -232,3 +232,12 @@ rebinds archived nodes after restart. Matching is time-window only with
 single-candidate binding — the manifest carries no verified workspace
 anchor, so two fresh manifests bind nothing rather than risk cross-wiring
 sessions.
+
+A second path opens once the attention hook is live: the route's fill-only
+capture. mcode reports `mvs_<hex>` in the hook payload, which is not a UUID, so
+`http::request::parse_session_id_for_provider` needs an explicit `mcode` arm
+(`parse_mcode_session_id`) or the route discards the id outright. Before that
+arm existed the route silently dropped it — caught in issue #1797's review. The
+manifest poller above is what binds the column today; the hook capture is
+redundant confirmation and keeps the lifecycle telemetry's
+`provider_session_id` populated.

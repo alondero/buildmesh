@@ -10,8 +10,11 @@
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
 //! verified for the TUI, so PTY capture stays off and ids are captured via
 //! the post-spawn manifest poller (`services::mcode_session`, issue #1798).
-//! `self_assigns_session_id()` is `true` and `session_assign_args()` is a
-//! no-op.
+//! Once the attention hook is live, the route's fill-only capture is a second
+//! path: mcode reports `mvs_<hex>` in the hook payload, so
+//! `http::request::parse_mcode_session_id` must accept that shape or the id is
+//! silently discarded. `self_assigns_session_id()` is `true` and
+//! `session_assign_args()` is a no-op.
 //!
 //! **No model override** (issue #1179). `mcode` exposes `--model
 //! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
@@ -260,12 +263,15 @@ fn resolve_plugin_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Optio
 /// the WSL host, mcode the Windows binary) relays through
 /// `windows_attention_command`, whose `curl` runs back inside the guest and so
 /// reaches the Linux-side listener over plain loopback.
-fn ensure_wsl_callbacks_reachable(env_type: EnvType) -> Result<(), String> {
+fn ensure_wsl_callbacks_reachable(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+) -> Result<(), String> {
     if !(cfg!(windows) && env_type == EnvType::Wsl) {
         return Ok(());
     }
     let mut command = crate::process_util::command_no_window("wsl.exe");
-    command.args(["--", "wslinfo", "--networking-mode"]);
+    command.args(wsl_wslinfo_args(wsl_distro));
     let mode = crate::process_util::run_command_with_timeout(
         command,
         "WSL networking mode",
@@ -280,10 +286,30 @@ fn ensure_wsl_callbacks_reachable(env_type: EnvType) -> Result<(), String> {
     }
     Err(format!(
         "MiniMax Code's attention hook needs WSL mirrored networking so guest callbacks reach \
-         the Buildmesh port; the interactive harness can still run. Enable it with \
-         `wsl --manage <distro> --set-networking-mode mirrored` (observed networking mode: {}).",
+         the Buildmesh port; the interactive harness can still run. Enable it by adding \
+         `[wsl2]` + `networkingMode=mirrored` to %USERPROFILE%\\.wslconfig, then run \
+         `wsl --shutdown` and relaunch the distro (observed networking mode: {}).",
         mode.as_deref().unwrap_or("unavailable")
     ))
+}
+
+/// `wslinfo --networking-mode` arguments for the distro the node actually runs
+/// in. `wsl.exe` without `-d` inspects the **default** distro, which may be a
+/// different distro with different networking settings (or lack `wslinfo`
+/// entirely), so the resolved distro is threaded through (issue #1797 review,
+/// finding 3). Split out so the argument shape is unit-testable on a host
+/// without WSL.
+fn wsl_wslinfo_args(wsl_distro: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(distro) = wsl_distro
+        .map(str::trim)
+        .filter(|distro| !distro.is_empty())
+    {
+        args.push("-d".to_string());
+        args.push(distro.to_string());
+    }
+    args.extend(["--", "wslinfo", "--networking-mode"].map(str::to_string));
+    args
 }
 
 /// Pure predicate over `wslinfo --networking-mode` output, split out so the
@@ -615,8 +641,9 @@ impl AgentProvider for McodeAdapter {
     ) -> Result<(), String> {
         // Refuse a WSL-guest spawn whose callbacks cannot reach the Buildmesh
         // port, rather than installing a hook that can only fail silently
-        // (issue #1797 review, finding 2).
-        ensure_wsl_callbacks_reachable(resolved.env_type)?;
+        // (issue #1797 review, finding 2). The node's own distro is threaded
+        // through so the preflight inspects the right one (finding 3).
+        ensure_wsl_callbacks_reachable(resolved.env_type, runtime.wsl_distro.as_deref())?;
         let plugin_root = resolve_plugin_dir(resolved, runtime);
         provision_at(plugin_root.as_deref(), resolved.env_type, node_id)
     }
@@ -1299,6 +1326,33 @@ mod tests {
                  nodes have provisioned into this data dir"
             );
         }
+    }
+
+    /// Issue #1797 review (finding 3): the preflight must inspect the distro
+    /// the node actually runs in, not `wsl.exe`'s default. A bare `wsl.exe`
+    /// reads whatever `wsl --set-default` points at, which can be a different
+    /// distro with different networking (or no `wslinfo` at all).
+    #[test]
+    fn wsl_preflight_targets_the_nodes_own_distro() {
+        assert_eq!(
+            wsl_wslinfo_args(Some("Ubuntu-22.04")),
+            vec!["-d", "Ubuntu-22.04", "--", "wslinfo", "--networking-mode"]
+        );
+        assert_eq!(
+            wsl_wslinfo_args(Some("  Ubuntu  ")),
+            vec!["-d", "Ubuntu", "--", "wslinfo", "--networking-mode"],
+            "the distro name is trimmed"
+        );
+        // No distro resolved (or a blank one) → the default-distro form, which
+        // is still the best available target.
+        assert_eq!(
+            wsl_wslinfo_args(None),
+            vec!["--", "wslinfo", "--networking-mode"]
+        );
+        assert_eq!(
+            wsl_wslinfo_args(Some("   ")),
+            vec!["--", "wslinfo", "--networking-mode"]
+        );
     }
 
     /// Issue #1797 review (finding 2): the WSL preflight is what turns a silent
