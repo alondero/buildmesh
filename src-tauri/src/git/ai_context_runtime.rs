@@ -609,21 +609,6 @@ mod windows {
     }
 
     fn create_candidate(candidate: &Candidate) -> Result<(), String> {
-        // Deterministic stand-in for a host without symlink privilege
-        // (Developer Mode off, no SeCreateSymbolicLinkPrivilege): the real
-        // `symlink_file`/`symlink_dir` calls fail with os error 1314 there.
-        // Surfacing the same message here keeps the no-privilege path
-        // exercised on every host without touching machine policy.
-        if consume_test_fault(TEST_DENY_SYMLINK_CREATION) {
-            return Err(format!(
-                "Muse context: cannot create {} link: A required privilege is not held by the client. (os error 1314) Enable Developer Mode or grant SeCreateSymbolicLinkPrivilege and retry",
-                if candidate.spec.target_is_dir {
-                    "directory"
-                } else {
-                    "file"
-                }
-            ));
-        }
         if candidate.temp.exists() || candidate.backup.exists() {
             return Err(format!(
                 "Muse context transaction name collision at {}",
@@ -636,14 +621,45 @@ mod windows {
         let target = std::str::from_utf8(candidate.spec.target)
             .unwrap()
             .replace('/', "\\");
+        // Deterministic stand-in for a host without symlink privilege
+        // (Developer Mode off, no SeCreateSymbolicLinkPrivilege): the real
+        // `symlink_dir` call below fails with raw os error 1314 there.
+        // Firing on the directory candidate (the second one) proves the
+        // file candidate staged before it is cleaned up again. The
+        // injected error flows through the same production mapper as a
+        // real denial, so the remediation text is production behavior,
+        // not a mocked string.
+        if candidate.spec.target_is_dir && consume_test_fault(TEST_DENY_SYMLINK_CREATION) {
+            return Err(symlink_error_message(
+                candidate,
+                std::io::Error::from_raw_os_error(1314),
+            ));
+        }
         if candidate.spec.target_is_dir {
             symlink_dir(&target, &candidate.temp)
-                .map_err(|e| format!("Muse context: cannot create directory link: {e}"))?;
+                .map_err(|e| symlink_error_message(candidate, e))?;
         } else {
             symlink_file(&target, &candidate.temp)
-                .map_err(|e| format!("Muse context: cannot create file link: {e}"))?;
+                .map_err(|e| symlink_error_message(candidate, e))?;
         }
         Ok(())
+    }
+
+    fn symlink_error_message(candidate: &Candidate, error: std::io::Error) -> String {
+        let kind = if candidate.spec.target_is_dir {
+            "directory"
+        } else {
+            "file"
+        };
+        // Match the denial by raw code, not message text: Windows localises
+        // the 1314 description, but the remediation is the same everywhere.
+        if error.raw_os_error() == Some(1314) {
+            format!(
+                "Muse context: cannot create {kind} link: {error} Enable Developer Mode or grant SeCreateSymbolicLinkPrivilege and retry"
+            )
+        } else {
+            format!("Muse context: cannot create {kind} link: {error}")
+        }
     }
 
     fn validate_installed(candidate: &Candidate) -> Result<(), String> {
@@ -1080,7 +1096,14 @@ mod tests {
             let root = temp.path();
             arm_windows_fault(super::super::windows::TEST_DENY_SYMLINK_CREATION);
 
+            // The fault fires on the directory candidate, after the file
+            // candidate was staged: the error must name the directory link
+            // and the staged file candidate must be cleaned up below.
             let error = prepare_muse_context(root.to_str().unwrap()).unwrap_err();
+            assert!(
+                error.contains("cannot create directory link"),
+                "denied repair must fail on the directory candidate, got: {error}"
+            );
             assert!(
                 error.contains("privilege is not held"),
                 "denied repair must name the missing capability, got: {error}"
@@ -1108,6 +1131,8 @@ mod tests {
                 );
             }
             assert!(git(root, &["status", "--porcelain"], None).is_empty());
+            // Non-vacuous: the file candidate was staged before the
+            // directory candidate failed, so cleanup really ran.
             assert!(transaction_files(root, ".", ".candidate").is_empty());
             assert!(transaction_files(root, ".agents", ".candidate").is_empty());
 
@@ -1320,22 +1345,7 @@ mod tests {
         fn live_muse_exec_uses_the_production_wsl_wrapper_after_repair() {
             let temp = fixture();
             prepare_muse_context(temp.path().to_str().unwrap()).unwrap();
-            let guest_path_output = Command::new("wsl.exe")
-                .args([
-                    "-d",
-                    "Ubuntu",
-                    "--exec",
-                    "wslpath",
-                    "-u",
-                    temp.path().to_str().unwrap(),
-                ])
-                .output()
-                .unwrap();
-            assert!(guest_path_output.status.success());
-            let guest_path = String::from_utf8(guest_path_output.stdout)
-                .unwrap()
-                .trim()
-                .to_string();
+            let guest_path = wsl_guest_path(temp.path());
             let mut recipe =
                 crate::agent::provider::adapters::MUSE.spawn_recipe(Platform::Linux, EnvType::Wsl);
             recipe.base_args = vec![
