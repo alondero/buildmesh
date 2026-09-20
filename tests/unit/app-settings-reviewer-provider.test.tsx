@@ -130,4 +130,22 @@ describe('AppSettingsModal reviewer provider', () => {
     await waitFor(() => expect(select.value).toBe('codex'));
     expect(await screen.findByText('settings write failed')).toBeTruthy();
   });
+
+  it('offers a harness with no turn signal, but not as a pickable reviewer', async () => {
+    tauriMocks.listProviders.mockResolvedValue([
+      provider('anthropic', 'Anthropic'),
+      provider('cline', 'Cline'),
+      provider('terminal', 'Terminal'),
+    ]);
+    const select = (await renderModal()) as HTMLSelectElement;
+
+    const options = Array.from(select.querySelectorAll('option'));
+    // Greying out (not hiding) keeps the limitation discoverable — the same
+    // reason the node title-bar picker renders these rows disabled.
+    expect(options.find(o => o.value === 'anthropic')?.disabled).toBe(false);
+    expect(options.find(o => o.value === 'cline')?.disabled).toBe(true);
+    expect(options.find(o => o.value === 'cline')?.textContent).toBe('Cline (no review support)');
+    // The plain shell is absent entirely: it is not an agent at all.
+    expect(options.find(o => o.value === 'terminal')).toBeUndefined();
+  });
 });

@@ -25,6 +25,7 @@ import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { isWindows } from '../../lib/platform';
 import { useSettingsResources, type ResourceKey, type ResourceState } from './useSettingsResources';
+import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -2056,10 +2057,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             >
               <option value={NO_OVERRIDE}>Source agent provider</option>
               {providers
-                .filter((p) => p.id !== 'terminal')
-                .map(p => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
+                .filter((p) => p.harness_id !== 'terminal')
+                .map(p => {
+                  // A reviewer whose harness cannot yield a turn never lets the
+                  // `verdict` gate fire, so it is offered but not pickable.
+                  const blocked = blocksReviewCircuit(p.harness_id);
+                  return (
+                    <option key={p.id} value={p.id} disabled={blocked}>
+                      {blocked ? `${p.label} (no review support)` : p.label}
+                    </option>
+                  );
+                })}
             </select>
           </SettingsRow>
 

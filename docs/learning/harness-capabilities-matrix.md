@@ -136,6 +136,74 @@ construction — that is why Cursor and Antigravity signal completion and
 background work but never a permission prompt. Under **Permission ask** the
 harness can raise a genuine approval signal.
 
+## Review-circuit eligibility
+
+Two columns above — **Attn hook** and **Watcher** — decide whether a harness can
+take part in a review Circuit at all, either as the reviewed source agent or as
+the reviewer agent node.
+
+The reason is structural, not stylistic. A Circuit gate that waits on an agent
+(`AwaitAgentTurn`, `ReviewVerdict`) parks in `Running` until that agent's status
+reaches `awaiting_input` / `ready` / `completed`, and those statuses only ever
+arrive from the attention/lifecycle path. A harness carrying **neither** signal
+can never satisfy a wait, so the run does not fail fast — it parks until the
+watchdog budget expires. **Plain shell** is excluded for the same reason it is
+excluded everywhere else: there is no agent to yield at all.
+
+This is the harness half of the backend Autopilot gate
+(`src-tauri/src/autopilot/compatibility.rs`, reason `MissingAttentionHook` /
+`PlainTerminal`), so the same predicate that decides whether a Mesh may be
+Autopilot-managed also decides who may review. The frontend mirror is
+`blocksReviewCircuit` in `src/components/Circuits/harnessCapabilities.ts`. It
+gates the Agent Node title-bar review control and the two interactive reviewer
+provider pickers (the Start Review dialog and Settings → Providers).
+
+It deliberately does **not** gate the Circuit Inspector's provider field on a
+reviewer agent node. Authored Circuits carry their reviewer provider in the
+graph and are intentionally exempt from the Autopilot compatibility gate
+(`services/circuit_worker/spawn.rs`), so an author may still build a graph whose
+reviewer harness has no turn signal — such a run advances only if nothing waits
+on that agent. The gate also passes any provider id it cannot resolve, because
+the column holds user-defined harness profile ids that resolve to a real
+executor at the spawn seam.
+
+| Harness | Turn signal | Review circuit |
+|---|---|---|
+| Claude Code | Attn hook | ✅ |
+| Codex | Attn hook | ✅ |
+| Cursor | Attn hook | ✅ |
+| Antigravity | Attn hook | ✅ |
+| OpenCode | Attn hook | ✅ |
+| Kimi Code | Attn hook | ✅ |
+| Grok Code | Attn hook | ✅ |
+| MiniMax Code | Attn hook | ✅ |
+| Command Code | Watcher | ✅ |
+| Meta Muse | Watcher | ✅ |
+| DeepSeek Harness | None | ❌ |
+| Freebuff | None | ❌ |
+| Cline | None | ❌ |
+| Terminal | None (plain shell) | ❌ |
+
+Eligibility is necessary, not sufficient, and two of the ✅ rows are weaker than
+the rest:
+
+- **Kimi Code** advertises a hook, but its CLI hook contract validation is still
+  open (#1554, blocking #1369). Until that lands the gate admits Kimi on an
+  unvalidated signal.
+- **Kimi Code** has no transcript reader, so its reviewer report comes from the
+  PTY tail rather than a parsed transcript. `produces_readable_transcript` is a
+  quality-and-recovery factor, not a gate: the transcript is the *preferred*
+  report source in the circuit worker, and it is what re-reads a turn that
+  completed while capture was offline.
+
+Separately, the review **verdict** is always an LLM classification — the
+`ReviewVerdict` gate has no clean-lifecycle shortcut, unlike `AwaitAgentTurn`,
+which short-circuits on `ready`/`completed`. That classification shells out to
+the `claude` CLI in `--print` mode
+(`src-tauri/src/autopilot/evaluator.rs`) routed through the Mesh's configured
+Autopilot provider. So a review Circuit needs the Claude Code CLI on the host
+regardless of which harness does the reviewing.
+
 ## Effort control vocabulary
 
 | Harness | Control kind | Accepted values |
