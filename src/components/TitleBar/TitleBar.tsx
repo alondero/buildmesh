@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import Wordmark from '../../assets/wordmark.png';
+import WordmarkOnDark from '../../assets/wordmark-on-dark.png';
+import WordmarkOnLight from '../../assets/wordmark-on-light.png';
 import { isMac } from '../../lib/platform';
+import { currentTheme, onThemeChange, type ThemeName } from '../../lib/theme';
 import { useWindowControlOverlay } from '../../hooks/useWindowControlOverlay';
 import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
@@ -418,13 +420,26 @@ function MacosTrafficLight({ kind, onClick, ariaLabel, inactive }: {
   );
 }
 
+/** The active theme name, re-rendering on flips via the `lib/theme` pub/sub
+    (the same channel TerminalRegistry's ThemeManager uses). The wordmark is a
+    baked raster, so it cannot inherit theme tokens the way an inline SVG
+    would — the title bar sits on `bg-bg-surface`, which is near-black in dark
+    and white in light, so one asset cannot serve both. */
+function useThemeName(): ThemeName {
+  const [theme, setThemeName] = useState<ThemeName>(currentTheme);
+  useEffect(() => onThemeChange(setThemeName), []);
+  return theme;
+}
+
 /** The wordmark <img>, kept as a single source so the macOS and
     non-macOS branches can't drift on the asset, alt text, or drag-region
-    attribute. */
+    attribute. Swaps to the light-surface artwork on the light theme —
+    without it the wordmark renders near-white on a white bar. */
 function WordmarkImg() {
+  const theme = useThemeName();
   return (
     <img
-      src={Wordmark}
+      src={theme === 'light' ? WordmarkOnLight : WordmarkOnDark}
       data-tauri-drag-region
       className="h-10 w-auto"
       alt="Buildmesh"

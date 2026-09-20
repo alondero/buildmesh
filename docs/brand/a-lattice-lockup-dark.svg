@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 96" width="288" height="96" fill="none" role="img" aria-labelledby="alTitle">
+  <title id="alTitle">Buildmesh</title>
+  <defs>
+    <linearGradient id="alMesh" x1="12" y1="50" x2="84" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00d4ff"/>
+      <stop offset=".42" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <linearGradient id="alVeil" x1="30" y1="18" x2="66" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67e8f9" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#34d399" stop-opacity=".5"/>
+    </linearGradient>
+    <filter id="alBloom" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.4"/>
+    </filter>
+  </defs>
+
+  <g>
+    <path d="M30 18 L48 86 L66 18" stroke="url(#alVeil)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M12 80 L30 18 L48 52 L66 18 L84 80" stroke="url(#alMesh)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".5" filter="url(#alBloom)"/>
+    <path d="M12 80 L30 18 L48 52 L66 18 L84 80" stroke="url(#alMesh)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="30" cy="18" r="6" fill="#22d3ee"/>
+    <circle cx="66" cy="18" r="6" fill="#34d399"/>
+    <circle cx="48" cy="52" r="4.2" fill="#8b5cf6"/>
+    <circle cx="12" cy="80" r="4" fill="#00d4ff"/>
+    <circle cx="84" cy="80" r="4" fill="#22c55e"/>
+  </g>
+
+  <text x="119" y="61" font-family="Geist, Inter, -apple-system, 'Segoe UI', sans-serif" font-size="33" font-weight="600" letter-spacing="-0.02em"><tspan fill="#e2e8f0">build</tspan><tspan fill="#00d4ff">mesh</tspan></text>
+</svg>

@@ -54,3 +54,5 @@ The folders below are deliberately separated by purpose:
 - [`releases/`](releases/) — versioned drafts and historical release notes.
 - [`specs/`](specs/README.md) — product and technical specifications.
 - [`archive/`](archive/README.md) — retired material that is not current truth.
+- [`brand/`](brand/README.md) — the mark, the wordmark, and how the raster
+  assets are generated.

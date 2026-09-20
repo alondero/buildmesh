@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 96" width="288" height="96" fill="none" role="img" aria-labelledby="b3lTitle">
+  <title id="b3lTitle">Buildmesh</title>
+
+  <g>
+    <rect x="4" y="4" width="88" height="88" rx="25" fill="#16161d"/>
+    <path d="M48 5.25 H29 A23.75 23.75 0 0 0 5.25 29 V67 A23.75 23.75 0 0 0 29 90.75 H48" stroke="#00d4ff" stroke-width="2.5" fill="none"/>
+    <path d="M48 5.25 H67 A23.75 23.75 0 0 1 90.75 29 V67 A23.75 23.75 0 0 1 67 90.75 H48" stroke="#22c55e" stroke-width="2.5" fill="none"/>
+    <g stroke="#00d4ff" stroke-width="5.5" stroke-linecap="round">
+      <path d="M21 71 L30 28"/>
+      <path d="M30 28 L48 53"/>
+    </g>
+    <g stroke="#22c55e" stroke-width="5.5" stroke-linecap="round">
+      <path d="M48 53 L66 28"/>
+      <path d="M66 28 L75 71"/>
+    </g>
+    <circle cx="21" cy="71" r="6.5" fill="#00d4ff"/>
+    <circle cx="30" cy="28" r="8.5" fill="#00d4ff"/>
+    <circle cx="48" cy="53" r="7.5" fill="#8b5cf6"/>
+    <circle cx="66" cy="28" r="8.5" fill="#22c55e"/>
+    <circle cx="75" cy="71" r="6.5" fill="#22c55e"/>
+  </g>
+
+  <text x="118" y="61" font-family="Geist, Inter, -apple-system, 'Segoe UI', sans-serif" font-size="33" font-weight="800" letter-spacing="-0.03em"><tspan fill="#e2e8f0">build</tspan><tspan fill="#00d4ff">mesh</tspan></text>
+</svg>

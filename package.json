@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "version:set": "node scripts/set-version.mjs",
+    "brand:build": "node scripts/generate-brand-assets.mjs",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
     "check:agent": "node scripts/check-agent-diff.mjs",
