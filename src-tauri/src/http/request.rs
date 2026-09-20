@@ -324,6 +324,44 @@ pub fn parse_opencode_session_id(s: &str) -> Option<String> {
     Some(format!("ses_{rest}"))
 }
 
+/// Parse a MiniMax Code (`mcode`) session id as posted by the Buildmesh
+/// Agent-Plugin hook (issue #1797).
+///
+/// mcode self-assigns `mvs_<hex>` ids: every id observed in the live 0.4.12
+/// hook payload is `mvs_` followed by 32 lowercase hex chars, e.g.
+/// `mvs_d66c5fa695294e2abe936c242fb43c76`. The attention route's fill-only
+/// capture persists the value into `agent_nodes.cli_session_id` — the column
+/// `--session <id>` resume and the `TranscriptFormat::Mcode` manifest scan key
+/// on — so the route must not drop it. Before this gate existed, mcode fell
+/// through to [`parse_cli_session_id`]'s UUID validator, which rejects the
+/// `mvs_…` shape outright and would have left the column NULL forever.
+///
+/// Like the UUID and OpenCode gates this closes the argv flag-position
+/// injection vector for the `--session <id>` resume path
+/// (`AgentProvider::resume_args`). The `mvs_` prefix is required
+/// (case-insensitive, normalised to lowercase on output), the remainder is
+/// bounded to `1..=124` bytes and restricted to `[0-9a-zA-Z_]`, so flag-shaped
+/// strings (`mvs_-x`), shell metacharacters, whitespace and path separators are
+/// all rejected. The remainder keeps its original casing so a future schema
+/// change that ships mixed case still round-trips.
+pub fn parse_mcode_session_id(s: &str) -> Option<String> {
+    // Four bytes, compared as bytes so a multi-byte leading char cannot panic
+    // the slice (the UUID / OpenCode gates take the same precaution).
+    const PREFIX: &[u8] = b"mvs_";
+    let s = s.trim();
+    if s.len() < PREFIX.len() || !s.as_bytes()[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    let rest = &s[PREFIX.len()..];
+    if rest.is_empty() || rest.len() > 124 {
+        return None;
+    }
+    if !rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    Some(format!("mvs_{rest}"))
+}
+
 /// Pick the right per-provider validator for a hook payload's session id
 /// (issue #1294).
 ///
@@ -332,8 +370,10 @@ pub fn parse_opencode_session_id(s: &str) -> Option<String> {
 /// non-UUID id shape must update both this dispatcher and its adapter's
 /// `claude_session_id`-style column before the value reaches
 /// `agent_nodes.cli_session_id`. The provider string is the value stored
-/// in `agent_nodes.provider`; OpenCode's id gate lives here, not in
-/// `agent::opencode`, so the attention route has one extraction point.
+/// in `agent_nodes.provider`; OpenCode's and mcode's id gates live here, not
+/// in `agent::opencode` / `agent::mcode`, so the attention route has one
+/// extraction point. Callers that ship a non-UUID id shape must add an arm
+/// here or their `cli_session_id` capture silently no-ops (issue #1797).
 pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String> {
     match provider {
         "opencode" => parse_opencode_session_id(raw),
@@ -341,6 +381,9 @@ pub fn parse_session_id_for_provider(provider: &str, raw: &str) -> Option<String
             Some(uuid) => parse_cli_session_id(uuid).map(|id| format!("session_{id}")),
             None => parse_cli_session_id(raw),
         },
+        // mcode self-assigns `mvs_<hex>` ids (issue #1797) — the UUID gate
+        // would silently drop every one of them.
+        "mcode" => parse_mcode_session_id(raw),
         // Codex/Claude/AGY/Grok/Cursor all use UUIDs (the alias stack on
         // `HookPayload::session_id` accepts every casing each harness
         // ships; canonicalisation to lowercase happens in
@@ -524,6 +567,78 @@ mod tests {
             parse_opencode_session_id("ses_0000000000000000000"),
             Some("ses_0000000000000000000".to_string())
         );
+    }
+
+    // ---- parse_mcode_session_id (issue #1797) ---------------------------
+
+    /// The id shape observed in the live 0.4.12 `Stop` payload must
+    /// round-trip — and must be rejected by the UUID gate, which is what the
+    /// dispatcher exists to bypass. Without the arm, mcode's
+    /// `agent_nodes.cli_session_id` would stay NULL and both `--session <id>`
+    /// resume and the `TranscriptFormat::Mcode` manifest scan would miss.
+    #[test]
+    fn parse_mcode_session_id_accepts_live_format() {
+        let id = "mvs_d66c5fa695294e2abe936c242fb43c76";
+        assert_eq!(
+            parse_mcode_session_id(id),
+            Some(id.to_string()),
+            "the live mcode id must round-trip"
+        );
+        assert_eq!(
+            parse_session_id_for_provider("mcode", id),
+            Some(id.to_string()),
+            "the dispatcher must route mcode through its own gate"
+        );
+        assert_eq!(
+            parse_cli_session_id(id),
+            None,
+            "the UUID gate must reject the mvs_ shape — that is why the arm exists"
+        );
+        assert_eq!(
+            parse_session_id_for_provider("anthropic", id),
+            None,
+            "another provider must not adopt mcode's id"
+        );
+    }
+
+    #[test]
+    fn parse_mcode_session_id_normalises_prefix_and_trims() {
+        assert_eq!(
+            parse_mcode_session_id("MVS_D66C5FA695294E2ABE936C242FB43C76"),
+            Some("mvs_D66C5FA695294E2ABE936C242FB43C76".to_string()),
+            "prefix case-folds, remainder casing is preserved"
+        );
+        assert_eq!(
+            parse_mcode_session_id("  mvs_abc123  "),
+            Some("mvs_abc123".to_string())
+        );
+    }
+
+    /// Same argv flag-position / metacharacter contract as the UUID and
+    /// OpenCode gates: `resume_args` splices this value into `--session <id>`.
+    #[test]
+    fn parse_mcode_session_id_rejects_malformed_and_flag_like() {
+        for invalid in [
+            "",
+            "   ",
+            "mvs_",
+            "mvs_-dangerously-skip-permissions",
+            "mvs_$(whoami)",
+            "mvs_`id`",
+            "mvs_abc def",
+            "mvs_abc/def",
+            "mvs_abc;rm -rf /",
+            "mvs_abc\\def",
+            "d66c5fa695294e2abe936c242fb43c76",
+            "ses_d66c5fa695294e2abe936c242fb43c76",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            assert_eq!(
+                parse_mcode_session_id(invalid),
+                None,
+                "must reject {invalid:?}"
+            );
+        }
     }
 
     #[test]

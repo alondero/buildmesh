@@ -140,7 +140,7 @@ describe('TitleBar on macOS', () => {
       // button at all".
       expect(container.querySelectorAll('[data-window-control]').length).toBe(0);
       // The rest of the chrome is still present.
-      expect(screen.getByAltText('Buildmesh')).toBeTruthy();
+      expect(screen.getByRole('img', { name: 'Buildmesh' })).toBeTruthy();
       expect(screen.getByRole('group', { name: /view mode/i })).toBeTruthy();
       // Issue #1375 — the navigation cluster renders on macOS too, with the
       // macOS chord from the shortcut catalog (`⌘+K`, the open-omnibar row)
@@ -166,7 +166,7 @@ describe('TitleBar on macOS', () => {
 
     it('wordmark still carries data-tauri-drag-region; the traffic lights themselves do NOT', async () => {
       await renderTitleBar();
-      expect(screen.getByAltText('Buildmesh').hasAttribute('data-tauri-drag-region')).toBe(true);
+      expect(screen.getByRole('img', { name: 'Buildmesh' }).hasAttribute('data-tauri-drag-region')).toBe(true);
       for (const kind of ['close', 'minimize', 'maximize']) {
         const button = screen.getByTestId(`macos-traffic-${kind}`);
         expect(button.hasAttribute('data-tauri-drag-region')).toBe(false);

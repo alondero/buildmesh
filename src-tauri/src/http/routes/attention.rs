@@ -345,11 +345,14 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
 /// and Cursor all use UUIDs; the alias on `HookPayload::session_id`
 /// makes `conversationId` (AGY) and `conversation_id` (Cursor) parse
 /// through the same code path. OpenCode mints `ses_<hex+base62>` ids
-/// instead (issue #1294), so this helper is **provider-aware** and
-/// dispatches to `request::parse_opencode_session_id` for OpenCode
-/// (`--session <uuid>` is `Invalid session ID` on the live CLI) or to
-/// `request::parse_cli_session_id` for every other provider (the
-/// issue #1237 UUID validator shared with `import_and_resume`).
+/// instead (issue #1294) and MiniMax Code mints `mvs_<hex>` ids (issue
+/// #1797), so this helper is **provider-aware** and dispatches to
+/// `request::parse_opencode_session_id` for OpenCode (`--session <uuid>` is
+/// `Invalid session ID` on the live CLI), to `request::parse_mcode_session_id`
+/// for mcode, or to `request::parse_cli_session_id` for every other provider
+/// (the issue #1237 UUID validator shared with `import_and_resume`). A harness
+/// missing from that dispatcher has its id silently discarded, so its
+/// `cli_session_id` capture no-ops.
 fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
     let id = HookPayload::parse(body)?.session_id?;
     request::parse_session_id_for_provider(provider, &id)
@@ -2790,6 +2793,33 @@ mod tests {
     /// the alias, just like Claude Code's `session_id`. Lower-cased so
     /// the value matches what the orchestrator's spawn pipeline writes
     /// into `agent_nodes.cli_session_id`.
+    #[test]
+    fn hook_session_id_reads_mcode_mvs_id() {
+        // Issue #1797: mcode's `mvs_<hex>` id is not a UUID. Without the
+        // provider arm it fell through to the UUID validator, so the fill-only
+        // capture dropped it and `agent_nodes.cli_session_id` stayed NULL —
+        // breaking `--session <id>` resume and the `TranscriptFormat::Mcode`
+        // manifest scan. The body is the real envelope from a live 0.4.12 TUI.
+        let body = serde_json::json!({
+            "stop_hook_active": false,
+            "last_assistant_message": "OK",
+            "hook_event_name": "Stop",
+            "session_id": "mvs_d66c5fa695294e2abe936c242fb43c76",
+            "transcript_path": "/tmp/x.jsonl",
+            "permission_mode": "auto",
+        })
+        .to_string();
+        assert_eq!(
+            hook_session_id(body.as_bytes(), "mcode").as_deref(),
+            Some("mvs_d66c5fa695294e2abe936c242fb43c76")
+        );
+        assert_eq!(
+            hook_session_id(body.as_bytes(), "anthropic"),
+            None,
+            "another provider must not adopt the mvs_ shape"
+        );
+    }
+
     #[test]
     fn hook_session_id_reads_agy_conversation_id() {
         let body = serde_json::json!({

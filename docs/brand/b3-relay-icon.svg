@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" fill="none" role="img" aria-labelledby="b3iTitle">
+  <title id="b3iTitle">Buildmesh — compact mark</title>
+  <rect x="2" y="2" width="92" height="92" rx="26" fill="#0a0a0e"/>
+  <g stroke="#00d4ff" stroke-width="9" stroke-linecap="round">
+    <path d="M16 74 L30 24"/>
+    <path d="M30 24 L48 52"/>
+  </g>
+  <g stroke="#22c55e" stroke-width="9" stroke-linecap="round">
+    <path d="M48 52 L66 24"/>
+    <path d="M66 24 L80 74"/>
+  </g>
+  <rect x="8" y="66" width="16" height="16" rx="4.5" fill="#00d4ff"/>
+  <rect x="20" y="14" width="20" height="20" rx="6" fill="#00d4ff"/>
+  <rect x="39" y="43" width="18" height="18" rx="5" fill="#8b5cf6"/>
+  <rect x="56" y="14" width="20" height="20" rx="6" fill="#22c55e"/>
+  <rect x="72" y="66" width="16" height="16" rx="4.5" fill="#22c55e"/>
+</svg>

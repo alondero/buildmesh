@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import Wordmark from '../../assets/wordmark.png';
 import { isMac } from '../../lib/platform';
 import { useWindowControlOverlay } from '../../hooks/useWindowControlOverlay';
 import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
 import { HeaderPillButton } from './HeaderPillButton';
+import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -418,20 +418,6 @@ function MacosTrafficLight({ kind, onClick, ariaLabel, inactive }: {
   );
 }
 
-/** The wordmark <img>, kept as a single source so the macOS and
-    non-macOS branches can't drift on the asset, alt text, or drag-region
-    attribute. */
-function WordmarkImg() {
-  return (
-    <img
-      src={Wordmark}
-      data-tauri-drag-region
-      className="h-10 w-auto"
-      alt="Buildmesh"
-    />
-  );
-}
-
 export function TitleBar() {
   // Issue #1411 review: the two modals' open state lives in `uiStore` (not
   // local state) so the Omnibar's "Open Settings" / "Open Remote Access"
@@ -540,7 +526,7 @@ export function TitleBar() {
               />
             </div>
           )}
-          <WordmarkImg />
+          <Wordmark />
           <ViewModeSwitcher />
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.

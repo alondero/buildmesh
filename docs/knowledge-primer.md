@@ -437,10 +437,17 @@ no permission-result hook, so its tool result or identified terminal `Stop`
 resolves the approval marker. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
-rather than guessing from PTY output. MiniMax keeps an explicit attention
-gap (no provisioned hook) while its `messages.jsonl` transcript is wired
-(`TranscriptFormat::Mcode`) — digest, picker, and circuit reports work, but
-Autopilot still gates on the missing hook. Muse has no native hook
+rather than guessing from PTY output. MiniMax's Agent-Plugin attention hook is
+live: `requires_attention_hook` is `true` after the issue #1797 validation
+delivered `Stop` from the installed 0.4.12 TUI. mcode 0.4.0+ reads
+`.claude-plugin/plugin.json` with `hooks` **inlined** (a separate
+`hooks/hooks.json` document is ignored, and a directory with no manifest is
+skipped silently), runs `command` + `args` with no shell interpretation, and
+`env_clear()`s `BUILDMESH_*` — so the callback URL bakes the port and node id.
+Only `TurnCompleted` is advertised: the launch auto-approves
+(`"permission_mode": "auto"`), so no permission signal is claimed. Its
+`messages.jsonl` transcript is wired too (`TranscriptFormat::Mcode`); see
+`docs/learning/mcode-harness-capabilities.md`. Muse has no native hook
 either: `services::muse_watcher` tails the interactive TUI's durable
 `~/.local/share/muse/sessions/…/session.jsonl` run boundaries (`runtime.session`
 records with `payload.kind == "run"` and `event.kind == "terminal"`) and
@@ -461,7 +468,7 @@ remaining limitations.
 ## Agent Node Management
 
 ### Agent Node ID Capture
-Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
+Session IDs are **assigned, not captured**, for providers whose CLI accepts a caller-chosen id (Anthropic): the orchestrator mints a UUID up front, writes it to `agent_nodes.cli_session_id` *before* launch, and passes it via `--session-id <uuid>` (`agent/spawn.rs`, `SessionIdMode::Assign`; ADR 0024). The PTY reader thread's labeled-UUID sniff (`session_capture.rs`) runs **only** for self-assigning providers that print a UUID banner (Codex, Antigravity) — gated by `reader_should_capture_session_id` / `captures_session_id_from_pty` so there is exactly one writer per spawn (issue #651). Recent Codex TUIs often omit the banner: SessionStart (hook payload) and the rollout `session_meta` poller (`after_fresh_spawn`) are the load-bearing capture paths; PTY sniff is opportunistic. OpenCode also self-assigns, but its ids are `ses_…` (not UUIDs) and are not printed on the TUI: a fresh spawn uses `SessionIdMode::None` and `OpenCodeAdapter::after_fresh_spawn` reads the local `opencode.db` SQLite store (`services::opencode_session`) for a row created in the spawn time window whose `directory` matches the node; resume is `--session <id>`. MiniMax Code (`mcode`) also self-assigns: `McodeAdapter::after_fresh_spawn` polls `<dataDir>/v2/sessions/**/manifest.json` for a fresh `sessionId` with a sibling `messages.jsonl` (`services::mcode_session`), and startup recovery reuses the same scan; PTY sniff is off because no banner shape is verified. Don't replicate any of these paths — they are backend-only. `CLAUDE_CODE_SESSION_ID` is deliberately **not** used: Claude Code sets its `CLAUDE_CODE_*` vars *downward* into its own subprocesses, so a parent that spawns `claude` can't read it, and for Claude we already know the ID (we assigned it). See ADR 0024 and `docs/learning/opencode-harness-capabilities.md`.
 
 ### Turn Counting and Node Naming
 `session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.

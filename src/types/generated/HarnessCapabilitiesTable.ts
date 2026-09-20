@@ -396,7 +396,13 @@ export const HARNESS_CATALOG = {
     },
     "mcode": {
       "attention_capability": {
-        "kind": "none"
+        "events": [
+          "turn_completed"
+        ],
+        "kind": "hook",
+        "launch_mode": "skip_permissions",
+        "min_version": "0.4.12",
+        "trust": null
       },
       "auto_resume_on_startup": true,
       "available_on": [
@@ -410,7 +416,7 @@ export const HARNESS_CATALOG = {
       "harness_id": "mcode",
       "is_plain_terminal": false,
       "produces_readable_transcript": true,
-      "requires_attention_hook": false,
+      "requires_attention_hook": true,
       "supports_effort_override": false,
       "supports_extra_args": true,
       "supports_model_override": false,
