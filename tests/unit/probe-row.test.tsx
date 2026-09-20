@@ -142,7 +142,7 @@ describe('ProbeRow (#463)', () => {
 
   // ---- Expand toggle (the load-bearing interaction) --------------------
 
-  it('calls onToggle when the body region is clicked', () => {
+  it('calls onToggle when the collapsed body preview is clicked', () => {
     const onToggle = vi.fn();
     render(
       <ProbeRow
@@ -300,8 +300,12 @@ describe('ProbeRow (#463)', () => {
 
     const expandedBody = container.querySelector('[data-pr-body-expanded]');
     expect(expandedBody).toBeTruthy();
-    expect(expandedBody!.className).toContain('max-h-48');
-    expect(expandedBody!.textContent).toBe('Adds the widget.');
+    // The scrollable `max-h-48` panel is the inner container (the
+    // outer wrapper only adds padding so the body region lines up
+    // with the stripe offset the title row uses).
+    const scroller = expandedBody!.querySelector('div.max-h-48')!;
+    expect(scroller.className).toContain('max-h-48');
+    expect(scroller.textContent).toBe('Adds the widget.');
     // The clamped paragraph is gone.
     expect(container.querySelector('p.line-clamp-2')).toBeNull();
   });
@@ -492,7 +496,11 @@ describe('ProbeRow (#463)', () => {
     // The slot is opaque — the rightSlot content is a sibling of the
     // left clickable column, not inside it. Clicking the slot's
     // button does NOT trigger the row's onToggle. Pin via a known
-    // selector inside the rightSlot.
+    // selector inside the rightSlot. NOTE: `row.querySelector('[role=
+    // "button"]')` is only unambiguous when NO body preview renders;
+    // this render passes no body, so the collapsed-preview button
+    // (also `role="button"` by design) is absent and the query can
+    // only match the title column.
     const onToggle = vi.fn();
     render(
       <ProbeRow
@@ -519,6 +527,67 @@ describe('ProbeRow (#463)', () => {
     const clickableColumn = row.querySelector('[role="button"]')!;
     expect(clickableColumn.contains(button)).toBe(false);
     expect(row.contains(button)).toBe(true);
+  });
+
+  // ---- Full-width body (below the title/action row, not beside it) ---
+
+  it('renders the collapsed body BELOW the title/action row, spanning it', () => {
+    // The 2-line preview renders outside the title column — beside the
+    // action buttons is no place for prose at 240px dock width. Pin the
+    // structure, not the pixels: the preview's wrapper is a sibling of
+    // the title/action row, inside the row root.
+    const { container } = render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={false}
+        onToggle={noop}
+        body="The widget wobbles under load."
+        rightSlot={<button>Spawn</button>}
+      />,
+    );
+
+    const row = container.querySelector('[data-issue-row]')!;
+    const preview = container.querySelector('p.line-clamp-2')!;
+    expect(preview).toBeTruthy();
+    // The title row is the row root's first flex child; the preview's
+    // wrapper is its sibling below.
+    const titleRow = row.firstElementChild!;
+    expect(titleRow.contains(preview)).toBe(false);
+    expect(preview.parentElement!.parentElement).toBe(titleRow.parentElement);
+  });
+
+  it('keeps the expanded panel inert — no onToggle on click, no space trap', () => {
+    // Regression: an expanded wrap in `role="button"` collapsed the row
+    // on click-release after every text selection and hijacked Space
+    // (the panel is `max-h-48 overflow-y-auto` — Space must scroll it,
+    // not snap the row shut). The panel must be a plain region: clicking
+    // it fires nothing, and keying Space on it fires nothing either.
+    const onToggle = vi.fn();
+    render(
+      <ProbeRow
+        dataAttr="issue"
+        rowKey={101}
+        number={101}
+        title="Fix the wobble"
+        url=""
+        iconAriaLabel="Open issue on GitHub"
+        isExpanded={true}
+        onToggle={onToggle}
+        body="The widget wobbles under load."
+      />,
+    );
+
+    const panel = screen.getByText('The widget wobbles under load.');
+    fireEvent.click(panel);
+    fireEvent.keyDown(panel, { key: ' ' });
+    fireEvent.keyDown(panel, { key: 'Enter' });
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(panel.closest('[role="button"]')).toBeNull();
   });
 
   it('renders the belowSlot as a child of the row, below the title row', () => {

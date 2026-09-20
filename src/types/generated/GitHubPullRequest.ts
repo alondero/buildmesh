@@ -64,6 +64,14 @@ head_repo_clone_url: string,
  */
 head_sha: string, 
 /**
+ * GitHub login of the PR's author — the contributor pill on the PRs
+ * probe row links to `https://github.com/<login>`. Sourced from the
+ * GraphQL summaries connection's `author { login }` (same request as
+ * every other list field — no extra enrichment call).
+ * `#[serde(default)]` for old cached payloads.
+ */
+author: string, 
+/**
  * Mergeability inline (issue #1529): `Some(true)` mergeable,
  * `Some(false)` conflicts, `None` while GitHub is still computing
  * (`UNKNOWN`) — mirrors the old `PrMergeability.mergeable` contract so

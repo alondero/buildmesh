@@ -40,6 +40,17 @@
  *   - `belowSlot`: rendered below the title row, inside the outer
  *     `<div data-X-row>`. The PR tab uses this for inline
  *     merge-error / spawn-error rows.
+ *   - `body` renders below BOTH columns, spanning the full row width —
+ *     the collapsed 2-line preview and the expanded `max-h-48` reading
+ *     panel alike. Long issue/PR text is primary reading material, so it
+ *     is not squeezed into the column left of the action buttons. The
+ *     collapsed preview is itself clickable (same `onToggle` as the
+ *     title column); the expanded panel is a plain, inert reading region
+ *     — wrapping scrollable text in a second `role="button"` would break
+ *     text selection, trap Space-bar scrolling, and violate the
+ *     button-content ARIA rule (buttons must not wrap interactive /
+ *     scrollable document content), so collapse happens only from the
+ *     title column.
  *
  * The slot wrappers in the *caller* carry the `onMouseDown`
  * stopPropagation for the dropdown click-outside handler —
@@ -94,9 +105,11 @@ export interface ProbeRowProps {
 
   /**
    * Body text. Null/empty hides the body region entirely (no
-   * clamped paragraph, no scrollable container). Strings of any
-   * length render — collapsed = clamped to 2 lines, expanded =
-   * scrollable up to `max-h-48`.
+   * collapsed preview, no expanded panel). Strings of any
+   * length render below the title + action columns at full row
+   * width — collapsed = a clickable 2-line preview (`onToggle`),
+   * expanded = a plain inert reading panel (selection / scroll /
+   * keyboard safe; collapse happens from the title column).
    */
   body?: string | null;
 
@@ -185,7 +198,9 @@ export function ProbeRow({
         {/* Left column — clickable to expand/collapse. The title
             `<a>` and the ↗ icon `<a>` (both via `<SafeLink>`) live
             here, each with stopPropagation so the row handler
-            doesn't fire when the user navigates to GitHub. */}
+            doesn't fire when the user navigates to GitHub. The body
+            moved OUT of this column (see below) so it can span the
+            full row width. */}
         <div
           ref={focusRef}
           role="button"
@@ -256,23 +271,53 @@ export function ProbeRow({
               {metaSlot}
             </div>
           )}
-          {hasBody &&
-            (isExpanded ? (
-              <div
-                data-issue-body-expanded={dataAttr === 'issue' ? true : undefined}
-                data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
-                className="mt-1.5 max-h-48 overflow-y-auto text-2xs leading-relaxed text-text-secondary whitespace-pre-wrap break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5"
-              >
-                {body}
-              </div>
-            ) : (
-              <p className="text-2xs text-text-muted mt-1 line-clamp-2 leading-relaxed">
-                {body}
-              </p>
-            ))}
         </div>
         {rightSlot}
       </div>
+      {/* Body — spans the FULL row width below the title + action
+          columns, so long issue/PR text isn't squeezed into the column
+          left of the buttons. Only the COLLAPSED preview is a second
+          disclosure control (mirrors the title column's handler). The
+          EXPANDED panel is plain, inert text — deliberately NOT
+          `role="button"`: wrapping a scrollable reading region in a
+          button would (1) collapse the row on click-release after every
+          text selection, (2) trap Space-bar scrolling (`preventDefault`
+          on the wrapper would swallow the panel's own scroll), and
+          (3) violate the button-content rule by embedding `overflow-y`
+          document content in an ARIA button. Collapse happens from the
+          title column (`aria-expanded` there stays the disclosure's
+          single control). */}
+      {hasBody &&
+        (isExpanded ? (
+          <div
+            data-issue-body-expanded={dataAttr === 'issue' ? true : undefined}
+            data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
+            className="px-2.5 pb-2 pl-3"
+          >
+            <div className="max-h-48 overflow-y-auto text-2xs leading-relaxed text-text-secondary whitespace-pre-wrap break-words rounded-md border border-border-subtle bg-bg-input px-2 py-1.5">
+              {body}
+            </div>
+          </div>
+        ) : (
+          <div
+            role="button"
+            tabIndex={0}
+            aria-expanded={false}
+            aria-label={`Expand ${dataAttr === 'pr' ? 'pull request' : 'issue'} #${rowKey} description`}
+            className="px-2.5 pb-2 pl-3 rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
+            onClick={onToggle}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onToggle();
+              }
+            }}
+          >
+            <p className="text-2xs text-text-muted line-clamp-2 leading-relaxed">
+              {body}
+            </p>
+          </div>
+        ))}
       {belowSlot && (
         <div className="px-2.5 pb-1.5 pl-3">{belowSlot}</div>
       )}

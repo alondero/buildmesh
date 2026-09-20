@@ -575,8 +575,8 @@ export const isAttentionPending = (nodeId: number) =>
 export const createPr = (sessionId: number, title: string, body: string) =>
   _invoke<string>('create_pr', { sessionId, title, body });
 
-export const mergePr = (prUrl: string) =>
-  _invoke<string>('merge_pr', { prUrl });
+export const mergePr = (prUrl: string, mergeMethod?: string) =>
+  _invoke<string>('merge_pr', { prUrl, mergeMethod });
 
 export const getCurrentBranch = (sessionId: number) =>
   _invoke<string>('get_current_branch', { sessionId });

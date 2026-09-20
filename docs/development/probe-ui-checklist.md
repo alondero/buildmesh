@@ -75,7 +75,11 @@ The dock resizes between **240px and 720px** (`PROBE_PANEL_BOUNDS` in
       contradictory instructions; you get a clipped single line competing with
       the buttons for width.
 - [ ] **Long lists cost height, not width.** Render sequences vertically so
-      the body's scroll absorbs them.
+      the body's scroll absorbs them. The same rule applies to prose: a row's
+      issue/PR body renders **below** the title + action columns, spanning the
+      row's full width (`ProbeRow`'s full-width body region) — putting
+      unbounded text in the column left of the buttons leaves it ~2–3 words
+      wide at 240px.
 
 ## 3. Status language
 

@@ -81,14 +81,14 @@ const MESH: Mesh = {
 // worktree from it. PRs without a head ref are fork PRs and the spawn flow
 // refuses them.
 const OPEN_PRS: GitHubPullRequest[] = [
-  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false, head_ref: 'feat/201-add-widget', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1', mergeable: true, mergeable_state: 'clean' },
-  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false, head_ref: 'refactor/202-core', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', mergeable: false, mergeable_state: 'dirty' },
-  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3', mergeable: false, mergeable_state: 'draft' },
-  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false, head_ref: 'fresh/204-pr', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4', mergeable: null, mergeable_state: 'unknown' },
+  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false, head_ref: 'feat/201-add-widget', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1', author: 'contributor-jane', mergeable: true, mergeable_state: 'clean' },
+  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false, head_ref: 'refactor/202-core', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', author: 'bob', mergeable: false, mergeable_state: 'dirty' },
+  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3', author: 'bob', mergeable: false, mergeable_state: 'draft' },
+  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false, head_ref: 'fresh/204-pr', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4', author: '', mergeable: null, mergeable_state: 'unknown' },
 ];
 
 const CLOSED_PRS: GitHubPullRequest[] = [
-  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false, head_ref: 'old/150-change', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5', mergeable: true, mergeable_state: 'clean' },
+  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false, head_ref: 'old/150-change', head_repo_owner: 'acme', head_repo_clone_url: 'https://github.com/acme/demo.git', head_sha: 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5', author: 'contributor-jane', mergeable: true, mergeable_state: 'clean' },
 ];
 
 const PROVIDERS = [
@@ -300,12 +300,227 @@ describe('GitPullRequestsTab', () => {
     await userEvent.click(confirmBtn);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('merge_pr', { prUrl: 'https://github.com/acme/demo/pull/201' });
+      expect(invoke).toHaveBeenCalledWith('merge_pr', {
+        prUrl: 'https://github.com/acme/demo/pull/201',
+        mergeMethod: 'squash',
+      });
     });
     // After a successful merge the list refetches.
     await waitFor(() => {
       expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length).toBeGreaterThan(1);
     });
+  });
+
+  // ----- Merge strategy picker -------------------------------------------
+  // The merge control is a split cluster: the left half arms the confirm
+  // for the currently selected strategy (squash by default — the
+  // historical behaviour), the ▾ half lists the strategies GitHub's REST
+  // merge endpoint accepts. Picking one arms the confirm with THAT
+  // strategy, and the confirm button names it, so the irreversible action
+  // never hides which technique will land.
+  // ---------------------------------------------------------------------
+
+  it('offers squash, merge-commit, and rebase in the strategy picker', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const strategyBtn = await screen.findByRole(
+      'button',
+      { name: 'Choose merge strategy for pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
+    await userEvent.click(strategyBtn);
+
+    const menu = await screen.findByRole('menu', {
+      name: 'Merge strategy for pull request #201',
+    });
+    const items = Array.from(menu.querySelectorAll('[role="menuitem"]')).map(
+      (el) => el.textContent,
+    );
+    expect(items).toEqual(['Squash and merge', 'Create a merge commit', 'Rebase and merge']);
+  });
+
+  it('arms the confirm for the picked strategy and merges with it', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const strategyBtn = await screen.findByRole(
+      'button',
+      { name: 'Choose merge strategy for pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
+    await userEvent.click(strategyBtn);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Rebase and merge' }));
+
+    // Picking a strategy arms the confirm — it must NOT merge on the
+    // click itself (irreversible outward action keeps its confirm gate).
+    expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
+    // The confirm names the strategy so the user can see what will land.
+    const confirmBtn = await screen.findByRole('button', {
+      name: 'Confirm rebase merge of pull request #201',
+    });
+    await userEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('merge_pr', {
+        prUrl: 'https://github.com/acme/demo/pull/201',
+        mergeMethod: 'rebase',
+      });
+    });
+  });
+
+  it('defaults to squash when the primary merge half is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole(
+      'button',
+      { name: 'Merge pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
+    await userEvent.click(mergeBtn);
+
+    // The default confirm names squash — the same strategy the pre-picker
+    // UI silently used.
+    const confirmBtn = await screen.findByRole('button', {
+      name: 'Confirm squash merge of pull request #201',
+    });
+    await userEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('merge_pr', {
+        prUrl: 'https://github.com/acme/demo/pull/201',
+        mergeMethod: 'squash',
+      });
+    });
+  });
+
+  it('closes the strategy picker on an outside mousedown (click-outside contract)', async () => {
+    // `useClickOutside` scopes the document mousedown listener to the
+    // tagged container (`data-dropdown-for="pr-method-201"`). A
+    // mismatched selector would close the menu on every click — including
+    // the item's own mousedown, unmounting it before the click lands — or
+    // leave it open forever. Pin the real DOM path: `fireEvent.mouseDown`
+    // on the document handler, then on the menu itself.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const strategyBtn = await screen.findByRole(
+      'button',
+      { name: 'Choose merge strategy for pull request #201' },
+      { timeout: MERGE_BTN_FIND_TIMEOUT_MS },
+    );
+    await userEvent.click(strategyBtn);
+    expect(
+      await screen.findByRole('menu', { name: 'Merge strategy for pull request #201' }),
+    ).toBeTruthy();
+
+    // A mousedown on the menu's own item must NOT close the menu — the
+    // hook's scoped selector has to match the tagged container. This is
+    // the exact failure mode of a bare-number hook argument: with
+    // `[data-dropdown-for="201"]` the item's mousedown reads as
+    // "outside" and the menu unmounts before the click.
+    fireEvent.mouseDown(screen.getByRole('menuitem', { name: 'Rebase and merge' }));
+    expect(
+      screen.queryByRole('menu', { name: 'Merge strategy for pull request #201' }),
+    ).toBeTruthy();
+
+    // A mousedown genuinely outside the menu dismisses it.
+    fireEvent.mouseDown(document.body);
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('menu', { name: 'Merge strategy for pull request #201' }),
+      ).toBeNull();
+    });
+  });
+
+  // ----- Contributor pill ------------------------------------------------
+  // The author of each PR / issue renders as a small `@login` pill beside
+  // the branch chip (PRs) / label chips (issues) that opens the
+  // contributor's GitHub profile.
+
+  it('renders the contributor pill next to the branch chip', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    const pill = row.querySelector('[title="@contributor-jane on GitHub"]');
+    expect(pill).toBeTruthy();
+    expect(pill!.textContent).toContain('@contributor-jane');
+    expect(pill!.getAttribute('href')).toBe('https://github.com/contributor-jane');
+  });
+
+  it('opens the contributor profile via openUrl when the pill is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const pill = await screen.findByRole('link', {
+      name: "Open contributor-jane's GitHub profile",
+    });
+    await userEvent.click(pill);
+
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/contributor-jane');
+  });
+
+  it('omits the contributor pill when the author is empty', async () => {
+    // PR 204's fixture carries `author: ''` (partial GitHub payload) — an
+    // empty login must render nothing rather than a dead link to
+    // `https://github.com/`.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Fresh PR');
+    const row = title.closest('[data-pr-row]')!;
+    expect(row.querySelector('[title^="@"]')).toBeNull();
+  });
+
+  // ----- Full-width body -------------------------------------------------
+  // The body text spans the whole row width BELOW the title + action
+  // columns, so long issue/PR text isn't squeezed into the column left of
+  // the buttons. The COLLAPSED preview is a disclosure control that
+  // expands; the EXPANDED panel is an inert reading region (no toggle
+  // on click — text selection and Space scrolling must not snap the row
+  // shut). ProbeRow pins the interaction contract; these two pin the
+  // assembled layout contract.
+
+  it('renders the collapsed preview below the action column, not beside it', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    const leftColumn = title.closest('[role="button"]')!;
+    // The preview's wrapper is a sibling of the row holding the title +
+    // right slot — i.e. it spans the row's full width rather than
+    // stopping at the action column.
+    const clampedBody = row.querySelector('p.line-clamp-2') as HTMLElement;
+
+    expect(clampedBody).toBeTruthy();
+    expect(leftColumn.contains(clampedBody)).toBe(false);
+    expect(row.contains(clampedBody)).toBe(true);
+    const titleRow = leftColumn.parentElement!;
+    expect(clampedBody.parentElement!.parentElement).toBe(titleRow.parentElement);
+  });
+
+  it('keeps the expanded panel inert — clicking it does not collapse the row', async () => {
+    // The expanded reading panel is deliberately NOT a `role="button"`:
+    // wrapping scrollable text in a button collapsed the row on
+    // click-release after every text selection and trapped Space-bar
+    // scrolling. Pin the assembled-contract: expand via the preview,
+    // click the panel, the row stays expanded.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    await userEvent.click(row.querySelector('p.line-clamp-2') as HTMLElement);
+
+    const panel = row.querySelector('[data-pr-body-expanded]') as HTMLElement;
+    expect(panel).toBeTruthy();
+    await userEvent.click(panel);
+    expect(row.querySelector('[data-pr-body-expanded]')).toBeTruthy();
+    expect(row.querySelector('p.line-clamp-2')).toBeNull();
   });
 
   // Issue #780 — the merge flow must force-invalidate the Open PR
@@ -1147,7 +1362,7 @@ describe('GitPullRequestsTab', () => {
   // Per memory feedback-probe-tab-test-and-jsdoc-gotchas §4: row's
   // bounding-box center is on the title <a> (stopPropagation), so
   // click the body / link directly, not the row.
-  it('expands the body to the full text when the body is clicked', async () => {
+  it('expands the body to the full text when the preview is clicked', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
@@ -1165,10 +1380,11 @@ describe('GitPullRequestsTab', () => {
     expect(expandedBody!.textContent).toBe('Adds the widget');
     expect(row.querySelector('p.line-clamp-2')).toBeNull();
 
-    const expandedBodyEl = row.querySelector(
-      'div.max-h-48, [data-pr-body-expanded]',
-    ) as HTMLElement;
-    await userEvent.click(expandedBodyEl);
+    // The expanded panel is INERT by design (it must not collapse on a
+    // text-selection click-release, and Space must scroll it) — collapse
+    // happens from the title column.
+    const titleColumn = title.closest('[role="button"]') as HTMLElement;
+    await userEvent.click(titleColumn);
     expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
     expect(row.querySelector('[data-pr-body-expanded], div.max-h-48')).toBeNull();
   });
@@ -1328,6 +1544,7 @@ describe('GitPullRequestsTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('merge_pr', {
         prUrl: 'https://github.com/acme/demo/pull/201',
+        mergeMethod: 'squash',
       });
     });
   });

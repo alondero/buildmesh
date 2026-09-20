@@ -27,9 +27,12 @@
  * panel-level error with manual retry. Stale list responses are dropped via
  * the `useAsyncEffect` abort signal when the mesh/filter changes.
  *
- * Merge is squash + delete branch (the existing `merge_pr`), gated behind an
- * inline confirm because it's an irreversible outward action. On success the
- * list refetches so the merged PR drops out of the open view.
+ * Merge strategy is the user's choice (`squash` / `merge` / `rebase` —
+ * the ▾ half of the merge split button), sent to `merge_pr` and echoed
+ * back in its success message; the default stays squash + delete branch,
+ * which is what older callers (PrPill, mobile) still get. Gated behind an
+ * inline confirm because it's an irreversible outward action. On success
+ * the list refetches so the merged PR drops out of the open view.
  *
  * Read-oriented companion (issue #421): each row has a "View changes" button
  * that opens the PR's diff in the Center Workspace Diff Overlay
@@ -84,6 +87,7 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
@@ -95,6 +99,38 @@ import {
 } from '../shared/Spinner';
 
 type StateFilter = 'open' | 'closed';
+
+/**
+ * Merge strategies offered by the merge dropdown. `value` is GitHub's
+ * REST `merge_method` vocabulary — sent verbatim to `merge_pr`, which
+ * validates it again at the seam (`normalise_merge_method`). The
+ * confirm button names the strategy explicitly (`confirmAria` /
+ * `confirmTitle`) so the irreversible action never hides which
+ * technique will land; `shortLabel` is its visible text.
+ */
+const MERGE_METHODS = [
+  {
+    value: 'squash',
+    label: 'Squash and merge',
+    shortLabel: 'Squash',
+    confirmTitle: 'Confirm squash merge',
+    confirmAria: (n: number) => `Confirm squash merge of pull request #${n}`,
+  },
+  {
+    value: 'merge',
+    label: 'Create a merge commit',
+    shortLabel: 'Merge commit',
+    confirmTitle: 'Confirm merge commit',
+    confirmAria: (n: number) => `Confirm merge commit of pull request #${n}`,
+  },
+  {
+    value: 'rebase',
+    label: 'Rebase and merge',
+    shortLabel: 'Rebase',
+    confirmTitle: 'Confirm rebase merge',
+    confirmAria: (n: number) => `Confirm rebase merge of pull request #${n}`,
+  },
+] as const;
 
 /** Derived merge readiness for one open PR (issue #1529 — inline fields). */
 type MergeStatus =
@@ -255,9 +291,13 @@ export function GitPullRequestsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
-  // Which PR is awaiting an inline merge confirm, and which is mid-merge.
+  // Which PR is awaiting an inline merge confirm, which is mid-merge,
+  // and — for the confirming row — which strategy the user armed
+  // (defaults to squash, the historical behaviour; the ▾ picker arms a
+  // different one).
   const [confirming, setConfirming] = useState<number | null>(null);
   const [merging, setMerging] = useState<number | null>(null);
+  const [mergeMethodByPr, setMergeMethodByPr] = useState<Record<number, string>>({});
   // Per-row merge failure message (transient `gh`/network hiccup, etc.).
   const [mergeError, setMergeError] = useState<Record<number, string>>({});
   // Spawn state (issue #420) — mirrors the issue-tab pattern: a per-PR
@@ -268,6 +308,7 @@ export function GitPullRequestsTab() {
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [spawnError, setSpawnError] = useState<Record<number, string>>({});
   const [providerList, setProviderList] = useState<SpawnOption[]>([]);
+  const [mergeMethodDropdown, setMergeMethodDropdown] = useState<number | null>(null);
   // Client-side search over the loaded list — mirrors GitIssuesTab and
   // ArchivedNodesTab. Matches title, body, and head_ref so a branch name
   // finds its PR. No debounce needed; the list is in memory.
@@ -434,14 +475,33 @@ export function GitPullRequestsTab() {
   useAsyncEffect(() => { refreshProviderList(); }, [refreshProviderList]);
   useProviderListInvalidation(refreshProviderList);
 
-  // Close the provider dropdown when clicking outside it. The dropdown
-  // container carries a `data-dropdown-for` attribute set to the PR number,
-  // matching the issue-tab pattern (memory:
-  // feedback-probe-tab-test-and-jsdoc-gotchas — mousedown vs click race).
-  // Issue #492 — shared `useClickOutside` hook; the scoped selector lives
-  // in the hook so a future caller cannot reintroduce the loose-selector
-  // drift that #492 fixed in Sidebar.
-  useClickOutside(openDropdown, () => setOpenDropdown(null));
+  // Close the provider dropdown when clicking outside it. The menu tags
+  // itself with the SURFACE-PREFIXED key (`dropdownId('pr', n)` → e.g.
+  // "pr-201") — the hook MUST receive that same string, not the bare
+  // number, or its `[data-dropdown-for="…"]` selector matches nothing
+  // and every mousedown counts as "outside" (the spawn picker only
+  // survived this mismatch because its stopPropagation wrapper swallows
+  // internal mousedowns before they reach `document`; see the method
+  // picker below for the un-wrapped case). Matches the issue-tab
+  // pattern (memory: feedback-probe-tab-test-and-jsdoc-gotchas —
+  // mousedown vs click race). Issue #492 — shared `useClickOutside`
+  // hook; the scoped selector lives in the hook so a future caller
+  // cannot reintroduce the loose-selector drift #492 fixed in Sidebar.
+  useClickOutside<string>(
+    openDropdown !== null ? dropdownId('pr', openDropdown) : null,
+    () => setOpenDropdown(null),
+  );
+  // Merge-method picker — separate click-outside scope (`pr-method-<n>`,
+  // not the provider picker's `pr-<n>`) so the two menus can't trip
+  // each other's handler. This menu is NOT wrapped in a stopPropagation
+  // guard (its clicks bubble normally), so the prefixed id above is
+  // load-bearing here: with a bare number the hook would close the menu
+  // on the item's own mousedown, unmounting it before the click lands
+  // and making strategy selection impossible in a real browser.
+  useClickOutside<string>(
+    mergeMethodDropdown !== null ? dropdownId('pr-method', mergeMethodDropdown) : null,
+    () => setMergeMethodDropdown(null),
+  );
 
   // One backend-owned acceptance call. The node-created event makes the row
   // visible immediately; completion/failure events arrive when the intent
@@ -525,16 +585,17 @@ export function GitPullRequestsTab() {
     }
   };
 
-  const handleMerge = async (pr: GitHubPullRequest) => {
+  const handleMerge = async (pr: GitHubPullRequest, method: string) => {
     setMerging(pr.number);
     setConfirming(null);
+    setMergeMethodDropdown(null);
     setMergeError((prev) => {
       const next = { ...prev };
       delete next[pr.number];
       return next;
     });
     try {
-      await mergePr(pr.url);
+      await mergePr(pr.url, method);
       // Issue #780 — force-invalidate the Open PR cache for every
       // agent node whose branch matches the merged PR's head ref, so
       // the chip in GridNodeHeader flips to "no open PR" immediately
@@ -666,6 +727,9 @@ export function GitPullRequestsTab() {
               const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
               const isConfirming = confirming === pr.number;
+              const selectedMethod = mergeMethodByPr[pr.number] ?? 'squash';
+              const selectedMethodDef =
+                MERGE_METHODS.find((m) => m.value === selectedMethod) ?? MERGE_METHODS[0];
               const rowError = mergeError[pr.number];
               const isSpawning = spawning === pr.number;
               const isDropdownOpen = openDropdown === pr.number;
@@ -720,6 +784,15 @@ export function GitPullRequestsTab() {
                         </span>,
                       );
                     }
+                    // Contributor pill — the PR's author, linking to
+                    // their GitHub profile. Sits next to the branch
+                    // chip (same metaSlot row); an empty author (older
+                    // cached payload) renders nothing.
+                    if (pr.author) {
+                      chips.push(
+                        <ContributorPill key="author" login={pr.author} />,
+                      );
+                    }
                     // Fork badge — only when the PR's head repo owner
                     // differs from the destination repo's owner. For
                     // same-repo PRs `head_repo_owner` IS the destination
@@ -754,16 +827,19 @@ export function GitPullRequestsTab() {
                     // button clicks here don't bubble to the row's
                     // `onToggle` — see `ProbeRow.tsx` for the layout.
                     <>
-                      {/* Merge control — open PRs only. Icon-only button
-                          (git-merge SVG) reclaims the 360px dock from
-                          button text. `aria-label` carries the PR number
-                          for screen readers; `title` is the hover tooltip.
-                          In the confirm state we swap to a green check +
-                          muted x — same colour semantics the text version
-                          used (green = go, muted = dismiss). The Confirm
-                          button is intentionally larger than Cancel via
-                          `px-2.5` (vs `p-1.5`) so the eye lands on the
-                          safe-looking affirmative. */}
+                      {/* Merge control — open PRs only. Icon-only split
+                          cluster (git-merge SVG + ▾) reclaims the 360px
+                          dock from button text. The left half arms the
+                          confirm for the selected strategy (default
+                          squash); the ▾ picker (squash / merge commit /
+                          rebase) arms the confirm with that strategy, so
+                          every merge passes through exactly one confirm
+                          and the confirm names the strategy. `aria-label`
+                          carries the PR number for screen readers;
+                          `title` is the hover tooltip. The confirm state
+                          swaps to a green check + muted x — same colour
+                          semantics as before (green = go, muted =
+                          dismiss). */}
                       {stateFilter === 'open' && (
                         <div
                           className="shrink-0 flex items-center gap-1"
@@ -775,13 +851,13 @@ export function GitPullRequestsTab() {
                             <>
                               <button
                                 type="button"
-                                onClick={() => handleMerge(pr)}
-                                aria-label={`Confirm squash merge of pull request #${pr.number}`}
-                                title="Confirm squash merge"
+                                onClick={() => handleMerge(pr, selectedMethod)}
+                                aria-label={selectedMethodDef.confirmAria(pr.number)}
+                                title={selectedMethodDef.confirmTitle}
                                 className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
                               >
                                 <CheckIcon className="w-3.5 h-3.5" />
-                                <span>Confirm</span>
+                                <span>{selectedMethodDef.shortLabel}</span>
                               </button>
                               <button
                                 type="button"
@@ -794,16 +870,70 @@ export function GitPullRequestsTab() {
                               </button>
                             </>
                           ) : status.kind === 'mergeable' ? (
-                            <button
-                              type="button"
-                              onClick={() => setConfirming(pr.number)}
-                              disabled={merging !== null}
-                              aria-label={`Merge pull request #${pr.number}`}
-                              title="Merge pull request"
-                              className="p-1.5 rounded-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            // Split cluster: the left half arms the
+                            // confirm for the currently selected
+                            // strategy (default squash); the ▾ half
+                            // opens the strategy picker, which arms the
+                            // confirm with that strategy — every merge
+                            // passes through exactly one confirm, and
+                            // the confirm names the strategy.
+                            <div
+                              className="relative flex items-center"
+                              data-dropdown-for={dropdownId('pr-method', pr.number)}
                             >
-                              <GitMergeIcon className="w-3.5 h-3.5" />
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirming(pr.number)}
+                                disabled={merging !== null}
+                                aria-label={`Merge pull request #${pr.number}`}
+                                title={`Merge pull request (${selectedMethodDef.label} & delete branch)`}
+                                className="inline-flex items-center p-1.5 rounded-l-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              >
+                                <GitMergeIcon className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setMergeMethodDropdown(
+                                    mergeMethodDropdown === pr.number ? null : pr.number,
+                                  )
+                                }
+                                disabled={merging !== null}
+                                aria-haspopup="menu"
+                                aria-expanded={mergeMethodDropdown === pr.number}
+                                aria-label={`Choose merge strategy for pull request #${pr.number}`}
+                                title="Choose merge strategy"
+                                className="inline-flex items-center px-1 py-1.5 rounded-r-md bg-accent-cyan/10 text-accent-cyan/80 hover:bg-accent-cyan/20 hover:text-accent-cyan disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-2xs"
+                              >
+                                ▾
+                              </button>
+                              {mergeMethodDropdown === pr.number && (
+                                <div
+                                  role="menu"
+                                  aria-label={`Merge strategy for pull request #${pr.number}`}
+                                  className="absolute right-0 top-full z-50 mt-1 min-w-[160px] rounded-md border border-border-subtle bg-bg-card py-1 shadow-lg"
+                                >
+                                  {MERGE_METHODS.map((m) => (
+                                    <button
+                                      key={m.value}
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        setMergeMethodByPr((prev) => ({
+                                          ...prev,
+                                          [pr.number]: m.value,
+                                        }));
+                                        setMergeMethodDropdown(null);
+                                        setConfirming(pr.number);
+                                      }}
+                                      className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+                                    >
+                                      {m.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                           ) : status.kind === 'checking' ? (
                             <span
                               className="inline-flex items-center gap-1 px-2 py-1 text-2xs text-text-muted"

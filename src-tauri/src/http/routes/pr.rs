@@ -59,10 +59,12 @@ struct MergeRequest {
 }
 
 /// `POST /api/meshes/{id}/pulls/{n}/merge` — merge a PR (squash +
-/// delete branch, matching the desktop panel). The `pr_number` from the
-/// path is echoed back in the response for client convenience, but the
-/// `url` in the body is the authoritative argument — `merge_pr` only
-/// understands full PR URLs.
+/// delete branch, matching the desktop panel's default strategy; the
+/// desktop merge-strategy dropdown passes its choice through
+/// `merge_pr`'s optional `merge_method` argument, which this route
+/// leaves unset). The `pr_number` from the path is echoed back in the
+/// response for client convenience, but the `url` in the body is the
+/// authoritative argument — `merge_pr` only understands full PR URLs.
 pub async fn merge(req: &ParsedRequest) -> Response {
     let pr_number = req.id1();
 
@@ -73,7 +75,7 @@ pub async fn merge(req: &ParsedRequest) -> Response {
         }
     };
 
-    match crate::commands::pr::merge_pr(parsed.url).await {
+    match crate::commands::pr::merge_pr(parsed.url, None).await {
         Ok(merged_url) => {
             let body = serde_json::to_string(&serde_json::json!({
                 "url": merged_url,

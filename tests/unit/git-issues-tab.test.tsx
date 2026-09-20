@@ -80,6 +80,7 @@ const ISSUES: GitHubIssue[] = [
     state: 'open',
     labels: ['bug'],
     blocked_by: [],
+    author: 'alice',
   },
   {
     number: 102,
@@ -89,6 +90,9 @@ const ISSUES: GitHubIssue[] = [
     state: 'open',
     labels: [],
     blocked_by: [],
+    // No author — partial GitHub payload. The contributor pill must
+    // render nothing rather than a dead `https://github.com/` link.
+    author: '',
   },
 ];
 
@@ -373,7 +377,7 @@ describe('GitIssuesTab (#378)', () => {
     expect(clampedBody).toBeTruthy();
     expect(clampedBody.textContent).toContain('wobbles under load');
 
-    // Expand — click the body (the user's actual click target).
+    // Expand — click the collapsed preview (the user's actual click target).
     await userEvent.click(clampedBody);
     const expandedBody = row.querySelector('div.max-h-48, [data-issue-body-expanded]');
     expect(expandedBody).toBeTruthy();
@@ -381,12 +385,11 @@ describe('GitIssuesTab (#378)', () => {
     // The clamp is gone — no line-clamp-2 element on the body now.
     expect(row.querySelector('p.line-clamp-2')).toBeNull();
 
-    // Collapse — click the expanded body (the same region, now showing
-    // the full text) to re-apply the clamp.
-    const expandedBodyEl = row.querySelector(
-      'div.max-h-48, [data-issue-body-expanded]',
-    ) as HTMLElement;
-    await userEvent.click(expandedBodyEl);
+    // The expanded panel is INERT by design (text selection / Space
+    // scrolling must not snap the row shut) — collapse happens from the
+    // title column, so click the column back to re-apply the clamp.
+    const titleColumn = title.closest('[role="button"]') as HTMLElement;
+    await userEvent.click(titleColumn);
     expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
     expect(row.querySelector('[data-issue-body-expanded], div.max-h-48')).toBeNull();
   });
@@ -841,8 +844,8 @@ describe('GitIssuesTab (#378)', () => {
   // ----- Trigger-label toggle (issue #979) ---------------------------
   // The Issues Probe surfaces the mesh's configured autopilot trigger
   // label as a click-to-toggle badge under the Spawn button:
-  //   - green check (✓ buildmesh:run) when the issue carries the label,
-  //   - neutral plus (+ buildmesh:run) when it doesn't.
+  //   - check icon when the issue carries the label,
+  //   - line-plus icon when it doesn't.
   // Clicking the badge adds/removes the label on GitHub with optimistic
   // UI + rollback on failure (see the locked design decisions #1-#5 in
   // map #979). Tests below pin the visible states, the IPC contract,
@@ -878,8 +881,10 @@ describe('GitIssuesTab (#378)', () => {
     // surfaces here rather than at the IPC seam.
     expect(badge.getAttribute('data-trigger-label')).toBe('remove');
     // The label name must be visible text so the user knows which label
-    // they're toggling — the default `buildmesh:run` plus the ✓ check.
+    // they're toggling. The add/remove affordance is the icon alone — a
+    // `✓` glyph in the text duplicated it into noise.
     expect(badge.textContent).toContain('buildmesh:run');
+    expect(badge.textContent).not.toContain('✓');
   });
 
   it('renders the trigger-label badge in the absent state when the issue does not carry the label', async () => {
@@ -893,8 +898,12 @@ describe('GitIssuesTab (#378)', () => {
     );
     expect(badge).toBeTruthy();
     expect(badge.getAttribute('data-trigger-label')).toBe('add');
-    expect(badge.textContent).toContain('+');
+    // The affordance is the icon only — no duplicated `+` in the text.
+    expect(badge.textContent).not.toContain('+');
     expect(badge.textContent).toContain('buildmesh:run');
+    // The icon (not text) carries the affordance, so AT users get the
+    // action from the aria-label/title while sighted users read the icon.
+    expect(badge.querySelector('svg')).toBeTruthy();
   });
 
   it('does not render the badge when the mesh has no trigger label configured', async () => {
@@ -1161,6 +1170,45 @@ describe('GitIssuesTab (#378)', () => {
     const overflow = row.querySelector('[title="needs-repro, v2"]');
     expect(overflow).toBeTruthy();
     expect(overflow!.textContent).toContain('+2');
+  });
+
+  // ----- Contributor pill ------------------------------------------------
+  // The issue's author renders as a small `@login` pill after the label
+  // chips; clicking it opens the contributor's GitHub profile.
+
+  it('renders the contributor pill for an issued author', async () => {
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Fix the wobble');
+    const row = title.closest('[data-issue-row]')!;
+    const pill = row.querySelector('[title="@alice on GitHub"]');
+    expect(pill).toBeTruthy();
+    expect(pill!.textContent).toContain('@alice');
+    expect(pill!.getAttribute('href')).toBe('https://github.com/alice');
+  });
+
+  it('opens the contributor profile via openUrl when the pill is clicked', async () => {
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const pill = await screen.findByRole('link', {
+      name: "Open alice's GitHub profile",
+    });
+    await userEvent.click(pill);
+
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alice');
+  });
+
+  it('omits the contributor pill for an empty author', async () => {
+    // Issue 102's fixture carries `author: ''` (partial GitHub payload) —
+    // no pill, never a dead link to `https://github.com/`.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Add a /v2 endpoint');
+    const row = title.closest('[data-issue-row]')!;
+    expect(row.querySelector('[title^="@"]')).toBeNull();
   });
 
   it('disables the badge while a toggle is in flight to block double-clicks', async () => {

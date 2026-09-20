@@ -135,6 +135,7 @@ function makeIssue(overrides: Partial<GitHubIssue> = {}): GitHubIssue {
     state: 'open',
     labels: ['bug', 'test'],
     blocked_by: [],
+    author: 'alice',
     ...overrides,
   };
 }
@@ -151,6 +152,7 @@ function makePullRequest(overrides: Partial<GitHubPullRequest> = {}): GitHubPull
     head_repo_owner: 'alice',
     head_repo_clone_url: '',
     head_sha: '',
+    author: 'alice',
     mergeable: true,
     mergeable_state: 'clean',
     ...overrides,
