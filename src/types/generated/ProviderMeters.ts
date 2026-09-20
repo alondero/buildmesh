@@ -31,4 +31,12 @@ usageTracked: boolean,
 /**
  * The fetched meters; `None` when usage isn't tracked.
  */
-usage: ProviderUsage | null, };
+usage: ProviderUsage | null, 
+/**
+ * Epoch seconds the reading was fetched from the provider. Set only when
+ * `usage` is served from the durable last-known cache instead of a live
+ * fetch (ADR-0037); `null`/absent means fetched live on this call. The UI
+ * labels such a row "Last known value · …" so a stale reading is never
+ * mistaken for a live one.
+ */
+cachedAt?: number, };

@@ -9,6 +9,10 @@
 //!   wire triple from a [`outcome::UsageOutcome`] (the seam that prevents
 //!   per-adapter drift). Visibility-fenced so adapters cannot bypass it.
 //! - [`cache`] — 5-minute in-process TTL cache keyed on account identity.
+//! - [`last_known`] — 7-day *durable* store of the last reading each provider
+//!   reported, used to keep a meter visible when a fetch cannot produce a fresh
+//!   reading (ADR-0037). Distinct from [`cache`]: that one keeps a reading
+//!   fresh within a process, this one survives restarts.
 //! - [`adapter`] — the [`adapter::UsageAdapter`] seam and shared HTTP driver.
 //! - [`adapters`] — per-provider drop-in adapters.
 //! - [`catalog`] — registry + dispatch + cache lookup.
@@ -18,6 +22,7 @@ pub(crate) mod cache;
 pub(crate) mod adapter;
 pub(crate) mod adapters;
 pub(crate) mod catalog;
+pub(crate) mod last_known;
 pub(crate) mod outcome;
 
 // Re-export the wire types so existing `crate::services::usage::{...}`

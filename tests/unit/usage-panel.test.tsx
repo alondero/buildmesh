@@ -348,3 +348,61 @@ describe('ExplicitUsageMeter (issue #1671 states)', () => {
     expect(container.querySelector('.truncate [data-testid="usage-state-managed-externally"]')).toBeNull();
   });
 });
+
+/**
+ * Last-known fallback (ADR-0037). A meter whose provider had no usable
+ * credential this round is served from the durable last-known store — the row
+ * stays visible, but it must be unmistakably labelled as a *remembered*
+ * reading, never presented as live.
+ */
+describe('LastKnownNote (last-known fallback, ADR-0037)', () => {
+  const FETCHED_AT_SECS = Math.floor(Date.parse('2026-09-17T09:00:00Z') / 1000);
+  const THREE_DAYS_LATER = new Date('2026-09-20T09:00:00Z');
+
+  function renderPanel(over: Partial<ProviderMeters>) {
+    return render(
+      <UsagePanel
+        account={account({ id: 'grok', name: 'Grok' })}
+        meter={meter({ provider: 'grok', ...over })}
+      />,
+    );
+  }
+
+  function rememberedReading(): ProviderUsage {
+    return usage({
+      provider: 'grok',
+      windows: [{ label: 'Weekly', usedPercent: 72.5, resetsAt: null }],
+    });
+  }
+
+  it('labels a cached reading with how long ago it was fetched', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(THREE_DAYS_LATER);
+      renderPanel({ cachedAt: FETCHED_AT_SECS, usage: rememberedReading() });
+
+      const note = screen.getByTestId('usage-last-known');
+      expect(note.textContent).toBe('Last known value · 3d ago');
+      // Raw value kept on a data attribute so tests/CSS never depend on prose.
+      expect(note.getAttribute('data-cached-at')).toBe(String(FETCHED_AT_SECS));
+      // The remembered numbers still render — that is the point of the fallback.
+      expect(screen.getByText('Weekly')).toBeTruthy();
+      expect(screen.getByText('72.5%')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a live reading unlabelled', () => {
+    renderPanel({ usage: rememberedReading() });
+    expect(screen.queryByTestId('usage-last-known')).toBeNull();
+  });
+
+  it('still says the row is last known when the remembered reading renders nothing', () => {
+    // `cachedAt` sits outside the `hasMeters` guard deliberately: a fallback row
+    // must admit what it is even when the remembered reading is empty.
+    renderPanel({ cachedAt: FETCHED_AT_SECS, usage: usage({ provider: 'grok' }) });
+    expect(screen.getByText('Unavailable')).toBeTruthy();
+    expect(screen.getByTestId('usage-last-known')).toBeTruthy();
+  });
+});

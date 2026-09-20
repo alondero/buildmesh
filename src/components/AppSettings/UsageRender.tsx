@@ -13,6 +13,7 @@
  *   - `UsageBar`     — single `UsageWindow` → labeled fill bar (#537)
  *   - `BalanceCard`  — single `BillingBalance` → two-row wallet readout
  *   - `ExplicitUsageMeter` — capped, uncapped, unlimited, external, unavailable
+ *   - `LastKnownNote` — "this meter is a cached reading, not a live one" caption
  *   - `UsagePanel`   — one provider's row on the glanceable surface
  *                      (icon + name + optional Refresh + meter body)
  *
@@ -25,6 +26,7 @@
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import type { UsageWindow, BillingBalance, UsageAmount, UsageMeter } from '../../lib/tauri';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { formatRelativeAge } from '../../lib/time';
 
 /** A single subscription-quota window as a labeled fill bar. The "0%
  *  renders as a real figure" rule is the issue #537 regression — a `> 0`
@@ -180,6 +182,27 @@ export function BalanceCard({ balance }: { balance: BillingBalance }) {
   );
 }
 
+/** Caption for a meter served from the durable last-known cache (ADR-0037)
+ *  rather than a live fetch — the provider had no usable credential this round,
+ *  so the row shows the last reading it did report. Without this the value,
+ *  which may be up to seven days old, would be indistinguishable from a live
+ *  one. Relative-only (minute grain, no per-second ticker): the reading is
+ *  stale by definition, so a ticking counter would imply freshness it doesn't
+ *  have. The absolute instant stays available via `title`. */
+export function LastKnownNote({ cachedAt }: { cachedAt: number }) {
+  const fetchedAt = new Date(cachedAt * 1000);
+  return (
+    <p
+      className="text-2xs text-text-muted mt-2"
+      data-testid="usage-last-known"
+      data-cached-at={cachedAt}
+      title={fetchedAt.toLocaleString()}
+    >
+      {`Last known value · ${formatRelativeAge(fetchedAt, new Date())}`}
+    </p>
+  );
+}
+
 /** One provider's read-only Usage Meter row on the glanceable surface.
  *  Pairs an account (for name + icon + enabled state) with the matching
  *  `ProviderMeters` row from `get_provider_meters`. The optional
@@ -263,6 +286,9 @@ export function UsagePanel({
         ))}
         {!hasMeters && <p className="text-2xs text-text-muted">Unavailable</p>}
         {meter.usage.detail && <p className="text-2xs text-text-secondary mt-2">{meter.usage.detail}</p>}
+        {/* Outside the `hasMeters` guard on purpose: a fallback row must say so
+            even if the remembered reading turns out to have nothing renderable. */}
+        {meter.cachedAt != null && <LastKnownNote cachedAt={meter.cachedAt} />}
       </div>
     );
   };
