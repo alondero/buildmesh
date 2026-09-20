@@ -20,7 +20,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 // when a real PR adds a 13th provider, both gate and tests see it
 // without anyone touching the fixtures.
 const realProviderTypesPath = join(root, 'src/types/generated/Provider.ts');
-const realHarnessLabelPath = join(root, 'src/components/Circuits/harnessCapabilities.ts');
+const realHarnessLabelPath = join(root, 'src/types/generated/HarnessCapabilitiesTable.json');
 const realReadmePath = join(root, 'README.md');
 
 const realProviderTypes = readFileSync(realProviderTypesPath, 'utf8');
@@ -335,6 +335,11 @@ test('parseHarnessLabel extracts the canonical table', () => {
   for (const v of Object.values(out)) {
     assert.ok(typeof v === 'string' && v.length > 0, `bad label value: ${v}`);
   }
+});
+
+test('parseHarnessLabel returns null for a non-catalog document', () => {
+  assert.equal(_parseHarnessLabel('export const HARNESS_LABEL = { anthropic: "Claude Code" };'), null);
+  assert.equal(_parseHarnessLabel('{ "not": "a catalog" }'), null);
 });
 
 test('featuresMultiAgentSection extracts the Features bullet', () => {

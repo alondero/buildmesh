@@ -248,10 +248,9 @@ function Invoke-Rust {
 function Invoke-ReadmeDrift {
   # Issue #1545 — the README is the user-facing landing page; a stale
   # provider count or a missing SmartScreen warning becomes a real
-  # support burden. scripts/check-readme-drift.mjs reads the source of
-  # truth (src/types/generated/Provider.ts + the canonical HARNESS_LABEL
-  # in src/components/Circuits/harnessCapabilities.ts) and asserts the
-  # README matches. Cheap (no build dependency, ~50ms).
+  # support burden. scripts/check-readme-drift.mjs reads the generated
+  # Provider union and HarnessCapabilitiesTable.json (ADR-0037) and
+  # asserts the README matches. Cheap (no build dependency, ~50ms).
   Write-Host '== README drift (issue #1545) ==' -ForegroundColor Cyan
   Push-Location $repo
   try {

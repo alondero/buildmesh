@@ -8,11 +8,10 @@
 // same function into a script.
 //
 // Source of truth: `src/types/generated/Provider.ts` (the ts-rs-generated
-// binding for the `Provider` enum — committed and regen-gated per the
-// shared-types rule in CLAUDE.md) and `HARNESS_LABEL` exported from
-// `src/components/Circuits/harnessCapabilities.ts` (the canonical harness
-// label used by the Inspector dropdown and Spawn Menu — `UiMeta::label`
-// in Rust mirrors this same table).
+// binding for the `Provider` enum) and
+// `src/types/generated/HarnessCapabilitiesTable.json` (the catalog
+// exporter in `src-tauri/src/agent/harness_catalog.rs`). Both are
+// committed and regen-gated by `git diff --exit-code src/types/generated`.
 //
 // Run:
 //   node scripts/check-readme-drift.mjs          # CI / local
@@ -30,7 +29,8 @@ const __dirname = dirname(__filename);
 export const repoRoot = resolve(__dirname, '..');
 export const readmePath = resolve(repoRoot, 'README.md');
 export const providerTypesPath = resolve(repoRoot, 'src/types/generated/Provider.ts');
-export const harnessLabelPath = resolve(repoRoot, 'src/components/Circuits/harnessCapabilities.ts');
+export const harnessLabelPath = resolve(repoRoot, 'src/types/generated/HarnessCapabilitiesTable.json');
+export const harnessCatalogPath = harnessLabelPath;
 
 /** Number → English word for small integers. Used to verify the README's
  *  count claim ("Twelve harnesses") against the actual Provider enum
@@ -58,20 +58,26 @@ export function parseProviderVariants(providerTypes) {
   return [...new Set([...m[1].matchAll(/"([a-z][a-z0-9_-]*)"/g)].map((x) => x[1]))];
 }
 
-/** Parse the `HARNESS_LABEL` table out of harnessCapabilities.ts as text.
- *  Avoids pulling in ts-node / a TypeScript build step. The shape is
- *  statically known (`export const HARNESS_LABEL: Record<...> = { key: 'label', ... };`)
- *  and the regex is forgiving enough to survive the project's 2-space
- *  indent + trailing-comma convention. If the shape ever changes, this
- *  helper returns `null` and the gate trips with a clear error. */
-export function parseHarnessLabel(ts) {
-  const m = ts.match(/export\s+const\s+HARNESS_LABEL[^{]*\{([\s\S]*?)\n\}\s*;?/);
-  if (!m) return null;
-  const out = {};
-  for (const e of m[1].matchAll(/^\s*([a-z][a-z0-9_-]*)\s*:\s*['"]([^'"]+)['"]/gm)) {
-    out[e[1]] = e[2];
+/** Parse the generated harness catalog JSON. Returns null when the
+ *  snapshot is missing or the shape is wrong so the gate fails closed
+ *  instead of inventing an empty label table. */
+export function parseHarnessCatalog(jsonText) {
+  if (typeof jsonText !== 'string' || jsonText.trim() === '') return null;
+  try {
+    const parsed = JSON.parse(jsonText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (!parsed.labels || typeof parsed.labels !== 'object' || Array.isArray(parsed.labels)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
   }
-  return out;
+}
+
+/** Label map from the generated catalog JSON (`{ id: "Label", ... }`). */
+export function parseHarnessLabel(jsonText) {
+  return parseHarnessCatalog(jsonText)?.labels ?? null;
 }
 
 /** Extract the body of the "Multi-agent orchestration" subsection
@@ -117,8 +123,8 @@ export function checkReadmeDrift({ readme, providerTypes, harnessLabel }) {
   if (Object.keys(labels).length === 0) {
     failures.push(failure(
       'harness-label-source',
-      'Could not parse the HARNESS_LABEL table from src/components/Circuits/harnessCapabilities.ts. ' +
-        'The export shape may have changed.'
+      'Could not parse labels from src/types/generated/HarnessCapabilitiesTable.json. ' +
+        'Regenerate with `cargo test` in src-tauri/.'
     ));
   }
 
@@ -145,7 +151,7 @@ export function checkReadmeDrift({ readme, providerTypes, harnessLabel }) {
       failures.push(failure(
         'harness-label-coverage',
         `Provider variant "${variant}" has no entry in HARNESS_LABEL. ` +
-          'Add it to src/components/Circuits/harnessCapabilities.ts and mention it in README.md.'
+          'Add it to the Rust catalog (Provider enum + inspector_label) and mention it in README.md.'
       ));
       continue;
     }
@@ -317,8 +323,8 @@ function runCli() {
   }
   if (!existsSync(harnessLabelPath)) {
     bail(
-      `HARNESS_LABEL source not found at ${harnessLabelPath}. ` +
-        'src/components/Circuits/harnessCapabilities.ts is the canonical label table; the gate cannot proceed without it.'
+      `Harness catalog not found at ${harnessLabelPath}. ` +
+        'src/types/generated/HarnessCapabilitiesTable.json is emitted by cargo test in src-tauri/; the gate cannot proceed without it.'
     );
   }
 

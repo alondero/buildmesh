@@ -8,6 +8,12 @@ metadata:
 
 # Harness capabilities matrix
 
+> Capability values are generated from `src-tauri/src/agent/harness_catalog.rs`
+> into `src/types/generated/HarnessCapabilitiesTable.ts`. Re-emit with
+> `cargo test` (cwd `src-tauri/`) and update this matrix so every label still
+> appears as a `| <label> |` row. See
+> [ADR-0037](../adr/0037-generated-harness-capabilities-catalog.md).
+
 This is the at-a-glance capability matrix for every Agent Harness Buildmesh
 supports. It answers one question per harness: **which capabilities does
 Buildmesh actually advertise?**

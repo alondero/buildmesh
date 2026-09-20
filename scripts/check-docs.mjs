@@ -214,14 +214,25 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     }
   }
 
-  const harnessPath = resolve(root, 'src/components/Circuits/harnessCapabilities.ts');
+  const harnessPath = resolve(root, 'src/types/generated/HarnessCapabilitiesTable.json');
   const userGuidePath = resolve(root, 'docs/user-guide.md');
+  const matrixPath = resolve(root, 'docs/learning/harness-capabilities-matrix.md');
   if (existsSync(harnessPath) && existsSync(userGuidePath)) {
     const labels = parseHarnessLabel(readFileSync(harnessPath, 'utf8')) ?? {};
     const guide = readFileSync(userGuidePath, 'utf8');
     for (const label of Object.values(labels)) {
       if (!guide.includes(`| ${label} |`)) {
         add('harness-guide-coverage', `docs/user-guide.md is missing the ${label} harness row`);
+      }
+    }
+    if (!existsSync(matrixPath)) {
+      add('harness-matrix-coverage', 'docs/learning/harness-capabilities-matrix.md is missing');
+    } else {
+      const matrix = readFileSync(matrixPath, 'utf8');
+      for (const label of Object.values(labels)) {
+        if (!matrix.includes(`| ${label} |`)) {
+          add('harness-matrix-coverage', `docs/learning/harness-capabilities-matrix.md is missing the ${label} harness row`);
+        }
       }
     }
   }
@@ -231,7 +242,7 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     const variants = parseProviderVariants(readFileSync(providerPath, 'utf8'));
     const labels = parseHarnessLabel(readFileSync(harnessPath, 'utf8')) ?? {};
     for (const variant of variants) {
-      if (!(variant in labels)) add('harness-source-coverage', `Provider variant ${variant} has no HARNESS_LABEL entry`);
+      if (!(variant in labels)) add('harness-source-coverage', `Provider variant ${variant} has no generated catalog label`);
     }
   }
 

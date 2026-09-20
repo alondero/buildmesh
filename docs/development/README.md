@@ -68,9 +68,12 @@ without pretending that a code linter can judge prose quality. CI passes
 
 ### Adding or changing a harness/provider
 
-- Update the Rust adapter and its capability inventory.
-- Update the frontend mirror only where the existing static contract requires
-  it; keep the Rust/TS capability tests green.
+- Update the Rust adapter and its capability inventory (`capabilities()` /
+  the trait methods it composes). Add the `Provider` variant,
+  `BUILTIN_HARNESS_IDS` entry, and `inspector_label` match arm.
+- Do not hand-edit a TypeScript capability table. Run `cargo test` from
+  `src-tauri/` so `HarnessCapabilitiesTable.ts` regenerates; CI's
+  `git diff --exit-code src/types/generated` is the drift gate (ADR-0037).
 - Regenerate committed wire types with `cargo test` when a wire struct changes.
 - Add fresh and resume coverage, plus attention/transcript behavior where the
   harness supports it.

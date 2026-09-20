@@ -8,8 +8,9 @@
  * Issue #1358 (Circuits v2 slice 3 — Harness Integration) extends
  * `SpawnAgentNode` with a Provider selector + capability-gated
  * Model / Effort / Extra-Args overrides. The Inspector reads the
- * capability contract from a hardcoded `harnessCapabilities.ts`
- * table; the orchestrator applies the same contract via
+ * capability contract from the generated harness catalog
+ * (`src/types/generated/HarnessCapabilitiesTable.ts`, ADR-0037);
+ * the orchestrator applies the same contract via
  * `resolve_agent_config` so a user-authored override that the new
  * harness can't honour is dropped at spawn time. Issue #1359
  * (Circuits v2 slice 4 — Canvas UX) layers a Context Variables
@@ -56,31 +57,19 @@ import {
 import {
   effortAllowedFor,
   getCapabilitiesFor,
+  HARNESS_IDS,
   HARNESS_LABEL,
+  HARNESS_PROFILE_ALIASES,
   type InspectorHarnessId,
 } from './harnessCapabilities';
 
 /**
- * The five harness ids offered in the Inspector's provider dropdown.
- * Mirrors the same surface that the Rust `BUILTIN_HARNESS_IDS`
- * list provides; the dropdown order is stable so the user's
- * selection persists across re-renders.
+ * Every built-in adapter, in `Provider::all()` order. Derived from the
+ * generated catalog so a new harness appears here without a frontend edit.
  */
-const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = [
-  { value: 'anthropic', label: HARNESS_LABEL.anthropic },
-  { value: 'codex', label: HARNESS_LABEL.codex },
-  { value: 'agy', label: HARNESS_LABEL.agy },
-  { value: 'opencode', label: HARNESS_LABEL.opencode },
-  { value: 'grok', label: HARNESS_LABEL.grok },
-  { value: 'cursor', label: HARNESS_LABEL.cursor },
-  { value: 'kimi', label: HARNESS_LABEL.kimi },
-  { value: 'mcode', label: HARNESS_LABEL.mcode },
-  { value: 'dsh', label: HARNESS_LABEL.dsh },
-  { value: 'commandcode', label: HARNESS_LABEL.commandcode },
-  { value: 'freebuff', label: HARNESS_LABEL.freebuff },
-  { value: 'cline', label: HARNESS_LABEL.cline },
-  { value: 'terminal', label: HARNESS_LABEL.terminal },
-];
+const HARNESS_OPTIONS: { value: InspectorHarnessId; label: string }[] = HARNESS_IDS.map(
+  (value) => ({ value, label: HARNESS_LABEL[value] }),
+);
 
 interface InspectorPanelProps {
   node: CircuitNode | null;
@@ -92,12 +81,11 @@ interface InspectorPanelProps {
 }
 
 /**
- * Compute the harness id string the Inspector uses to key into
- * `harnessCapabilities.ts`. Mirrors `Provider::from_db_str`'s default
- * fallback (`""` and unknown ids → `"anthropic"`) so a user-authored
- * `provider` that hasn't been normalised by the backend still resolves
- * to Anthropic's descriptor. `null` ⇒ no harness selected (use the
- * mesh's default at spawn).
+ * Compute the harness id the Inspector uses to key into the generated
+ * catalog. Historical aliases (`claude_code`, `antigravity`, …) stay
+ * local to this form; the profile id `claude` is mapped by
+ * `HARNESS_PROFILE_ALIASES`. Unknown / empty ids return `null` so the
+ * UI stays on "no provider selected" rather than inventing Anthropic.
  */
 function harnessIdFromProvider(provider: string | null | undefined): InspectorHarnessId | null {
   if (provider == null) return null;
@@ -109,43 +97,15 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
   // selected" honest in the UI.
   const normalised = provider.trim().toLowerCase();
   if (normalised === '') return null;
-  if (normalised === 'anthropic' || normalised === 'claude_code' || normalised === 'claude') {
-    // Inspector's selector keys on `anthropic` to match the backend id.
-    return 'anthropic';
+  if (normalised === 'claude_code') return 'anthropic';
+  if (normalised === 'antigravity') return 'agy';
+  if (normalised === 'minimax-code' || normalised === 'minimax') return 'mcode';
+  if (normalised === 'deepseek' || normalised === 'deepseek-harness') return 'dsh';
+  if (normalised === 'command-code' || normalised === 'cmdc') return 'commandcode';
+  const canonical = HARNESS_PROFILE_ALIASES[normalised] ?? normalised;
+  if (canonical in HARNESS_LABEL) {
+    return canonical as InspectorHarnessId;
   }
-  if (normalised === 'antigravity') {
-    return 'agy';
-  }
-  if (normalised === 'minimax-code' || normalised === 'minimax') {
-    return 'mcode';
-  }
-  if (normalised === 'deepseek' || normalised === 'deepseek-harness') {
-    return 'dsh';
-  }
-  if (normalised === 'command-code' || normalised === 'cmdc') {
-    return 'commandcode';
-  }
-  if (
-    normalised === 'codex' ||
-    normalised === 'agy' ||
-    normalised === 'opencode' ||
-    normalised === 'grok' ||
-    normalised === 'cursor' ||
-    normalised === 'kimi' ||
-    normalised === 'mcode' ||
-    normalised === 'dsh' ||
-    normalised === 'commandcode' ||
-    normalised === 'freebuff' ||
-    normalised === 'cline' ||
-    normalised === 'terminal'
-  ) {
-    return normalised as InspectorHarnessId;
-  }
-  // Unknown id: emit as a synthetic entry. We don't have a stable
-  // capability descriptor for it (matches the backend's
-  // `Provider::from_db_str` fallback to Anthropic, but the inspector
-  // renders the resolved id so the user sees what they authored).
-  // Return null to fall back to "no overrides".
   return null;
 }
 
@@ -156,7 +116,6 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
  * just maps back to the wire shape the AST serialises.
  */
 function providerStringFromHarnessId(id: InspectorHarnessId): string {
-  if (id === 'agy') return 'agy';
   return id;
 }
 
