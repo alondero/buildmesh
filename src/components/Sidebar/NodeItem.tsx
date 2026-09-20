@@ -114,9 +114,13 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // keyboard contract live in the shared `useSubmenu` hook (same hook
   // drives the header kebab submenu): hover/click opens via `setOpen`,
   // ArrowRight opens-and-focuses via `openViaKeyboard`, ArrowLeft closes,
-  // ArrowDown/Up wraps via `step`. The picker itself renders the node's
-  // current provider pinned on top (`Current (<label>)`, in-place
-  // kick-start) followed by alternates grouped by `group_key`.
+  // ArrowDown/Up wraps via `step`. The hook also owns the #1293 arm
+  // gate (pointerover precedes mouseenter) and the diagonal-cursor
+  // hover-leave delay — the wrapper just binds the four hover handlers
+  // it returns, so the sidebar and kebab pickers never diverge. The
+  // picker itself renders the node's current provider pinned on top
+  // (`Current (<label>)`, in-place kick-start) followed by alternates
+  // grouped by `group_key`.
   const regen = useRegenerateAction(node, providerList);
   const { isRegenerateDisabled, hasRegenerateTargets } = regen;
   const regenSubmenu = useSubmenu({
@@ -328,24 +332,12 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
   // menuitem). Chromium sometimes fires `mouseenter` on the wrapper
   // synchronously on mount, popping the submenu without any real
   // pointer movement — the "occasionally" symptom PR #1290 didn't
-  // fully pin. Gate hover-open behind a `pointerover` arm so a quiet
-  // mount-time `mouseenter` is ignored; click (`onClick` below) and
-  // `ArrowRight` (`openSubmenuViaKeyboard`) stay immediate because
-  // they don't go through `mouseenter`. The arm is a ref (not state)
-  // because a flip shouldn't re-render — only the submenu's open
-  // boolean should drive renders. `pointerover` is the FIRST event
-  // in the per-spec enter-the-element sequence (before `mouseenter`),
-  // so it reliably arms for real hovers in production AND in
-  // @testing-library/user-event — see the wrapper's handler comment
-  // below for the dispatch-order detail.
-  const submenuArmedRef = useRef(false);
-  // Reset on every menu open/close so the next right-click starts
-  // from a known-unarmed state. Escape / outside-click close the menu
-  // (set `contextMenu` to null) and the effect resets the arm; the
-  // next mount starts unarmed, requiring real pointer movement again.
-  useEffect(() => {
-    if (!contextMenu) submenuArmedRef.current = false;
-  }, [contextMenu]);
+  // fully pin. The arm gate moved into `useSubmenu` in PR #1796 — the
+  // hook exposes `onPointerOver` / `onMouseEnter` that bind the
+  // pointerover-first contract for both picker surfaces at once.
+  // Click (`onClick` below) and `ArrowRight`
+  // (`openSubmenuViaKeyboard`) stay immediate because they don't go
+  // through `mouseenter`.
 
   // Issue #776 — on open, reset the roving index and move focus to the
   // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
@@ -522,42 +514,31 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           {/* Issue #774 — Regenerate submenu container. The wrapper
-              div shares `onMouseEnter` / `onMouseLeave` so the cursor
-              can move from the parent button into the submenu
-              (positioned to the right) without the gap triggering a
-              close. Hovering opens the picker; clicking the parent
-              toggles it (tap/touch parity).
+              div binds the shared `useSubmenu` hover handlers so the
+              cursor can move from the parent button into the submenu
+              (positioned to the right) without the L-shaped hit-area
+              gap triggering a close. Hovering opens the picker;
+              clicking the parent opens it (tap/touch parity, and the
+              only way to open on a keyboard `ArrowRight`).
 
-              Issue #1293 — `mouseenter` alone doesn't open the picker
-              (Chromium quirk fires it on mount under an existing
-              cursor). The wrapper's `onPointerOver` arms
-              `submenuArmedRef`; only an armed `mouseenter` opens.
-              `pointerover` is the FIRST event in the per-spec
-              enter-the-element sequence (before `mouseenter`), so it
-              reliably arms for real hovers in production AND in
-              @testing-library/user-event (whose dispatch order is
-              `pointerover → mouseenter → pointermove → mousemove`).
-              When the wrapper mounts under an existing cursor, no
-              `pointerover` fires (no boundary was crossed), so the
-              arm stays false and a stray mount-time `mouseenter` is
-              ignored. Click and `ArrowRight` stay immediate (they
-              don't go through `mouseenter`). `mouseleave` disarms
-              so a re-entry still requires real movement. */}
+              Issue #1293 — the hook's `onMouseEnter` only opens when
+              the cursor crossed into the wrapper (armed via the
+              preceding `onPointerOver`), so a synchronous
+              mount-time `mouseenter` from Chromium under an existing
+              cursor is ignored. Click and `ArrowRight` stay
+              immediate because they don't go through `mouseenter`.
+
+              PR #1796 (diagonal-cursor UX) — `onMouseLeave` arms a
+              cancellable 120 ms close delay (configurable on the
+              hook); the wider `-ml-2` overlap on the picker below
+              shrinks the L-shaped gap so most diagonal cursor paths
+              never trip `mouseleave` in the first place. */}
           <div
             role="presentation"
             className="relative"
-            onPointerOver={() => {
-              submenuArmedRef.current = true;
-            }}
-            onMouseEnter={() => {
-              if (submenuArmedRef.current && !isRegenerateDisabled) {
-                regenSubmenu.setSubmenuOpen(true);
-              }
-            }}
-            onMouseLeave={() => {
-              submenuArmedRef.current = false;
-              regenSubmenu.closeSubmenu();
-            }}
+            onPointerOver={regenSubmenu.onPointerOver}
+            onMouseEnter={regenSubmenu.onMouseEnter}
+            onMouseLeave={regenSubmenu.onMouseLeave}
           >
             <button
               // Roving tabindex — only the active item is in the Tab
@@ -611,15 +592,30 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
               <span aria-hidden="true" className="ml-auto">▸</span>
             </button>
             {/* Issue #774 — provider picker submenu. Positioned
-                absolutely to the right of the parent (-ml-1 overlaps
-                by 1px so the cursor's path from parent into the
-                picker never crosses the wrapper's mouseleave edge).
-                `role="menu"` keeps it a peer of the parent menu so
-                screen readers announce "menu: <picker label>". Rows
-                render via the shared `RegenerateProviderMenu`
-                (current pinned on top for in-place kick-start, then
-                alternates grouped by harness) so the sidebar and
-                `GridNodeHeader` pickers never drift. */}
+                absolutely to the right of the parent (-ml-2 overlaps
+                by 2px so a shallow horizontal cursor wobble from the
+                trigger into the picker stays inside the wrapper's hit
+                area). `role="menu"` keeps it a peer of the parent
+                menu so screen readers announce "menu: <picker
+                label>". Rows render via the shared
+                `RegenerateProviderMenu` (current pinned on top for
+                in-place kick-start, then alternates grouped by
+                harness) so the sidebar and `GridNodeHeader` pickers
+                never drift.
+
+                PR #1796 (diagonal-cursor UX) — the wider overlap
+                (`-ml-2`, 8 px) plus the 120 ms cancellable
+                hover-leave delay in `useSubmenu` is the entire fix.
+                The earlier L-shaped-gap bridge element from the
+                first revision was removed after review: JSDOM
+                doesn't enforce CSS hit-testing so the bridge's
+                tests passed without ever proving it helped in a
+                real browser, and the timer + overlap is the
+                standard, sufficient answer. `onMouseDown
+                stopPropagation` mirrors the parent menu — without
+                it, a click inside the submenu bubbles to the
+                document-level mousedown handler and the menu
+                closes BEFORE the button's onClick fires. */}
             {regenSubmenu.submenuOpen && (
               <div
                 ref={regenSubmenu.submenuRef}
@@ -634,12 +630,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                 // menu so the `useClickOutside` selector resolves
                 // across both the parent and submenu.
                 data-dropdown-for={dropdownId('node', node.id)}
-                className="absolute left-full top-0 -ml-1 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
-                // `onMouseDown stopPropagation` mirrors the parent
-                // menu — without it, a click inside the submenu
-                // bubbles to the document-level mousedown handler
-                // and the menu closes BEFORE the button's onClick
-                // fires.
+                className="absolute left-full top-0 -ml-2 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <RegenerateProviderMenu

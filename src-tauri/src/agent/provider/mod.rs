@@ -463,12 +463,14 @@ pub trait AgentProvider: Send + Sync {
     /// custom MiniMax/DeepSeek profiles), so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
     /// `services::transcript_reader` knows how to read. Codex's rollout format
-    /// is parsed via `TranscriptFormat::Codex` (issue #887), and Cursor's
-    /// workspace-scoped JSONL via `TranscriptFormat::Cursor`; AGY, Grok, and
-    /// Command Code have dedicated readers as well.
-    /// Providers with no wired transcript reader (OpenCode, Kimi, Terminal) return
-    /// `false`; their digest degrades to spine-only with enrichment explicitly
-    /// flagged `unsupported`, never silently omitted.
+    /// is parsed via `TranscriptFormat::Codex` (issue #887); Cursor's
+    /// workspace-scoped JSONL via `TranscriptFormat::Cursor`; AGY, Grok,
+    /// mcode, OpenCode (issue #1296 SQLite reader), Muse (issue #1708 JSONL
+    /// reader), and Command Code have dedicated readers as well.
+    /// Providers with no wired transcript reader (Kimi, dsh, freebuff,
+    /// cline, terminal) return `false`; their digest degrades to spine-only
+    /// with enrichment explicitly flagged `unsupported`, never silently
+    /// omitted.
     fn produces_readable_transcript(&self) -> bool {
         false
     }

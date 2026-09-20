@@ -18,7 +18,7 @@
  * `pending`) or be rejected by the backend (`archived`, `suspended`).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
@@ -933,27 +933,141 @@ describe('NodeItem context menu (issue #776)', () => {
         expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
       });
 
-      it('disarms on mouseleave so a re-entry still requires pointerover', () => {
-        // After a real hover opens the picker, mouseleave closes it
-        // AND resets the arm. Re-entering without a fresh pointerover
-        // should NOT reopen it (the next user gesture still has to
-        // be a real movement).
-        mountRegenMenu();
-        const wrapper = getRegenWrapper();
-        // Real hover → open.
-        fireEvent.pointerOver(wrapper);
-        fireEvent.mouseEnter(wrapper);
-        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
-        // Leave → close + disarm.
-        fireEvent.mouseLeave(wrapper);
-        expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
-        // Re-enter without a fresh pointerover → still closed.
-        fireEvent.mouseEnter(wrapper);
-        expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
-        // Now a real move → opens.
-        fireEvent.pointerOver(wrapper);
-        fireEvent.mouseEnter(wrapper);
-        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      it('disarms on mouseleave so a re-entry still requires pointerover', async () => {
+        // After a real hover opens the picker, mouseleave schedules a
+        // delayed close AND resets the arm. Re-entering without a
+        // fresh pointerover should NOT reopen it (the next user
+        // gesture still has to be a real movement). The close is now
+        // delayed (PR #1796, default 120 ms) so the cursor can
+        // recover from a diagonal exit; we use fake timers here so the
+        // 120 ms lands deterministically without a real wait. The
+        // timer advance is wrapped in `act` (project convention, see
+        // `agent-changes-tab.test.tsx:190`) so React flushes the
+        // `setSubmenuOpen(false)` re-render before the assertion.
+        vi.useFakeTimers();
+        try {
+          mountRegenMenu();
+          const wrapper = getRegenWrapper();
+          // Real hover → open.
+          fireEvent.pointerOver(wrapper);
+          fireEvent.mouseEnter(wrapper);
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+          // Leave → close is scheduled, not immediate. Within the
+          // 120 ms grace window the picker is still mounted.
+          fireEvent.mouseLeave(wrapper);
+          expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeTruthy();
+          // After the timer fires → closed.
+          await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+          expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+          // Re-enter within the window would have cancelled the
+          // close; without a fresh pointerover the arm is still
+          // false → no reopen.
+          fireEvent.mouseEnter(wrapper);
+          expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+          // Now a real move → opens.
+          fireEvent.pointerOver(wrapper);
+          fireEvent.mouseEnter(wrapper);
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // PR #1796 — diagonal-cursor UX. The wider picker overlap
+      // (`-ml-2`) shrinks the L-shaped hit-area gap the wrapper leaves
+      // between the trigger and any picker row below the trigger's
+      // own height; the 120 ms cancellable close delay in
+      // `useSubmenu` is the fallback for diagonal paths that still
+      // cross the gap. These tests pin the hook contract: grace
+      // timer countdown, cancellation on re-entry, immediate close on
+      // pick, and clean unmount. Hit-testing bounds live in the
+      // browser (CSS), not JSDOM, so the geometry itself is verified
+      // by `verify-ui`, not here.
+      describe('hover-leave delay (#1796)', () => {
+        function openPicker() {
+          mountRegenMenu();
+          const wrapper = getRegenWrapper();
+          fireEvent.pointerOver(wrapper);
+          fireEvent.mouseEnter(wrapper);
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+          return wrapper;
+        }
+
+        it('does not auto-close on mouseleave within the grace window', async () => {
+          // Pin the default 120 ms grace so a future zero-it-out
+          // regression doesn't silently re-introduce the diagonal
+          // flicker.
+          vi.useFakeTimers();
+          try {
+            const wrapper = openPicker();
+            fireEvent.mouseLeave(wrapper);
+            await act(async () => { await vi.advanceTimersByTimeAsync(119); });
+            expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeTruthy();
+            await act(async () => { await vi.advanceTimersByTimeAsync(2); });
+            expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('cancels the pending close when the cursor re-enters the wrapper', async () => {
+          // Diagonal-cursor contract: the cursor leaves the trigger
+          // (close is scheduled) and is back over the wrapper
+          // before the grace lands. The close must cancel; the
+          // picker stays open.
+          vi.useFakeTimers();
+          try {
+            const wrapper = openPicker();
+            fireEvent.mouseLeave(wrapper);
+            expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeTruthy();
+            await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+            fireEvent.mouseEnter(wrapper);
+            await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+            expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeTruthy();
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('closes immediately on pick, bypassing the grace window', () => {
+          // The hook exposes two close paths: the delayed hover-leave
+          // arm above, and the immediate `closeSubmenu` for pick /
+          // Escape / outside click. Pick a row → picker unmounts
+          // synchronously, no 120 ms wait.
+          const wrapper = openPicker();
+          const current = screen.getByTestId('regenerate-submenu-current');
+          fireEvent.click(current);
+          expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+          // The parent menu's Escape path also calls
+          // `closeSubmenu()` directly; the wrapper mount can be
+          // torn down without a timer advance.
+          expect(wrapper.isConnected).toBe(false);
+        });
+
+        it('clears the pending close on unmount (no setState after unmount)', async () => {
+          // A pending close must not fire after the wrapper
+          // unmounts, otherwise the hook would schedule a
+          // setState on an unmounted component. Force a teardown
+          // mid-grace and confirm no timer fires after the
+          // component is gone.
+          vi.useFakeTimers();
+          try {
+            const wrapper = openPicker();
+            fireEvent.mouseLeave(wrapper);
+            // Schedule the grace fire before the unmount so the
+            // timer is alive when we tear down.
+            await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+            cleanup();
+            // Push past the original fire time. With the cleanup
+            // hook in `useSubmenu` clearing the timer on unmount,
+            // nothing should be observable; without it a React
+            // warning would surface.
+            await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+            expect(wrapper.isConnected).toBe(false);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
       });
     });
   });
