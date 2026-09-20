@@ -58,7 +58,11 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
 /// **First writer wins.** If the source agent already owns a live run, the
 /// early-return below hands back that run's id and `max_rounds` /
 /// `reviewer_provider` are not applied — the dialog hides the form in this
-/// state, so the only way here is a retry or IPC race.
+/// state, so the only way here is a retry or IPC race. The dedupe check
+/// runs BEFORE the readiness gate (#1792) so a retry on an unobserved
+/// source still returns the existing run id (issue #1660 dedupe wins
+/// over the gate, otherwise the gate would silently strip the live
+/// borrower's run id on every retry).
 ///
 /// `allow_unobserved` (issue #1792) is the explicit override for the
 /// source-agent readiness gate enforced by [`assert_source_observed`].
@@ -80,13 +84,23 @@ pub fn create_node_circuit_run(
     reviewer_provider: Option<String>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
-    if !allow_unobserved {
-        // Read-only check via the process-global reader — no writer mutex
-        // touched. `assert_source_observed` may call `assistant_report`,
-        // which reads the harness transcript dir off disk; that must not
-        // happen while a writer transaction is open.
+    // First-writer-wins dedupe (#1660). Lock-free read via the
+    // process-global reader — runs BEFORE the readiness gate so a
+    // duplicate call on an unobserved source hands back the live
+    // borrower's run id (otherwise the gate would refuse the retry and
+    // silently drop the existing run). The locked helper re-checks
+    // this under the writer transaction as defense in depth for
+    // concurrent inserts.
+    if let Some(existing) = find_live_run_for_source(node_id).map_err(|e| e.to_string())? {
+        return Ok(existing);
+    }
+    // Source-agent readiness gate (#1792). Only run when the override
+    // is off AND the user is on the built-in review preset path — the
+    // user-selected-circuit and recovery carve-outs are permissive and
+    // the override is the explicit user opt-out.
+    if !allow_unobserved && selected_circuit_id.is_none() {
         let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-        assert_source_observed(&node, false, selected_circuit_id.is_some())?;
+        assert_source_observed(&node, false, false)?;
     }
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
@@ -147,6 +161,33 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
 /// (issue #1792).
 pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
     "Source agent has not started yet — wait for its first turn before starting a review.";
+
+/// First-writer-wins dedupe (issue #1660). Returns the id of the source's
+/// currently-live run if any. Lock-free read via `read_conn()` — runs
+/// BEFORE the readiness gate so a retry on an unobserved source still
+/// hands back the live borrower's run id. The locked helper re-checks
+/// this under the writer transaction as defense in depth for concurrent
+/// inserts.
+pub(crate) fn find_live_run_for_source(node_id: i64) -> SqlResult<Option<i64>> {
+    let db = crate::db::read_conn();
+    find_live_run_for_source_inner(&db, node_id)
+}
+
+pub(crate) fn find_live_run_for_source_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<i64>> {
+    conn.query_row(
+        &format!(
+            "SELECT id FROM autopilot_circuit_runs
+             WHERE source_agent_node_id = ?1 AND state IN ({})
+             LIMIT 1",
+            RunState::SQL_IN_LIVE
+        ),
+        params![node_id], |row| row.get(0),
+    )
+    .optional()
+}
 
 /// Source-agent readiness gate (issue #1792). Lock-free: callers MUST run
 /// this before acquiring the writer mutex because `assistant_report` does
@@ -211,15 +252,8 @@ fn create_node_circuit_run_with_recovery_locked(
             return Err("The implementation agent is still being stopped. Try Continue review again in a moment.".into());
         }
     }
-    let existing: Option<i64> = tx.query_row(
-        &format!(
-            "SELECT id FROM autopilot_circuit_runs
-             WHERE source_agent_node_id = ?1 AND state IN ({})
-             LIMIT 1",
-            RunState::SQL_IN_LIVE
-        ),
-        params![node_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing: Option<i64> = find_live_run_for_source_inner(&tx, node_id)
+        .map_err(|e| e.to_string())?;
     if let Some(id) = existing { return Ok(id); }
     let owned: bool = tx.query_row(
         &format!(

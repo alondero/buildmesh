@@ -310,22 +310,19 @@ describe('agent workflow title-bar control', () => {
   it('resets the readiness-gate override when the dialog is reopened', async () => {
     // The override is intentionally off by default so power users opt in
     // by choice on every review; it does not leak across modal opens.
-    // Wrapped in async + waitFor so React's asynchronous state updates
-    // (modal close → reopen) settle inside `act(...)` and the test runs
-    // without the "An update to AgentReviewButton inside a test was not
-    // wrapped in act(...)" warning.
+    // `async` + `findByLabelText` so the async `listCircuits` state update
+    // (triggered by every modal open) settles inside `act(...)` and the
+    // test runs without the "An update to AgentReviewButton inside a
+    // test was not wrapped in act(...)" warning. The same pattern as
+    // `offers saved manual Circuits and passes the selected id`.
     renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const override = screen.getByLabelText(/Review an agent that hasn.t started yet/);
+    const override = await screen.findByLabelText(/Review an agent that hasn.t started yet/);
     fireEvent.click(override);
     expect((override as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    // Wait for the modal to actually unmount before reopening, otherwise
-    // the second click races the close animation and the assertions
-    // below see stale DOM.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Start review' })).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const reopened = screen.getByLabelText(/Review an agent that hasn.t started yet/);
+    const reopened = await screen.findByLabelText(/Review an agent that hasn.t started yet/);
     expect((reopened as HTMLInputElement).checked).toBe(false);
   });
 });

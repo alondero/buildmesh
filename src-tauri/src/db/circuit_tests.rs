@@ -428,7 +428,7 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
 #[test]
 fn node_review_refuses_unstarted_source_with_exact_message() {
     use super::circuit::ledger::{SOURCE_NOT_YET_OBSERVED_MESSAGE, assert_source_observed};
-    let mut conn = isolated_test_conn();
+    let conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-unstarted", "/tmp/ready-gate-unstarted").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
@@ -449,7 +449,7 @@ fn node_review_refuses_unstarted_source_with_exact_message() {
 #[test]
 fn node_review_allows_source_with_cli_session_id() {
     use super::circuit::ledger::assert_source_observed;
-    let mut conn = isolated_test_conn();
+    let conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-cli", "/tmp/ready-gate-cli").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Started", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
@@ -466,7 +466,7 @@ fn node_review_allows_source_with_cli_session_id() {
 #[test]
 fn node_review_skips_readiness_for_user_selected_circuit() {
     use super::circuit::ledger::assert_source_observed;
-    let mut conn = isolated_test_conn();
+    let conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-circuit", "/tmp/ready-gate-circuit").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
@@ -484,7 +484,7 @@ fn node_review_skips_readiness_for_user_selected_circuit() {
 #[test]
 fn node_review_skips_readiness_for_recovery_path() {
     use super::circuit::ledger::assert_source_observed;
-    let mut conn = isolated_test_conn();
+    let conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-recovery", "/tmp/ready-gate-recovery").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Recoverable", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
@@ -525,9 +525,13 @@ fn node_review_override_records_audit_field_on_context_json() {
         "the audit field must record the override for downstream reviewers");
 }
 
-/// First-writer-wins dedupe (issue #1660) is preserved: even an unobserved
-/// source cannot double-mint a run if the first call already succeeded via
-/// the override. The dedupe check still hands back the original run id.
+/// First-writer-wins dedupe (issue #1660) is preserved at the locked
+/// helper level. The public wrapper also runs a dedupe ahead of the
+/// readiness gate (#1792) so a retry on an unobserved source hands
+/// back the live borrower's run id; the locked helper's own check is
+/// defense in depth for concurrent inserts. Modelling the locked
+/// helper path: a duplicate call returns the original run id without
+/// re-asserting the gate.
 #[test]
 fn node_review_dedupe_survives_after_override_mints() {
     let mut conn = isolated_test_conn();
@@ -537,9 +541,8 @@ fn node_review_dedupe_survives_after_override_mints() {
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
     let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
     // A second call without the override must NOT re-mint the gate —
-    // the existing live run answers first. (This models the public
-    // wrapper's behaviour: the first writer won, so subsequent calls
-    // get the same id back without re-checking observation.)
+    // the locked helper's dedupe (mirrored by the public wrapper's
+    // pre-gate `find_live_run_for_source` check) hands back the same id.
     let second = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
     assert_eq!(first, second, "first-writer-wins dedupe wins over the readiness gate");
     let third = create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("codex".into()), false).unwrap();
@@ -550,6 +553,33 @@ fn node_review_dedupe_survives_after_override_mints() {
         "the override from the first writer is the one that wins");
     assert_eq!(ctx.get("retry.max_retries"), Some("3"),
         "and so is the first round limit");
+}
+
+/// Models the public wrapper's pre-gate dedupe: a retry on a source
+/// that already owns a live run returns the live borrower's id without
+/// ever reaching the readiness gate (#1792). The wrapper uses
+/// `find_live_run_for_source` (lock-free read via `read_conn()`); this
+/// test drives that helper directly on a per-test in-memory DB so the
+/// lock-free SQL itself is covered.
+#[test]
+fn node_review_public_wrapper_dedupe_runs_before_readiness_gate() {
+    use super::circuit::ledger::find_live_run_for_source_inner;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-public-dedupe", "/tmp/ready-gate-public-dedupe").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Public dedupe", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    // No live run yet — the wrapper would proceed to the readiness gate.
+    assert!(find_live_run_for_source_inner(&conn, source.id).unwrap().is_none(),
+        "with no live run, the dedupe query returns None and the wrapper falls through to the gate");
+    // Mint a live run via the override path.
+    let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
+    // Now the dedupe query returns the live run id BEFORE the wrapper
+    // would call `assert_source_observed` — so a retry on an
+    // unobserved source hands back the existing run id without ever
+    // firing the refusal error.
+    assert_eq!(find_live_run_for_source_inner(&conn, source.id).unwrap(), Some(first),
+        "the public wrapper's pre-gate dedupe must hand back the live borrower's run id");
 }
 
 // ---------------------------------------------------------------------------
