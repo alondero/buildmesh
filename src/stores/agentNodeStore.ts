@@ -138,10 +138,33 @@ function shallowEqualOwnership(a: CircuitAgentOwnership, b: CircuitAgentOwnershi
   return true;
 }
 
+/// Fold a fetched ownership list into the existing map, keeping the previous
+/// object identity for rows that did not change. Shared by both read paths
+/// (`fetchAgentNodes` and `refreshCircuitOwnerships`) so a full refetch does
+/// not allocate fresh ownership objects for every node and defeat per-id
+/// selector caching. `changed` reports whether anything actually moved, which
+/// lets a no-op satellite refresh skip its `set` entirely.
+function reconcileOwnerships(
+  current: Readonly<Record<number, CircuitAgentOwnership>>,
+  rows: readonly CircuitAgentOwnership[],
+): { ownerships: Record<number, CircuitAgentOwnership>; changed: boolean } {
+  const ownerships: Record<number, CircuitAgentOwnership> = {};
+  let changed = Object.keys(current).length !== rows.length;
+  for (const ownership of rows) {
+    const prior = current[ownership.node_id];
+    const unchanged = prior !== undefined && shallowEqualOwnership(prior, ownership);
+    ownerships[ownership.node_id] = unchanged ? prior : ownership;
+    if (!unchanged) changed = true;
+  }
+  return { ownerships, changed };
+}
+
 /// Single-flight plus one trailing re-run, shared by `fetchAgentNodes` and
 /// `refreshCircuitOwnerships`. A burst of callers collapses to the in-flight
 /// read plus exactly one follow-up, and the follow-up is what lands last — so
-/// the newest request's result is the one that commits.
+/// the newest request's result is the one that commits. The trailing run is
+/// chained through a rejection handler as well as the fulfilment path: a
+/// transient failure of the in-flight task must not swallow the queued retry.
 function createCoalescedRefresh(task: () => Promise<void>): () => Promise<void> {
   let inFlight: Promise<void> | null = null;
   let queued: Promise<void> | null = null;
@@ -149,10 +172,11 @@ function createCoalescedRefresh(task: () => Promise<void>): () => Promise<void> 
     if (inFlight) {
       if (!queued) {
         const current = inFlight;
-        queued = current.then(() => {
+        const afterInFlight = () => {
           queued = null;
           return run();
-        });
+        };
+        queued = current.then(afterInFlight, afterInFlight);
       }
       return queued;
     }
@@ -460,6 +484,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Serialize full refreshes: concurrent callers share one trailing refresh
   // instead of opening competing IPC/database snapshots.
   const fetchAgentNodes = createCoalescedRefresh(async () => {
+    // Sample the ledger revision BEFORE awaiting. A live `circuit-run-updated`
+    // can land while this snapshot is in flight; its patch is newer than the
+    // result about to arrive, so the ownership slice below must be dropped
+    // rather than written over it. Dropping (and not bumping) also keeps the
+    // event's trailing satellite read alive: bumping here would make that read
+    // look superseded and it would discard the newest state, leaving the stale
+    // snapshot in place — the exact regression this guard exists to prevent.
+    const ownershipRevision = circuitOwnershipsRevision;
     set({ loading: true, error: null });
     try {
       // Satellite reads fail independently. A transient failure preserves
@@ -516,15 +548,22 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       }
       const schedulesChanged =
         Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
-      // This snapshot is newer than any satellite read already in flight.
-      circuitOwnershipsRevision += 1;
+      // A live event patched the ledger while this snapshot was in flight, so
+      // this ownership list is older than what the store already holds. Keep
+      // the newer state and leave the revision alone — the event's own
+      // trailing satellite read is the one entitled to commit here.
+      const ownershipsStale = ownershipRevision !== circuitOwnershipsRevision;
+      const reconciledOwnerships = Array.isArray(circuitOwnerships) && !ownershipsStale
+        ? reconcileOwnerships(get().circuitOwnerships, circuitOwnerships).ownerships
+        : get().circuitOwnerships;
+      // Only a snapshot that is actually applied counts as a newer write for
+      // in-flight satellite reads to defer to.
+      if (!ownershipsStale) circuitOwnershipsRevision += 1;
       set({
         nodesById: newById,
         nodeIds: newIds,
         autopilotStates,
-        circuitOwnerships: !Array.isArray(circuitOwnerships)
-          ? get().circuitOwnerships
-          : Object.fromEntries(circuitOwnerships.map((ownership) => [ownership.node_id, ownership])),
+        circuitOwnerships: reconciledOwnerships,
         semanticTurns: !Array.isArray(semanticTurns)
           ? get().semanticTurns
           : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
@@ -552,18 +591,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // than regress the visible indicator. The queued trailing read (or the
       // snapshot that superseded us) carries the newer state.
       if (revision !== circuitOwnershipsRevision) return;
-      const current = get().circuitOwnerships;
-      const next: Record<number, CircuitAgentOwnership> = {};
-      let changed = Object.keys(current).length !== rows.length;
-      for (const ownership of rows) {
-        const prior = current[ownership.node_id];
-        const unchanged = prior !== undefined && shallowEqualOwnership(prior, ownership);
-        next[ownership.node_id] = unchanged ? prior : ownership;
-        if (!unchanged) changed = true;
-      }
+      const { ownerships, changed } = reconcileOwnerships(get().circuitOwnerships, rows);
       // Nothing moved (the common case for a burst's trailing read) — keep the
       // same map reference so no subscriber re-renders.
-      if (changed) set({ circuitOwnerships: next });
+      if (changed) set({ circuitOwnerships: ownerships });
     } catch {
       // A transient read failure preserves the last known ownership instead of
       // clearing a live indicator; the next event or fetch retries.

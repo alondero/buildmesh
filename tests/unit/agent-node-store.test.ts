@@ -158,6 +158,27 @@ describe('useAgentNodeStore', () => {
       });
     });
 
+    it('preserves ownership row identity for unchanged rows across a full fetch', async () => {
+      const node = makeNode({ id: 7 });
+      const ownership = {
+        node_id: 7, run_id: 1, circuit_id: 1, circuit_name: 'Review',
+        state: 'running', parent_node_id: null,
+      };
+      useAgentNodeStore.setState({ circuitOwnerships: { 7: ownership } });
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.resolve([node]);
+        // A fresh but field-identical row, as the IPC deserialiser produces.
+        if (command === 'list_circuit_agent_ownerships') return Promise.resolve([{ ...ownership }]);
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().fetchAgentNodes();
+
+      // Same reference ⇒ per-id subscribers skip the render on an unrelated
+      // full refetch (the reconciliation both read paths now share).
+      expect(useAgentNodeStore.getState().circuitOwnerships[7]).toBe(ownership);
+    });
+
     it('populates agent nodes on success', async () => {
       const nodes = [makeNode()];
       mockInvoke.mockResolvedValueOnce(nodes);
@@ -524,9 +545,10 @@ describe('useAgentNodeStore', () => {
 
     // Spec `autopilot-node-indicators.md` step 7: "Give the async refresh an
     // owner so an older response cannot overwrite newer event state" — and the
-    // acceptance bullet "Resolve older/newer refreshes in both orders". Both
-    // orders below hold a read open, land the newer write, then release it: the
-    // stale snapshot must be dropped, not committed.
+    // acceptance bullet "Resolve older/newer refreshes in both orders". Each
+    // test below holds one reader open, lands the newer write, then releases it:
+    // whichever side is in flight, the stale snapshot must be dropped rather
+    // than committed over the newer state.
     it('drops an in-flight read that resolves after a newer circuit event', async () => {
       const node = makeNode({ id: 11, status: 'running' });
       seedAgentNodes([node]);
@@ -591,6 +613,45 @@ describe('useAgentNodeStore', () => {
       releaseRead();
       await pending;
 
+      expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('paused');
+    });
+
+    // The third direction, and the one that hid a real bug: the FULL snapshot is
+    // the reader in flight. Its ownership slice is older than the live event that
+    // lands mid-fetch, so it must be dropped — and must not bump the revision,
+    // or the event's own trailing satellite read would look superseded and
+    // discard the newest state, stranding the stale snapshot.
+    it('drops a full snapshot\u2019s ownership when a live event lands mid-fetch', async () => {
+      const node = makeNode({ id: 11, status: 'running' });
+      seedAgentNodes([node]);
+      const running = {
+        node_id: 11, run_id: 1, circuit_id: 1, circuit_name: 'Review',
+        state: 'running', parent_node_id: null,
+      };
+      useAgentNodeStore.setState({ circuitOwnerships: { 11: running } });
+
+      // The fetch hangs on the node-list read while its ownership satellite
+      // read (still the pre-pause `running` snapshot) has already resolved
+      // inside Promise.all.
+      let releaseNodes!: () => void;
+      const nodesRead = new Promise<AgentNode[]>((resolve) => {
+        releaseNodes = () => resolve([node]);
+      });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return nodesRead;
+        if (cmd === 'list_circuit_agent_ownerships') return Promise.resolve([running]);
+        return Promise.resolve(undefined);
+      });
+
+      const fetch = useAgentNodeStore.getState().fetchAgentNodes();
+      await Promise.resolve();
+      useAgentNodeStore.getState().patchCircuitOwnershipState(1, 'paused');
+      expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('paused');
+
+      releaseNodes();
+      await fetch;
+
+      // The stale snapshot must not overwrite the newer live event.
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('paused');
     });
 
