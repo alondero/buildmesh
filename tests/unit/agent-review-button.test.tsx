@@ -117,7 +117,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.getByRole('heading', { name: 'Review or circuit for Fix parser' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value: '5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null, false));
     await waitFor(() => expect(useUIStore.getState().probeTab).toBe('circuits'));
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
@@ -131,7 +131,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.queryByRole('option', { name: 'Terminal' })).toBeNull();
     fireEvent.change(select, { target: { value: 'codex' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
   });
 
   it('themes its dropdowns with a defined surface token (regression: bg-surface-raised)', () => {
@@ -168,7 +168,7 @@ describe('agent workflow title-bar control', () => {
     // The composite id is what reaches the backend, so it must be selectable.
     fireEvent.change(select, { target: { value: 'claude:minimax' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'claude:minimax'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'claude:minimax', false));
   });
 
   it('sends a cross-harness pick without warning about the model', async () => {
@@ -183,7 +183,7 @@ describe('agent workflow title-bar control', () => {
     fireEvent.change(select, { target: { value: 'codex' } });
     expect(screen.queryByText(/#1690/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
   });
 
   it('resets the reviewer provider when the dialog is reopened', () => {
@@ -211,7 +211,7 @@ describe('agent workflow title-bar control', () => {
     // not that the control is hidden.
     expect(screen.queryByLabelText('Reviewer provider')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null, false));
   });
 
   it('keeps an actionable backend error in the dialog', async () => {
@@ -294,5 +294,28 @@ describe('agent workflow title-bar control', () => {
     // Let any pending microtask resolve so we can compare counts after.
     await Promise.resolve();
     expect(callCount.n).toBe(0);
+  });
+
+  it('forwards the readiness-gate override (#1792) when the user opts in', async () => {
+    // The override lets the user mint a run on a never-observed source
+    // (no `cli_session_id`, no readable `assistant_report`); the backend
+    // records it on the run's `context_json` for audit.
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    fireEvent.click(screen.getByLabelText(/Review an agent that hasn.t started yet/));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null, true));
+  });
+
+  it('resets the readiness-gate override when the dialog is reopened', () => {
+    // The override is intentionally off by default so power users opt in
+    // by choice on every review; it does not leak across modal opens.
+    renderButton();
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    fireEvent.click(screen.getByLabelText(/Review an agent that hasn.t started yet/));
+    expect((screen.getByLabelText(/Review an agent that hasn.t started yet/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
+    expect((screen.getByLabelText(/Review an agent that hasn.t started yet/) as HTMLInputElement).checked).toBe(false);
   });
 });

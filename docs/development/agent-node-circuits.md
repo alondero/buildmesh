@@ -79,6 +79,42 @@ by another Circuit or legacy Autopilot must finish that automation first, so
 two controllers cannot send it competing instructions. Suspended agents must
 be resumed before starting a workflow.
 
+## Source-agent readiness gate (#1792)
+
+The built-in review preset refuses to mint a run on a source agent that has
+not produced any observable evidence yet — neither a captured `cli_session_id`
+nor a readable `assistant_report` revision. A freshly-spawned node reaches
+`status = Running` before the worker has had time to read a session identity
+from the harness's transcript dir or capture a readable report, so without
+this gate the review would burn the full `ACTIVE_WAIT_MS` budget waiting for
+evidence that never arrives. When the gate fires, the dialog shows:
+
+> Source agent has not started yet — wait for its first turn before starting
+> a review.
+
+The dialog opens a **Review an agent that hasn't started yet** checkbox in
+the same panel as the rounds control. Ticking it bypasses the gate and the
+override is recorded on the run's `context_json` (`source.review_allow_unobserved
+= "1"`) so the audit trail shows which runs skipped the readiness check. The
+checkbox defaults to off, so the default behaviour is to wait for the source
+to be observed.
+
+The gate is **only** enforced on the built-in review preset:
+
+- **Recovery** (Continue review after a failed run) bypasses the gate: the
+  source is already known to be observed via its previous run's evidence.
+- **Explicit user-selected Circuits** (any authored blueprint chosen from the
+  picker) bypass the gate: the user is asking for a specific blueprint, not
+  the built-in review preset.
+- **Recovery-via-IPC entry points** (Continue review, the reviewer's feedback
+  step) call the recovery path internally and therefore inherit its
+  permissive behaviour.
+
+The override does not soften any other gate: the reviewer still has to be
+alive, the source still has to be in `Running | AwaitingInput | Completed |
+Ready`, and the first-writer-wins dedupe (issue #1660) still hands back the
+original run id on a retry.
+
 ## Blueprint authors
 
 On prompt injection and classifier steps, select **Triggering agent** to target

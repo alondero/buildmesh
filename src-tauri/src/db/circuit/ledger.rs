@@ -59,15 +59,24 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
 /// early-return below hands back that run's id and `max_rounds` /
 /// `reviewer_provider` are not applied — the dialog hides the form in this
 /// state, so the only way here is a retry or IPC race.
+///
+/// `allow_unobserved` (issue #1792) is the explicit override for the
+/// source-agent readiness gate below. The built-in review preset refuses
+/// to mint a run on a never-observed source (no `cli_session_id`, no
+/// readable `assistant_report`); recovery and explicit user-selected
+/// circuits stay permissive because both paths have already proven the
+/// source is observed in another context. The override is recorded on the
+/// run's `context_json` (`source.review_allow_unobserved = "1"`) for audit.
 pub fn create_node_circuit_run(
     node_id: i64,
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
-        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider,
+        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider, allow_unobserved,
     )
 }
 
@@ -84,17 +93,33 @@ pub(crate) fn create_node_circuit_run_locked(
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
-    create_node_circuit_run_with_recovery_locked(db, node_id, selected_circuit_id, max_rounds, reviewer_provider, None)
+    create_node_circuit_run_with_recovery_locked(
+        db, node_id, selected_circuit_id, max_rounds, reviewer_provider, None, allow_unobserved,
+    )
 }
 
+/// Recovery path: the source is already known to be observed (it has a
+/// previous run whose evidence the recovery plan reads), so the readiness
+/// check is skipped by passing `allow_unobserved = true`.
 pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
 ) -> Result<i64, String> {
-    create_node_circuit_run_with_recovery_locked(db, recovery.source_id, None, max_rounds, None, Some(recovery))
+    create_node_circuit_run_with_recovery_locked(
+        db, recovery.source_id, None, max_rounds, None, Some(recovery), true,
+    )
 }
+
+/// Exact reason returned when the built-in review preset is asked to mint
+/// a run on a source agent that has produced no observable evidence yet
+/// (no captured `cli_session_id`, no readable `assistant_report` revision).
+/// Pinned by `node_review_refuses_unstarted_source_with_exact_message`
+/// (issue #1792).
+pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
+    "Source agent has not started yet — wait for its first turn before starting a review.";
 
 fn create_node_circuit_run_with_recovery_locked(
     db: &mut Connection,
@@ -103,6 +128,7 @@ fn create_node_circuit_run_with_recovery_locked(
     max_rounds: i32,
     reviewer_provider: Option<String>,
     recovery: Option<super::recovery::ReviewRecovery>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
     let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -144,6 +170,36 @@ fn create_node_circuit_run_with_recovery_locked(
     if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
         return Err("Resume the agent before starting a review.".into());
     }
+    // Source-agent readiness gate (issue #1792). Skip the built-in review
+    // preset's check on the recovery path (source is already observed via
+    // its previous run) and on the explicit user-selected-circuit path
+    // (the user is asking for a specific blueprint, not the built-in
+    // review preset). The override flag bypasses this for users who
+    // knowingly want to review a never-observed agent.
+    let tx = if !allow_unobserved && recovery.is_none() && selected_circuit_id.is_none() {
+        let cli_present = crate::db::agent_node::cli_session_id_present_inner(&tx, node_id)
+            .map_err(|e| e.to_string())?;
+        if !cli_present {
+            // The DB presence check is cheap; `assistant_report` does
+            // filesystem I/O (reads the harness transcript dir for the
+            // captured `cli_session_id`). Release the writer mutex before
+            // the I/O call so we don't hold a lock during disk reads
+            // (issue #1228 three-phase pattern). The report reader returns
+            // `None` when there is no transcript yet, when the session id
+            // has not been captured, or when the harness does not produce
+            // a readable report — every one of those is exactly the
+            // "never observed" case we want to refuse.
+            drop(tx);
+            if crate::coordinator::enrichment::assistant_report(&node).is_none() {
+                return Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into());
+            }
+            db.transaction().map_err(|e| e.to_string())?
+        } else {
+            tx
+        }
+    } else {
+        tx
+    };
     let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
         Some(tx.query_row(
             "SELECT NULLIF(TRIM(model), ''), NULLIF(TRIM(effort), '') FROM meshes WHERE id = ?1",
@@ -204,6 +260,14 @@ fn create_node_circuit_run_with_recovery_locked(
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() && recovery.is_none() {
+        if allow_unobserved {
+            // Audit field for the readiness-gate override (issue #1792):
+            // a user who knowingly reviewed an unobserved source leaves a
+            // permanent breadcrumb on the run. Absent means the source
+            // either had a captured `cli_session_id` or a readable
+            // `assistant_report` at create time.
+            context.set("source.review_allow_unobserved", "1");
+        }
         if let Some(provider) = reviewer_override.as_deref() {
             context.set("review.provider", provider);
         }

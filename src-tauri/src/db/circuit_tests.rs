@@ -201,12 +201,17 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
+    // Mark the source as observed (issue #1792): the built-in review
+    // preset refuses to mint a run on a target that has not produced
+    // any observable evidence yet. Set a `cli_session_id` so the rest
+    // of this test exercises the observed-source path.
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
+    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()), false).unwrap();
     // First writer wins: a retry passing no pick, or a different one, gets the
     // existing run back untouched — neither the provider nor the round limit
     // from the later calls is applied.
-    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap(), run_id);
-    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("anthropic".into())).unwrap(), run_id);
+    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap(), run_id);
+    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("anthropic".into()), false).unwrap(), run_id);
     assert!(list_autopilot_circuits_inner(&conn, mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
     let preset_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
@@ -248,7 +253,11 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
+    // Mark the source as observed (issue #1792) so the initial review
+    // run can be created. The recovery path is permissive by design and
+    // would not need this, but the first run does.
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
+    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()), false).unwrap();
     assert!(review_recovery_inner(&conn, old, 1).unwrap_err().contains("Only failed"));
     commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
         node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
@@ -328,12 +337,12 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
         "claude", None, None, None, None, false, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let foreign = create_autopilot_circuit_inner(&conn, other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
-    assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None).unwrap_err().contains("manual Circuit"));
+    assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None, false).unwrap_err().contains("manual Circuit"));
     let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
     let timed = create_autopilot_circuit_inner(&conn, mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
-    assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(timed.id), 3, None).is_err());
+    assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(timed.id), 3, None, false).is_err());
     let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
-    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, None).unwrap();
+    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, None, false).unwrap();
     assert_eq!(get_circuit_run_inner(&conn, run).unwrap().unwrap().circuit_id, manual.id);
     cancel_circuit_run_locked(&mut conn, run).unwrap();
     // An authored Circuit carries its reviewer provider in its graph, so the
@@ -345,7 +354,7 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     let run_context = crate::autopilot::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
-    let rerun = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("codex".into())).unwrap();
+    let rerun = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("codex".into()), false).unwrap();
     let rerun_context = crate::autopilot::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, rerun).unwrap().unwrap().context_json,
     ).unwrap();
@@ -365,17 +374,20 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     let source = create_agent_node_inner(&conn, mesh.id, "Validated", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    // Mark the source as observed (issue #1792) so the readiness gate
+    // does not block the blank-pick test path below.
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
     // The picker filters Terminal, but the backend holds its own invariant: the
     // spawn cascade treats any non-empty string as the preset winner, so an
     // unchecked invoke would otherwise spawn the "reviewer" on a plain shell.
     // Bare, padded, and composite (the harness segment decides) all reject.
     for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
-        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into())).unwrap_err();
+        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
         assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
     }
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.
-    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("   ".into())).unwrap();
+    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("   ".into()), false).unwrap();
     let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
@@ -384,6 +396,159 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
         Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
         "a blank pick collapses to the app-wide snapshot",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Source-agent readiness gate (issue #1792).
+//
+// The built-in review preset must refuse to mint a run on a source that has
+// not produced any observable evidence yet (no captured `cli_session_id`,
+// no readable `assistant_report` revision). A freshly-spawned node reaches
+// `status = Running` before the worker has had time to read a session
+// identity from the harness's transcript dir or capture a readable report,
+// so without this gate the review would burn the full `ACTIVE_WAIT_MS`
+// budget waiting for evidence that never arrives. Recovery and explicit
+// user-selected circuits stay permissive — both paths have already proven
+// the source is observed in another context. The override flag bypasses
+// this for users who knowingly want to review a never-observed agent, and
+// the override is recorded on the run's `context_json` for audit.
+// ---------------------------------------------------------------------------
+
+/// A source with no `cli_session_id` and no readable `assistant_report`
+/// must be rejected with the exact reason string from the issue (the
+/// `MAINTAINERS_REASON` regression net for the user-visible error
+/// message). Pinned by the acceptance criteria.
+#[test]
+fn node_review_refuses_unstarted_source_with_exact_message() {
+    use super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-unstarted", "/tmp/ready-gate-unstarted").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    // Deliberately leave `cli_session_id` unset: a fresh spawn has not yet
+    // been observed by the worker. The transcript path the assistant
+    // report reader would consult (`/tmp/ready-gate-unstarted/...`) does
+    // not exist on disk, so the report also returns `None` — both gates
+    // fail and the request is refused.
+    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err();
+    assert_eq!(err, SOURCE_NOT_YET_OBSERVED_MESSAGE,
+        "the user-visible reason must match the issue's exact wording, got {err:?}");
+}
+
+/// A captured `cli_session_id` is enough to satisfy the gate: the worker
+/// has already seen the harness's transcript dir and recorded the identity.
+/// No `assistant_report` is needed.
+#[test]
+fn node_review_allows_source_with_cli_session_id() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-cli", "/tmp/ready-gate-cli").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Started", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "captured-by-worker").unwrap();
+    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
+    let stored = get_circuit_run_inner(&conn, run).unwrap().unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+    assert!(ctx.get("source.review_allow_unobserved").is_none(),
+        "the override was not requested; the audit field must stay empty");
+}
+
+/// The explicit user-selected-circuit path bypasses the readiness gate.
+/// The user is asking for a specific blueprint, not the built-in review
+/// preset — that path has its own observation guarantees.
+#[test]
+fn node_review_skips_readiness_for_user_selected_circuit() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-circuit", "/tmp/ready-gate-circuit").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    // Note: no `cli_session_id` is set — the source is technically
+    // unobserved. The user-selected-circuit path stays permissive.
+    let manual = CircuitGraph::walking_skeleton("user-authored circuit");
+    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "user manual", "", 1, &manual.to_json().unwrap()).unwrap();
+    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(circuit.id), 3, None, false).unwrap();
+    assert_eq!(get_circuit_run_inner(&conn, run).unwrap().unwrap().circuit_id, circuit.id);
+}
+
+/// The recovery path bypasses the readiness gate: the source is already
+/// known to be observed via its previous run (its report lives in the
+/// failed-ledger's `context_json`). `create_node_circuit_run_recovery_locked`
+/// fixes `allow_unobserved = true` internally.
+#[test]
+fn node_review_skips_readiness_for_recovery_path() {
+    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-recovery", "/tmp/ready-gate-recovery").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Recoverable", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "recoverable-sid").unwrap();
+    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
+    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "completed".into(),
+        outcome: Some(Some("working".into())), error: Some(Some("Latest findings".into())),
+        agent_node_id: None, attempt: 3, fresh_attempt: false,
+    }]).unwrap();
+    // Wipe the cli_session_id to prove the recovery path does not re-check.
+    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
+        rusqlite::params![source.id]).unwrap();
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    assert_eq!(get_circuit_run_inner(&conn, next).unwrap().unwrap().state, "pending");
+}
+
+/// The override flag lets the user mint a run on an unobserved source.
+/// The override is recorded on the run's `context_json` so audit and
+/// support can see the bypass was intentional.
+#[test]
+fn node_review_override_records_audit_field_on_context_json() {
+    use super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-override", "/tmp/ready-gate-override").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Override me", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    // Sanity: without the override, the request is refused.
+    assert_eq!(
+        create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err(),
+        SOURCE_NOT_YET_OBSERVED_MESSAGE,
+    );
+    // With the override, the request succeeds and the audit field lands
+    // on the run's context_json (the reviewer can see why this run
+    // bypassed the gate).
+    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
+    let stored = get_circuit_run_inner(&conn, run).unwrap().unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+    assert_eq!(ctx.get("source.review_allow_unobserved"), Some("1"),
+        "the audit field must record the override for downstream reviewers");
+}
+
+/// First-writer-wins dedupe (issue #1660) is preserved: even an unobserved
+/// source cannot double-mint a run if the first call already succeeded via
+/// the override. The dedupe check still hands back the original run id.
+#[test]
+fn node_review_dedupe_survives_after_override_mints() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-dedupe", "/tmp/ready-gate-dedupe").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Override then dedupe", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
+    // A second call without the override must NOT re-mint and must NOT
+    // trip the readiness gate — the existing live run answers first.
+    let second = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
+    assert_eq!(first, second, "first-writer-wins dedupe wins over the readiness gate");
+    let third = create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("codex".into()), false).unwrap();
+    assert_eq!(first, third, "the second pick is ignored, including its reviewer provider");
+    let stored = get_circuit_run_inner(&conn, third).unwrap().unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+    assert_eq!(ctx.get("source.review_allow_unobserved"), Some("1"),
+        "the override from the first writer is the one that wins");
+    assert_eq!(ctx.get("retry.max_retries"), Some("3"),
+        "and so is the first round limit");
 }
 
 // ---------------------------------------------------------------------------

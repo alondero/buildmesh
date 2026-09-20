@@ -75,6 +75,11 @@ fn create_review_activity_pair(
         None,
     )
     .map_err(|error| error.to_string())?;
+    // Stamp a `cli_session_id` so the source passes the readiness gate
+    // (issue #1792): the built-in review preset refuses to mint a run on
+    // a target whose worker has not captured a session identity yet.
+    crate::db::set_cli_session_id_if_missing(source.id, &format!("fixture-{label}-sid"))
+        .map_err(|error| error.to_string())?;
     crate::db::update_agent_node_status(source.id, SessionStatus::Completed)
         .map_err(|error| error.to_string())?;
 
@@ -100,7 +105,7 @@ fn create_review_activity_pair(
         // Use the same production circuit creation path as the node-review
         // command so source.* context and the canonical preset stay realistic.
         ReviewFixtureKind::NodeStarted => {
-            let run_id = crate::db::create_node_circuit_run(source.id, None, 3, None)?;
+            let run_id = crate::db::create_node_circuit_run(source.id, None, 3, None, false)?;
             let run = crate::db::get_circuit_run(run_id)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("review fixture run {} disappeared", run_id))?;
