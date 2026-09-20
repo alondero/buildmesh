@@ -7,9 +7,11 @@
 //! so we launch in interactive mode everywhere.
 //!
 //! **Session resumption** uses `--session [<id>]` or `-c` / `--continue`.
-//! MiniMax Code auto-assigns its own session ids (captured from PTY output by
-//! `session_naming`), so `self_assigns_session_id()` is `true` and
-//! `session_assign_args()` is a no-op.
+//! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
+//! verified for the TUI, so PTY capture stays off and ids are captured via
+//! the post-spawn manifest poller (`services::mcode_session`, issue #1798).
+//! `self_assigns_session_id()` is `true` and `session_assign_args()` is a
+//! no-op.
 //!
 //! **No model override** (issue #1179). `mcode` exposes `--model
 //! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
@@ -536,9 +538,48 @@ impl AgentProvider for McodeAdapter {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
-    /// MiniMax Code auto-assigns session ids — captured from PTY output.
+    /// MiniMax Code auto-assigns session ids — captured via the manifest
+    /// poller, not PTY output (issue #1798).
     fn self_assigns_session_id(&self) -> bool {
         true
+    }
+
+    /// The TUI has no verified session banner, so the labeled-UUID PTY regex
+    /// can never reliably match an mcode id — and leaving it on would risk
+    /// binding a stray UUID from tool output (same reason AGY opts out).
+    /// Capture runs from [`Self::after_fresh_spawn`] via the manifest scan.
+    fn captures_session_id_from_pty(&self) -> bool {
+        false
+    }
+
+    /// Start the manifest-scan capture poller so `cli_session_id` is
+    /// populated shortly after spawn. Without this, every mcode node keeps
+    /// `cli_session_id = NULL` and is permanently skipped by
+    /// `auto_resume_agent_nodes` (issue #1798).
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+        crate::services::mcode_session::start_capture_poller(
+            node_id,
+            spawn_path.to_string(),
+            env_type,
+        );
+    }
+
+    fn recover_suspended_session_id(
+        &self,
+        spawn_path: &str,
+        env_type: EnvType,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        crate::services::mcode_session::find_historic_id_for_directory(
+            env_type, spawn_path, anchor_ms, recorded_start,
+        )
     }
 
     fn resume_args(&self, id: &str) -> Vec<String> {
@@ -617,6 +658,23 @@ mod tests {
     #[test]
     fn self_assigns_session_id() {
         assert!(MCODE.self_assigns_session_id());
+    }
+
+    /// Issue #1798: mcode self-assigns ids but the TUI prints no verified
+    /// banner, so the PTY UUID regex can never reliably capture one. Capture
+    /// runs from `after_fresh_spawn` (manifest-scan poller, same shape as
+    /// CommandCode) — the PTY path must stay off so a stray UUID from tool
+    /// output can't bind the wrong session.
+    #[test]
+    fn self_assigns_but_does_not_capture_from_pty() {
+        assert!(
+            MCODE.self_assigns_session_id(),
+            "mcode mints its own session ids"
+        );
+        assert!(
+            !MCODE.captures_session_id_from_pty(),
+            "mcode ids are not PTY banners; capture is after_fresh_spawn (issue #1798)"
+        );
     }
 
     #[test]
