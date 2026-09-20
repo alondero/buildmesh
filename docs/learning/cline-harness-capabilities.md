@@ -5,6 +5,7 @@ metadata:
   type: reference
   harness: cline
   verified_cli_version: 3.0.62
+  capture_resume_added: 2026-09-20
 ---
 
 # Cline harness vs Buildmesh capability contract (2026-09-18)
@@ -68,8 +69,9 @@ wired yet, so those capabilities are advertised honestly as unsupported.
 
 Session ids are self-assigned and shaped `<epochms>_<5 base36 chars>`
 (for example `1789757012702_7of3e`). There is no flag that mints an id, so
-Buildmesh cannot pin one at spawn, and live capture is handled by the
-separate capture pipeline.
+Buildmesh cannot pin one at spawn. Live capture and suspended-node
+recovery are handled by the SQLite pipeline documented in the next
+section.
 
 ## Spawn recipe
 
@@ -150,6 +152,76 @@ demands isolation, but Buildmesh does not set it. Be aware that concurrent
 Cline processes share the same local session database and hub daemon; if you
 run many Cline nodes at once, watch for lock contention and hub port reuse.
 
+## Session-id capture and auto-resume (issue #1774)
+
+Cline's TUI never prints its self-assigned session id live (it only
+surfaces it in the end-of-run summary), so the PTY labeled-UUID regex in
+`session_capture` cannot bind a fresh spawn. Buildmesh captures the id
+from the authoritative local SQLite store at
+`<cline home>/data/db/sessions.db`, then writes it to
+`agent_nodes.cli_session_id` so auto-resume on the next startup can
+splice `--id <id>` into the spawn argv.
+
+### Fresh-spawn capture
+
+- The adapter calls
+  [`services::cline_session::start_capture_poller`](../../src-tauri/src/services/cline_session.rs)
+  from
+  [`AgentProvider::after_fresh_spawn`](../../src-tauri/src/agent/provider/mod.rs).
+  The poller retries at 400 ms / 800 ms / 1.6 s / 2.5 s / 4 s (≈9.3 s
+  total budget) until a row whose `time_created >= spawn - 2 s` appears
+  in the SQLite store for the spawn `cwd`.
+- It picks the newest row that (a) matches the spawn directory under
+  the platform-aware `env::directories_match` rules, (b) carries a valid
+  `<epochms>_<5 base36>` id, and (c) is tagged `interactive = 1` (one-shot
+  prompt runs are excluded — they exit immediately per issue #1769).
+- The id is persisted via `db::set_cli_session_id_if_missing`, so a
+  later, more authoritative capture (the on-disk `sessions/<id>/`
+  fallback, when added) cannot clobber it.
+- The poller cancels if the node leaves the process registry (killed /
+  crashed before the TUI flushed) — no zombie writes for a node the
+  user has already abandoned.
+
+### Suspended-node recovery (startup sweep)
+
+The startup resume path (`services::session_recovery`) calls
+`AgentProvider::recover_suspended_session_id`, which delegates to
+`services::cline_session::find_historic_id_for_directory`. The helper
+reads the same SQLite store without the spawn-anchor `not_before` floor
+and applies `services::session_recovery::select_recovery_identity` —
+the same one-candidate-in-window gate every other harness uses to avoid
+binding the wrong conversation when a user reopens the same directory
+twice. Two viable interactive rows in the spawn window → recovery
+returns `None`, the node stays suspended, and the sweep retries on the
+next startup.
+
+### Override precedence
+
+`env::cline_db_path_for_env` resolves the SQLite store from the spawn
+environment in this order, mirroring `--help` (the issue #1769 source
+of truth):
+
+1. `CLINE_DATA_DIR` env var (if set and non-empty) — points at a
+   different `data/db/sessions.db`.
+2. Otherwise the spawn environment's `~/.cline`, with the same WSL
+   guest-home probe every other harness uses
+   (`env::wsl_home()`).
+
+A Windows-side Buildmesh driving a WSL Cline still reads the
+guest-side store via `cline_dir_for_env(EnvType::Wsl, …)`; the same
+shape the Codex and AGY adapters use for cross-env capture.
+
+### Limitations
+
+- `~/.cline/data/db/sessions.db` is the **only** capture source today.
+  The on-disk `~/.cline/data/sessions/<id>/` tree is a documented
+  fallback for future work; the capture poller does not consult it.
+- `--data-dir <path>` is honoured by the resolver, but Buildmesh never
+  sets it — concurrent Buildmesh-spawned Cline processes share one
+  store, and the row matchers use `cwd` to disambiguate. The
+  `interactive = 1` filter excludes one-shot prompt runs that would
+  otherwise pollute that shared view.
+
 ## Troubleshooting
 
 - **Windows Application Control / antivirus blocks `cline.exe`.** Cline's own
@@ -182,6 +254,19 @@ run many Cline nodes at once, watch for lock contention and hub port reuse.
 - **A Cline row does not appear.** Confirm `cline` (or `cline.cmd`) is on
   PATH, or that `~/.cline` exists, then restart Buildmesh. Detection runs once
   at startup.
+- **`cli_session_id` stays `NULL` after a fresh spawn.** The poller
+  retries for ~9.3 s before giving up. The two most common causes:
+  - The Cline TUI was started without `-i` (a one-shot prompt run) —
+    the SQLite row carries `interactive = 0` and is filtered out by
+    design. Switch the Spawn Menu entry to **Cline (interactive)**.
+  - The Cline process was killed before it flushed the `sessions`
+    row. Check `~/.cline/data/db/sessions.db` with `sqlite3` to confirm
+    whether a row was written for the spawn cwd at all.
+- **Auto-resume splices the wrong session id.** Two interactive rows
+  for the same directory inside the 5-minute spawn window will cause
+  recovery to refuse to bind rather than guess. The node stays
+  suspended; manually paste the desired id into the Spawn Menu or wait
+  for the older row to age out of the window.
 
 ## Sources
 

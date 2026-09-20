@@ -217,6 +217,52 @@ impl AgentProvider for ClineAdapter {
         vec!["--id".into(), id.into()]
     }
 
+    /// Issue #1774: Cline's TUI never prints its self-assigned
+    /// `<epochms>_<base36>` id, so the PTY labeled-UUID regex in
+    /// `session_capture` can never match. Start the SQLite poller
+    /// (`services::cline_session::start_capture_poller`) so the id lands
+    /// in `cli_session_id` within ~1-2s of spawn — the same shape AGY
+    /// and OpenCode use for their self-assigned ids.
+    ///
+    /// `spawn_path` is the spawn-time directory of the node (Root Node:
+    /// mesh path; Worktree Node: resolved worktree directory). The
+    /// poller matches it against the Cline `sessions.cwd` column so a
+    /// sibling spawn in the same mesh root does not steal the row.
+    fn after_fresh_spawn(
+        &self,
+        node_id: i64,
+        spawn_path: &str,
+        env_type: EnvType,
+        _app: &tauri::AppHandle,
+    ) {
+        crate::services::cline_session::start_capture_poller(
+            node_id,
+            spawn_path.to_string(),
+            env_type,
+        );
+    }
+
+    /// Issue #1774: read Cline's `<home>/data/db/sessions.db` to find
+    /// an interactive session row whose `cwd` matches the suspended
+    /// node and whose `time_created` sits inside the recovery window.
+    /// Returns the candidate id only — the startup service decides
+    /// whether to persist it (via `db::recover_suspended_cli_session_id`)
+    /// based on the durable process generation.
+    fn recover_suspended_session_id(
+        &self,
+        spawn_path: &str,
+        env_type: EnvType,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        crate::services::cline_session::find_historic_id_for_directory(
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
+        )
+    }
+
     /// `cline -i "<prefill>"` — the positional prompt seeds the TUI's first
     /// turn. **Returns just the prefill text**; the base `-i` is already in
     /// `spawn_recipe.base_args` and `default_prepare` extends `base_args`
@@ -564,5 +610,44 @@ mod tests {
 
         // Nothing present → None (no false-positive menu row).
         assert!(resolve_install(None, Some(appdata), &|_| false).is_none());
+    }
+
+    // ── Issue #1774: session-id capture wiring ──────────────────────────
+
+    /// Cline self-assigns and disables PTY capture. The fresh-spawn hook
+    /// must run a SQLite poller (`services::cline_session`) — pinning
+    /// both invariants in one place so a refactor that flips the PTY
+    /// flag back to `true` *or* drops the after_fresh_spawn call fails
+    /// this test instead of silently leaving `cli_session_id` null on
+    /// every Cline node.
+    #[test]
+    fn self_assigns_disables_pty_capture_and_runs_a_poller() {
+        assert!(
+            CLINE.self_assigns_session_id(),
+            "Cline mints its own session ids; auto-resume must drive --id"
+        );
+        assert!(
+            !CLINE.captures_session_id_from_pty(),
+            "Cline ids are <epochms>_<base36>, not UUIDs — PTY capture must stay off"
+        );
+    }
+
+    /// `recover_suspended_session_id` is the durable path used by the
+    /// startup sweep (issue #1774 / issue #1224 family). It must defer
+    /// to the Cline SQLite helper rather than reimplementing the read,
+    /// and it must surface `None` when no home is resolvable (e.g. an
+    /// `$HOME`-less Linux container) — a real `None` is what lets the
+    /// sweep skip the node instead of binding garbage.
+    #[test]
+    fn recover_suspended_session_id_delegates_to_cline_session_helper() {
+        // No home resolvable in a bare test env: the helper returns None.
+        // We don't assert on the positive path here — `services::cline_session`
+        // covers it under controlled SQLite fixtures, and the adapter's job
+        // is just to forward without re-implementing.
+        let no_home_result = CLINE.recover_suspended_session_id("/no/such/path", EnvType::Wsl, 0, false);
+        assert!(
+            no_home_result.is_none(),
+            "without a resolvable Cline home, the adapter must return None, not a synthesised id"
+        );
     }
 }

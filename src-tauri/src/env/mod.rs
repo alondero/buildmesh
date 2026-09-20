@@ -261,6 +261,53 @@ mod tests {
         assert_eq!(grok_dir(), expected);
     }
 
+    /// Issue #1774: the Cline CLI home directory must match the current
+    /// environment's home — `~/.cline` everywhere, with the same
+    /// `$HOME`/`$USERPROFILE` fallback rules the other CLI helpers
+    /// already pin. The capture poller reads its SQLite store under
+    /// `<cline home>/data/db/sessions.db`, so the path the helper emits
+    /// must land in a place that actually exists on a real install.
+    #[test]
+    fn cline_dir_uses_the_current_environment_home() {
+        let expected = match current_env() {
+            Environment::Wsl => std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                .join(".cline"),
+            Environment::Windows => std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                    std::path::PathBuf::from(format!("C:\\Users\\{user}"))
+                })
+                .join(".cline"),
+        };
+        assert_eq!(cline_dir(), expected);
+    }
+
+    /// Issue #1774: `cline_db_path_for_env` must always append the
+    /// authoritative `data/db/sessions.db` suffix onto whatever home
+    /// the spawn-aware resolver picked (override or `~/.cline`). The
+    /// SQLite store is the canonical capture source — `~/.cline/data/
+    /// sessions/<id>/` is the fallback. If the suffix drifts, the
+    /// capture poller silently reads the wrong file.
+    #[test]
+    fn cline_db_path_for_env_appends_canonical_suffix() {
+        use crate::models::EnvType;
+        // Windows path: bare-home derivation, suffix must still apply.
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let path = cline_db_path_for_env(EnvType::Windows, "")
+            .expect("windows home must resolve to a Cline DB path");
+        let expected = windows_home.join(".cline").join("data").join("db").join("sessions.db");
+        assert_eq!(path, expected, "windows DB path must end in data/db/sessions.db");
+        assert!(path.ends_with("data/db/sessions.db") || path.ends_with("data\\db\\sessions.db"),
+                "DB path must carry the data/db/sessions.db suffix regardless of separator");
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]

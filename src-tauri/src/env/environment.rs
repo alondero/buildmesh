@@ -684,3 +684,86 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
         }
     }
 }
+
+// ── Cline CLI home ──────────────────────────────────────────────────────────
+//
+// Issue #1773 wired the Cline CLI as a first-class agent harness. Issue
+// #1774 captures the session id it self-assigns (`<epochms>_<5 chars>`)
+// from `~/.cline/data/db/sessions.db`. The capture helper below resolves
+// that home directory and SQLite store from the *spawn* environment
+// (matches `codex_dir_for_env` / `agy_dir_for_env`) so a Windows
+// Buildmesh driving a WSL Cline still reads the guest-side store.
+//
+// `--data-dir` is an explicit Cline runtime override for parallel runs;
+// `CLINE_DATA_DIR` is the matching env var. Issue #1769 research pinned
+// `--help` as the source of truth, so we honour both with the same
+// precedence Cline does: explicit flag > env > `~/.cline/data`.
+
+/// Honour the Cline `--data-dir` / `CLINE_DATA_DIR` override for the
+/// resolved environment. `get` lets tests inject a fake env without
+/// mutating process state.
+fn cline_data_dir_override_for_env<F: Fn(&str) -> Option<std::ffi::OsString>>(
+    env_type: EnvType,
+    get: F,
+) -> Option<PathBuf> {
+    let raw = match env_type {
+        EnvType::WindowsInterop | EnvType::Windows => get("CLINE_DATA_DIR"),
+        EnvType::Wsl => get("CLINE_DATA_DIR"),
+    }?;
+    let raw = raw.to_string_lossy().trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+/// Cline CLI home directory: `<home>/.cline/`. Override precedence:
+/// `CLINE_DATA_DIR` (env) → otherwise `~/.cline` under the *spawn*
+/// environment. WSL guests use `wsl_home()` (cached guest login-shell
+/// probe) so a Windows username and a guest username can disagree
+/// without aliasing to the wrong account.
+pub(crate) fn cline_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, |k| env::var_os(k)) {
+        return Some(override_dir);
+    }
+    match env_type {
+        EnvType::WindowsInterop => super::windows_cli_home(".cline"),
+        EnvType::Windows => {
+            let _ = spawn_path;
+            Some(cline_dir())
+        }
+        EnvType::Wsl => {
+            let _ = spawn_path;
+            wsl_home().map(|home| home.join(".cline"))
+        }
+    }
+}
+
+/// Absolute path to Cline's authoritative session store:
+/// `<cline home>/data/db/sessions.db` (issue #1769 research). Returns
+/// `None` when the home directory is unknown (no `$HOME` / `$USERPROFILE`).
+pub(crate) fn cline_db_path_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    cline_dir_for_env(env_type, spawn_path).map(|dir| dir.join("data").join("db").join("sessions.db"))
+}
+
+/// Cline session-id capture root for the **current** (running) Buildmesh
+/// environment. Used by tests and by helpers that do not have a `EnvType`
+/// in scope. Mirrors the structure of [`codex_dir`] / [`agy_dir`] —
+/// no `CLINE_DATA_DIR` honoured at this level (the spawn-aware helpers
+/// above are the only ones that need to reason about guest vs host).
+pub fn cline_dir() -> PathBuf {
+    match current_env() {
+        Environment::Wsl => env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/root"))
+            .join(".cline"),
+        Environment::Windows => env::var("USERPROFILE")
+            .or_else(|_| env::var("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}"))
+            })
+            .join(".cline"),
+    }
+}
