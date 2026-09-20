@@ -51,6 +51,14 @@ pub struct GitHubIssue {
     /// deploys — a missing key parses to `vec![]`.
     #[serde(default)]
     pub blocked_by: Vec<i32>,
+    /// GitHub login of the issue's author (`user.login`). Drives the
+    /// contributor pill on the Issues probe row — clicking it opens
+    /// `https://github.com/<login>`. `#[serde(default)]` keeps the field
+    /// additive across rolling deploys; `services::github::Issue` already
+    /// defaults a missing `user` to `\"\"`, and the pill simply doesn't
+    /// render for an empty author.
+    #[serde(default)]
+    pub author: String,
 }
 
 /// Wire shape of `get_repo_pulls` (desktop Tauri) — one entry per pull request.
@@ -110,6 +118,13 @@ pub struct GitHubPullRequest {
     /// semantics.
     #[serde(default)]
     pub head_sha: String,
+    /// GitHub login of the PR's author — the contributor pill on the PRs
+    /// probe row links to `https://github.com/<login>`. Sourced from the
+    /// GraphQL summaries connection's `author { login }` (same request as
+    /// every other list field — no extra enrichment call).
+    /// `#[serde(default)]` for old cached payloads.
+    #[serde(default)]
+    pub author: String,
     /// Mergeability inline (issue #1529): `Some(true)` mergeable,
     /// `Some(false)` conflicts, `None` while GitHub is still computing
     /// (`UNKNOWN`) — mirrors the old `PrMergeability.mergeable` contract so
@@ -242,6 +257,7 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
             url: issue.html_url,
             state: issue.state,
             labels: issue.labels,
+            author: issue.author,
             // Downcast internal `i64` → wire `i32` (issue numbers fit
             // comfortably in i32's ~2.1B max; matches the existing
             // `#[ts(as = "i32")]` convention on the wire struct's other
@@ -359,6 +375,7 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
         head_repo_owner: pr.head_repo_owner,
         head_repo_clone_url: pr.head_repo_clone_url,
         head_sha: pr.head_sha,
+        author: pr.author,
         mergeable: pr.mergeable,
         mergeable_state: pr.mergeable_state,
     }).collect())
@@ -715,20 +732,28 @@ pub(crate) fn create_pr_for_mesh_blocking_with_client(
         .map_err(|e| e.to_string())
 }
 
-/// Merge a PR (squash + delete branch).
+/// Merge a PR with the caller-chosen strategy + delete the branch.
 /// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
+///
+/// `merge_method` is GitHub's REST vocabulary: `\"squash\"`, `\"merge\"`, or
+/// `\"rebase\"`. An absent or unrecognised value falls back to `\"squash\"`
+/// (the historical behaviour) so older clients — the PrPill menu, the
+/// mobile HTTP route — keep working unchanged; the panel's dropdown is
+/// the only caller that names a method explicitly.
 #[command]
-pub async fn merge_pr(pr_url: String) -> Result<String, String> {
-    crate::commands::run_blocking("merge_pr", move || merge_pr_blocking(pr_url)).await
+pub async fn merge_pr(pr_url: String, merge_method: Option<String>) -> Result<String, String> {
+    crate::commands::run_blocking("merge_pr", move || merge_pr_blocking(pr_url, merge_method)).await
 }
 
 /// Sync core for [`merge_pr`] — see [`get_repo_issues_blocking`].
-pub(crate) fn merge_pr_blocking(pr_url: String) -> Result<String, String> {
+pub(crate) fn merge_pr_blocking(pr_url: String, merge_method: Option<String>) -> Result<String, String> {
     let (owner, repo, pr_number) = parse_pr_url(&pr_url)
         .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
+    let method = normalise_merge_method(merge_method);
+
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.merge_pull_request(&owner, &repo, pr_number)
+    client.merge_pull_request(&owner, &repo, pr_number, &method)
         .map_err(|e| e.to_string())
 }
 
@@ -976,6 +1001,16 @@ pub fn get_github_url_for_mesh(mesh_id: i64) -> Result<Option<String>, String> {
 }
 
 /// Parse a GitHub PR URL into (owner, repo, pr_number).
+/// Validate the merge-method vocabulary at the wire seam. An absent or
+/// unrecognised value falls back to `"squash"` (the historical
+/// behaviour) so older clients keep working; the panel's dropdown sends
+/// one of the three literals GitHub's REST merge endpoint understands.
+fn normalise_merge_method(merge_method: Option<String>) -> String {
+    merge_method
+        .filter(|m| matches!(m.as_str(), "squash" | "merge" | "rebase"))
+        .unwrap_or_else(|| "squash".to_string())
+}
+
 fn parse_pr_url(url: &str) -> Option<(String, String, i64)> {
     let rest = url.strip_prefix("https://github.com/")?;
     let parts: Vec<&str> = rest.split('/').collect();
@@ -1067,12 +1102,45 @@ mod tests {
             state: "open".into(),
             labels: vec!["bug".into()],
             blocked_by: vec![481, 482, 483],
+            author: "contributor-jane".into(),
         };
         let json = serde_json::to_string(&original).expect("serialise");
         let parsed: GitHubIssue = serde_json::from_str(&json).expect("re-parse");
         assert_eq!(parsed.blocked_by, vec![481, 482, 483]);
         assert_eq!(parsed.number, 482);
         assert_eq!(parsed.labels, vec!["bug".to_string()]);
+        assert_eq!(parsed.author, "contributor-jane");
+    }
+
+    /// The contributor pill on the Issues probe row reads `author`; an
+    /// older cached payload without the key must still parse (additive
+    /// field) and default to `\"\"` — the pill then doesn't render.
+    #[test]
+    fn github_issue_wire_shape_author_defaults_empty() {
+        let json = r#"{
+            "number": 7,
+            "url": "https://github.com/x/y/issues/7",
+            "title": "legacy",
+            "body": "",
+            "state": "open",
+            "labels": [],
+            "blocked_by": []
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).expect("partial wire shape parses");
+        assert_eq!(issue.author, "", "missing author defaults to empty");
+
+        let json_author = r#"{
+            "number": 8,
+            "url": "https://github.com/x/y/issues/8",
+            "title": "with author",
+            "body": "",
+            "state": "open",
+            "labels": [],
+            "blocked_by": [],
+            "author": "octocat"
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json_author).expect("author wire shape parses");
+        assert_eq!(issue.author, "octocat");
     }
 
     // ----- GitHubPullRequest wire shape (issue #420) ---------------------
@@ -1118,6 +1186,26 @@ mod tests {
         assert_eq!(pr.head_sha, "", "missing head_sha defaults to empty");
         assert_eq!(pr.mergeable, None, "missing mergeable defaults to None (unknown)");
         assert_eq!(pr.mergeable_state, "", "missing mergeable_state defaults to empty");
+        assert_eq!(pr.author, "", "missing author defaults to empty");
+    }
+
+    /// The contributor pill on the PRs probe row reads `author` — pin the
+    /// wire name so the regenerated `GitHubPullRequest.ts` keeps
+    /// `author: string` and the frontend's strict typing keeps compiling.
+    #[test]
+    fn github_pull_request_wire_shape_with_author() {
+        let json = r#"{
+            "number": 9,
+            "url": "https://github.com/x/y/pull/9",
+            "title": "authored PR",
+            "body": "",
+            "state": "open",
+            "draft": false,
+            "head_ref": "feat/9",
+            "author": "contributor-jane"
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("author wire shape parses");
+        assert_eq!(pr.author, "contributor-jane");
     }
 
     /// Issue #1529: mergeability rides inline on the list wire shape.
@@ -2281,5 +2369,24 @@ mod tests {
         assert_eq!(pr.number, 42);
         handle.join().expect("server");
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    // ----- merge-method vocabulary (merge-strategy dropdown) -----------
+
+    #[test]
+    fn normalise_merge_method_accepts_the_three_github_verbs() {
+        assert_eq!(normalise_merge_method(Some("squash".into())), "squash");
+        assert_eq!(normalise_merge_method(Some("merge".into())), "merge");
+        assert_eq!(normalise_merge_method(Some("rebase".into())), "rebase");
+    }
+
+    #[test]
+    fn normalise_merge_method_falls_back_to_squash_for_absent_or_unknown() {
+        // Older clients (PrPill menu, mobile HTTP route) don't send a
+        // method at all; an unrecognised one must never reach GitHub's
+        // API verbatim. Both collapse to the historical squash behaviour.
+        assert_eq!(normalise_merge_method(None), "squash");
+        assert_eq!(normalise_merge_method(Some("octopus".into())), "squash");
+        assert_eq!(normalise_merge_method(Some(String::new())), "squash");
     }
 }

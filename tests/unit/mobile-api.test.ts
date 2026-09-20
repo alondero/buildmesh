@@ -53,6 +53,7 @@ const issue: GitHubIssue = {
   state: "open",
   labels: ["enhancement"],
   blocked_by: [],
+  author: "alondero",
 };
 
 function jsonResponse(status: number, body: unknown): Response {

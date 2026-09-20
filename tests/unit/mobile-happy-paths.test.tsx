@@ -63,6 +63,7 @@ const issue: GitHubIssue = {
   state: "open",
   labels: ["bug"],
   blocked_by: [],
+  author: "alondero",
 };
 
 const archived: ArchivedAgentNode = {

@@ -1121,12 +1121,21 @@ impl GitHubClient {
         Ok(files)
     }
 
-    /// Merge a pull request via squash and delete the branch.
+    /// Merge a pull request with the caller-chosen merge method
+    /// (`merge`, `squash`, or `rebase` — GitHub's REST vocabulary) and
+    /// delete the branch. The method used is echoed back in the success
+    /// message so the UI never has to guess which strategy landed.
+    ///
+    /// The `merge_method` argument is validated at the seam in
+    /// `commands::pr::merge_pr_blocking` — by the time it reaches this
+    /// fn it is one of the three literals above, so the request body
+    /// can carry it verbatim.
     pub fn merge_pull_request(
         &self,
         owner: &str,
         repo: &str,
         pr_number: i64,
+        merge_method: &str,
     ) -> Result<String, GitHubError> {
         let url = self.rest_url(&format!(
             "/repos/{}/{}/pulls/{}/merge",
@@ -1134,8 +1143,8 @@ impl GitHubClient {
         ));
 
         #[derive(Serialize)]
-        struct MergePr {
-            merge_method: &'static str,
+        struct MergePr<'a> {
+            merge_method: &'a str,
         }
 
         let resp = self.client
@@ -1143,7 +1152,7 @@ impl GitHubClient {
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
-            .json(&MergePr { merge_method: "squash" })
+            .json(&MergePr { merge_method })
             .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
@@ -1205,7 +1214,7 @@ impl GitHubClient {
             }
         }
 
-        Ok(format!("Merged (squash) via {} — {}", result.sha, result.message))
+        Ok(format!("Merged ({}) via {} — {}", merge_method, result.sha, result.message))
     }
 
     /// Percent-encode a label name for safe inclusion in a URL path component.
@@ -1596,6 +1605,10 @@ pub struct PullRequestSummary {
     pub head_repo_owner: String,
     pub head_repo_clone_url: String,
     pub head_sha: String,
+    /// GitHub login of the PR's author — the contributor pill on the PRs
+    /// probe row links to `https://github.com/<login>`. Empty when the
+    /// GraphQL node omits the author (the pill then doesn't render).
+    pub author: String,
     /// `Some(true)` mergeable, `Some(false)` conflicting, `None` while
     /// GitHub is still computing (`UNKNOWN`) — mirrors the REST detail's
     /// `mergeable: null` contract so the panel's "checking" state is
@@ -1739,6 +1752,7 @@ query PrSummaries($owner: String!, $name: String!, $states: [PullRequestState!],
         isDraft
         headRefName
         headRefOid
+        author { login }
         headRepository {
           owner { login }
           url
@@ -1810,12 +1824,26 @@ struct GraphQLPrNode {
     head_ref_name: Option<String>,
     #[serde(default, rename = "headRefOid")]
     head_ref_oid: Option<String>,
+    /// The PR's author — the contributor pill on the PRs probe row links
+    /// to `https://github.com/<login>`.
+    #[serde(default)]
+    author: Option<GraphQLAuthor>,
     #[serde(default, rename = "headRepository")]
     head_repository: Option<GraphQLHeadRepo>,
     #[serde(default)]
     mergeable: Option<String>,
     #[serde(default, rename = "mergeStateStatus")]
     merge_state_status: Option<String>,
+}
+
+/// `author { login }` on the summaries node. GraphQL's `author` is an
+/// `Actor` (users AND bots), so the field is `Option` throughout: a bot
+/// or deleted account still yields a login, but a missing object degrades
+/// to an empty string on the summary rather than failing the page.
+#[derive(Debug, Deserialize)]
+struct GraphQLAuthor {
+    #[serde(default)]
+    login: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1859,6 +1887,10 @@ impl PullRequestSummary {
             head_repo_owner: head_owner,
             head_repo_clone_url: head_clone_url,
             head_sha: node.head_ref_oid.unwrap_or_default(),
+            author: node
+                .author
+                .and_then(|a| a.login)
+                .unwrap_or_default(),
             mergeable: node.mergeable.as_deref().map(map_graphql_mergeable).unwrap_or(None),
             mergeable_state: node
                 .merge_state_status
@@ -3443,6 +3475,7 @@ This issue is related to #481 in a narrative sense.
             "isDraft": false,
             "headRefName": "feat/7-widget",
             "headRefOid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "author": {"login": "contributor-jane"},
             "headRepository": {
                 "owner": {"login": "acme"},
                 "url": "https://github.com/acme/demo"
@@ -3460,8 +3493,29 @@ This issue is related to #481 in a narrative sense.
         assert_eq!(s.head_ref, "feat/7-widget");
         assert_eq!(s.head_repo_owner, "acme");
         assert_eq!(s.head_repo_clone_url, "https://github.com/acme/demo.git");
+        // The contributor pill on the PRs probe row reads `author` from
+        // the `author { login }` selection — pin the projection so the
+        // field can't silently drop off the query.
+        assert_eq!(s.author, "contributor-jane");
         assert_eq!(s.mergeable, Some(true));
         assert_eq!(s.mergeable_state, "clean");
+    }
+
+    #[test]
+    fn pr_summary_from_graphql_node_missing_author_defaults_empty() {
+        // A node without `author` (deleted account edge cases, older
+        // cached payloads) must degrade to `\"\"` — the pill simply doesn't
+        // render — never fail the page.
+        let node: GraphQLPrNode = serde_json::from_value(serde_json::json!({
+            "number": 10,
+            "title": "Authorless PR",
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN"
+        }))
+        .expect("node parses");
+        let s = PullRequestSummary::from_graphql_node(node);
+        assert_eq!(s.author, "", "missing author must default to empty");
     }
 
     #[test]
@@ -3544,6 +3598,19 @@ This issue is related to #481 in a narrative sense.
         /// with the given status + body. Used to verify that the optimistic
         /// recovery path doesn't swallow non-duplicate errors.
         CreatePrError(u16, String),
+        /// PUT `/repos/{o}/{r}/pulls/{n}/merge` — 200 OK with a merged
+        /// result body. The fake asserts the request line is the merge
+        /// endpoint AND that the request body's `merge_method` equals
+        /// `expected_method` — that's the assertion that pins the
+        /// merge-strategy dropdown (squash / merge / rebase) reaching
+        /// GitHub verbatim. Follow with `PullHead` for the post-merge
+        /// branch-cleanup read.
+        MergePullRequest {
+            expected_method: String,
+        },
+        /// GET `/repos/{o}/{r}/pulls/{n}` — 200 OK with a head-ref body.
+        /// Serves the post-merge read that finds the branch to delete.
+        PullHead,
     }
 
     /// Spin a fake GitHub server that counts requests and serves `script` in
@@ -3587,6 +3654,7 @@ This issue is related to #481 in a narrative sense.
                 let mut reader = BufReader::new(sock.try_clone().expect("clone"));
                 let mut request_line = String::new();
                 reader.read_line(&mut request_line).expect("read request line");
+                let mut body_text = String::new();
                 let mut content_length: usize = 0;
                 loop {
                     let mut line = String::new();
@@ -3604,6 +3672,7 @@ This issue is related to #481 in a narrative sense.
                 if content_length > 0 {
                     let mut body = vec![0u8; content_length];
                     reader.read_exact(&mut body).expect("read body");
+                    body_text = String::from_utf8(body).expect("utf8 request body");
                 }
                 let (status_line, body_bytes): (String, Vec<u8>) = match step {
                     Scripted::Page(nodes, has_next, cursor) => {
@@ -3698,6 +3767,41 @@ This issue is related to #481 in a narrative sense.
                             format!("HTTP/1.1 {status} {reason}\r\n"),
                             bytes,
                         )
+                    }
+                    Scripted::MergePullRequest { expected_method } => {
+                        assert!(
+                            request_line.starts_with("PUT ")
+                                && request_line.contains("/merge"),
+                            "scripted a MergePullRequest but client sent: {}",
+                            request_line.trim()
+                        );
+                        // The whole point of the merge-strategy dropdown:
+                        // the method the user picked must reach GitHub
+                        // verbatim in the request body.
+                        assert!(
+                            body_text.contains(&format!("\"merge_method\":\"{expected_method}\"")),
+                            "merge body must carry merge_method {expected_method:?}, got: {body_text}"
+                        );
+                        let body = serde_json::json!({
+                            "sha": "abc123merged",
+                            "merged": true,
+                            "message": "Pull Request successfully merged"
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::PullHead => {
+                        assert!(
+                            request_line.starts_with("GET /repos/")
+                                && request_line.contains("/pulls/"),
+                            "scripted a PullHead but client sent: {}",
+                            request_line.trim()
+                        );
+                        let body = serde_json::json!({
+                            "head": { "ref": "feat/merged-branch" }
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
                     }
                 };
                 let http = if body_bytes.is_empty() {
@@ -3949,6 +4053,55 @@ This issue is related to #481 in a narrative sense.
             }
             other => panic!("expected Api error, got {:?}", other),
         }
+        handle.join().expect("server");
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge method plumbing (merge-strategy dropdown). The PUT body must
+    // carry the caller's method verbatim — the fake server asserts the
+    // request body's `merge_method`, so a regression that hard-codes
+    // `"squash"` (or drops the field) fails the test.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_pull_request_sends_the_chosen_method_and_echoes_it() {
+        let (base, count, handle) = fake_server(vec![
+            Scripted::MergePullRequest { expected_method: "rebase".to_string() },
+            Scripted::PullHead,
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let msg = client
+            .merge_pull_request("acme", "demo", 7, "rebase")
+            .expect("merge must succeed");
+
+        assert!(
+            msg.contains("Merged (rebase)"),
+            "success message must name the method used, got: {msg}"
+        );
+        handle.join().expect("server");
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly the merge PUT + the post-merge head read"
+        );
+    }
+
+    #[test]
+    fn merge_pull_request_defaults_path_sends_squash() {
+        // The historical behaviour: squash + delete branch. Pin it so the
+        // new parameter is visibly opt-in per call site.
+        let (base, _count, handle) = fake_server(vec![
+            Scripted::MergePullRequest { expected_method: "squash".to_string() },
+            Scripted::PullHead,
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let msg = client
+            .merge_pull_request("acme", "demo", 7, "squash")
+            .expect("merge must succeed");
+
+        assert!(msg.contains("Merged (squash)"), "got: {msg}");
         handle.join().expect("server");
     }
 

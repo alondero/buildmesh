@@ -67,6 +67,7 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { dropdownId } from '../../lib/dropdownId';
 import { ProbeRow } from './ProbeRow';
+import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
@@ -265,12 +266,22 @@ export function GitIssuesTab() {
   useAsyncEffect(() => { refreshProviderList(); }, [refreshProviderList]);
   useProviderListInvalidation(refreshProviderList);
 
-  // Close the provider dropdown when clicking outside of it. The dropdown
-  // container carries a `data-dropdown-for` attribute set to the issue number.
-  // Issue #492 — shared `useClickOutside` hook replaces the hand-rolled
-  // add/removeEventListener pair; the hook pins the scoped selector so a
-  // future caller can't reintroduce the loose-selector drift from Sidebar.
-  useClickOutside(openDropdown, () => setOpenDropdown(null));
+  // Close the provider dropdown when clicking outside of it. The menu tags
+  // itself with the SURFACE-PREFIXED key (`dropdownId('issue', n)` →
+  // e.g. "issue-101") — the hook MUST receive that same string, not the
+  // bare number, or its `[data-dropdown-for="…"]` selector matches nothing
+  // and every mousedown counts as "outside" (this survived only because
+  // the spawn-picker wrapper swallows internal mousedowns via
+  // stopPropagation before they reach `document` — see the PR tab's
+  // method picker for the un-wrapped case where the prefixed id is
+  // load-bearing). Issue #492 — shared `useClickOutside` hook replaces
+  // the hand-rolled add/removeEventListener pair; the hook pins the
+  // scoped selector so a future caller can't reintroduce the
+  // loose-selector drift from Sidebar.
+  useClickOutside<string>(
+    openDropdown !== null ? dropdownId('issue', openDropdown) : null,
+    () => setOpenDropdown(null),
+  );
 
   // One backend-owned acceptance call. `create_issue_node` commits the
   // `pending` row and starts the intent-driven launch in the background.
@@ -546,6 +557,15 @@ export function GitIssuesTab() {
                         </span>,
                       );
                     }
+                    // Contributor pill — the issue's author, linking to
+                    // their GitHub profile. Sits after the label chips;
+                    // an empty author (older cached payload) renders
+                    // nothing.
+                    if (issue.author) {
+                      chips.push(
+                        <ContributorPill key="author" login={issue.author} />,
+                      );
+                    }
                     return chips.length > 0 ? <>{chips}</> : null;
                   })()}
                   rightSlot={
@@ -643,6 +663,11 @@ export function GitIssuesTab() {
                                   : 'inline-flex items-center gap-1 text-text-muted hover:text-text-primary transition-colors disabled:opacity-60'
                               }
                             >
+                              {/* The icon IS the add/remove affordance
+                                  (line-plus when absent, check when
+                                  present) — the label text is just the
+                                  name. A leading `+`/`✓` glyph in the
+                                  text duplicated the icon into noise. */}
                               <svg
                                 width="12"
                                 height="12"
@@ -664,7 +689,7 @@ export function GitIssuesTab() {
                                 )}
                               </svg>
                               <span className="text-2xs font-medium leading-none">
-                                {present ? '✓' : '+'} {triggerLabel}
+                                {triggerLabel}
                               </span>
                             </button>
                           </div>

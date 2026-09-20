@@ -44,4 +44,13 @@ labels: Array<string>,
  * `#[serde(default)]` keeps the field additive across rolling
  * deploys — a missing key parses to `vec![]`.
  */
-blocked_by: Array<number>, };
+blocked_by: Array<number>, 
+/**
+ * GitHub login of the issue's author (`user.login`). Drives the
+ * contributor pill on the Issues probe row — clicking it opens
+ * `https://github.com/<login>`. `#[serde(default)]` keeps the field
+ * additive across rolling deploys; `services::github::Issue` already
+ * defaults a missing `user` to `\"\"`, and the pill simply doesn't
+ * render for an empty author.
+ */
+author: string, };
