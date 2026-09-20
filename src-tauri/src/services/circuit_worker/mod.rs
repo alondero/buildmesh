@@ -1346,6 +1346,7 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         if !matches!(step.status, StepStatus::Running | StepStatus::Blocked) { continue; }
         if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
         let mut progress = None;
+        let mut observed = None;
         let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
             ("Waiting for your approval. This gate does not expire while you are away.".to_string(), APPROVAL_WAIT_MS)
         } else if let Some(id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
@@ -1354,8 +1355,14 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
             crate::autopilot::evaluator::note_circuit_probe(id, &probe, generation);
             let Ok(node) = db::get_agent_node_by_id(id) else { continue; };
             progress = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
+            // #1791: a busy agent is only provably running once it has produced
+            // a session identity or a readable report. A busy status alone does
+            // not prove progress; the stepper decides when that is fatal.
+            let observed_here = node.cli_session_id.as_deref().is_some_and(|id| !id.is_empty())
+                || progress.is_some();
+            observed = Some(observed_here);
             let yielded = matches!(node.status, SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed);
-            let reason = if node.cli_session_id.as_deref().is_none_or(str::is_empty) && progress.is_none() {
+            let reason = if !observed_here {
                 "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
             } else if !yielded {
                 String::new()
@@ -1369,11 +1376,15 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
         // #1219: an explicit per-step budget on the graph node overrides the
         // fixed defaults above. The stepper enforces whatever `timeout_ms`
         // this event carries, so this override is what makes the
-        // user-visible timeout setting take effect on circuit execution.
-        let timeout_ms = spawn_step_timeout_ms(view.graph.node(&step.node_id).map(|n| &n.kind))
-            .unwrap_or(timeout_ms);
+        // user-visible timeout setting take effect on circuit execution — and
+        // why it also takes precedence over the unobserved fast fail.
+        let explicit_budget = spawn_step_timeout_ms(view.graph.node(&step.node_id).map(|n| &n.kind));
+        let timeout_ms = explicit_budget.unwrap_or(timeout_ms);
+        // A step with no agent has nothing to observe; only a bound agent can
+        // be "unobserved".
         events.push(CircuitEvent::WaitObserved { node_id: step.node_id.clone(), attempt: step.attempt,
-            now_ms, progress, reason, timeout_ms });
+            now_ms, progress, observed: observed.unwrap_or(true),
+            explicit_budget: explicit_budget.is_some(), reason, timeout_ms });
     }
 }
 
@@ -4950,5 +4961,128 @@ mod tests {
             YIELDED_WAIT_MS,
             "Some(0) collapses to absent so it can't request instant expiry"
         );
+    }
+
+    /// A Running `SpawnAgentNode` step bound to `agent_node_id`, carrying an
+    /// optional authored `timeout_seconds` budget.
+    fn spawn_wait_view(agent_node_id: i64, timeout_seconds: Option<u32>) -> RunView {
+        RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: CIRCUIT_GRAPH_VERSION,
+                blueprint: None,
+                nodes: vec![CircuitNode {
+                    id: "worker".into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "p".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                        timeout_seconds,
+                    },
+                }],
+                edges: vec![],
+            },
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![StepView {
+                node_id: "worker".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: Some(agent_node_id),
+                attempt: 1,
+            }],
+        }
+    }
+
+    fn wait_event(events: &[CircuitEvent]) -> &CircuitEvent {
+        assert_eq!(events.len(), 1, "one Running step must yield one WaitObserved");
+        &events[0]
+    }
+
+    /// Create a node and register it with the evaluator so `observe_waits`
+    /// reads it. Returns its id.
+    fn register_test_agent(mesh_id: i64, path: &str, name: &str) -> i64 {
+        let agent = db::create_agent_node(mesh_id, name, path, "main",
+            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+        crate::autopilot::evaluator::unregister(agent.id);
+        crate::autopilot::evaluator::register_circuit(agent.id);
+        agent.id
+    }
+
+    /// #1791: a busy agent that has produced neither a session identity nor a
+    /// readable report is reported as unobserved, so the stepper can fail it
+    /// at the first-observation window instead of the active budget.
+    #[test]
+    fn observe_waits_flags_an_agent_without_session_identity_or_report() {
+        init_temp_db_at("wait-unobserved");
+        let mesh = db::create_mesh("wait-unobserved", "/tmp/wait-unobserved").unwrap();
+        let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
+        let view = spawn_wait_view(agent_id, None);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent_id);
+
+        match wait_event(&events) {
+            CircuitEvent::WaitObserved { observed, explicit_budget, reason, timeout_ms, .. } => {
+                assert!(!*observed, "no session identity and no report is the unobserved case");
+                assert!(!*explicit_budget);
+                assert!(reason.contains("session identity"), "discovery reason: {reason}");
+                assert_eq!(*timeout_ms, ACTIVE_WAIT_MS);
+            }
+            other => panic!("expected WaitObserved, got {other:?}"),
+        }
+    }
+
+    /// A session identity on its own is an observation: the agent is provably
+    /// running, so it must not be reported as unobserved.
+    #[test]
+    fn observe_waits_marks_a_session_identity_as_observed() {
+        init_temp_db_at("wait-observed");
+        let mesh = db::create_mesh("wait-observed", "/tmp/wait-observed").unwrap();
+        let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
+        db::write_conn().execute(
+            "UPDATE agent_nodes SET cli_session_id = 'test-session-1791' WHERE id = ?1",
+            rusqlite::params![agent_id],
+        ).unwrap();
+        let view = spawn_wait_view(agent_id, None);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent_id);
+
+        match wait_event(&events) {
+            CircuitEvent::WaitObserved { observed, reason, .. } => {
+                assert!(*observed, "a captured session identity is an observation");
+                assert!(reason.is_empty(), "observed and not yielded has no diagnostic: {reason}");
+            }
+            other => panic!("expected WaitObserved, got {other:?}"),
+        }
+    }
+
+    /// #1219: an authored per-step budget must reach the stepper flagged as an
+    /// override so it takes precedence over the unobserved fast fail.
+    #[test]
+    fn observe_waits_reports_an_explicit_step_budget() {
+        init_temp_db_at("wait-explicit-budget");
+        let mesh = db::create_mesh("wait-explicit-budget", "/tmp/wait-explicit-budget").unwrap();
+        let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
+        let view = spawn_wait_view(agent_id, Some(1800));
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent_id);
+
+        match wait_event(&events) {
+            CircuitEvent::WaitObserved { explicit_budget, timeout_ms, .. } => {
+                assert!(*explicit_budget, "an authored budget must be flagged as an override");
+                assert_eq!(*timeout_ms, 1_800_000);
+            }
+            other => panic!("expected WaitObserved, got {other:?}"),
+        }
     }
 }
