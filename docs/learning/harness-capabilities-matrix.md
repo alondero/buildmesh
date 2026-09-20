@@ -100,7 +100,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
-| MiniMax Code | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | TUI rejects `--model`; transcript reader wired, attention still empty |
+| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | TUI rejects `--model`; attention hook validated on 0.4.12 (`Stop` only) |
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
@@ -116,8 +116,8 @@ transcript reader. DeepSeek Harness and Terminal do not resume at all.
 
 ## Attention hooks
 
-Non-boolean detail for the seven harnesses with a native attention hook
-(`attention_capability`). The other seven have no hook wired yet.
+Non-boolean detail for the eight harnesses with a native attention hook
+(`attention_capability`). The other six have no hook wired yet.
 
 | Harness | Launch mode | Lifecycle events | Min. CLI version | Trust requirement |
 |---|---|---|---|---|
@@ -128,6 +128,7 @@ Non-boolean detail for the seven harnesses with a native attention hook
 | OpenCode | Permission ask | Turn completed, question, permission | — | — |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
+| MiniMax Code | Skip permissions | Turn completed | 0.4.12 | — |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by

@@ -760,9 +760,23 @@ mod tests {
         assert!(mcode.supports_prefill);
         // mcode's canonical `messages.jsonl` history is parsed via
         // TranscriptFormat::Mcode, so the digest rich layer hydrates.
-        // Attention stays honest-empty (no provisioned hook) — Autopilot
-        // still gates mcode out via MissingAttentionHook.
-        assert!(!mcode.requires_attention_hook);
+        // Issue #1797 flipped attention open: the Agent-Plugin hook is
+        // provisioned and `Stop` delivery was validated against a live
+        // 0.4.12 TUI (see `adapters::mcode::tests`).
+        assert!(mcode.requires_attention_hook);
+        // Issue #1797 — pin the Hook shape. `Stop` is the only validated
+        // event; Buildmesh launches mcode with an auto-approving permission
+        // policy (`"permission_mode": "auto"` in the live envelope), so no
+        // permission prompt is raised and the descriptor must not claim one.
+        assert!(matches!(
+            mcode.attention_capability,
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::SkipPermissions,
+                trust: None,
+                min_version: Some(ref v),
+                ..
+            } if v == crate::agent::provider::adapters::mcode::MCODE_MIN_HOOK_VERSION
+        ));
         assert!(mcode.produces_readable_transcript);
         assert_eq!(mcode.effort_control, EffortControlKind::None);
         assert_eq!(

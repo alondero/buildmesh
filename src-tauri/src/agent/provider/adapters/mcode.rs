@@ -10,8 +10,11 @@
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
 //! verified for the TUI, so PTY capture stays off and ids are captured via
 //! the post-spawn manifest poller (`services::mcode_session`, issue #1798).
-//! `self_assigns_session_id()` is `true` and `session_assign_args()` is a
-//! no-op.
+//! Once the attention hook is live, the route's fill-only capture is a second
+//! path: mcode reports `mvs_<hex>` in the hook payload, so
+//! `http::request::parse_mcode_session_id` must accept that shape or the id is
+//! silently discarded. `self_assigns_session_id()` is `true` and
+//! `session_assign_args()` is a no-op.
 //!
 //! **No model override** (issue #1179). `mcode` exposes `--model
 //! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
@@ -33,37 +36,35 @@
 //! wraps with `WindowsShell::Cmd` -> `cmd.exe /c mcode …` on Windows. On macOS /
 //! Linux it is an executable on PATH so `WindowsShell::Direct` is used.
 //!
-//! **Attention** (issue #1796 — **wiring dormant in this PR**, awaiting the
-//! TUI-delivery follow-up): mcode ≥0.2.4 exposes an Agent-Plugin hook
-//! surface (`hooks/hooks.json` entries plus per-event scripts; stdin JSON
-//! carries `hook_event_name` + `session_id` + `transcript_path`). Buildmesh
-//! provisions the `io.buildmesh.attention` plugin under
-//! `<dataDir>/plugins/io.buildmesh.attention/hooks/hooks.json`, installing
-//! Claude-shaped `{command}` curl entries for `Stop` and `PermissionRequest`
-//! that POST stdin JSON to `/api/attention/<session-id>` (env-var expanded at
-//! hook-run time, matching the Cursor / Kimi / Grok precedent). The merge is
-//! idempotent and additive: user-authored plugins and sibling Buildmesh
-//! entries for events we don't manage (`SessionStart`, etc.) round-trip
-//! untouched, malformed user files fail closed rather than overwriting
-//! silently, and an unresolvable data dir returns `Ok(())` with no side
-//! effects.
+//! **Attention** (issue #1797, validating #1796): a Buildmesh Agent-Plugin is
+//! provisioned into `<dataDir>/plugins/io.buildmesh.attention/`, and `Stop`
+//! delivery is validated end-to-end against a live `mcode` 0.4.12 TUI — a
+//! completed turn POSTs the mcode envelope (`hook_event_name`, `session_id`,
+//! `transcript_path`) to `/api/attention/<node-id>`. Three mcode-0.4.x
+//! constraints shape the write:
 //!
-//! **STATUS** (PR #1805 round-1 review): the `provision_attention_hooks`
-//! seam IS wired and unit-tested end-to-end (merge behaviour, malformed
-//! refusal, atomic write, stdin entrypoint), but **`requires_attention_hook`
-//! stays `false`** per the issue's explicit acceptance line, so the
-//! `provision.rs:557-569` spawn path does NOT currently call the seam.
-//! This PR locks in the merge/integration shape so the follow-up issue
-//! that validates TUI delivery only has to flip the descriptor — no
-//! re-design or re-test of the merge. The release note is honest about
-//! the dormancy. Do NOT advertise the plugin as user-visible until the
-//! follow-up flips the descriptor AND validates callback delivery.
+//! 1. The manifest lives at `.claude-plugin/plugin.json` and `hooks` is
+//!    **inlined on the manifest**. A separate `io.minimax.mcode/hooks/hooks.json`
+//!    document is ignored by 0.4.x, and a plugin directory with no manifest is
+//!    skipped silently (no plugin, no diagnostic).
+//! 2. `command` + `args` are executed **without shell interpretation**, so the
+//!    invocation names a shell (`cmd.exe` / `sh`) and hands it one command line.
+//! 3. mcode `env_clear()`s `BUILDMESH_*` before running a hook — exactly like
+//!    Codex — so the callback URL **bakes** the loopback port and node id rather
+//!    than expanding them at run time.
+//!
+//! The merge is idempotent and additive: sibling events and user-authored
+//! handlers round-trip untouched, a malformed user file fails closed rather
+//! than being overwritten silently, and an unresolvable data dir returns
+//! `Ok(())` with no side effects.
 //!
 //! **Transcript**: `messages.jsonl` canonical history is parsed via
 //! `TranscriptFormat::Mcode`, so the Coordinator Node Digest rich layer,
 //! the archived-node resume picker, and circuit assistant reports all work.
 
+use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
 use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::windows_attention_command;
 use crate::models::EnvType;
 use std::io::Write;
@@ -73,48 +74,52 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct McodeAdapter;
 pub static MCODE: McodeAdapter = McodeAdapter;
 
-/// Minimum mcode release the Agent-Plugin hook surface has been
-/// validated against (issue #1796). The `hooks/hooks.json` schema,
-/// the `Stop` and `PermissionRequest` event names, and the `hook_event_name`
-/// / `session_id` / `transcript_path` stdin envelope were introduced in
-/// the 0.2.x Agent-Plugin revision; the constant pins the descriptor
-/// to a concrete release so a future mcode that renames events, drops
-/// the plugin directory, or rewrites the payload shape surfaces as a
-/// visible capability/health change. Like `CURSOR_MIN_HOOK_VERSION` and
-/// `GROK_MIN_HOOK_VERSION`, the pin is descriptor-shape only — we do not
-/// gate the spawn on a runtime version probe because mcode does not
-/// expose a semver-ish header through the hook surface.
+/// Minimum mcode release the Buildmesh attention hook has been validated
+/// against (issue #1797). Validated on a live `0.4.12` TUI: `Stop` fires at
+/// turn end and POSTs the mcode envelope to `/api/attention/<node-id>`. The
+/// pin is descriptor-shape only — we do not gate the spawn on a runtime
+/// version probe because mcode does not expose a semver-ish header through
+/// the hook surface. Like `CURSOR_MIN_HOOK_VERSION` / `GROK_MIN_HOOK_VERSION`.
 pub const MCODE_MIN_HOOK_VERSION: &str = "0.4.12";
 
 /// Buildmesh-owned mcode Agent-Plugin directory under the user's data
-/// root (`<dataDir>/plugins/<dir>`). mcode ≥0.2.4 loads every
-/// `<dataDir>/plugins/*/hooks/hooks.json`; installing this plugin makes
-/// Buildmesh's attention callbacks fire without disturbing any other
-/// plugin the user has registered. Follows the reverse-DNS convention
-/// used by the upstream `hello-mcode-hooks` example
+/// root (`<dataDir>/plugins/<dir>`). mcode scans every `<dataDir>/plugins/*/`
+/// for a plugin manifest; installing this plugin makes Buildmesh's attention
+/// callbacks fire without disturbing any other plugin the user has registered.
+/// Follows the reverse-DNS convention used by the upstream examples
 /// (`io.<publisher>.<plugin>`).
 const MCODE_PLUGIN_DIR: &str = "io.buildmesh.attention";
 
-/// Events Buildmesh provisions into the mcode Agent-Plugin hooks file.
-/// The issue #1796 acceptance specification calls out `Stop` (turn
-/// finished) and `PermissionRequest` (tool approval pending) as the
-/// two events Buildmesh needs to drive Node Digest turn completion and
-/// the permission-aware attention surface. We do not register for the
-/// question / pre-tool / notification events Cursor or Kimi subscribe
-/// to because mcode's permission prompt runs over `PermissionRequest`
-/// specifically — its `PreToolUse` semantics differ from the Claude
-/// spec and its question flow is delivered through the interactive
-/// TUI rather than a hook (validated by the live TUI delivery issue
-/// follow-up).
+/// Plugin `name` in the manifest. mcode requires lowercase letters, digits
+/// and single hyphens — the reverse-domain directory name above is not a
+/// legal manifest name, so the two intentionally differ.
+const MCODE_PLUGIN_NAME: &str = "buildmesh-attention";
+
+const MCODE_PLUGIN_VERSION: &str = "1.0.0";
+
+const MCODE_PLUGIN_DESCRIPTION: &str =
+    "Buildmesh attention observer: reports turn completion to the local Buildmesh node.";
+
+/// Per-handler timeout, in seconds (the mcode 0.4+ unit; the v0.3.x spec used
+/// milliseconds and 0.4+ accepts either — we pin one).
+const MCODE_HOOK_TIMEOUT_SECONDS: u64 = 5;
+
+/// Events Buildmesh provisions into the mcode plugin manifest. `Stop` (turn
+/// finished) is the validated signal that drives Node Digest turn completion.
+/// `PermissionRequest` is provisioned for completeness but is **not**
+/// advertised in `attention_capability`: Buildmesh launches mcode with its
+/// default permission policy, which auto-approves (the live hook envelope
+/// reports `"permission_mode": "auto"`), so no approval prompt is raised and
+/// the event is never observed.
 const MCODE_PROVISIONED_EVENTS: &[&str] = &["Stop", "PermissionRequest"];
 
-/// Marker substring written into the Buildmesh-owned hook handler.
-/// `ensure_mcode_hooks_json` uses it to detect a stale Buildmesh entry
-/// on re-provision (the issue #886 idempotency invariant): a re-run
-/// that finds an existing event array carrying this substring replaces
-/// the entry in place (so the array never grows), a re-run that finds
-/// no Buildmesh entry for the event appends a fresh one, and a re-run
-/// that already carries the exact handler leaves the file untouched.
+/// Marker substring identifying the Buildmesh-owned handler inside the
+/// manifest's inline `hooks` map. Used to detect a stale Buildmesh entry on
+/// re-provision (the issue #886 idempotency invariant): a re-run that finds
+/// an existing handler carrying this substring replaces it in place (so the
+/// array never grows), a re-run that finds no Buildmesh handler appends a
+/// fresh one, and a re-run that already carries the exact handler leaves the
+/// file untouched.
 const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 
 /// Counter backing the PID+counter `.tmp` suffix for atomic writes
@@ -131,44 +136,75 @@ fn shell_for(platform: Platform) -> WindowsShell {
     }
 }
 
-/// Build the curl command line mcode's hook runner invokes when the
-/// `Stop` or `PermissionRequest` event fires. The runner forwards the
-/// hook stdin JSON (mcode's `session_id` + `hook_event_name` envelope)
-/// and we POST it verbatim to the attention endpoint via curl.
-/// `--data-binary @-` passes stdin as the POST body so the attention
-/// route's classifier can read the envelope fields. mcode's hook
-/// runner inherits the agent process's environment, so
-/// `$BUILDMESH_PORT` / `$BUILDMESH_SESSION_ID` set per-agent by
-/// `spawn_environment::wrap` expand at hook-run time — `node_id` is
-/// intentionally not baked into the URL (Kimi / Cursor precedent), it
-/// arrives via `BUILDMESH_SESSION_ID` which is the Buildmesh node id.
+/// Build the `(command, args)` pair mcode's hook runner executes for one
+/// event. mcode passes `args` to `command` **without shell interpretation**
+/// (0.4+ plugin spec), so a bare `curl` invocation cannot express stdin
+/// piping or output suppression — the invocation therefore names a shell
+/// explicitly and hands it a single command line.
 ///
-/// The trailing `|| exit 0` (cmd) / `|| true` (POSIX) ensures a curl
-/// failure (Buildmesh restarting, port dropped, EHOSTUNREACH, …) never
-/// surfaces as a non-zero hook exit. mcode propagates hook exit codes
-/// into its TUI as visible errors, and the attention webhook is
-/// best-effort telemetry — it must never fail-block the agent.
+/// The URL is **baked**, never expanded from the environment: mcode
+/// `env_clear()`s the `BUILDMESH_*` variables before running a hook (the live
+/// 0.4.12 validation observed `%BUILDMESH_PORT%` arriving verbatim), which is
+/// the same constraint Codex has. The event payload is forwarded from the
+/// hook's stdin with `--data-binary @-`; a curl failure must never surface as
+/// a non-zero hook exit, so both branches swallow it.
 ///
-/// Round-2 review (PR #1511, Cursor precedent): Windows cmd syntax
-/// (`curl.exe` / `%VAR%` / `>nul`) is ONLY correct when the runtime is
-/// Windows, and `EnvType::Windows` is the default for non-WSL macOS and
-/// Linux too. A naive `match env_type` would write `curl.exe` into
-/// `.hooks.json` on macOS / Linux where it doesn't exist. Gate cmd
-/// syntax on `cfg!(target_os = "windows") && env_type == EnvType::Windows`
-/// (cross-compile safe — `cfg!` is the *target* triple).
-pub(crate) fn hook_command(env_type: EnvType) -> String {
+/// The `WindowsInterop` case is the mirror image: Buildmesh runs *inside* the
+/// WSL/Linux host and mcode is the **Windows** executable reached through
+/// interop (`EnvType::WindowsInterop` = "Windows executable reached through
+/// interoperability from a Linux WSL host"). The callback is therefore
+/// relayed back into the guest by `windows_attention_command`, whose
+/// `powershell.exe … -EncodedCommand <b64>` line runs
+/// `wsl.exe -d <distro> --exec curl …`; that curl lands on the Linux-side
+/// listener's own loopback, so this direction needs no mirrored networking.
+/// Its single-line command is split into the `command` + `args` shape.
+fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
     if env_type == EnvType::WindowsInterop {
-        if let Some(command) = windows_attention_command(None) {
-            return command;
+        if let Some(command) = windows_attention_command(Some(url)) {
+            let mut parts = command.split(' ');
+            let executable = parts.next().unwrap_or("powershell.exe").to_string();
+            return (executable, parts.map(str::to_string).collect());
         }
     }
     if cfg!(target_os = "windows") && env_type == EnvType::Windows {
-        "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
-            .to_string()
+        (
+            "cmd.exe".to_string(),
+            vec![
+                "/c".to_string(),
+                format!(
+                    "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {url} >nul 2>nul"
+                ),
+            ],
+        )
     } else {
-        "curl -sf --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID >/dev/null 2>/dev/null || true"
-            .to_string()
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "curl -sf --connect-timeout 1 --max-time 2 -X POST --data-binary @- {url} >/dev/null 2>&1 || true"
+                ),
+            ],
+        )
     }
+}
+
+/// One inline handler entry for an event in the manifest's `hooks` map. The
+/// mcode 0.4.0+ shape nests the executable entry under a `hooks` array beside
+/// a `matcher` (a `"*"` matcher matches every occurrence).
+fn attention_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
+    let port = crate::http_server::current_http_port();
+    let url = format!("http://localhost:{port}/api/attention/{node_id}");
+    let (command, args) = attention_invocation(env_type, &url);
+    serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "args": args,
+            "timeout": MCODE_HOOK_TIMEOUT_SECONDS,
+        }],
+    })
 }
 
 /// Resolve the directory Buildmesh's mcode attention plugin lives in.
@@ -214,17 +250,85 @@ fn resolve_plugin_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Optio
     )
 }
 
+/// Issue #1797 review (finding 2): a WSL-guest mcode runs its hook `curl`
+/// inside the guest, so reaching the Windows-side Buildmesh depends entirely
+/// on WSL mirrored networking. Without it the callback is swallowed (`|| true`)
+/// and the node looks permanently dead to Autopilot while the descriptor
+/// claims a working hook. Refuse provisioning with an actionable message
+/// instead — the spawn still proceeds, it just surfaces as
+/// `SignalHealth::Unavailable` rather than a silent black hole, exactly as
+/// `grok.rs:393-399` does for its HTTP hooks.
+///
+/// Only the guest direction needs the check. `WindowsInterop` (Buildmesh in
+/// the WSL host, mcode the Windows binary) relays through
+/// `windows_attention_command`, whose `curl` runs back inside the guest and so
+/// reaches the Linux-side listener over plain loopback.
+fn ensure_wsl_callbacks_reachable(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+) -> Result<(), String> {
+    if !(cfg!(windows) && env_type == EnvType::Wsl) {
+        return Ok(());
+    }
+    let mut command = crate::process_util::command_no_window("wsl.exe");
+    command.args(wsl_wslinfo_args(wsl_distro));
+    let mode = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL networking mode",
+        std::time::Duration::from_secs(5),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+    if wsl_networking_is_mirrored(mode.as_deref()) {
+        return Ok(());
+    }
+    Err(format!(
+        "MiniMax Code's attention hook needs WSL mirrored networking so guest callbacks reach \
+         the Buildmesh port; the interactive harness can still run. Enable it by adding \
+         `[wsl2]` + `networkingMode=mirrored` to %USERPROFILE%\\.wslconfig, then run \
+         `wsl --shutdown` and relaunch the distro (observed networking mode: {}).",
+        mode.as_deref().unwrap_or("unavailable")
+    ))
+}
+
+/// `wslinfo --networking-mode` arguments for the distro the node actually runs
+/// in. `wsl.exe` without `-d` inspects the **default** distro, which may be a
+/// different distro with different networking settings (or lack `wslinfo`
+/// entirely), so the resolved distro is threaded through (issue #1797 review,
+/// finding 3). Split out so the argument shape is unit-testable on a host
+/// without WSL.
+fn wsl_wslinfo_args(wsl_distro: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(distro) = wsl_distro
+        .map(str::trim)
+        .filter(|distro| !distro.is_empty())
+    {
+        args.push("-d".to_string());
+        args.push(distro.to_string());
+    }
+    args.extend(["--", "wslinfo", "--networking-mode"].map(str::to_string));
+    args
+}
+
+/// Pure predicate over `wslinfo --networking-mode` output, split out so the
+/// accept/reject decision is unit-testable on a host without WSL.
+fn wsl_networking_is_mirrored(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| mode.trim().eq_ignore_ascii_case("mirrored"))
+}
+
 /// Atomically persist `content` to `path` via a PID+counter `.tmp`
 /// file + rename. Mirrors `cursor.rs:127-157` / `agy.rs:14-40`. A
 /// pre-existing `.tmp` from an earlier crash is overwritten; the final
-/// rename is a single filesystem operation so partial reads of
-/// `hooks.json` see either the old file or the new one.
+/// rename is a single filesystem operation so partial reads of the
+/// manifest see either the old file or the new one.
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("hooks.json");
+        .unwrap_or("plugin.json");
     let tmp = path.with_file_name(format!(
         "{}.{}.{}.tmp",
         file_name,
@@ -251,109 +355,126 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// True when `handler` looks like a Buildmesh-owned hook entry: the
-/// `command` field carries our `/api/attention/` URL marker AND the
-/// per-agent env var names that the Cursor `BUILDMESH_HOOK_MARKER`
-/// fingerprint pattern uses. Used by `ensure_mcode_hooks_json` to
-/// upsert the Buildmesh entry into an event's handler array on
-/// re-provision (the issue #886 idempotency invariant) — a Windows
-/// hook may have been encoded with `powershell.exe -EncodedCommand …`,
-/// so we decode it before testing the marker substring.
+/// True when one executable entry resolves to the Buildmesh attention URL.
+/// The `WindowsInterop` invocation is a `powershell.exe … -EncodedCommand
+/// <b64>` line, so the command and its args are rejoined and the payload
+/// decoded before the marker substring is tested.
+fn handler_entry_targets_attention(entry: &serde_json::Value) -> bool {
+    let mut haystack = String::new();
+    if let Some(command) = entry.get("command").and_then(|v| v.as_str()) {
+        haystack.push_str(command);
+        haystack.push(' ');
+    }
+    if let Some(args) = entry.get("args").and_then(|v| v.as_array()) {
+        for arg in args {
+            if let Some(arg) = arg.as_str() {
+                haystack.push_str(arg);
+                haystack.push(' ');
+            }
+        }
+    }
+    let decoded = crate::env::decode_powershell_command(haystack.trim_end());
+    let candidate = decoded.as_deref().unwrap_or(&haystack);
+    candidate.contains(BUILDMESH_HOOK_MARKER)
+}
+
+/// True when `handler` is a Buildmesh-owned entry. Accepts the 0.4.0+ nested
+/// shape (`{ matcher, hooks: [{ type, command, args }] }`) and the legacy flat
+/// v0.3.x shape (`{ command }`) so a manifest written by an older development
+/// build is upgraded in place rather than duplicated.
 fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-    handler
-        .get("command")
-        .and_then(|v| v.as_str())
-        .is_some_and(|command| {
-            let decoded = crate::env::decode_powershell_command(command);
-            let candidate = decoded.as_deref().unwrap_or(command);
-            candidate.contains(BUILDMESH_HOOK_MARKER)
-                && candidate.contains("BUILDMESH_PORT")
-                && candidate.contains("BUILDMESH_SESSION_ID")
-        })
+    if let Some(inner) = handler.get("hooks").and_then(|v| v.as_array()) {
+        return inner.iter().any(handler_entry_targets_attention);
+    }
+    handler_entry_targets_attention(handler)
 }
 
 /// Add or refresh the Buildmesh-owned handler for each event in
-/// `MCODE_PROVISIONED_EVENTS` inside `<plugin>/hooks/hooks.json`.
-/// Mirrors `cursor.rs:191-274` / `agy.rs: ensure_hooks_json`: the
-/// function walks the documented `{ "hooks": { "<Event>": [...] } }`
-/// shape, upserts the Buildmesh entry into each event's handler
-/// array, and preserves any sibling handlers (other tools,
-/// user-authored automation) the user has registered.
+/// `MCODE_PROVISIONED_EVENTS` inside the plugin manifest, while preserving
+/// everything else the manifest carries (the user's own events, matchers and
+/// sibling handlers).
 ///
-/// A missing file is the happy path (fresh install → write
-/// `{ "hooks": { … } }`). A malformed existing file (trailing comma,
-/// partial edit, syntax error) is treated as an explicit `Err` rather
-/// than silently clobbered — the Cursor precedent at
-/// `cursor.rs:194-198` pins this round-2 fix: the user's data must
-/// surface to the spawn path as a provision failure so the agent
-/// user can repair it.
+/// The manifest identity fields are owned by Buildmesh — the plugin directory
+/// is ours, and mcode requires a legal `name` — while the `hooks` map is only
+/// ever merged additively.
 ///
-/// Returns `Ok(())` without rewriting the file when every event
-/// already carries the expected handler (the issue #886 idempotency
-/// invariant — no spurious mtime bumps).
-fn ensure_mcode_hooks_json(hooks_path: &Path, command: &str) -> Result<(), String> {
-    let mut settings: serde_json::Value = match std::fs::read_to_string(hooks_path) {
+/// A missing file is the happy path (fresh install). A malformed existing file
+/// (trailing comma, partial edit, syntax error) is treated as an explicit
+/// `Err` rather than silently clobbered — the Cursor precedent at
+/// `cursor.rs:194-198`: the user's data must surface to the spawn path as a
+/// provision failure so it can be repaired.
+///
+/// Returns `Ok(())` without rewriting the file when every event already
+/// carries the expected handler (the issue #886 idempotency invariant — no
+/// spurious mtime bumps).
+fn ensure_plugin_manifest(path: &Path, handler: &serde_json::Value) -> Result<(), String> {
+    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).map_err(|e| {
             format!(
-                "refusing to overwrite malformed {hooks_path:?}: {e}. \
+                "refusing to overwrite malformed {path:?}: {e}. \
                  Repair or remove the file and retry"
             )
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(format!("failed to read {hooks_path:?}: {e}")),
+        Err(e) => return Err(format!("failed to read {path:?}: {e}")),
     };
     if !settings.is_object() {
         return Err(format!(
-            "mcode hooks.json top-level must be a JSON object; got {}",
+            "mcode plugin manifest top-level must be a JSON object; got {}",
             settings_kind(&settings)
         ));
     }
-    // mcode's documented shape (verified against the
-    // `hello-mcode-hooks` example plugin shipped in
-    // `minimax-code-plugins`) is `{ "hooks": { "<Event>": […] } }`.
-    // We don't write a schema version marker — mcode doesn't
-    // require one and adding it would diverge from the upstream
-    // example shape, surprising user tooling.
-    if settings.get("hooks").is_none() {
-        settings["hooks"] = serde_json::json!({});
-    }
-    let hooks = settings
-        .get_mut("hooks")
-        .expect("hooks key inserted above");
-    if !hooks.is_object() {
-        return Err(format!(
-            "mcode hooks.json `hooks` must be a JSON object; got {}",
-            settings_kind(hooks)
-        ));
-    }
 
-    let new_handler = serde_json::json!({ "command": command });
     let mut changed = false;
-    for event in MCODE_PROVISIONED_EVENTS {
-        let group = hooks
+    {
+        let object = settings
             .as_object_mut()
-            .expect("hooks verified object above")
-            .entry(*event)
-            .or_insert_with(|| serde_json::json!([]));
-        // Capture the kind tag for the error path before taking the
-        // mutable borrow — `group.as_array_mut()` borrows the whole
-        // entry, so calling `settings_kind(group)` inside the closure
-        // would conflict with the live mutable borrow.
-        let group_kind = settings_kind(group);
-        let group_array = group.as_array_mut().ok_or_else(|| {
-            format!("mcode hooks.json `hooks.{event}` must be an array; got {group_kind}")
-        })?;
-        if let Some(existing) = group_array
-            .iter_mut()
-            .find(|h| is_buildmesh_handler(h))
-        {
-            if *existing != new_handler {
-                *existing = new_handler.clone();
+            .expect("manifest verified object above");
+        for (key, value) in [
+            ("name", serde_json::json!(MCODE_PLUGIN_NAME)),
+            ("version", serde_json::json!(MCODE_PLUGIN_VERSION)),
+            ("description", serde_json::json!(MCODE_PLUGIN_DESCRIPTION)),
+        ] {
+            if object.get(key) != Some(&value) {
+                object.insert(key.to_string(), value);
                 changed = true;
             }
-        } else {
-            group_array.push(new_handler.clone());
-            changed = true;
+        }
+
+        let hooks = object
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}));
+        if !hooks.is_object() {
+            return Err(format!(
+                "mcode plugin manifest `hooks` must be a JSON object; got {}",
+                settings_kind(hooks)
+            ));
+        }
+        for event in MCODE_PROVISIONED_EVENTS {
+            let group = hooks
+                .as_object_mut()
+                .expect("hooks verified object above")
+                .entry(*event)
+                .or_insert_with(|| serde_json::json!([]));
+            // Capture the kind tag for the error path before taking the
+            // mutable borrow — `group.as_array_mut()` borrows the whole
+            // entry, so calling `settings_kind(group)` inside the closure
+            // would conflict with the live mutable borrow.
+            let group_kind = settings_kind(group);
+            let group_array = group.as_array_mut().ok_or_else(|| {
+                format!(
+                    "mcode plugin manifest `hooks.{event}` must be an array; got {group_kind}"
+                )
+            })?;
+            if let Some(existing) = group_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
+                if *existing != *handler {
+                    *existing = handler.clone();
+                    changed = true;
+                }
+            } else {
+                group_array.push(handler.clone());
+                changed = true;
+            }
         }
     }
 
@@ -361,10 +482,10 @@ fn ensure_mcode_hooks_json(hooks_path: &Path, command: &str) -> Result<(), Strin
         return Ok(());
     }
     let content = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    atomic_write(hooks_path, &content)
-        .map_err(|e| format!("failed to write hooks.json: {e}"))?;
-    tracing::info!("mcode provision_attention_hooks: wrote {:?}", hooks_path);
+        .map_err(|e| format!("serialize mcode plugin manifest failed: {e}"))?;
+    atomic_write(path, &content)
+        .map_err(|e| format!("failed to write mcode plugin manifest: {e}"))?;
+    tracing::info!("mcode provision_attention_hooks: wrote {:?}", path);
     Ok(())
 }
 
@@ -389,7 +510,7 @@ fn settings_kind(value: &serde_json::Value) -> &'static str {
 /// directly — the trait signature cannot inject a `None` plugin root
 /// without changing the spawn-path contract (`requires_attention_hook`),
 /// so we exercise the inner branch with `plugin_root = None` here.
-fn provision_at(plugin_root: Option<&Path>, env_type: EnvType) -> Result<(), String> {
+fn provision_at(plugin_root: Option<&Path>, env_type: EnvType, node_id: i64) -> Result<(), String> {
     let Some(root) = plugin_root else {
         // Issue #1796 acceptance: "Return Ok(()) without side effects
         // when the hook config root is unresolvable". No file system
@@ -401,19 +522,24 @@ fn provision_at(plugin_root: Option<&Path>, env_type: EnvType) -> Result<(), Str
         );
         return Ok(());
     };
-    let hooks_path = root
+    // mcode 0.4.0+ reads the manifest at `<plugin>/.claude-plugin/plugin.json`
+    // and requires `hooks` to be inlined on it. A separate
+    // `io.minimax.mcode/hooks/hooks.json` document is ignored by 0.4.x, and a
+    // plugin directory without a manifest is skipped silently (the issue #1797
+    // root cause the live validation exposed).
+    let manifest_path = root
         .join("plugins")
         .join(MCODE_PLUGIN_DIR)
-        .join("hooks")
-        .join("hooks.json");
-    if let Some(parent) = hooks_path.parent() {
+        .join(".claude-plugin")
+        .join("plugin.json");
+    if let Some(parent) = manifest_path.parent() {
         // `create_dir_all` on the parent chain is idempotent; it
         // fails only on permission / read-only-fs errors, which we
         // surface as `Err` (provision failure) rather than swallow.
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create mcode plugin dir {parent:?}: {e}"))?;
     }
-    ensure_mcode_hooks_json(&hooks_path, &hook_command(env_type))
+    ensure_plugin_manifest(&manifest_path, &attention_handler(node_id, env_type))
 }
 
 impl AgentProvider for McodeAdapter {
@@ -446,57 +572,80 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
+    /// `true` — the Buildmesh Agent-Plugin is provisioned into
+    /// `<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
+    /// and `Stop` delivery was validated against a live 0.4.12 TUI (issue
+    /// #1797). This flag opens the spawn-time gate at `provision.rs:557-569`
+    /// and, downstream, the Autopilot compatibility gate; see
+    /// `attention_capability()` for the structured contract.
     fn requires_attention_hook(&self) -> bool {
-        // **DORMANT FLIP**: this descriptor is intentionally `false`
-        // for PR #1805. The issue #1796 acceptance line calls for it
-        // to stay `false` until TUI delivery is validated end-to-end
-        // (follow-up issue). With this `false`, the spawn-time
-        // gate at `provision.rs:557-569` does NOT call
-        // `provision_attention_hooks`, so the `io.buildmesh.attention`
-        // plugin is NOT installed for users in this release — the
-        // wiring exists in code + unit tests (issue #1796 §Acceptance
-        // acceptance criteria for merge/no-clobber/malformed-refusal +
-        // the stdin entrypoint test), and the follow-up only has to
-        // flip this to `true` and validate TUI delivery. DO NOT flip
-        // without the follow-up's TUI-delivery evidence.
-        false
+        true
     }
 
-    /// Provision mcode's Agent-Plugin attention hooks (issue #1796,
-    /// **dormant in this PR**: not invoked from spawn because
-    /// `requires_attention_hook` is `false` per the issue's explicit
-    /// acceptance line — see the descriptor's doc comment for the
-    /// follow-up rationale). Wired and tested here so the follow-up
-    /// issue that validates TUI delivery only has to flip the
-    /// descriptor: the merge / atomic-write / stdin-delivery
-    /// behaviour is locked in.
+    /// Issue #1797 — the structured attention contract. mcode's `Stop` hook is
+    /// the validated signal: a completed turn POSTs the mcode envelope to
+    /// `/api/attention/<node-id>`. Buildmesh launches mcode with its default
+    /// permission policy, which auto-approves (the live envelope reports
+    /// `"permission_mode": "auto"`), so no approval prompt is raised and
+    /// `PermissionRequested` is not advertised — exactly like Cursor under
+    /// `--force`. No workspace-trust step is required and none is taken, so
+    /// `trust` stays `None`.
+    fn attention_capability(&self) -> AttentionCapability {
+        AttentionCapability::Hook {
+            events: vec![LifecycleKind::TurnCompleted],
+            launch_mode: AttentionLaunchMode::SkipPermissions,
+            trust: None,
+            min_version: Some(MCODE_MIN_HOOK_VERSION.into()),
+        }
+    }
+
+    /// Provision mcode's Agent-Plugin attention hook (issue #1796, wired and
+    /// validated in #1797). Writes
+    /// `<mcode-data-dir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
+    /// with the `Stop` + `PermissionRequest` handlers inlined on the manifest
+    /// in mcode's 0.4.0+ (Claude-compatible) shape.
     ///
-    /// Writes `<mcode-data-dir>/plugins/io.buildmesh.attention/hooks/hooks.json`,
-    /// installing Claude-shaped `{ "command": "<curl>" }` entries for
-    /// `Stop` and `PermissionRequest`. The merge is additive
-    /// (sibling entries round-trip) and idempotent (issue #886);
-    /// a malformed existing file returns `Err` rather than being
-    /// overwritten with a fresh payload (the Cursor / Grok round-2
-    /// review fix); and an unresolvable data dir returns `Ok(())`
-    /// without side effects so a mcode spawn that cannot find its
-    /// home directory still proceeds (only the attention callback is
-    /// lost — the agent remains usable).
+    /// The merge is additive (sibling events and user handlers round-trip) and
+    /// idempotent (issue #886); a malformed existing file returns `Err` rather
+    /// than being overwritten with a fresh payload (the Cursor / Grok round-2
+    /// review fix); and an unresolvable data dir returns `Ok(())` without side
+    /// effects so an mcode spawn that cannot find its home directory still
+    /// proceeds (only the attention callback is lost — the agent remains
+    /// usable).
     ///
-    /// `node_id` is intentionally ignored — the curl command POSTs to
-    /// `/api/attention/$BUILDMESH_SESSION_ID`, which is the per-agent
-    /// Buildmesh node id set by `spawn_environment::wrap` at spawn
-    /// time. Baking the literal node id into the URL would force an
-    /// in-flight edit on every spawn; the env-var expansion matches
-    /// the Cursor / Kimi / Grok precedent for harnesses whose hook
-    /// runner inherits the agent process's environment.
+    /// `node_id` is baked into the callback URL: mcode `env_clear()`s the
+    /// `BUILDMESH_*` variables before running a hook, so `BUILDMESH_SESSION_ID`
+    /// is not available at run time (the same constraint Codex has). The URL is
+    /// re-baked on every spawn, which also re-points a node at the current
+    /// Buildmesh HTTP port.
+    ///
+    /// **One machine-global manifest, one node per file.** The path is shared
+    /// by every mcode node on the machine — `<dataDir>` is the user's home, not
+    /// the worktree (unlike Codex, whose hooks file is project-scoped) — so a
+    /// later spawn rewrites the baked `node_id` and the file is
+    /// last-writer-wins. That is safe for a *running* session, because mcode
+    /// resolves a plugin's hooks once at process start and keeps them for the
+    /// life of the session: verified against 0.4.12 by rewriting the manifest
+    /// mid-session and observing the session keep posting to its original URL
+    /// (pinned by `provision_is_last_writer_wins_across_nodes_sharing_one_data_dir`).
+    /// The residual hazard is a narrow **startup** window — a node whose
+    /// process scans the plugin directory after another node's spawn overwrote
+    /// it adopts the other node's URL. Serialising those two spawns, or a
+    /// node-agnostic callback the route resolves from the payload, would close
+    /// it; neither is implemented here.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         runtime: &LaunchRuntime,
-        _node_id: i64,
+        node_id: i64,
     ) -> Result<(), String> {
+        // Refuse a WSL-guest spawn whose callbacks cannot reach the Buildmesh
+        // port, rather than installing a hook that can only fail silently
+        // (issue #1797 review, finding 2). The node's own distro is threaded
+        // through so the preflight inspects the right one (finding 3).
+        ensure_wsl_callbacks_reachable(resolved.env_type, runtime.wsl_distro.as_deref())?;
         let plugin_root = resolve_plugin_dir(resolved, runtime);
-        provision_at(plugin_root.as_deref(), resolved.env_type)
+        provision_at(plugin_root.as_deref(), resolved.env_type, node_id)
     }
 
     /// `true` — mcode persists canonical history under
@@ -602,8 +751,8 @@ impl AgentProvider for McodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
     use crate::agent::capabilities::ResolvedAgentConfig;
+    use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
 
     #[test]
     fn id_and_ui_metadata() {
@@ -724,12 +873,11 @@ mod tests {
     fn supports_resume_but_no_model_override_after_issue_1179() {
         assert!(MCODE.supports_resume());
         assert!(!MCODE.supports_model_override());
-        assert!(!MCODE.requires_attention_hook());
     }
 
     /// Pin the capability descriptor end-to-end: the harness-id,
-    /// `supports_model_override = false`, and the absence of effort /
-    /// attention controls. Drift here means the Spawn Menu or autopilot
+    /// `supports_model_override = false`, and the absence of effort
+    /// controls. Drift here means the Spawn Menu or autopilot
     /// compatibility gate will misroute mcode.
     #[test]
     fn capabilities_descriptor_drops_model_and_effort() {
@@ -739,7 +887,9 @@ mod tests {
         assert!(caps.supports_prefill);
         assert!(!caps.supports_model_override);
         assert!(!caps.supports_effort_override);
-        assert!(!caps.requires_attention_hook);
+        // Issue #1797 — the hook is provisioned and Stop delivery was
+        // validated against a live 0.4.12 TUI.
+        assert!(caps.requires_attention_hook);
         assert!(caps.produces_readable_transcript);
         assert!(!caps.is_plain_terminal);
         assert_eq!(
@@ -748,9 +898,48 @@ mod tests {
         );
     }
 
+    /// Issue #1797 — pin the structured attention contract. `Stop` is the only
+    /// validated event; Buildmesh launches mcode with its default
+    /// (auto-approving) permission policy, so no permission prompt is raised
+    /// and `PermissionRequested` must NOT be advertised. The `min_version` pin
+    /// fails a refactor that drops it.
+    #[test]
+    fn attention_capability_advertises_validated_stop_only() {
+        let caps = MCODE.capabilities();
+        assert!(caps.requires_attention_hook);
+        let capability = caps.attention_capability;
+        match &capability {
+            AttentionCapability::Hook {
+                events,
+                launch_mode,
+                trust,
+                min_version,
+            } => {
+                assert_eq!(
+                    events,
+                    &vec![LifecycleKind::TurnCompleted],
+                    "`Stop` is the only validated event; advertising more would \
+                     claim a signal we never observed"
+                );
+                assert!(
+                    !events.contains(&LifecycleKind::PermissionRequested),
+                    "Buildmesh launches mcode with an auto-approving permission \
+                     policy — no approval prompt is raised, so a permission \
+                     signal is impossible by construction"
+                );
+                assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
+                assert!(
+                    trust.is_none(),
+                    "mcode requires no workspace-trust step and we take none: {trust:?}"
+                );
+                assert_eq!(min_version.as_deref(), Some(MCODE_MIN_HOOK_VERSION));
+            }
+            _ => panic!("expected Hook, got {capability:?}"),
+        }
+    }
+
     /// The recipe for the default launch mode — even with a (hypothetical)
     /// resolved model in the input — must contain no `--model` flag.
-    /// This is the central coherence regression the issue asked for.
     #[test]
     fn mcode_interactive_recipe_never_carries_model_arg() {
         // Defence in depth: even if a caller bypassed the resolver mask
@@ -818,31 +1007,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Issue #1796: McodeAdapter::provision_attention_hooks + helpers.
+    // Issue #1796 provisioning + issue #1797 validation.
     //
-    // These tests verify the contract from the issue:
-    //   1. Fresh install writes a `Stop` AND `PermissionRequest` entry
-    //      into `<data-dir>/plugins/io.buildmesh.attention/hooks/hooks.json`.
+    // Contract pinned here:
+    //   1. Fresh install writes a mcode 0.4.0+ manifest at
+    //      `<data-dir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
+    //      with `Stop` AND `PermissionRequest` INLINED on the manifest.
     //   2. Additive merge preserves sibling user-authored handlers and
-    //      events outside our ownership — never clobbers user plugins
-    //      (Kimi / Grok pattern).
+    //      events outside our ownership — never clobbers user plugins.
     //   3. Malformed user files are refused (not silently overwritten).
     //   4. Idempotent re-provision dedupes our Buildmesh entry rather
     //      than appending duplicates.
     //   5. Atomic write leaves no `.tmp` residue.
     //   6. Unresolvable data dir returns `Ok(())` with no side effects.
-    //   7. The hook command POSTs stdin JSON to
-    //      `/api/attention/<node-id>` through a real localhost
-    //      listener (parity with the Kimi / Cursor / Grok entrypoint
-    //      tests).
+    //   7. The hook invocation POSTs stdin JSON to
+    //      `/api/attention/<node-id>` through a real localhost listener,
+    //      with NO reliance on inherited environment (mcode env_clears
+    //      `BUILDMESH_*`, so the URL is baked).
     // -----------------------------------------------------------------
+
+    fn plugin_manifest_path(home: &Path) -> std::path::PathBuf {
+        home.join("plugins")
+            .join(MCODE_PLUGIN_DIR)
+            .join(".claude-plugin")
+            .join("plugin.json")
+    }
 
     /// Drive `provision_attention_hooks` against a temporary directory
     /// masquerading as the mcode data dir, returning the resolved
-    /// `<plugin>/hooks/hooks.json` path so the test can inspect the
-    /// resulting JSON. Mirrors the `provision_test_home` helper used
-    /// in `kimi.rs:311-316` and the `provision_cursor` helper in
-    /// `cursor.rs:447-459`.
+    /// `.claude-plugin/plugin.json` path so the test can inspect the JSON.
     fn provision_test_home(home: &Path, env_type: EnvType) -> std::path::PathBuf {
         let path = home.to_string_lossy().to_string();
         MCODE
@@ -860,152 +1053,192 @@ mod tests {
                 7,
             )
             .expect("provision_attention_hooks should succeed");
-        home.join("plugins")
-            .join(MCODE_PLUGIN_DIR)
-            .join("hooks")
-            .join("hooks.json")
+        plugin_manifest_path(home)
+    }
+
+    /// The executable entry under one event's first handler group.
+    fn first_executable(value: &serde_json::Value, event: &str) -> serde_json::Value {
+        value["hooks"][event][0]["hooks"][0].clone()
+    }
+
+    /// The args of one handler group's first executable, joined for matching.
+    fn joined_args(entry: &serde_json::Value) -> String {
+        entry["args"]
+            .as_array()
+            .map(|args| {
+                args.iter()
+                    .filter_map(|a| a.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
     }
 
     #[test]
-    fn provision_fresh_install_writes_stop_and_permission_request_entries() {
+    fn provision_fresh_install_writes_manifest_with_inlined_hooks() {
         let home = tempfile::tempdir().unwrap();
-        let hooks = provision_test_home(home.path(), EnvType::Windows);
-        assert!(hooks.is_file(), "hooks.json was not written: {hooks:?}");
+        let manifest = provision_test_home(home.path(), EnvType::Windows);
+        assert!(
+            manifest.is_file(),
+            "plugin.json was not written: {manifest:?}"
+        );
+
+        // The ignored v0.3.x document must NOT be created — mcode 0.4.0+
+        // reads `hooks` from the manifest and skips a directory without one.
+        let legacy = home
+            .path()
+            .join("plugins")
+            .join(MCODE_PLUGIN_DIR)
+            .join("hooks")
+            .join("hooks.json");
+        assert!(
+            !legacy.exists(),
+            "mcode 0.4.0+ ignores `hooks/hooks.json`; writing it would be dead \
+             weight that looks like a working integration: {legacy:?}"
+        );
 
         let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
-        let command = hook_command(EnvType::Windows);
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
 
-        // Both events provisioned, each with exactly one Buildmesh
-        // handler carrying the curl command.
+        // A manifest is only loaded when it carries a legal name; the
+        // reverse-domain directory name is not a legal manifest name.
+        assert_eq!(value["name"].as_str(), Some(MCODE_PLUGIN_NAME));
+        assert!(
+            MCODE_PLUGIN_NAME
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "mcode requires lowercase letters, digits and single hyphens: {MCODE_PLUGIN_NAME}"
+        );
+
         for event in MCODE_PROVISIONED_EVENTS {
-            let group = &value["hooks"][*event];
-            let array = group
-                .as_array()
-                .unwrap_or_else(|| panic!("hooks.{event} must be an array, got {group:?}"));
+            let entry = first_executable(&value, event);
             assert_eq!(
-                array.len(),
-                1,
-                "fresh install must populate {event} with exactly one Buildmesh entry; got {array:?}"
+                entry["type"].as_str(),
+                Some("command"),
+                "{event} must carry the 0.4.0+ command entry: {entry:?}"
             );
-            assert_eq!(
-                array[0]["command"].as_str(),
-                Some(command.as_str()),
-                "Stop / PermissionRequest must carry the curl command verbatim"
+            let joined = joined_args(&entry);
+            assert!(
+                joined.contains(BUILDMESH_HOOK_MARKER),
+                "{event} handler must POST to the attention route: {joined}"
             );
             assert!(
-                array[0]["command"]
-                    .as_str()
-                    .unwrap()
-                    .contains(BUILDMESH_HOOK_MARKER),
-                "fresh-install command must carry the Buildmesh marker: {command}"
+                joined.contains("/api/attention/7"),
+                "{event} must bake the node id into the callback URL: {joined}"
+            );
+            assert!(
+                !joined.contains("BUILDMESH_PORT") && !joined.contains("BUILDMESH_SESSION_ID"),
+                "{event} must not rely on inherited env; mcode env_clears \
+                 BUILDMESH_*: {joined}"
             );
         }
-
-        // The output should not carry a schema-version marker — mcode's
-        // documented shape (`hello-mcode-hooks`) is `{ "hooks": … }`.
-        assert!(
-            value.get("version").is_none(),
-            "fresh install must NOT write a `version` key — that drifts from \
-             the documented mcode Agent-Plugin shape and surprises user tooling; got {value:?}"
-        );
     }
 
-    /// Additive merge: a user-authored `Stop` handler (e.g. an
-    /// audit log) MUST round-trip. The Kimi / Grok precedent
-    /// (`kimi.rs: native_hooks_preserve_user_configuration_and_are_shared_safely`,
-    /// `grok.rs:1302-1323`) pins this contract — we never silently
-    /// clobber sibling entries.
+    /// Additive merge: a user-authored sibling handler (e.g. an audit log)
+    /// MUST round-trip. The Kimi / Grok precedent pins this contract — we
+    /// never silently clobber sibling entries.
     #[test]
     fn provision_preserves_user_authored_sibling_handlers() {
         let home = tempfile::tempdir().unwrap();
-        let plugin_root = home.path().join("plugins").join(MCODE_PLUGIN_DIR);
-        std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
-        // Pre-existing user-authored `Stop` handler plus an event
-        // outside our ownership (`SessionStart`) that already has the
-        // user's automation registered.
+        let manifest = plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        // A pre-existing Buildmesh manifest the user has extended: a sibling
+        // `Stop` handler plus an event outside our ownership (`SessionStart`).
         let user = r#"{
+            "name": "buildmesh-attention",
             "hooks": {
                 "Stop": [
-                    { "command": "echo user-audit-log >> /tmp/audit.log" }
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "node", "args": ["audit.mjs"] }
+                        ]
+                    }
                 ],
                 "SessionStart": [
-                    { "command": "echo user-startup-hook" }
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "node", "args": ["startup.mjs"] }
+                        ]
+                    }
                 ]
             }
         }"#;
-        std::fs::write(plugin_root.join("hooks").join("hooks.json"), user).unwrap();
+        std::fs::write(&manifest, user).unwrap();
 
-        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let written = provision_test_home(home.path(), EnvType::Windows);
         let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
 
-        // The user-authored `Stop` handler must survive.
-        let stop = value["hooks"]["Stop"]
-            .as_array()
-            .expect("Stop array");
+        // The user-authored sibling `Stop` handler must survive.
+        let stop = value["hooks"]["Stop"].as_array().expect("Stop array");
         assert!(
             stop.iter()
-                .any(|h| h["command"].as_str() == Some("echo user-audit-log >> /tmp/audit.log")),
+                .any(|h| h["hooks"][0]["command"].as_str() == Some("node")),
             "user-authored Stop handler must round-trip; got {stop:?}"
         );
-        // The Buildmesh-curated Stop handler must also be installed.
         assert!(
-            stop.iter()
-                .any(|h| h["command"]
-                    .as_str()
-                    .is_some_and(|c| c.contains(BUILDMESH_HOOK_MARKER))),
-            "Buildmesh Stop handler must be installed alongside user handler; got {stop:?}"
+            stop.iter().any(is_buildmesh_handler),
+            "Buildmesh Stop handler must be installed alongside the user handler; got {stop:?}"
         );
         assert_eq!(
             stop.len(),
             2,
-            "Stop must carry both user and Buildmesh entries (additive merge); got {stop:?}"
+            "Stop must carry both the user and Buildmesh entries (additive merge); got {stop:?}"
+        );
+
+        // The unmanaged `SessionStart` event must be preserved verbatim.
+        let session_start = value["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart array");
+        assert_eq!(session_start.len(), 1);
+        assert_eq!(
+            session_start[0]["hooks"][0]["args"][0].as_str(),
+            Some("startup.mjs")
         );
 
         // `PermissionRequest` is provisioned fresh (no user entry to merge with).
         let permission = value["hooks"]["PermissionRequest"]
             .as_array()
             .expect("PermissionRequest array");
-        assert_eq!(permission.len(), 1, "PermissionRequest must carry exactly one Buildmesh entry");
-
-        // The unmanaged `SessionStart` event with the user's handler
-        // must be preserved byte-for-byte — we never touch events we
-        // don't own.
-        let session_start = value["hooks"]["SessionStart"]
-            .as_array()
-            .expect("SessionStart array");
         assert_eq!(
-            session_start,
-            &serde_json::json!([{ "command": "echo user-startup-hook" }]).as_array().unwrap().clone(),
-            "unmanaged SessionStart must NOT be clobbered; got {session_start:?}"
+            permission.len(),
+            1,
+            "PermissionRequest must carry exactly one Buildmesh entry"
         );
     }
 
-    /// Re-running provision on a file that already carries a stale
-    /// Buildmesh `Stop` entry (marker substring matches, body drifted)
-    /// must replace it in place — appending would create duplicates.
-    /// The Cursor precedent (`cursor.rs:727-769`) pins this for issue
-    /// #886 idempotency.
+    /// Re-running provision on a manifest that already carries a stale
+    /// Buildmesh `Stop` entry (marker matches, URL drifted) must replace it in
+    /// place — appending would create duplicates (issue #886 idempotency).
     #[test]
     fn provision_dedupes_existing_buildmesh_stop_entry() {
         let home = tempfile::tempdir().unwrap();
-        let plugin_root = home.path().join("plugins").join(MCODE_PLUGIN_DIR);
-        std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
+        let manifest = plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         let existing = r#"{
+            "name": "buildmesh-attention",
             "hooks": {
                 "Stop": [
                     {
-                        "command": "echo stale-buildmesh-curl http://localhost:1999/api/attention/0 BUILDMESH_PORT=stale BUILDMESH_SESSION_ID=stale"
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "cmd.exe",
+                                "args": ["/c", "curl.exe -s http://localhost:1999/api/attention/0"]
+                            }
+                        ]
                     }
                 ]
             }
         }"#;
-        std::fs::write(plugin_root.join("hooks").join("hooks.json"), existing).unwrap();
+        std::fs::write(&manifest, existing).unwrap();
 
-        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let written = provision_test_home(home.path(), EnvType::Windows);
         let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
 
         let stop = value["hooks"]["Stop"].as_array().expect("Stop array");
         assert_eq!(
@@ -1013,62 +1246,169 @@ mod tests {
             1,
             "stale Buildmesh entry must be replaced, not appended; got {stop:?}"
         );
-        let cmd = stop[0]["command"].as_str().expect("command");
-        assert!(cmd.contains("/api/attention/"), "replaced entry must carry the Buildmesh URL: {cmd}");
+        let joined = joined_args(&first_executable(&value, "Stop"));
         assert!(
-            !cmd.contains("stale-buildmesh-curl"),
-            "stale body must be replaced, not preserved: {cmd}"
+            !joined.contains("localhost:1999"),
+            "stale URL must be replaced, not preserved: {joined}"
+        );
+        assert!(
+            joined.contains("/api/attention/7"),
+            "replacement must carry the fresh node id: {joined}"
         );
     }
 
-    /// On a non-Windows run the curl command is the POSIX shape, not
-    /// the Windows `%VAR%`-bearing shape — issuing `$BUILDMESH_PORT`
-    /// makes the hook actually runnable on the user's machine.
+    /// Issue #1797 review (finding 1): the plugin path is machine-global
+    /// (`<dataDir>/plugins/…` — the user's home, not per-worktree like Codex),
+    /// so provisioning is last-writer-wins: a second node's spawn overwrites
+    /// the first node's baked URL on disk. Pin that on-disk semantics, and pin
+    /// that a re-spawn restores a node's own URL, so the shared-path behaviour
+    /// is a tested property rather than a surprise. *Running* sessions are
+    /// unaffected because mcode resolves a plugin's hooks once at process start
+    /// — see the trait method's docs and the mid-session rewrite experiment
+    /// recorded in `docs/learning/mcode-harness-capabilities.md`.
     #[test]
-    fn provision_writes_posix_shell_command_on_unix() {
+    fn provision_is_last_writer_wins_across_nodes_sharing_one_data_dir() {
         let home = tempfile::tempdir().unwrap();
-        // Use a non-Windows env_type for this probe; on Windows hosts
-        // `EnvType::Windows` is the only POSIX-incorrect choice.
-        let env_type = if cfg!(target_os = "windows") {
-            EnvType::Wsl
-        } else {
-            EnvType::Windows
-        };
-        let hooks = provision_test_home(home.path(), env_type);
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        let manifest = plugin_manifest_path(home.path());
 
-        let cmd = value["hooks"]["Stop"][0]["command"]
-            .as_str()
-            .expect("Stop command");
+        let provision = |node_id: i64| -> String {
+            let path = home.path().to_string_lossy().to_string();
+            MCODE
+                .provision_attention_hooks(
+                    &ResolvedPath {
+                        host_path: path.clone(),
+                        spawn_path: path.clone(),
+                        raw_path: path,
+                        env_type: EnvType::Windows,
+                    },
+                    &LaunchRuntime {
+                        harness_home: Some(home.path().to_string_lossy().to_string()),
+                        wsl_distro: None,
+                    },
+                    node_id,
+                )
+                .expect("provision_attention_hooks should succeed");
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+            joined_args(&first_executable(&value, "Stop"))
+        };
+
+        let first = provision(101);
         assert!(
-            cmd.contains("$BUILDMESH_PORT"),
-            "non-Windows provision must use POSIX env-var syntax: {cmd}"
+            first.contains("/api/attention/101"),
+            "node 101's URL must be baked: {first}"
+        );
+
+        let second = provision(202);
+        assert!(
+            second.contains("/api/attention/202"),
+            "a second node sharing the data dir overwrites the manifest: {second}"
         );
         assert!(
-            cmd.contains("$BUILDMESH_SESSION_ID"),
-            "non-Windows provision must use POSIX env-var syntax for session id: {cmd}"
+            !second.contains("/api/attention/101"),
+            "no stale node id may survive the overwrite: {second}"
         );
+
+        let restored = provision(101);
         assert!(
-            cmd.contains("|| true"),
-            "POSIX hook command must suppress curl failures; got {cmd}"
+            restored.contains("/api/attention/101"),
+            "re-spawning a node restores its own URL: {restored}"
+        );
+
+        // The merge never accumulates handlers across nodes.
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        for event in MCODE_PROVISIONED_EVENTS {
+            assert_eq!(
+                value["hooks"][*event].as_array().unwrap().len(),
+                1,
+                "{event} must hold exactly one Buildmesh handler no matter how many \
+                 nodes have provisioned into this data dir"
+            );
+        }
+    }
+
+    /// Issue #1797 review (finding 3): the preflight must inspect the distro
+    /// the node actually runs in, not `wsl.exe`'s default. A bare `wsl.exe`
+    /// reads whatever `wsl --set-default` points at, which can be a different
+    /// distro with different networking (or no `wslinfo` at all).
+    #[test]
+    fn wsl_preflight_targets_the_nodes_own_distro() {
+        assert_eq!(
+            wsl_wslinfo_args(Some("Ubuntu-22.04")),
+            vec!["-d", "Ubuntu-22.04", "--", "wslinfo", "--networking-mode"]
+        );
+        assert_eq!(
+            wsl_wslinfo_args(Some("  Ubuntu  ")),
+            vec!["-d", "Ubuntu", "--", "wslinfo", "--networking-mode"],
+            "the distro name is trimmed"
+        );
+        // No distro resolved (or a blank one) → the default-distro form, which
+        // is still the best available target.
+        assert_eq!(
+            wsl_wslinfo_args(None),
+            vec!["--", "wslinfo", "--networking-mode"]
+        );
+        assert_eq!(
+            wsl_wslinfo_args(Some("   ")),
+            vec!["--", "wslinfo", "--networking-mode"]
         );
     }
 
-    /// A malformed user-authored JSON file (trailing comma, partial
-    /// edit, syntax error) must NOT cause provisioning to silently
-    /// overwrite with `{}`. The function returns an `Err`, the spawn
-    /// path surfaces it as a provision failure, and the user's content
-    /// survives intact. Mirrors Cursor (`cursor.rs:813-849`) / Grok
-    /// (`grok.rs:1302-1329`) round-2 fix.
+    /// Issue #1797 review (finding 2): the WSL preflight is what turns a silent
+    /// callback black hole into an actionable provisioning failure. The accept
+    /// predicate is split out so it is testable without a WSL host.
+    #[test]
+    fn wsl_networking_preflight_only_accepts_mirrored() {
+        assert!(wsl_networking_is_mirrored(Some("mirrored")));
+        assert!(wsl_networking_is_mirrored(Some("  mirrored\n")));
+        assert!(wsl_networking_is_mirrored(Some("Mirrored")));
+        assert!(!wsl_networking_is_mirrored(Some("nat")));
+        assert!(!wsl_networking_is_mirrored(Some("")));
+        assert!(!wsl_networking_is_mirrored(None));
+    }
+
+    /// Non-Windows runtimes get the POSIX invocation: `sh -c`, `/dev/null`
+    /// redirection and `|| true` — never Windows `>nul` or `curl.exe`.
+    #[test]
+    fn provision_writes_posix_invocation_on_unix() {
+        let url = "http://localhost:2992/api/attention/7";
+        let (command, args) = attention_invocation(EnvType::Wsl, url);
+        assert_eq!(command, "sh");
+        assert_eq!(args[0], "-c");
+        assert!(
+            args[1].contains(url),
+            "POSIX invocation must carry the baked url: {}",
+            args[1]
+        );
+        assert!(
+            args[1].contains("|| true"),
+            "POSIX hook must suppress curl failures: {}",
+            args[1]
+        );
+        assert!(
+            !args[1].contains(">nul"),
+            "POSIX hook must not emit Windows `>nul`: {}",
+            args[1]
+        );
+        assert!(
+            !args[1].contains("curl.exe"),
+            "POSIX hook must not use curl.exe: {}",
+            args[1]
+        );
+    }
+
+    /// A malformed user-authored manifest (trailing comma, partial edit,
+    /// syntax error) must NOT cause provisioning to silently overwrite. The
+    /// function returns an `Err`, the spawn path surfaces it as a provision
+    /// failure, and the user's content survives intact.
     #[test]
     fn provision_refuses_to_overwrite_malformed_user_file() {
         let home = tempfile::tempdir().unwrap();
-        let plugin_root = home.path().join("plugins").join(MCODE_PLUGIN_DIR);
-        std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
-        let path = plugin_root.join("hooks").join("hooks.json");
+        let manifest = plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         let malformed = "{ \"hooks\": [],, }";
-        std::fs::write(&path, malformed).unwrap();
+        std::fs::write(&manifest, malformed).unwrap();
 
         let path_str = home.path().to_string_lossy().to_string();
         let resolved = ResolvedPath {
@@ -1087,28 +1427,23 @@ mod tests {
         );
         assert!(
             result.is_err(),
-            "provision must refuse a malformed existing file; got {result:?}"
+            "provision must refuse a malformed existing manifest; got {result:?}"
         );
-
-        // The user's malformed content must survive intact.
-        let on_disk = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
-            on_disk, malformed,
-            "malformed file content must NOT be overwritten"
+            std::fs::read_to_string(&manifest).unwrap(),
+            malformed,
+            "malformed manifest content must NOT be overwritten"
         );
     }
 
-    /// A valid JSON top-level that isn't an object (e.g. `[1, 2, 3]`)
-    /// is a misconfiguration — return `Err` rather than clobbering
-    /// the user's payload with `{}`. Mirrors Cursor / Grok round-2
-    /// fix (`cursor.rs:851-878`).
+    /// A valid JSON top-level that isn't an object is a misconfiguration —
+    /// return `Err` rather than clobbering the user's payload with `{}`.
     #[test]
     fn provision_refuses_top_level_array() {
         let home = tempfile::tempdir().unwrap();
-        let plugin_root = home.path().join("plugins").join(MCODE_PLUGIN_DIR);
-        std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
-        let path = plugin_root.join("hooks").join("hooks.json");
-        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        let manifest = plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "[1, 2, 3]").unwrap();
 
         let path_str = home.path().to_string_lossy().to_string();
         let resolved = ResolvedPath {
@@ -1129,50 +1464,29 @@ mod tests {
             result.is_err(),
             "provision must refuse a top-level array; got {result:?}"
         );
-        // The user's payload must survive intact.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2, 3]");
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "[1, 2, 3]");
     }
 
-    /// The issue #1796 acceptance invariant: when the hook config root
-    /// cannot be resolved (the harness home is unresolvable), the
-    /// function returns `Ok(())` WITHOUT side effects on disk. The
-    /// Cursor precedent for the same invariant is implicit (Kimi /
-    /// Grok error-out instead), but mcode ships the "no-op, no
-    /// side-effect" path explicitly because mcode is the harness
-    /// where the data dir may legitimately not exist on first spawn.
-    ///
+    /// The issue #1796 acceptance invariant: when the hook config root cannot
+    /// be resolved, the function returns `Ok(())` WITHOUT side effects on disk.
     /// We exercise the inner `provision_at` helper directly with
-    /// `plugin_root = None` (the unresolvable case) and verify both
-    /// the return value AND the absence of any side effects in a
-    /// sandboxed tempdir. A tautological assertion here previously
-    /// hidden the dormant branch from review (PR #1805 round-1).
+    /// `plugin_root = None` (the unresolvable case) and verify both the return
+    /// value AND the absence of any side effects in a sandboxed tempdir.
     #[test]
     fn provision_returns_ok_without_side_effects_when_home_unresolvable() {
-        // Sandboxed working dir: if the unresolvable branch leaked any
-        // directory / file writes, we'd see them here. Use a fresh
-        // tempdir so the test's "no side effects" verdict is local
-        // and unconfounded by other tests' artifacts.
         let sandbox = tempfile::tempdir().unwrap();
         let sandbox_root = sandbox.path().to_path_buf();
-        // Snapshot the sandbox for the assertion below.
         let before: std::collections::BTreeSet<_> = walk_dir_files(&sandbox_root)
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
-        // Call the inner helper directly with `None` (the
-        // unresolvable branch — `resolve_plugin_dir` only yields
-        // `None` when `cli_dir_for_spawn` returns `None`, which
-        // happens on a Linux/WSL host with no HOME and no WSL
-        // distro, or a WindowsInterop host that is not actually
-        // `is_wsl_host()`).
-        let result = provision_at(None, EnvType::Windows);
+        let result = provision_at(None, EnvType::Windows, 7);
         assert!(
             result.is_ok(),
             "unresolvable hook config root must return Ok(()) per issue #1796; got {result:?}"
         );
 
-        // No side effects: the sandbox contents must be identical.
         let after: std::collections::BTreeSet<_> = walk_dir_files(&sandbox_root)
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -1183,24 +1497,24 @@ mod tests {
              the sandbox has changed: before={before:?}, after={after:?}"
         );
 
-        // Specifically assert no `.minimax` / `plugins` /
-        // `io.buildmesh.attention` artifacts were created.
-        for forbidden in ["minimax", "plugins", "io.buildmesh.attention", "hooks.json"] {
+        for forbidden in [
+            "minimax",
+            "plugins",
+            "io.buildmesh.attention",
+            "plugin.json",
+        ] {
             let found = walk_dir_files(&sandbox_root)
                 .into_iter()
                 .any(|p| p.to_string_lossy().contains(forbidden));
             assert!(
                 !found,
-                "provision_at(None) must NOT create a `{forbidden}` artifact; \
-                 walked: {:?}",
+                "provision_at(None) must NOT create a `{forbidden}` artifact; walked: {:?}",
                 walk_dir_files(&sandbox_root)
             );
         }
     }
 
     /// Recursively walk `root` and collect every file path under it.
-    /// Used by the unresolvable-home test to snapshot the sandbox
-    /// before / after the no-side-effect call.
     fn walk_dir_files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1219,15 +1533,17 @@ mod tests {
         out
     }
 
-    /// Atomic write leaves no `.tmp` residue in the plugin dir. Mirrors
-    /// Cursor / AGY precedent (`agy.rs:567-582`, `cursor.rs:794-811`).
+    /// Atomic write leaves no `.tmp` residue beside the manifest.
     #[test]
     fn provision_atomic_write_leaves_no_tmp_residue() {
         let home = tempfile::tempdir().unwrap();
         provision_test_home(home.path(), EnvType::Windows);
 
-        let plugin_root = home.path().join("plugins").join(MCODE_PLUGIN_DIR);
-        let entries = std::fs::read_dir(&plugin_root).unwrap();
+        let manifest_dir = plugin_manifest_path(home.path())
+            .parent()
+            .expect("manifest dir")
+            .to_path_buf();
+        let entries = std::fs::read_dir(&manifest_dir).unwrap();
         let tmp_files: Vec<_> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
@@ -1238,13 +1554,10 @@ mod tests {
         );
     }
 
-    /// Pin the descriptor-related constants so a refactor that flips
-    /// the values trips the test before the wire shape drifts. Mirrors
-    /// the Cursor `cursor_min_hook_version_constant_is_pinned` test
-    /// (`cursor.rs:1180-1187`) and the Grok `GROK_MIN_HOOK_VERSION`
-    /// precedent.
+    /// Pin the descriptor-related constants so a refactor that flips the values
+    /// trips the test before the wire shape drifts.
     #[test]
-    fn mcode_min_hook_version_constant_is_pinned() {
+    fn mcode_hook_constants_are_pinned() {
         assert_eq!(MCODE_MIN_HOOK_VERSION, "0.4.12");
         assert!(
             !MCODE_MIN_HOOK_VERSION.contains(".."),
@@ -1259,105 +1572,93 @@ mod tests {
             &["Stop", "PermissionRequest"],
             "issue #1796 calls out Stop + PermissionRequest specifically; drift trips here"
         );
-    }
-
-    /// Issue #1796: `requires_attention_hook` stays `false` because
-    /// TUI delivery validation is a separate follow-up issue. The
-    /// *provisioning* side of the contract IS in place (this test
-    /// asserts the method is defined and idempotent); the *delivery*
-    /// side needs a live mcode TUI fixture before it can be flipped.
-    #[test]
-    fn requires_attention_hook_remains_false_until_tui_validation() {
         assert!(
-            !MCODE.requires_attention_hook(),
-            "issue #1796: descriptor stays false until TUI delivery is validated; \
-             flipping it here would advertise a wire we haven't proven end-to-end"
+            MCODE_HOOK_TIMEOUT_SECONDS > 0,
+            "hook timeout must be positive: {MCODE_HOOK_TIMEOUT_SECONDS}"
         );
     }
 
-    /// Issue #1796 round-2: Windows cmd syntax is ONLY correct when
-    /// the runtime is Windows, and `EnvType::Windows` is the default
-    /// for non-WSL macOS and Linux too. Gate cmd syntax on
-    /// `cfg!(target_os = "windows") && env_type == EnvType::Windows`
-    /// so a macOS / Linux build never emits `curl.exe` /
-    /// `%BUILDMESH_PORT%` / `>nul` (which would create literal files
-    /// named `nul` / `2>nul` under POSIX shells).
+    /// Issue #1797: `requires_attention_hook` is `true` — the plugin is
+    /// provisioned and `Stop` delivery was validated end-to-end against a live
+    /// mcode 0.4.12 TUI. Reverting this without new evidence would re-close the
+    /// Autopilot gate.
     #[test]
-    fn hook_command_uses_env_type_specific_syntax_with_fail_safe() {
-        let windows_runtime = hook_command(EnvType::Windows);
+    fn requires_attention_hook_is_enabled_after_tui_validation() {
+        assert!(
+            MCODE.requires_attention_hook(),
+            "issue #1797 validated Stop delivery against a live 0.4.12 TUI; \
+             reverting to false would close the Autopilot gate without cause"
+        );
+    }
+
+    /// The plugin directory is only loaded when it carries a manifest at the
+    /// Claude-compatible location; mcode silently skips a bare directory (the
+    /// issue #1797 root cause). Pin the path so a refactor back to the ignored
+    /// v0.3.x `hooks/hooks.json` trips here.
+    #[test]
+    fn manifest_path_is_the_claude_plugin_location() {
+        let manifest = plugin_manifest_path(Path::new("/tmp/mcode-home"));
+        assert_eq!(
+            manifest.file_name().and_then(|n| n.to_str()),
+            Some("plugin.json")
+        );
+        assert_eq!(
+            manifest
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some(".claude-plugin"),
+            "mcode 0.4.0+ reads `.claude-plugin/plugin.json`; got {manifest:?}"
+        );
+        assert!(
+            manifest.to_string_lossy().contains(MCODE_PLUGIN_DIR),
+            "manifest must live under our plugin dir: {manifest:?}"
+        );
+    }
+
+    /// The Windows invocation wraps the baked curl line in `cmd.exe /c` (mcode
+    /// applies no shell interpretation of its own). Non-Windows hosts must never
+    /// emit the cmd-shape line.
+    #[test]
+    fn attention_invocation_matches_host_platform() {
+        let url = "http://localhost:1992/api/attention/42";
+        let (command, args) = attention_invocation(EnvType::Windows, url);
         if cfg!(target_os = "windows") {
+            assert_eq!(command, "cmd.exe");
+            assert_eq!(args[0], "/c");
             assert!(
-                windows_runtime.contains("%BUILDMESH_PORT%"),
-                "Windows runtime must use cmd %%VAR%% syntax; got {windows_runtime}"
+                args[1].contains(url),
+                "Windows invocation must carry the url: {}",
+                args[1]
             );
             assert!(
-                windows_runtime.contains(">nul"),
-                "Windows runtime must redirect to nul; got {windows_runtime}"
+                args[1].contains("curl.exe"),
+                "Windows invocation must use curl.exe: {}",
+                args[1]
             );
             assert!(
-                windows_runtime.contains("|| exit 0"),
-                "Windows runtime must suppress curl failures; got {windows_runtime}"
+                args[1].contains(">nul"),
+                "Windows invocation must redirect to nul: {}",
+                args[1]
             );
         } else {
+            assert_eq!(command, "sh", "non-Windows hosts must not emit cmd.exe");
             assert!(
-                windows_runtime.contains("$BUILDMESH_PORT"),
-                "non-Windows host must use POSIX $VAR syntax; got {windows_runtime}"
-            );
-            assert!(
-                windows_runtime.contains("|| true"),
-                "non-Windows host must suppress curl failures; got {windows_runtime}"
-            );
-            assert!(
-                !windows_runtime.contains(">nul"),
-                "non-Windows host must NOT emit Windows `>nul` (creates literal files); got {windows_runtime}"
-            );
-        }
-
-        // WSL-guest runtime should always emit POSIX syntax
-        // (`$BUILDMESH_PORT` / `|| true` / `>/dev/null`), since the
-        // WSL shell is bash, regardless of the host triple.
-        let wsl_runtime = hook_command(EnvType::Wsl);
-        assert!(
-            wsl_runtime.contains("$BUILDMESH_PORT"),
-            "WSL-guest runtime must use POSIX $VAR syntax; got {wsl_runtime}"
-        );
-        assert!(
-            wsl_runtime.contains("|| true"),
-            "WSL-guest runtime must suppress curl failures; got {wsl_runtime}"
-        );
-        assert!(
-            !wsl_runtime.contains(">nul"),
-            "WSL-guest runtime must NOT emit Windows `>nul`; got {wsl_runtime}"
-        );
-
-        // The WindowsInterop runtime is a Windows-shell-wrap of a
-        // POSIX command (PowerShell → wsl.exe → curl) — surface as
-        // the encoded PowerShell command and let the inner branch
-        // assert. Skip the literal-string inspection when no
-        // `WindowsInterop` adapter is available (non-WSL host).
-        let interop = hook_command(EnvType::WindowsInterop);
-        if !cfg!(target_os = "windows") {
-            // On non-Windows hosts the WindowsInterop path is a
-            // no-op (the `if is_wsl_host()` short-circuit in
-            // `hook_command` returns the POSIX fall-through) and the
-            // emitter is the same as a direct Windows runtime — just
-            // confirm the output is non-empty.
-            assert!(
-                !interop.is_empty(),
-                "WindowsInterop runtime must yield a non-empty command even on non-Windows hosts"
+                !args[1].contains(">nul"),
+                "non-Windows hosts must NOT emit Windows `>nul` (creates literal files): {}",
+                args[1]
             );
         }
     }
 
-    /// Issue #1796 acceptance: the hook stdin entrypoint must reach
-    /// `/api/attention/<node-id>` exactly as required by the attention
-    /// route. This mirrors the Kimi
-    /// (`kimi.rs:native_hook_command_delivers_stdin_to_runtime_node_without_stdout`)
-    /// and Cursor stdin-delivery tests so a regression that drops the
-    /// env-var expansion, swaps the URL, or breaks `--data-binary @-`
-    /// trips here before the wire does.
+    /// Issue #1797 acceptance: the hook invocation must reach
+    /// `/api/attention/<node-id>` with the event's stdin JSON as the body — and
+    /// must do so **without** any inherited `BUILDMESH_*` environment, because
+    /// mcode's hook runner env_clears them (a live 0.4.12 run observed
+    /// `%BUILDMESH_PORT%` arriving verbatim). This mirrors the Cursor / Kimi
+    /// stdin-delivery tests.
     #[test]
-    fn mcode_hook_command_delivers_stdin_to_attention_route() {
+    fn attention_invocation_delivers_stdin_to_attention_route_without_env() {
         use std::io::{Read, Seek, Write};
         use std::time::{Duration, Instant};
 
@@ -1399,57 +1700,46 @@ mod tests {
                 .unwrap();
             let mut body = vec![0; length];
             stream.read_exact(&mut body).unwrap();
-            // Even a nonempty successful response must not leak
-            // into the mcode hook protocol.
+            // Even a nonempty successful response must not leak into the mcode
+            // hook protocol.
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
                 .unwrap();
             (headers, body)
         });
 
-        // Render the hook command via the same code path the
-        // provisioner uses so we exercise the live env-var
-        // expansion and the live `--data-binary @-` plumbing.
-        // The Windows-runtime shape is the canonical cmd.exe surface
-        // for this issue #1796 hook; the test only verifies that
-        // surface on Windows hosts, falling through to WSL on Linux
-        // hosts (the reviewer round-1 nit: previous copy-paste made
-        // both branches identical).
-        let host_is_windows = cfg!(target_os = "windows");
-        let command = hook_command(EnvType::Windows);
-        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","message":"literal $HOME & %PATH%"}"#;
+        // Bake the listener's ephemeral port into the URL the way the
+        // provisioner bakes the live Buildmesh port.
+        let url = format!("http://localhost:{port}/api/attention/741");
+        let env_type = if cfg!(target_os = "windows") {
+            EnvType::Windows
+        } else {
+            EnvType::Wsl
+        };
+        let (command, args) = attention_invocation(env_type, &url);
+
+        let payload = br#"{"hook_event_name":"Stop","session_id":"8a979720-1cb0-408c-b29c-9f0f68f2982b","transcript_path":"/tmp/x.jsonl","permission_mode":"auto","message":"literal $HOME & %PATH%"}"#;
         let mut input = tempfile::tempfile().unwrap();
         input.write_all(payload).unwrap();
         input.rewind().unwrap();
 
-        let mut shell = crate::process_util::command_no_window(if host_is_windows {
-            "cmd.exe"
-        } else {
-            "/bin/sh"
-        });
-        if host_is_windows {
-            shell.args(["/d", "/c"]);
-            // `cmd /c` has special quoting rules for its final
-            // argument; preserve the hook command byte-for-byte in
-            // this probe (Cursor / Kimi parity).
-            #[cfg(windows)]
-            std::os::windows::process::CommandExt::raw_arg(&mut shell, &command);
-        } else {
-            shell.args(["-c", &command]);
-        }
-        shell
-            .env("BUILDMESH_PORT", port.to_string())
-            .env("BUILDMESH_SESSION_ID", "741")
+        let mut invocation = crate::process_util::command_no_window(&command);
+        invocation.args(&args);
+        invocation
+            // Deliberately do NOT provide BUILDMESH_*: the URL is baked, so the
+            // callback must work under mcode's env_clear().
+            .env_remove("BUILDMESH_PORT")
+            .env_remove("BUILDMESH_SESSION_ID")
             .env_remove("BUILDMESH_WSL_HOST")
             .env("NO_PROXY", "localhost,127.0.0.1")
             .env("no_proxy", "localhost,127.0.0.1")
             .stdin(std::process::Stdio::from(input));
         let output = crate::process_util::run_command_with_timeout(
-            shell,
-            "mcode attention command",
+            invocation,
+            "mcode attention invocation",
             Duration::from_secs(10),
-        );
-        let output = output.unwrap();
+        )
+        .unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -1457,19 +1747,14 @@ mod tests {
         );
 
         let (headers, body) = server.join().unwrap();
-        assert!(
-            output.stdout.is_empty(),
-            "hook stdout: {:?}",
-            output.stdout
-        );
+        assert!(output.stdout.is_empty(), "hook stdout: {:?}", output.stdout);
         assert!(
             headers.starts_with("POST /api/attention/741 HTTP/1.1\r\n"),
             "{headers}"
         );
-        assert!(headers.to_ascii_lowercase().contains("content-type: application/json\r\n"));
-        // Stop and PermissionRequest share the same curl shape —
-        // assert payload integrity so a regression that re-encodes
-        // or filters the body trips here.
+        // Stop and PermissionRequest share the same invocation shape — assert
+        // payload integrity so a regression that re-encodes or filters the body
+        // trips here.
         assert_eq!(body, payload);
     }
 }

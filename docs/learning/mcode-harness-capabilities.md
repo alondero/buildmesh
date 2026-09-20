@@ -1,33 +1,38 @@
 ---
 name: mcode-harness-capabilities
-description: MiniMax Code (mcode) capability review against Buildmesh's harness contract — transcript reader evidence, attention-hook surface, and the remaining Autopilot gap
+description: MiniMax Code (mcode) capability review against Buildmesh's harness contract — transcript reader evidence and the validated attention hook
 metadata:
   type: reference
   harness: mcode
-  mcode_version: 0.4.12 (@minimax-ai/code, npm bundle strings)
-  date: 2026-09-19
+  mcode_version: 0.4.12 (@minimax-ai/code)
+  date: 2026-09-20
+  attention_validation: validated 2026-09-20 against installed 0.4.12 —
+    Stop delivered from a live TUI; requires_attention_hook flipped to true
 ---
 
 # MiniMax Code harness capabilities vs Buildmesh
 
 Review of what the `mcode` binary actually exposes, versus what Buildmesh's
-Mcode adapter advertises and uses. Primary concerns: **transcript
-understanding** (landed — `TranscriptFormat::Mcode`) and **attention hooks**
-(open — the Autopilot gate).
+Mcode adapter advertises and uses. Both primary concerns have landed:
+**transcript understanding** (`TranscriptFormat::Mcode`) and **attention
+hooks** (the provisioned Agent-Plugin, validated against a live 0.4.12 TUI —
+issue #1797). The Autopilot gate is open for mcode.
 
 ## Sources (primary only)
 
 | Source | What it is |
 |---|---|
-| `@minimax-ai/code@0.4.12` npm bundle (`cli.js` + `chunks/*.js` strings) | Shipped CLI: data-dir resolution, session layout, hook payload/output protocol |
-| `mcode --help` shape via README (`mcode [prompt]`, `--session [id]`, `--continue`, `exec`, `plugin`) | Public CLI surface |
-| `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-detailed-spec.md`, `examples/hello-mcode-hooks`) | Agent Plugins 1.0 portable Hooks preview: `hooks.json` entries, per-event scripts |
+| `@minimax-ai/code@0.4.12` npm bundle (`cli.js` + `chunks/*.js` strings) | Shipped CLI: data-dir resolution, session layout, plugin scan, hook payload |
+| Installed `mcode 0.4.12` driven on Windows, 2026-09-20 | Live `exec` and interactive-TUI runs against a local listener (issue #1797) |
+| `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-v0.4-spec.md`, `docs/plugin-compatibility.md`) | The mcode 0.4.0+ plugin format: `.claude-plugin/plugin.json`, inline `hooks` |
+| `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-detailed-spec.md`, `examples/hello-mcode-hooks`) | The superseded v0.3.x Agent-Plugin format (`io.minimax.mcode/hooks/hooks.json`) |
 | `src-tauri/src/agent/provider/adapters/mcode.rs` | Current Buildmesh adapter |
 | `src-tauri/src/services/transcript_reader/adapters/mcode.rs` | Current Buildmesh reader |
 | `src-tauri/src/agent/capabilities.rs`, `autopilot/compatibility.rs` | Harness contract and Autopilot gate |
 
-No live `mcode` binary was available on this host; every claim below traces
-to bundle strings or the linked repos, never to guessed PTY output.
+Delivery, layout, and payload claims below are backed by the live run; the
+scanner and manifest rules are traceable to the shipped bundle and the
+first-party plugin spec.
 
 ## What Buildmesh wants from a harness
 
@@ -45,7 +50,8 @@ interactive TUI over PTY, no harness-owned worktree flag.
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
 | `supports_model_override` | `false` | Issue #1179: `--model` exists only on `mcode exec`, never the launched TUI |
 | `effort_control` | `None` | Same reason — the TUI rejects effort flags |
-| `requires_attention_hook` | `false` | No hook provisioned — honest-empty, see below |
+| `requires_attention_hook` | `true` | `Stop` delivered from a live 0.4.12 TUI (#1797); `SkipPermissions`, `TurnCompleted` only — see below |
+| `attention_capability` | `Hook { events: [turn_completed], launch_mode: skip_permissions, min_version: "0.4.12" }` | Buildmesh launches mcode with an auto-approving policy, so no permission signal is claimed |
 | `produces_readable_transcript` | `true` | Canonical `messages.jsonl` via `TranscriptFormat::Mcode` (this change) |
 | Shell | `WindowsShell::Cmd` on Windows, `Direct` elsewhere | Correct — `.cmd` shim on Windows, native binary on macOS/Linux |
 | Launch mode | Interactive TUI | Correct — PTY backend supports full-screen rendering |
@@ -104,43 +110,115 @@ This flip surfaces mcode in the archived-node resume picker (`resumable =
 supports_resume && produces_readable_transcript`), hydrates the Coordinator
 Node Digest rich layer, and feeds circuit assistant reports.
 
-## Attention — open (the Autopilot gap)
+## Attention — validated against a live 0.4.12 TUI (issue #1797)
 
-mcode ships a Claude-compatible hook surface (Agent Plugins 1.0 preview,
-`mcode 0.2.4+` per the plugins repo):
+mcode exposes a twelve-event hook surface. For mcode 0.4.0+ the plugin format
+is the Claude-compatible one; the older `io.minimax.mcode/hooks/hooks.json`
+document is ignored.
 
-- Hook stdin JSON: `hook_event_name`, `session_id`/`sessionId`,
-  `turn_id`/`turnId`, `transcript_path`, `cwd`, `model`, `permission_mode`,
-  `effort`. Events include `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
-  `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStart/Stop`,
-  `Stop`, `PreCompact`, `PostCompact`; `sourceFormat` covers `MINIMAX`,
-  `CODEX`, and `CLAUDE` payloads.
-- Hook stdout JSON: `{decision: "block", reason, hookSpecificOutput:
-  {hookEventName, additionalContext}, continue, continuePrompt, …}`.
-- Hooks ship inside plugins (`<plugin>/hooks/hooks.json` entries plus
-  per-event scripts, e.g. `io.minimax.mcode/hooks/scripts/<event>.ps1`).
+- Hook stdin JSON (captured live from a `Stop` callback): `hook_event_name`,
+  `session_id`, `prompt_id`, `transcript_path`, `cwd`, `permission_mode`,
+  `effort`, `last_assistant_message`.
+- Events: `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`,
+  `UserPromptSubmit`, `Stop`, `PreCompact`, `Notification`, `SubagentStart`,
+  `SubagentStop`, `PermissionRequest`, `PermissionDenied`.
+- Hooks must be **inlined** on `.claude-plugin/plugin.json`, each event mapping
+  to `[{ "matcher": "*", "hooks": [{ "type": "command", "command", "args",
+  "timeout" }] }]`.
 
-Buildmesh provisions **nothing** here yet: no plugin is installed, no hook
-command is registered, and no `Stop`→`turn_completed` delivery has been
-validated against a live TUI. Per the primer rule ("native hooks are
-provisioned only where the installed harness contract is verified"), the
-adapter stays honest-empty (`requires_attention_hook = false`,
-`attention_capability = None`) instead of guessing from PTY output.
+### What Buildmesh provisions
 
-Consequence: `autopilot::compatibility::evaluate` still returns
-`MissingAttentionHook { harness_id: "mcode" }` — mcode nodes get digests and
-picker support, but Autopilot circuits stay closed until the follow-up lands:
+`McodeAdapter::provision_attention_hooks` writes
+`<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json` with
+`Stop` and `PermissionRequest` handlers. Three mcode constraints shape the
+write, and all three were found the hard way:
 
-1. Ship a Buildmesh attention plugin (Stop + PermissionRequest entries
-   POSTing to `/api/attention/<node-id>`, Claude-hook curl shape) or find
-   the user-config hook file the TUI reads without a plugin install.
-2. Implement `provision_attention_hooks` (idempotent merge, additive like
-   Kimi/Grok — never clobber user plugins).
-3. Validate end-to-end against a live `mcode` TUI (Stop fires at turn end,
-   no duplicate turns), then flip `requires_attention_hook` and advertise
-   the `Hook` capability with events + min version.
-4. A passive `mcode_watcher` over `messages.jsonl` run boundaries (Muse /
-   Command Code pattern) is the fallback if plugin hooks prove unreliable.
+1. The manifest must live at `.claude-plugin/plugin.json`. A plugin directory
+   without one is skipped **silently** by the scan — no plugin, no diagnostic —
+   which made the earlier `hooks/hooks.json`-only layout dead on arrival.
+2. `command` + `args` run with **no shell interpretation**, so the invocation
+   names a shell explicitly (`cmd.exe /c …` on Windows, `sh -c …` on POSIX) and
+   hands it a single curl line.
+3. mcode `env_clear()`s the `BUILDMESH_*` variables before running a hook (the
+   same constraint Codex has), so the callback URL **bakes** the loopback port
+   and node id. A live run confirmed `%BUILDMESH_PORT%` arriving verbatim.
+
+The merge is additive (sibling events and user handlers round-trip) and
+idempotent; a malformed user manifest fails closed rather than being
+overwritten; and an unresolvable data dir returns `Ok(())` with no side effects.
+
+### Validation evidence
+
+Against the installed `@minimax-ai/code` **0.4.12** on Windows, 2026-09-20:
+
+- `Stop` fires at turn end and POSTs the mcode envelope to
+  `/api/attention/<node-id>`, confirmed from **both** `mcode exec` and the
+  **interactive TUI driven through a ConPTY** (a genuine model turn completed):
+  `{"stop_hook_active":false,"last_assistant_message":"OK","hook_event_name":"Stop","session_id":"mvs_…","prompt_id":"turn_…","transcript_path":"…","permission_mode":"auto","effort":{"level":"medium"}}`.
+- Each run produced exactly one `Stop` POST — no duplicate turns.
+- The attention route's parser already accepts this envelope (`hook_event_name`,
+  `session_id`, `transcript_path`, `last_assistant_message`), so no route change
+  was needed.
+- `mcode`'s hook cache (`<dataDir>/v2/plugin-hook-cache/`) materialises the
+  plugin once the manifest exists, which is the cheap way to tell "loaded" from
+  "silently skipped".
+
+Multi-node behaviour was probed directly rather than assumed: a session bound
+to node 7, whose manifest was overwritten mid-session with node 99, kept posting
+to node 7 — mcode snapshots a plugin's hooks at process start. Still not
+exercised: two nodes sharing one worktree directory, a live WSL guest, and a
+Buildmesh restart onto a different port (see Known limits).
+
+### Advertised capability
+
+`requires_attention_hook = true`, with `AttentionCapability::Hook`:
+`events: [TurnCompleted]`, `launch_mode: SkipPermissions`,
+`min_version: "0.4.12"`, `trust: None`.
+
+`PermissionRequest` is provisioned but **not advertised**. Buildmesh launches
+mcode with its default permission policy, which auto-approves — every observed
+hook envelope reports `"permission_mode": "auto"`, and even a shell command ran
+without a prompt — so a permission signal is impossible by construction under
+our launch, exactly like Cursor under `--force`. If a future launch enables ask
+mode, the handler is already provisioned.
+
+`MissingAttentionHook` no longer fires for mcode, so
+`autopilot::compatibility::evaluate` allows it (with worktrees on); pinned by
+`compute_for_mesh_allows_mcode_via_attention_hook`.
+
+### Known limits
+
+- **One machine-global manifest.** The plugin path is the user's home
+  (`<dataDir>/plugins/…`), not the worktree — unlike Codex, whose hooks file is
+  project-scoped — so provisioning is last-writer-wins: each `Stop` reports to
+  the id baked by the most recent mcode spawn. That is safe for a *running*
+  session, because mcode resolves a plugin's hooks once at process start and
+  keeps them for the session's life. Verified on 0.4.12: a session launched
+  bound to node 7, whose manifest was then overwritten mid-session with node 99,
+  kept posting to `/api/attention/7` — not to 99. The residual hazard is a
+  narrow **startup** window: a node whose process scans the plugin directory
+  *after* another node's spawn overwrote it adopts the other node's URL. Closing
+  it needs either serialised mcode spawns or a node-agnostic callback the route
+  resolves from the payload; neither is implemented, because the payload's `cwd`
+  is ambiguous for two nodes sharing one worktree and mcode's self-assigned
+  session id is not known at provision time.
+- **WSL-guest mcode now fails provisioning loudly when it cannot deliver.**
+  Reaching the Windows-side Buildmesh from the guest needs mirrored networking,
+  so `provision_attention_hooks` preflights `wslinfo --networking-mode`
+  (mirroring `grok.rs`) and returns an actionable error — surfacing as
+  `SignalHealth::Unavailable` — instead of installing a hook that could only
+  fail silently. The `WindowsInterop` direction needs no preflight: its relay
+  runs `curl` back inside the guest, where the Linux-side listener's own
+  loopback is reachable. The WSL leg is still not *validated* on a live guest
+  from this host.
+- The baked port means a node that survives a Buildmesh restart onto a different
+  HTTP port keeps the old port until it is re-spawned. The port is stable for
+  the life of the process (`RESOLVED_HTTP_PORT`) and provisioning runs on every
+  spawn, so a re-spawn re-points it — the same class of limitation Codex has.
+- Permission, question, and background-work signals are **not** claimed: none
+  was observed. A passive `mcode_watcher` over `messages.jsonl` run boundaries
+  (the Muse / Command Code pattern) remains the fallback if the plugin path
+  proves unreliable.
 
 ## Session identity — manifest-scan capture (issue #1798)
 
@@ -154,3 +232,12 @@ rebinds archived nodes after restart. Matching is time-window only with
 single-candidate binding — the manifest carries no verified workspace
 anchor, so two fresh manifests bind nothing rather than risk cross-wiring
 sessions.
+
+A second path opens once the attention hook is live: the route's fill-only
+capture. mcode reports `mvs_<hex>` in the hook payload, which is not a UUID, so
+`http::request::parse_session_id_for_provider` needs an explicit `mcode` arm
+(`parse_mcode_session_id`) or the route discards the id outright. Before that
+arm existed the route silently dropped it — caught in issue #1797's review. The
+manifest poller above is what binds the column today; the hook capture is
+redundant confirmation and keeps the lifecycle telemetry's
+`provider_session_id` populated.

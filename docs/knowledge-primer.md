@@ -437,10 +437,17 @@ no permission-result hook, so its tool result or identified terminal `Stop`
 resolves the approval marker. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
-rather than guessing from PTY output. MiniMax keeps an explicit attention
-gap (no provisioned hook) while its `messages.jsonl` transcript is wired
-(`TranscriptFormat::Mcode`) — digest, picker, and circuit reports work, but
-Autopilot still gates on the missing hook. Muse has no native hook
+rather than guessing from PTY output. MiniMax's Agent-Plugin attention hook is
+live: `requires_attention_hook` is `true` after the issue #1797 validation
+delivered `Stop` from the installed 0.4.12 TUI. mcode 0.4.0+ reads
+`.claude-plugin/plugin.json` with `hooks` **inlined** (a separate
+`hooks/hooks.json` document is ignored, and a directory with no manifest is
+skipped silently), runs `command` + `args` with no shell interpretation, and
+`env_clear()`s `BUILDMESH_*` — so the callback URL bakes the port and node id.
+Only `TurnCompleted` is advertised: the launch auto-approves
+(`"permission_mode": "auto"`), so no permission signal is claimed. Its
+`messages.jsonl` transcript is wired too (`TranscriptFormat::Mcode`); see
+`docs/learning/mcode-harness-capabilities.md`. Muse has no native hook
 either: `services::muse_watcher` tails the interactive TUI's durable
 `~/.local/share/muse/sessions/…/session.jsonl` run boundaries (`runtime.session`
 records with `payload.kind == "run"` and `event.kind == "terminal"`) and

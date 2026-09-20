@@ -914,6 +914,29 @@ mod tests {
         assert_eq!(result.resolved_harness_id.as_deref(), Some("muse"));
     }
 
+    /// Issue #1797: mcode's Agent-Plugin attention hook is provisioned into
+    /// `.claude-plugin/plugin.json` and `Stop` delivery was validated against
+    /// a live 0.4.12 TUI, so the turn-driven Autopilot pipeline has a signal to
+    /// drive and the gate must clear. With worktrees on, nothing else blocks.
+    #[test]
+    fn compute_for_mesh_allows_mcode_via_attention_hook() {
+        let caps = lookup_capabilities("mcode").expect("mcode known");
+        assert!(
+            caps.requires_attention_hook,
+            "the descriptor is what opens the gate; a false here would re-close \
+             Autopilot for mcode without new evidence"
+        );
+        let result = compute_for_mesh(Some("mcode"), None, None, true);
+        assert!(
+            result.allowed,
+            "mcode's validated Stop hook + worktree on must allow Autopilot; \
+             got reasons: {:?}",
+            result.reasons
+        );
+        assert!(result.reasons.is_empty());
+        assert_eq!(result.resolved_harness_id.as_deref(), Some("mcode"));
+    }
+
     /// `compute_for_mesh` falls through to mesh default when explicit is
     /// empty. The `explicit_autopilot_provider` flag is `false` so the UI
     /// labels the verdict "default harness is incompatible".
