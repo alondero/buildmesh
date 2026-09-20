@@ -44,7 +44,7 @@
  * flip with the theme, matching how `CircuitsProbeTab` scopes child styles.
  */
 
-import { memo } from 'react';
+import { memo, type AnchorHTMLAttributes } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { SafeLink } from './SafeLink';
@@ -106,7 +106,10 @@ export const MarkdownText = memo(function MarkdownText({ source, className }: Ma
           // Route markdown links through SafeLink (openUrl + stopPropagation;
           // empty-href edge case renders the inert span). Class mimics the
           // app's cyan link affordance on the small body text.
-          a: ({ children, href }) => (
+          // Props are annotated explicitly (not left to contextual
+          // inference) so `noImplicitAny` stays satisfied here even when
+          // the `components` prop's contextual type is unavailable.
+          a: ({ children, href }: AnchorHTMLAttributes<HTMLAnchorElement>) => (
             <SafeLink
               url={href ?? ''}
               className="text-accent-cyan hover:underline break-all"
