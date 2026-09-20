@@ -61,12 +61,18 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
 /// state, so the only way here is a retry or IPC race.
 ///
 /// `allow_unobserved` (issue #1792) is the explicit override for the
-/// source-agent readiness gate below. The built-in review preset refuses
-/// to mint a run on a never-observed source (no `cli_session_id`, no
-/// readable `assistant_report`); recovery and explicit user-selected
-/// circuits stay permissive because both paths have already proven the
-/// source is observed in another context. The override is recorded on the
-/// run's `context_json` (`source.review_allow_unobserved = "1"`) for audit.
+/// source-agent readiness gate enforced by [`assert_source_observed`].
+/// The built-in review preset refuses to mint a run on a never-observed
+/// source (no `cli_session_id`, no readable `assistant_report`); recovery
+/// and explicit user-selected circuits stay permissive because both paths
+/// have already proven the source is observed in another context. The
+/// override is recorded on the run's `context_json`
+/// (`source.review_allow_unobserved = "1"`) for audit.
+///
+/// The readiness gate runs **before** the writer mutex is acquired —
+/// `assistant_report` does filesystem I/O and the writer mutex cannot be
+/// released mid-call (issue #1228). The locked helper trusts the caller
+/// and does not re-check.
 pub fn create_node_circuit_run(
     node_id: i64,
     selected_circuit_id: Option<i64>,
@@ -74,6 +80,14 @@ pub fn create_node_circuit_run(
     reviewer_provider: Option<String>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
+    if !allow_unobserved {
+        // Read-only check via the process-global reader — no writer mutex
+        // touched. `assert_source_observed` may call `assistant_report`,
+        // which reads the harness transcript dir off disk; that must not
+        // happen while a writer transaction is open.
+        let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+        assert_source_observed(&node, false, selected_circuit_id.is_some())?;
+    }
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
         &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider, allow_unobserved,
@@ -87,6 +101,14 @@ pub fn create_node_circuit_run(
 /// normalised *inside* the helper so the validation is not duplicated
 /// between the public wrapper and the test path (issue #1691 review
 /// cleanup) — a bare `terminal` is rejected before any DB work happens.
+///
+/// The helper trusts the caller: it assumes the readiness gate has
+/// already been enforced by [`assert_source_observed`] (the public
+/// wrapper runs that before `write_conn()`) or that the override /
+/// recovery / explicit-circuit carve-out applies. Tests that call the
+/// locked helper directly model the "caller has already verified"
+/// state — they do not need to stamp `cli_session_id` to satisfy a
+/// gate that is no longer in this function.
 pub(crate) fn create_node_circuit_run_locked(
     db: &mut Connection,
     node_id: i64,
@@ -102,7 +124,12 @@ pub(crate) fn create_node_circuit_run_locked(
 
 /// Recovery path: the source is already known to be observed (it has a
 /// previous run whose evidence the recovery plan reads), so the readiness
-/// check is skipped by passing `allow_unobserved = true`.
+/// check is irrelevant. The locked helper records `allow_unobserved = true`
+/// purely so the audit field is *not* emitted on this path — the
+/// `if selected_circuit_id.is_none() && recovery.is_none()` guard below
+/// already drops the audit on recovery, but the helper still uses
+/// `allow_unobserved = true` so any future "always audit" tweak lands on
+/// the right side of the carve-out.
 pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
@@ -120,6 +147,45 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
 /// (issue #1792).
 pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
     "Source agent has not started yet — wait for its first turn before starting a review.";
+
+/// Source-agent readiness gate (issue #1792). Lock-free: callers MUST run
+/// this before acquiring the writer mutex because `assistant_report` does
+/// filesystem I/O. Refuses to mint a run on a source agent that has
+/// produced no observable evidence yet — neither a non-empty
+/// `cli_session_id` nor a readable `assistant_report` revision.
+///
+/// Carve-outs (the gate is permissive):
+/// - `allow_unobserved` — the user explicitly opted in to the override
+///   on the Start Review dialog.
+/// - `has_selected_circuit` — the user is asking for a specific
+///   authored blueprint, not the built-in review preset.
+/// - `is_recovery` — the recovery path always points at a source that
+///   is already observed via its previous run.
+///
+/// Note: today's `assistant_report` reader returns `None` whenever
+/// `cli_session_id` is `None` (every harness stores the session id
+/// alongside the report, so the report branch never produces
+/// independent evidence). The check is kept for the spec's
+/// `cli_session_id OR assistant_report` contract and to defend against
+/// future harness adapters that may diverge.
+pub(crate) fn assert_source_observed(
+    node: &crate::models::AgentNode,
+    is_recovery: bool,
+    has_selected_circuit: bool,
+) -> Result<(), String> {
+    if is_recovery || has_selected_circuit {
+        return Ok(());
+    }
+    if node.cli_session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+        return Ok(());
+    }
+    // `assistant_report` is filesystem I/O. The caller must run this
+    // helper before acquiring any DB writer mutex (issue #1228).
+    if crate::coordinator::enrichment::assistant_report(node).is_some() {
+        return Ok(());
+    }
+    Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into())
+}
 
 fn create_node_circuit_run_with_recovery_locked(
     db: &mut Connection,
@@ -170,36 +236,6 @@ fn create_node_circuit_run_with_recovery_locked(
     if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
         return Err("Resume the agent before starting a review.".into());
     }
-    // Source-agent readiness gate (issue #1792). Skip the built-in review
-    // preset's check on the recovery path (source is already observed via
-    // its previous run) and on the explicit user-selected-circuit path
-    // (the user is asking for a specific blueprint, not the built-in
-    // review preset). The override flag bypasses this for users who
-    // knowingly want to review a never-observed agent.
-    let tx = if !allow_unobserved && recovery.is_none() && selected_circuit_id.is_none() {
-        let cli_present = crate::db::agent_node::cli_session_id_present_inner(&tx, node_id)
-            .map_err(|e| e.to_string())?;
-        if !cli_present {
-            // The DB presence check is cheap; `assistant_report` does
-            // filesystem I/O (reads the harness transcript dir for the
-            // captured `cli_session_id`). Release the writer mutex before
-            // the I/O call so we don't hold a lock during disk reads
-            // (issue #1228 three-phase pattern). The report reader returns
-            // `None` when there is no transcript yet, when the session id
-            // has not been captured, or when the harness does not produce
-            // a readable report — every one of those is exactly the
-            // "never observed" case we want to refuse.
-            drop(tx);
-            if crate::coordinator::enrichment::assistant_report(&node).is_none() {
-                return Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into());
-            }
-            db.transaction().map_err(|e| e.to_string())?
-        } else {
-            tx
-        }
-    } else {
-        tx
-    };
     let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
         Some(tx.query_row(
             "SELECT NULLIF(TRIM(model), ''), NULLIF(TRIM(effort), '') FROM meshes WHERE id = ?1",

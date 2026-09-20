@@ -201,11 +201,9 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    // Mark the source as observed (issue #1792): the built-in review
-    // preset refuses to mint a run on a target that has not produced
-    // any observable evidence yet. Set a `cli_session_id` so the rest
-    // of this test exercises the observed-source path.
-    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
+    // The locked helper trusts the caller to have run the readiness
+    // gate (#1792) — no `cli_session_id` stamp needed here. The
+    // gate's own tests live in the readiness-gate section below.
     let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()), false).unwrap();
     // First writer wins: a retry passing no pick, or a different one, gets the
     // existing run back untouched — neither the provider nor the round limit
@@ -253,10 +251,9 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    // Mark the source as observed (issue #1792) so the initial review
-    // run can be created. The recovery path is permissive by design and
-    // would not need this, but the first run does.
-    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
+    // The locked helper trusts the caller to have run the readiness
+    // gate (#1792) — the recovery path uses the recovery helper, which
+    // bypasses the gate by design.
     let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()), false).unwrap();
     assert!(review_recovery_inner(&conn, old, 1).unwrap_err().contains("Only failed"));
     commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
@@ -374,9 +371,8 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     let source = create_agent_node_inner(&conn, mesh.id, "Validated", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    // Mark the source as observed (issue #1792) so the readiness gate
-    // does not block the blank-pick test path below.
-    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "test-sid-1792").unwrap();
+    // The locked helper trusts the caller to have run the readiness
+    // gate (#1792) — no `cli_session_id` stamp needed here.
     // The picker filters Terminal, but the backend holds its own invariant: the
     // spawn cascade treats any non-empty string as the preset winner, so an
     // unchecked invoke would otherwise spawn the "reviewer" on a plain shell.
@@ -407,11 +403,22 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
 // `status = Running` before the worker has had time to read a session
 // identity from the harness's transcript dir or capture a readable report,
 // so without this gate the review would burn the full `ACTIVE_WAIT_MS`
-// budget waiting for evidence that never arrives. Recovery and explicit
-// user-selected circuits stay permissive — both paths have already proven
-// the source is observed in another context. The override flag bypasses
-// this for users who knowingly want to review a never-observed agent, and
-// the override is recorded on the run's `context_json` for audit.
+// budget waiting for evidence that never arrives.
+//
+// Architecture: the gate lives in `circuit::ledger::assert_source_observed`,
+// a pure helper that operates on an already-loaded `AgentNode`. The public
+// `create_node_circuit_run` wrapper runs it before acquiring the writer
+// mutex (the assistant report reader does filesystem I/O and the writer
+// mutex cannot be released mid-call, issue #1228). The locked helpers
+// (`create_node_circuit_run_locked`, `..._recovery_locked`) trust the
+// caller — they do NOT re-check the gate, so tests that drive them
+// directly model the "caller has already verified" state.
+//
+// Recovery and explicit user-selected circuits stay permissive — both
+// paths have already proven the source is observed in another context.
+// The override flag bypasses this for users who knowingly want to review
+// a never-observed agent, and the override is recorded on the run's
+// `context_json` (`source.review_allow_unobserved = "1"`) for audit.
 // ---------------------------------------------------------------------------
 
 /// A source with no `cli_session_id` and no readable `assistant_report`
@@ -420,7 +427,7 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
 /// message). Pinned by the acceptance criteria.
 #[test]
 fn node_review_refuses_unstarted_source_with_exact_message() {
-    use super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE;
+    use super::circuit::ledger::{SOURCE_NOT_YET_OBSERVED_MESSAGE, assert_source_observed};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-unstarted", "/tmp/ready-gate-unstarted").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
@@ -431,7 +438,7 @@ fn node_review_refuses_unstarted_source_with_exact_message() {
     // report reader would consult (`/tmp/ready-gate-unstarted/...`) does
     // not exist on disk, so the report also returns `None` — both gates
     // fail and the request is refused.
-    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err();
+    let err = assert_source_observed(&source, false, false).unwrap_err();
     assert_eq!(err, SOURCE_NOT_YET_OBSERVED_MESSAGE,
         "the user-visible reason must match the issue's exact wording, got {err:?}");
 }
@@ -441,17 +448,16 @@ fn node_review_refuses_unstarted_source_with_exact_message() {
 /// No `assistant_report` is needed.
 #[test]
 fn node_review_allows_source_with_cli_session_id() {
+    use super::circuit::ledger::assert_source_observed;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-cli", "/tmp/ready-gate-cli").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Started", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
     crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "captured-by-worker").unwrap();
-    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
-    let stored = get_circuit_run_inner(&conn, run).unwrap().unwrap();
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
-    assert!(ctx.get("source.review_allow_unobserved").is_none(),
-        "the override was not requested; the audit field must stay empty");
+    // Re-load the row so the in-memory `AgentNode` reflects the stamp.
+    let source = crate::db::agent_node::get_agent_node_by_id_inner(&conn, source.id).unwrap();
+    assert_source_observed(&source, false, false).expect("captured cli_session_id must satisfy the gate");
 }
 
 /// The explicit user-selected-circuit path bypasses the readiness gate.
@@ -459,66 +465,59 @@ fn node_review_allows_source_with_cli_session_id() {
 /// preset — that path has its own observation guarantees.
 #[test]
 fn node_review_skips_readiness_for_user_selected_circuit() {
+    use super::circuit::ledger::assert_source_observed;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-circuit", "/tmp/ready-gate-circuit").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fresh", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
-    // Note: no `cli_session_id` is set — the source is technically
-    // unobserved. The user-selected-circuit path stays permissive.
-    let manual = CircuitGraph::walking_skeleton("user-authored circuit");
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "user manual", "", 1, &manual.to_json().unwrap()).unwrap();
-    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(circuit.id), 3, None, false).unwrap();
-    assert_eq!(get_circuit_run_inner(&conn, run).unwrap().unwrap().circuit_id, circuit.id);
+    // No `cli_session_id` set — the source is technically unobserved.
+    // The gate must pass when `has_selected_circuit = true`.
+    assert_source_observed(&source, false, true).expect("user-selected-circuit path bypasses the gate");
+    // Sanity: the same unobserved source *does* fail when the circuit id
+    // is None (built-in review preset path).
+    assert_source_observed(&source, false, false).unwrap_err();
 }
 
 /// The recovery path bypasses the readiness gate: the source is already
-/// known to be observed via its previous run (its report lives in the
-/// failed-ledger's `context_json`). `create_node_circuit_run_recovery_locked`
-/// fixes `allow_unobserved = true` internally.
+/// known to be observed via its previous run.
 #[test]
 fn node_review_skips_readiness_for_recovery_path() {
-    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
-    use super::circuit::recovery::review_recovery_inner;
+    use super::circuit::ledger::assert_source_observed;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-recovery", "/tmp/ready-gate-recovery").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Recoverable", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
-    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "recoverable-sid").unwrap();
-    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
-    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "completed".into(),
-        outcome: Some(Some("working".into())), error: Some(Some("Latest findings".into())),
-        agent_node_id: None, attempt: 3, fresh_attempt: false,
-    }]).unwrap();
-    // Wipe the cli_session_id to prove the recovery path does not re-check.
-    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
-        rusqlite::params![source.id]).unwrap();
-    let plan = review_recovery_inner(&conn, old, 1).unwrap();
-    let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
-    assert_eq!(get_circuit_run_inner(&conn, next).unwrap().unwrap().state, "pending");
+    // No `cli_session_id` set — same unobserved setup as the refusal
+    // test. The recovery carve-out must let it through.
+    assert_source_observed(&source, true, false).expect("recovery path bypasses the gate");
 }
 
 /// The override flag lets the user mint a run on an unobserved source.
 /// The override is recorded on the run's `context_json` so audit and
-/// support can see the bypass was intentional.
+/// support can see the bypass was intentional. Note that the override
+/// flag is enforced by the **public** wrapper (not by the gate helper
+/// itself, which is concerned only with the two-sided OR check) — the
+/// public wrapper short-circuits to skip the gate when the override is
+/// set. The locked helper, however, still records the audit field on
+/// the run's context so downstream reviewers can see why this run
+/// skipped the gate.
 #[test]
 fn node_review_override_records_audit_field_on_context_json() {
-    use super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE;
+    use super::circuit::ledger::assert_source_observed;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-override", "/tmp/ready-gate-override").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Override me", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
-    // Sanity: without the override, the request is refused.
-    assert_eq!(
-        create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err(),
-        SOURCE_NOT_YET_OBSERVED_MESSAGE,
-    );
-    // With the override, the request succeeds and the audit field lands
-    // on the run's context_json (the reviewer can see why this run
-    // bypassed the gate).
+    // Sanity: the gate refuses the same source without the override.
+    let err = assert_source_observed(&source, false, false).unwrap_err();
+    assert_eq!(err, super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE);
+    // The locked helper (which the public wrapper calls when the
+    // override is set) still records the audit field on the run's
+    // context_json so downstream reviewers can see why the run
+    // skipped the gate.
     let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
     let stored = get_circuit_run_inner(&conn, run).unwrap().unwrap();
     let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
@@ -537,8 +536,10 @@ fn node_review_dedupe_survives_after_override_mints() {
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
     let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
-    // A second call without the override must NOT re-mint and must NOT
-    // trip the readiness gate — the existing live run answers first.
+    // A second call without the override must NOT re-mint the gate —
+    // the existing live run answers first. (This models the public
+    // wrapper's behaviour: the first writer won, so subsequent calls
+    // get the same id back without re-checking observation.)
     let second = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
     assert_eq!(first, second, "first-writer-wins dedupe wins over the readiness gate");
     let third = create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("codex".into()), false).unwrap();
