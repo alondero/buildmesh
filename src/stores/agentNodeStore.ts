@@ -113,6 +113,58 @@ function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
   return true;
 }
 
+// Same exhaustiveness contract as `AGENT_NODE_RECONCILE_SCHEMA` above. The
+// ownership wire type has already gained fields once, and an unreconciled
+// field would make a refresh keep a stale row's object identity (silently
+// skipping the re-render that should have shown the change). Listing every
+// key here makes `tsc` fail at the next `cargo test` regeneration instead.
+type OwnershipReconciledKey = keyof CircuitAgentOwnership;
+const CIRCUIT_OWNERSHIP_RECONCILE_SCHEMA: Record<OwnershipReconciledKey, true> = {
+  node_id: true,
+  run_id: true,
+  circuit_id: true,
+  circuit_name: true,
+  state: true,
+  parent_node_id: true,
+};
+const CIRCUIT_OWNERSHIP_RECONCILE_FIELDS = Object.keys(
+  CIRCUIT_OWNERSHIP_RECONCILE_SCHEMA,
+) as ReadonlyArray<OwnershipReconciledKey>;
+
+function shallowEqualOwnership(a: CircuitAgentOwnership, b: CircuitAgentOwnership): boolean {
+  for (const k of CIRCUIT_OWNERSHIP_RECONCILE_FIELDS) {
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
+/// Single-flight plus one trailing re-run, shared by `fetchAgentNodes` and
+/// `refreshCircuitOwnerships`. A burst of callers collapses to the in-flight
+/// read plus exactly one follow-up, and the follow-up is what lands last — so
+/// the newest request's result is the one that commits.
+function createCoalescedRefresh(task: () => Promise<void>): () => Promise<void> {
+  let inFlight: Promise<void> | null = null;
+  let queued: Promise<void> | null = null;
+  const run = (): Promise<void> => {
+    if (inFlight) {
+      if (!queued) {
+        const current = inFlight;
+        queued = current.then(() => {
+          queued = null;
+          return run();
+        });
+      }
+      return queued;
+    }
+    const tracked = task().finally(() => {
+      if (inFlight === tracked) inFlight = null;
+    });
+    inFlight = tracked;
+    return tracked;
+  };
+  return run;
+}
+
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
 /// updated nodes replace that mesh's entries; the whole id list is re-sorted
 /// by (mesh_id, position) so the in-memory order matches `list_agent_nodes`.
@@ -337,6 +389,9 @@ interface AgentNodeState {
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
   patchCircuitOwnershipState: (runId: number, state: string) => void;
+  /// Re-read just the Circuit ownership ledger, without the full
+  /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
+  refreshCircuitOwnerships: () => Promise<void>;
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   initAttentionListeners: () => Promise<void>;
@@ -370,11 +425,15 @@ export function useAllAgentNodes(): AgentNode[] {
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
-  // Serialize full refreshes. Circuit state changes patch the ownership map
-  // directly; other callers that refresh during an in-flight read share one
-  // trailing refresh instead of opening competing IPC/database snapshots.
-  let fetchInFlight: Promise<void> | null = null;
-  let queuedFetch: Promise<void> | null = null;
+  // Monotonic revision of the ownership ledger. Every newer authoritative
+  // write bumps it: a `circuit-run-updated` patch, or a full `fetchAgentNodes`
+  // snapshot. A satellite read captures it before awaiting and drops its
+  // response when it moved — the read started earlier, so its snapshot is
+  // older than the state already applied. Coalescing is not sufficient on its
+  // own: it orders the queue, but a stale in-flight response still lands after
+  // the newer event (spec `autopilot-node-indicators.md` step 7: "an older
+  // response cannot overwrite newer event state").
+  let circuitOwnershipsRevision = 0;
   // Issue #1054 — shared `OptimisticSurface` for the three sites
   // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
   // route through `withOptimistic`. Built once per `create()` call so
@@ -397,6 +456,120 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     },
     setError: (error) => set({ error }),
   };
+
+  // Serialize full refreshes: concurrent callers share one trailing refresh
+  // instead of opening competing IPC/database snapshots.
+  const fetchAgentNodes = createCoalescedRefresh(async () => {
+    set({ loading: true, error: null });
+    try {
+      // Satellite reads fail independently. A transient failure preserves
+      // the last known satellite state instead of clearing a live path.
+      const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
+        api.listAgentNodes(),
+        api.listAutopilotRuns().catch(() => null),
+        api.listCircuitAgentOwnerships().catch(() => null),
+        api.listSemanticTurns().catch(() => null),
+      ]);
+      const autopilotStates = !Array.isArray(autopilotRuns)
+        ? get().autopilotStates
+        : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
+      // Issue #1384 — shallow reconciliation. For each incoming node, check
+      // against the existing entry under the same id; if all reconciled
+      // fields match, keep the old object reference. The new `nodesById`
+      // and `nodeIds` are always fresh containers (so Zustand subscribers
+      // re-evaluate), but the per-id references they hold are the original
+      // objects for unchanged nodes — `state.nodesById[id]` is the same
+      // reference as before, and per-id selectors skip the render.
+      const oldById = get().nodesById;
+      const newById: Record<number, AgentNode> = {};
+      const newIds: number[] = [];
+      for (const n of agentNodes) {
+        const old = oldById[n.id];
+        newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
+        newIds.push(n.id);
+      }
+      // Issue #1252 — a schedule that outlives its target node would
+      // fire `send_to_agent` (or `write_to_agent` for the empty-message
+      // "hit Enter" sentinel) at an archived node, the backend would
+      // reject, and App.tsx's generic "System" toast pipeline would
+      // surface a spurious error minutes after the user moved on. The
+      // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
+      // routes through here, so every archive transition sweeps
+      // schedules for free — without this, the only cancellation path
+      // was `deleteAgentNode`, which the archive path never invokes.
+      //
+      // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
+      // is a side effect we don't want running twice under React
+      // StrictMode. We keep the same object reference when nothing was
+      // cancelled, so subscribers that read `state.schedules` don't
+      // re-render on every fetch (the steady-state autopilot case).
+      const oldSchedules = get().schedules;
+      const keptSchedules: Record<number, ScheduledTask> = {};
+      for (const idStr of Object.keys(oldSchedules)) {
+        const id = Number(idStr);
+        const node = newById[id];
+        if (node && node.status !== 'archived') {
+          keptSchedules[id] = oldSchedules[id];
+        } else {
+          clearTimeout(oldSchedules[id].timeoutId);
+        }
+      }
+      const schedulesChanged =
+        Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
+      // This snapshot is newer than any satellite read already in flight.
+      circuitOwnershipsRevision += 1;
+      set({
+        nodesById: newById,
+        nodeIds: newIds,
+        autopilotStates,
+        circuitOwnerships: !Array.isArray(circuitOwnerships)
+          ? get().circuitOwnerships
+          : Object.fromEntries(circuitOwnerships.map((ownership) => [ownership.node_id, ownership])),
+        semanticTurns: !Array.isArray(semanticTurns)
+          ? get().semanticTurns
+          : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
+        loading: false,
+        ...(schedulesChanged && { schedules: keptSchedules }),
+      });
+    } catch (e) {
+      set({ error: formatError(e), loading: false });
+    }
+  });
+
+  // Re-read just the Circuit ownership ledger. `patchCircuitOwnershipState`
+  // can only rewrite rows the map already holds (it matches by `run_id`), so a
+  // `circuit-run-updated` event — which carries only `{ run_id, state }` —
+  // cannot introduce an ownership row the UI has not seen: a node's first run,
+  // or a fresh run on a node whose prior ownership is terminal. Without this
+  // read the Pilot light and the title bar's "already under review" control
+  // stay blank until an unrelated full `fetchAgentNodes` (the next node spawn).
+  const refreshCircuitOwnerships = createCoalescedRefresh(async () => {
+    const revision = circuitOwnershipsRevision;
+    try {
+      const rows = await api.listCircuitAgentOwnerships();
+      // A newer event or full snapshot landed while this read was in flight.
+      // Its state is newer than this response, so drop the response rather
+      // than regress the visible indicator. The queued trailing read (or the
+      // snapshot that superseded us) carries the newer state.
+      if (revision !== circuitOwnershipsRevision) return;
+      const current = get().circuitOwnerships;
+      const next: Record<number, CircuitAgentOwnership> = {};
+      let changed = Object.keys(current).length !== rows.length;
+      for (const ownership of rows) {
+        const prior = current[ownership.node_id];
+        const unchanged = prior !== undefined && shallowEqualOwnership(prior, ownership);
+        next[ownership.node_id] = unchanged ? prior : ownership;
+        if (!unchanged) changed = true;
+      }
+      // Nothing moved (the common case for a burst's trailing read) — keep the
+      // same map reference so no subscriber re-renders.
+      if (changed) set({ circuitOwnerships: next });
+    } catch {
+      // A transient read failure preserves the last known ownership instead of
+      // clearing a live indicator; the next event or fetch retries.
+    }
+  });
+
   return {
   nodesById: {},
   nodeIds: [],
@@ -425,97 +598,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     return node?.mesh_id ?? null;
   },
 
-  fetchAgentNodes: () => {
-    if (fetchInFlight) {
-      if (!queuedFetch) {
-        const inFlight = fetchInFlight;
-        queuedFetch = inFlight.then(() => {
-          queuedFetch = null;
-          return get().fetchAgentNodes();
-        });
-      }
-      return queuedFetch;
-    }
-    const refresh = (async () => {
-      set({ loading: true, error: null });
-      try {
-        // Satellite reads fail independently. A transient failure preserves
-        // the last known satellite state instead of clearing a live path.
-        const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
-          api.listAgentNodes(),
-          api.listAutopilotRuns().catch(() => null),
-          api.listCircuitAgentOwnerships().catch(() => null),
-          api.listSemanticTurns().catch(() => null),
-        ]);
-        const autopilotStates = !Array.isArray(autopilotRuns)
-          ? get().autopilotStates
-          : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
-        // Issue #1384 — shallow reconciliation. For each incoming node, check
-        // against the existing entry under the same id; if all reconciled
-        // fields match, keep the old object reference. The new `nodesById`
-        // and `nodeIds` are always fresh containers (so Zustand subscribers
-        // re-evaluate), but the per-id references they hold are the original
-        // objects for unchanged nodes — `state.nodesById[id]` is the same
-        // reference as before, and per-id selectors skip the render.
-        const oldById = get().nodesById;
-        const newById: Record<number, AgentNode> = {};
-        const newIds: number[] = [];
-        for (const n of agentNodes) {
-          const old = oldById[n.id];
-          newById[n.id] = old && shallowEqualAgentNode(old, n) ? old : n;
-          newIds.push(n.id);
-        }
-        // Issue #1252 — a schedule that outlives its target node would
-        // fire `send_to_agent` (or `write_to_agent` for the empty-message
-        // "hit Enter" sentinel) at an archived node, the backend would
-        // reject, and App.tsx's generic "System" toast pipeline would
-        // surface a spurious error minutes after the user moved on. The
-        // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
-        // routes through here, so every archive transition sweeps
-        // schedules for free — without this, the only cancellation path
-        // was `deleteAgentNode`, which the archive path never invokes.
-        //
-        // Compute cancellations OUTSIDE the `set` updater — `clearTimeout`
-        // is a side effect we don't want running twice under React
-        // StrictMode. We keep the same object reference when nothing was
-        // cancelled, so subscribers that read `state.schedules` don't
-        // re-render on every fetch (the steady-state autopilot case).
-        const oldSchedules = get().schedules;
-        const keptSchedules: Record<number, ScheduledTask> = {};
-        for (const idStr of Object.keys(oldSchedules)) {
-          const id = Number(idStr);
-          const node = newById[id];
-          if (node && node.status !== 'archived') {
-            keptSchedules[id] = oldSchedules[id];
-          } else {
-            clearTimeout(oldSchedules[id].timeoutId);
-          }
-        }
-        const schedulesChanged =
-          Object.keys(keptSchedules).length !== Object.keys(oldSchedules).length;
-        set({
-          nodesById: newById,
-          nodeIds: newIds,
-          autopilotStates,
-          circuitOwnerships: !Array.isArray(circuitOwnerships)
-            ? get().circuitOwnerships
-            : Object.fromEntries(circuitOwnerships.map((ownership) => [ownership.node_id, ownership])),
-          semanticTurns: !Array.isArray(semanticTurns)
-            ? get().semanticTurns
-            : Object.fromEntries(semanticTurns.map((turn) => [turn.node_id, turn])),
-          loading: false,
-          ...(schedulesChanged && { schedules: keptSchedules }),
-        });
-      } catch (e) {
-        set({ error: formatError(e), loading: false });
-      }
-    })();
-    const trackedRefresh = refresh.finally(() => {
-      if (fetchInFlight === trackedRefresh) fetchInFlight = null;
-    });
-    fetchInFlight = trackedRefresh;
-    return trackedRefresh;
-  },
+  fetchAgentNodes,
 
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // One-liners that the listeners dispatch through; also exposed on the
@@ -535,6 +618,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
   },
   patchCircuitOwnershipState: (runId, state) => {
+    // Any recognised run-state event is newer than an in-flight satellite
+    // read, so bump before applying: a read that resolves after this event
+    // must not commit its older snapshot over it. Bump even when no row
+    // matches — the event still describes newer state for that run.
+    circuitOwnershipsRevision += 1;
     set((current) => {
       let changed = false;
       const circuitOwnerships = Object.fromEntries(
@@ -547,6 +635,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       return changed ? { circuitOwnerships } : current;
     });
   },
+  refreshCircuitOwnerships,
   findAgentNode: (id) => get().nodesById[id],
 
   ...(() => {
@@ -571,6 +660,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,
           patchCircuitOwnershipState: get().patchCircuitOwnershipState,
+          refreshCircuitOwnerships: get().refreshCircuitOwnerships,
           setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
           removeAgentNode: get().removeAgentNode,
