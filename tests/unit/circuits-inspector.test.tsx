@@ -5,10 +5,10 @@
  * Verifies the four capability-gated override controls render only
  * when the selected provider's `HarnessCapabilities` descriptor
  * advertises them, plus the schema round-trip through `onChange`.
- * The capability source itself is hardcoded in
- * `src/components/Circuits/harnessCapabilities.ts`; see
- * `tests/unit/circuits-inspector-capabilities.test.ts` for the drift
- * gate against the Rust inventory.
+ * The capability source is the generated catalog
+ * (`src/types/generated/HarnessCapabilitiesTable.ts`); see
+ * `tests/unit/circuits-inspector-capabilities.test.ts` for lookup
+ * helpers and the no-hand-typed-table invariant.
  */
 
 // vi.hoisted requires `vi.mock` patterns; we need to import the panel

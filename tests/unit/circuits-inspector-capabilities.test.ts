@@ -1,310 +1,129 @@
 /**
- * Drift gate for `src/components/Circuits/harnessCapabilities.ts`
- * (issue #1358 / slice 3 of #1355).
+ * Inspector helpers over the generated harness catalog (ADR-0037).
  *
- * The Rust `inventory_matches_research_matrix` test in
- * `src-tauri/src/agent/capabilities.rs` pins the per-adapter boolean
- * flags and `EffortControlKind` vocabulary. This vitest mirrors the
- * same per-adapter inventory on the TS side so the Inspector's
- * capability-gated controls stay in sync with the Rust resolver's
- * capability mask. CI's `scripts/check.ps1 all` runs both suites in
- * the same pipeline so a unilateral change in either source trips
- * the other.
- *
- * Touching either side requires touching the other. The failure
- * message when these two diverge names both files.
+ * Capability *values* are owned by Rust adapters and emitted into
+ * `src/types/generated/HarnessCapabilitiesTable.ts`. This file must not
+ * re-state those values as hand-typed literals — that was the placebo
+ * drift gate this slice retires. Tests here cover lookup/effort logic
+ * and the "no hand-copied capability table in src/" invariant.
  */
 
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   effortAllowedFor,
+  getCapabilitiesFor,
   HARNESS_CAPABILITIES,
+  HARNESS_IDS,
   HARNESS_LABEL,
-  type InspectorHarnessId,
+  HARNESS_PROFILE_ALIASES,
 } from '../../src/components/Circuits/harnessCapabilities';
+import type { HarnessCapabilities } from '../../src/types/generated/HarnessCapabilities';
+import {
+  HARNESS_CATALOG,
+  type InspectorHarnessId,
+} from '../../src/types/generated/HarnessCapabilitiesTable';
 
-const REQUIRED_HARNESSES: InspectorHarnessId[] = [
-  'anthropic',
-  'codex',
-  'agy',
-  'opencode',
-  'grok',
-  'cursor',
-  'kimi',
-  'mcode',
-  'dsh',
-  'commandcode',
-  'freebuff',
-  'muse',
-  'cline',
-  'terminal',
-];
+const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '../../src');
 
-describe('harnessCapabilities.ts ↔ Rust inventory drift gate (issue #1358)', () => {
-  it('exports every harness id the Inspector offers', () => {
-    for (const id of REQUIRED_HARNESSES) {
-      expect(HARNESS_CAPABILITIES[id], `missing capability entry for ${id}`).toBeDefined();
-    }
+function walkTsFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    const st = statSync(path);
+    if (st.isDirectory()) return walkTsFiles(path);
+    return name.endsWith('.ts') || name.endsWith('.tsx') ? [path] : [];
   });
+}
 
-  it('every entry has a human label for the dropdown', () => {
-    for (const id of REQUIRED_HARNESSES) {
+function fixtureCaps(overrides: Partial<HarnessCapabilities> & Pick<HarnessCapabilities, 'effort_control'>): HarnessCapabilities {
+  return {
+    harness_id: 'fixture',
+    supports_resume: false,
+    auto_resume_on_startup: false,
+    requires_attention_hook: false,
+    attention_capability: { kind: 'none' },
+    supports_passive_turn_watcher: false,
+    produces_readable_transcript: false,
+    supports_model_override: false,
+    supports_effort_override: overrides.effort_control.kind !== 'none',
+    supports_extra_args: false,
+    supports_prefill: false,
+    is_plain_terminal: false,
+    available_on: [],
+    ...overrides,
+  };
+}
+
+describe('generated harness catalog (ADR-0037)', () => {
+  it('exports every catalog id with a label and a capability row', () => {
+    expect(HARNESS_IDS.length).toBeGreaterThan(0);
+    expect(HARNESS_IDS).toEqual(HARNESS_CATALOG.ids);
+    for (const id of HARNESS_IDS) {
       expect(HARNESS_LABEL[id], `missing label for ${id}`).toMatch(/^[A-Z]/);
+      expect(HARNESS_CAPABILITIES[id], `missing capability entry for ${id}`).toBeDefined();
+      expect(HARNESS_CAPABILITIES[id].harness_id).toBe(id);
     }
   });
 
-  // Per-adapter capability flags — mirrors the Rust inventory table.
-  it('Anthropic (Claude Code) matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.anthropic;
-    expect(c.harness_id).toBe('anthropic');
-    // Issue #1481 — pin supports_passive_turn_watcher across every harness
-    // (TS vitest is opt-in per field; commandcode.rs and muse.rs override the
-    // trait default of `false`, see provider/mod.rs:348).
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.is_plain_terminal).toBe(false);
-    expect(c.effort_control.kind).toBe('closed');
-    expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
+  it('maps the claude profile id to the anthropic adapter', () => {
+    expect(HARNESS_PROFILE_ALIASES.claude).toBe('anthropic');
+    expect(getCapabilitiesFor('claude')).toBe(HARNESS_CAPABILITIES.anthropic);
   });
-
-  it('Codex matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.codex;
-    expect(c.harness_id).toBe('codex');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.effort_control.kind).toBe('inline_config');
-    if (c.effort_control.kind === 'inline_config') {
-      expect(c.effort_control.key).toBe('model_reasoning_effort');
-    }
-    expect(effortAllowedFor(c)).toEqual(
-      expect.arrayContaining(['none', 'low', 'medium', 'high', 'xhigh']),
-    );
-  });
-
-  it('AGY (Antigravity) matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.agy;
-    expect(c.harness_id).toBe('agy');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.effort_control.kind).toBe('closed');
-    expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
-  });
-
-  it('OpenCode matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.opencode;
-    expect(c.harness_id).toBe('opencode');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.effort_control.kind).toBe('none');
-    expect(effortAllowedFor(c)).toEqual([]);
-  });
-
-  it('Grok matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.grok;
-    expect(c.harness_id).toBe('grok');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.effort_control.kind).toBe('closed');
-    expect(effortAllowedFor(c)).toEqual(
-      expect.arrayContaining(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
-    );
-      // Issue #1366: pin Grok's min_version via vitest so a
-    // flip-back to null trips the gate here, not just the
-    // Rust inventory. (round-3 N1 follow-up.)
-    expect(c.attention_capability).toEqual({
-      kind: 'hook',
-      events: expect.arrayContaining([
-        'turn_completed',
-        'input_required',
-        'permission_requested',
-        'question_requested',
-      ]),
-      launch_mode: 'permission_ask',
-      trust: 'global hook dir',
-      min_version: '1.0.5',
-    });
 });
 
-  // Cursor — model yes, effort no, prefill yes (issue #1143).
-  // Issue #1368 round-2: Cursor now ships an attention hook under
-  // `--force`, mirroring AGY's skip-permissions shape. The vitest pin
-  // catches a flip-back to `requires_attention_hook: false` (round-2
-  // review N1 pattern from Grok issue #1366) AND the `trust` field
-  // must be `null` — Cursor under `--force` does not require an
-  // explicit workspace-trust entry (review point 2).
-  it('Cursor matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.cursor;
-    expect(c.harness_id).toBe('cursor');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.requires_attention_hook).toBe(true);
-    expect(c.attention_capability).toEqual({
-      kind: 'hook',
-      events: expect.arrayContaining([
-        'turn_completed',
-        'background_running',
-      ]),
-      launch_mode: 'skip_permissions',
-      trust: null,
-      min_version: '1.0.0',
-    });
-    expect(c.effort_control.kind).toBe('none');
-    expect(effortAllowedFor(c)).toEqual([]);
+describe('getCapabilitiesFor', () => {
+  it('returns null for empty, missing, and unknown ids', () => {
+    expect(getCapabilitiesFor(null)).toBeNull();
+    expect(getCapabilitiesFor(undefined)).toBeNull();
+    expect(getCapabilitiesFor('')).toBeNull();
+    expect(getCapabilitiesFor('not-a-harness')).toBeNull();
   });
 
-  // Kimi — model yes, no effort, no prefill (issue #918 / #911).
-  it('Kimi matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.kimi;
-    expect(c.harness_id).toBe('kimi');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(false);
-    expect(c.effort_control.kind).toBe('none');
+  it('returns the generated row for a catalog id', () => {
+    const id = HARNESS_IDS[0] as InspectorHarnessId;
+    expect(getCapabilitiesFor(id)).toBe(HARNESS_CAPABILITIES[id]);
+  });
+});
+
+describe('effortAllowedFor', () => {
+  it('returns [] when effort control is none', () => {
+    expect(effortAllowedFor(fixtureCaps({ effort_control: { kind: 'none' } }))).toEqual([]);
   });
 
-  // mcode — interaction TUI; model OFF (issue #1179), effort OFF, prefill yes;
-  // readable messages.jsonl transcript wired (TranscriptFormat::Mcode).
-  it('mcode matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.mcode;
-    expect(c.harness_id).toBe('mcode');
-    expect(c.produces_readable_transcript).toBe(true);
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(false);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.effort_control.kind).toBe('none');
+  it('returns the closed vocabulary', () => {
+    expect(
+      effortAllowedFor(fixtureCaps({ effort_control: { kind: 'closed', allowed: ['low', 'high'] } })),
+    ).toEqual(['low', 'high']);
   });
 
-  // dsh — model yes, no effort, no prefill.
-  it('dsh matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.dsh;
-    expect(c.harness_id).toBe('dsh');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(false);
-    expect(c.effort_control.kind).toBe('none');
+  it('returns the inline-config vocabulary', () => {
+    expect(
+      effortAllowedFor(
+        fixtureCaps({
+          effort_control: { kind: 'inline_config', key: 'model_reasoning_effort', allowed: ['none', 'xhigh'] },
+        }),
+      ),
+    ).toEqual(['none', 'xhigh']);
   });
+});
 
-  it('Command Code matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.commandcode;
-    expect(c.harness_id).toBe('commandcode');
-    expect(c.supports_passive_turn_watcher).toBe(true);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.produces_readable_transcript).toBe(true);
-    expect(c.effort_control.kind).toBe('closed');
-    expect(effortAllowedFor(c)).toEqual(['low', 'medium', 'high']);
-  });
-
-  it('Freebuff matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.freebuff;
-    expect(c.harness_id).toBe('freebuff');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.supports_model_override).toBe(false);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.effort_control.kind).toBe('none');
-  });
-
-  // Muse — Linux + macOS only. Issue #1708 wired the durable per-session
-  // JSONL reader (`services::transcript_reader::adapters::muse`), so the
-  // Coordinator Node Digest hydrates and the archived-node resume picker
-  // surfaces muse rows (`produces_readable_transcript: true`). Issue #1709
-  // wired the passive session-log watcher (`supports_passive_turn_watcher:
-  // true`) since Muse exposes no native attention hook. Both invariants
-  // land here so a flip-back on either flag trips this test.
-  it('Muse matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.muse;
-    expect(c.harness_id).toBe('muse');
-    expect(c.supports_resume).toBe(true);
-    expect(c.auto_resume_on_startup).toBe(true);
-    // Issue #1709 — passive turn watcher is wired.
-    expect(c.supports_passive_turn_watcher).toBe(true);
-    expect(c.requires_attention_hook).toBe(false);
-    expect(c.attention_capability).toEqual({ kind: 'none' });
-    // Issue #1708 — transcript reader is wired.
-    expect(c.produces_readable_transcript).toBe(true);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.is_plain_terminal).toBe(false);
-    expect(c.effort_control.kind).toBe('none');
-    // Order mirrors `MuseAdapter::available_on()` in Rust:
-    // `[Platform::Linux, Platform::Macos]`.
-    expect(c.available_on).toEqual(['linux', 'macos']);
-  });
-
-  // Cline (issue #1773) — Native Provider: resume + model + effort + prefill.
-  // Attention (#1775) and the transcript reader (#1776) are not shipped in
-  // this slice, so those flags stay honest-empty. Effort is the closed
-  // `--thinking` vocabulary verified against Cline 3.0.62.
-  it('Cline matches the Rust inventory', () => {
-    const c = HARNESS_CAPABILITIES.cline;
-    expect(c.harness_id).toBe('cline');
-    expect(c.supports_resume).toBe(true);
-    expect(c.auto_resume_on_startup).toBe(true);
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.requires_attention_hook).toBe(false);
-    expect(c.attention_capability).toEqual({ kind: 'none' });
-    expect(c.produces_readable_transcript).toBe(false);
-    expect(c.supports_model_override).toBe(true);
-    expect(c.supports_effort_override).toBe(true);
-    expect(c.supports_extra_args).toBe(true);
-    expect(c.supports_prefill).toBe(true);
-    expect(c.is_plain_terminal).toBe(false);
-    expect(c.effort_control.kind).toBe('closed');
-    expect(effortAllowedFor(c)).toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
-    // Order mirrors `ClineAdapter::available_on()` in Rust.
-    expect(c.available_on).toEqual(['windows', 'linux', 'macos']);
-  });
-
-  // Terminal — plain shell; every override OFF. The issue #1362 review
-  // caveat: splicing synthetic flags into a user's interactive shell
-  // session is a footgun, hence `supports_extra_args: false`.
-  it('Terminal matches the Rust inventory (plain shell, no overrides)', () => {
-    const c = HARNESS_CAPABILITIES.terminal;
-    expect(c.harness_id).toBe('terminal');
-    expect(c.supports_passive_turn_watcher).toBe(false);
-    expect(c.is_plain_terminal).toBe(true);
-    expect(c.supports_model_override).toBe(false);
-    expect(c.supports_effort_override).toBe(false);
-    expect(c.supports_extra_args).toBe(false);
-    expect(c.supports_prefill).toBe(false);
-    expect(c.effort_control.kind).toBe('none');
-  });
-
-  // Drift gate invariant: the set of inspector-visible harness ids
-  // matches BUILTIN_HARNESS_IDS exactly (modulo legacy aliases). Any
-  // future harness added to Rust must be added here in the same PR.
-  // The vitest is the FAIL-CLOSED enforcement; the test file lists the
-  // same set explicitly above and here.
-  it('Inspector exposes every BUILTIN_HARNESS_IDS adapter', () => {
-    const exposed = new Set(Object.keys(HARNESS_CAPABILITIES));
-    expect(exposed.size).toBe(REQUIRED_HARNESSES.length);
-    for (const id of REQUIRED_HARNESSES) {
-      expect(exposed.has(id), `${id} is a Rust BUILTIN_HARNESS_IDS adapter and must have a TS entry`).toBe(true);
+describe('no hand-typed capability table in src/', () => {
+  it('does not assign supports_model_override literals outside generated artifacts', () => {
+    const generated = `${relative(srcRoot, join(srcRoot, 'types/generated')).replaceAll('\\', '/')}/`;
+    const violations: string[] = [];
+    const assign = /supports_model_override\s*:/;
+    for (const file of walkTsFiles(srcRoot)) {
+      const rel = relative(srcRoot, file).replaceAll('\\', '/');
+      if (rel.startsWith(generated) || rel.startsWith('types/generated/')) continue;
+      const text = readFileSync(file, 'utf8');
+      text.split('\n').forEach((line, i) => {
+        if (assign.test(line)) {
+          violations.push(`${rel}:${i + 1}: ${line.trim()}`);
+        }
+      });
     }
+    expect(violations, `hand-typed capability literals remain:\n${violations.join('\n')}`).toEqual([]);
   });
 });

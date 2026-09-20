@@ -2,6 +2,7 @@
 //!
 //! Organized into focused modules:
 //! - `detection.rs` — startup scan of `PATH`/config dirs for installed harnesses
+//! - `harness_catalog.rs` — total built-in capability + label table (ADR-0037)
 //! - `process.rs` — process-lifecycle home: `AgentProcess`/`AgentProcessRegistry`
 //!   storage plus the Tauri commands (`kill_agent`, `write_to_agent`,
 //!   `resize_agent`, `send_to_agent`, `is_agent_running`, `debug_*`) that
@@ -20,6 +21,7 @@
 
 pub mod capabilities;
 pub mod detection;
+pub mod harness_catalog;
 pub(crate) mod hook_state;
 pub mod launch;
 pub mod launch_routing;

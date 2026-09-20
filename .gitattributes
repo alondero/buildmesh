@@ -1,4 +1,7 @@
 # Generated ts-rs bindings are written with LF (issue #359). Pin them to LF so
 # the CI drift gate (`git diff --exit-code src/types/generated`) never trips on
 # a CRLF/LF mismatch on Windows runners where core.autocrlf may be enabled.
+# The harness catalog JSON snapshot (ADR-0037) is emitted by the same cargo
+# test pass and must stay LF for the same reason.
 src/types/generated/*.ts text eol=lf
+src/types/generated/*.json text eol=lf
