@@ -163,8 +163,11 @@ Against the installed `@minimax-ai/code` **0.4.12** on Windows, 2026-09-20:
   plugin once the manifest exists, which is the cheap way to tell "loaded" from
   "silently skipped".
 
-Not exercised here: two nodes sharing one worktree directory, and a Buildmesh
-restart onto a different port (see Known limits).
+Multi-node behaviour was probed directly rather than assumed: a session bound
+to node 7, whose manifest was overwritten mid-session with node 99, kept posting
+to node 7 — mcode snapshots a plugin's hooks at process start. Still not
+exercised: two nodes sharing one worktree directory, a live WSL guest, and a
+Buildmesh restart onto a different port (see Known limits).
 
 ### Advertised capability
 
@@ -185,20 +188,37 @@ mode, the handler is already provisioned.
 
 ### Known limits
 
-- The baked URL means a node that survives a Buildmesh restart onto a different
-  HTTP port keeps the old port until it is re-spawned — the same limitation
-  Codex has. Provisioning runs on every spawn, so a re-spawn re-points it.
+- **One machine-global manifest.** The plugin path is the user's home
+  (`<dataDir>/plugins/…`), not the worktree — unlike Codex, whose hooks file is
+  project-scoped — so provisioning is last-writer-wins: each `Stop` reports to
+  the id baked by the most recent mcode spawn. That is safe for a *running*
+  session, because mcode resolves a plugin's hooks once at process start and
+  keeps them for the session's life. Verified on 0.4.12: a session launched
+  bound to node 7, whose manifest was then overwritten mid-session with node 99,
+  kept posting to `/api/attention/7` — not to 99. The residual hazard is a
+  narrow **startup** window: a node whose process scans the plugin directory
+  *after* another node's spawn overwrote it adopts the other node's URL. Closing
+  it needs either serialised mcode spawns or a node-agnostic callback the route
+  resolves from the payload; neither is implemented, because the payload's `cwd`
+  is ambiguous for two nodes sharing one worktree and mcode's self-assigned
+  session id is not known at provision time.
+- **WSL-guest mcode now fails provisioning loudly when it cannot deliver.**
+  Reaching the Windows-side Buildmesh from the guest needs mirrored networking,
+  so `provision_attention_hooks` preflights `wslinfo --networking-mode`
+  (mirroring `grok.rs`) and returns an actionable error — surfacing as
+  `SignalHealth::Unavailable` — instead of installing a hook that could only
+  fail silently. The `WindowsInterop` direction needs no preflight: its relay
+  runs `curl` back inside the guest, where the Linux-side listener's own
+  loopback is reachable. The WSL leg is still not *validated* on a live guest
+  from this host.
+- The baked port means a node that survives a Buildmesh restart onto a different
+  HTTP port keeps the old port until it is re-spawned. The port is stable for
+  the life of the process (`RESOLVED_HTTP_PORT`) and provisioning runs on every
+  spawn, so a re-spawn re-points it — the same class of limitation Codex has.
 - Permission, question, and background-work signals are **not** claimed: none
   was observed. A passive `mcode_watcher` over `messages.jsonl` run boundaries
   (the Muse / Command Code pattern) remains the fallback if the plugin path
   proves unreliable.
-- WSL-guest mcode (`EnvType::Wsl` / `WindowsInterop`) is **not** validated here.
-  A guest reaches the Windows-side Buildmesh only under mirrored networking —
-  the same constraint Grok's HTTP hooks carry — and, unlike Grok, the mcode
-  provisioner does not preflight the networking mode. A WSL node without
-  mirrored networking therefore writes the plugin but never delivers, and the
-  failure is silent (the curl error is swallowed). A network-mode preflight,
-  mirroring `grok.rs`, is the follow-up if WSL parity is wanted.
 
 ## Session identity — manifest-scan capture (issue #1798)
 

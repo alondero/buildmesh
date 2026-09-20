@@ -146,10 +146,15 @@ fn shell_for(platform: Platform) -> WindowsShell {
 /// hook's stdin with `--data-binary @-`; a curl failure must never surface as
 /// a non-zero hook exit, so both branches swallow it.
 ///
-/// The `WindowsInterop` case (a WSL-guest mcode whose callbacks must reach a
-/// Windows-side Buildmesh) reuses `windows_attention_command` with the baked
-/// URL and splits its `powershell.exe … -EncodedCommand <b64>` line into the
-/// `command` + `args` shape.
+/// The `WindowsInterop` case is the mirror image: Buildmesh runs *inside* the
+/// WSL/Linux host and mcode is the **Windows** executable reached through
+/// interop (`EnvType::WindowsInterop` = "Windows executable reached through
+/// interoperability from a Linux WSL host"). The callback is therefore
+/// relayed back into the guest by `windows_attention_command`, whose
+/// `powershell.exe … -EncodedCommand <b64>` line runs
+/// `wsl.exe -d <distro> --exec curl …`; that curl lands on the Linux-side
+/// listener's own loopback, so this direction needs no mirrored networking.
+/// Its single-line command is split into the `command` + `args` shape.
 fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
     if env_type == EnvType::WindowsInterop {
         if let Some(command) = windows_attention_command(Some(url)) {
@@ -240,6 +245,51 @@ fn resolve_plugin_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Optio
         ".minimax",
         &resolved.spawn_path,
     )
+}
+
+/// Issue #1797 review (finding 2): a WSL-guest mcode runs its hook `curl`
+/// inside the guest, so reaching the Windows-side Buildmesh depends entirely
+/// on WSL mirrored networking. Without it the callback is swallowed (`|| true`)
+/// and the node looks permanently dead to Autopilot while the descriptor
+/// claims a working hook. Refuse provisioning with an actionable message
+/// instead — the spawn still proceeds, it just surfaces as
+/// `SignalHealth::Unavailable` rather than a silent black hole, exactly as
+/// `grok.rs:393-399` does for its HTTP hooks.
+///
+/// Only the guest direction needs the check. `WindowsInterop` (Buildmesh in
+/// the WSL host, mcode the Windows binary) relays through
+/// `windows_attention_command`, whose `curl` runs back inside the guest and so
+/// reaches the Linux-side listener over plain loopback.
+fn ensure_wsl_callbacks_reachable(env_type: EnvType) -> Result<(), String> {
+    if !(cfg!(windows) && env_type == EnvType::Wsl) {
+        return Ok(());
+    }
+    let mut command = crate::process_util::command_no_window("wsl.exe");
+    command.args(["--", "wslinfo", "--networking-mode"]);
+    let mode = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL networking mode",
+        std::time::Duration::from_secs(5),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+    if wsl_networking_is_mirrored(mode.as_deref()) {
+        return Ok(());
+    }
+    Err(format!(
+        "MiniMax Code's attention hook needs WSL mirrored networking so guest callbacks reach \
+         the Buildmesh port; the interactive harness can still run. Enable it with \
+         `wsl --manage <distro> --set-networking-mode mirrored` (observed networking mode: {}).",
+        mode.as_deref().unwrap_or("unavailable")
+    ))
+}
+
+/// Pure predicate over `wslinfo --networking-mode` output, split out so the
+/// accept/reject decision is unit-testable on a host without WSL.
+fn wsl_networking_is_mirrored(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| mode.trim().eq_ignore_ascii_case("mirrored"))
 }
 
 /// Atomically persist `content` to `path` via a PID+counter `.tmp`
@@ -542,12 +592,31 @@ impl AgentProvider for McodeAdapter {
     /// is not available at run time (the same constraint Codex has). The URL is
     /// re-baked on every spawn, which also re-points a node at the current
     /// Buildmesh HTTP port.
+    ///
+    /// **One machine-global manifest, one node per file.** The path is shared
+    /// by every mcode node on the machine — `<dataDir>` is the user's home, not
+    /// the worktree (unlike Codex, whose hooks file is project-scoped) — so a
+    /// later spawn rewrites the baked `node_id` and the file is
+    /// last-writer-wins. That is safe for a *running* session, because mcode
+    /// resolves a plugin's hooks once at process start and keeps them for the
+    /// life of the session: verified against 0.4.12 by rewriting the manifest
+    /// mid-session and observing the session keep posting to its original URL
+    /// (pinned by `provision_is_last_writer_wins_across_nodes_sharing_one_data_dir`).
+    /// The residual hazard is a narrow **startup** window — a node whose
+    /// process scans the plugin directory after another node's spawn overwrote
+    /// it adopts the other node's URL. Serialising those two spawns, or a
+    /// node-agnostic callback the route resolves from the payload, would close
+    /// it; neither is implemented here.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         runtime: &LaunchRuntime,
         node_id: i64,
     ) -> Result<(), String> {
+        // Refuse a WSL-guest spawn whose callbacks cannot reach the Buildmesh
+        // port, rather than installing a hook that can only fail silently
+        // (issue #1797 review, finding 2).
+        ensure_wsl_callbacks_reachable(resolved.env_type)?;
         let plugin_root = resolve_plugin_dir(resolved, runtime);
         provision_at(plugin_root.as_deref(), resolved.env_type, node_id)
     }
@@ -1159,6 +1228,90 @@ mod tests {
             joined.contains("/api/attention/7"),
             "replacement must carry the fresh node id: {joined}"
         );
+    }
+
+    /// Issue #1797 review (finding 1): the plugin path is machine-global
+    /// (`<dataDir>/plugins/…` — the user's home, not per-worktree like Codex),
+    /// so provisioning is last-writer-wins: a second node's spawn overwrites
+    /// the first node's baked URL on disk. Pin that on-disk semantics, and pin
+    /// that a re-spawn restores a node's own URL, so the shared-path behaviour
+    /// is a tested property rather than a surprise. *Running* sessions are
+    /// unaffected because mcode resolves a plugin's hooks once at process start
+    /// — see the trait method's docs and the mid-session rewrite experiment
+    /// recorded in `docs/learning/mcode-harness-capabilities.md`.
+    #[test]
+    fn provision_is_last_writer_wins_across_nodes_sharing_one_data_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let manifest = plugin_manifest_path(home.path());
+
+        let provision = |node_id: i64| -> String {
+            let path = home.path().to_string_lossy().to_string();
+            MCODE
+                .provision_attention_hooks(
+                    &ResolvedPath {
+                        host_path: path.clone(),
+                        spawn_path: path.clone(),
+                        raw_path: path,
+                        env_type: EnvType::Windows,
+                    },
+                    &LaunchRuntime {
+                        harness_home: Some(home.path().to_string_lossy().to_string()),
+                        wsl_distro: None,
+                    },
+                    node_id,
+                )
+                .expect("provision_attention_hooks should succeed");
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+            joined_args(&first_executable(&value, "Stop"))
+        };
+
+        let first = provision(101);
+        assert!(
+            first.contains("/api/attention/101"),
+            "node 101's URL must be baked: {first}"
+        );
+
+        let second = provision(202);
+        assert!(
+            second.contains("/api/attention/202"),
+            "a second node sharing the data dir overwrites the manifest: {second}"
+        );
+        assert!(
+            !second.contains("/api/attention/101"),
+            "no stale node id may survive the overwrite: {second}"
+        );
+
+        let restored = provision(101);
+        assert!(
+            restored.contains("/api/attention/101"),
+            "re-spawning a node restores its own URL: {restored}"
+        );
+
+        // The merge never accumulates handlers across nodes.
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        for event in MCODE_PROVISIONED_EVENTS {
+            assert_eq!(
+                value["hooks"][*event].as_array().unwrap().len(),
+                1,
+                "{event} must hold exactly one Buildmesh handler no matter how many \
+                 nodes have provisioned into this data dir"
+            );
+        }
+    }
+
+    /// Issue #1797 review (finding 2): the WSL preflight is what turns a silent
+    /// callback black hole into an actionable provisioning failure. The accept
+    /// predicate is split out so it is testable without a WSL host.
+    #[test]
+    fn wsl_networking_preflight_only_accepts_mirrored() {
+        assert!(wsl_networking_is_mirrored(Some("mirrored")));
+        assert!(wsl_networking_is_mirrored(Some("  mirrored\n")));
+        assert!(wsl_networking_is_mirrored(Some("Mirrored")));
+        assert!(!wsl_networking_is_mirrored(Some("nat")));
+        assert!(!wsl_networking_is_mirrored(Some("")));
+        assert!(!wsl_networking_is_mirrored(None));
     }
 
     /// Non-Windows runtimes get the POSIX invocation: `sh -c`, `/dev/null`
