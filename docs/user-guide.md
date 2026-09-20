@@ -84,6 +84,10 @@ Capabilities can change with the installed CLI and runtime. Buildmesh hides
 controls that a harness cannot safely honor. After installing or removing a
 CLI, restart Buildmesh so detection and runtime identity are refreshed.
 
+For the complete harness-by-harness grid — resume, attention hooks, transcript
+support, model and effort controls, and platform availability — see the
+[harness capabilities matrix](learning/harness-capabilities-matrix.md).
+
 On Windows, Buildmesh bundles Microsoft's ConPTY runtime so animated terminal
 updates keep the text caret in place. Codex's Astra glitter and other harness
 animations remain enabled. After upgrading Buildmesh, restart the app to use
