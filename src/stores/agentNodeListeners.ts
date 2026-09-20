@@ -81,6 +81,10 @@ export interface AgentNodeActionSurface {
   patchAutopilotState: (id: number, state: AutopilotRunState) => void;
   /** Patch every visible node owned by a Circuit run when its runner state changes. */
   patchCircuitOwnershipState: (runId: number, state: string) => void;
+  /** Re-read the Circuit ownership ledger on its own. Needed because
+   *  `patchCircuitOwnershipState` cannot introduce an ownership row the map
+   *  has not seen yet — its match is by `run_id` over existing entries. */
+  refreshCircuitOwnerships: () => Promise<void>;
   /** Set or clear the structured action shown above an awaiting terminal. */
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   /** Read a single agent node by id — the cache-invalidation handlers
@@ -101,12 +105,24 @@ export interface AgentNodeActionSurface {
 // `node_id` alias for vocabulary consistency inside the store.
 const SESSION_ID_KEY = 'session_id';
 
+/// Non-terminal run states: ownership is still live, so the satellite re-read
+/// keeps the Pilot light current without a full node refetch.
+const LIVE_CIRCUIT_RUN_STATES = new Set(['pending', 'running', 'paused']);
+
 /// Circuit run states after which the run's remaining agents have been swept.
 /// Deleted agents arrive via `node-deleted`, but a failed-run sweep *archives*
 /// the agents still attached to the run — archive must not dispose their
 /// terminals, and it emits no per-node event — so refetch on these states to
 /// drop the archived cards.
 const TERMINAL_CIRCUIT_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
+
+/// Every state the runner emits. Anything else is an unknown state the UI
+/// ignores rather than guesses at, so the two sets above stay the single
+/// vocabulary rather than a third inline list.
+const KNOWN_CIRCUIT_RUN_STATES = new Set([
+  ...LIVE_CIRCUIT_RUN_STATES,
+  ...TERMINAL_CIRCUIT_RUN_STATES,
+]);
 
 /**
  * Subscribe every agent-node Tauri event the store cares about.
@@ -126,8 +142,14 @@ export async function attachAgentNodeListeners(
 
   unlistens.push(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
-      if (['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(payload.state)) {
+      if (KNOWN_CIRCUIT_RUN_STATES.has(payload.state)) {
         surface.patchCircuitOwnershipState(payload.run_id, payload.state);
+      }
+      // The patch above only rewrites rows the map already holds, and the event
+      // carries just `{ run_id, state }`, so the satellite re-read is what
+      // introduces a node to the map (see `refreshCircuitOwnerships`).
+      if (LIVE_CIRCUIT_RUN_STATES.has(payload.state)) {
+        void surface.refreshCircuitOwnerships();
       }
       // A terminal run has swept its remaining agents — a failed-run sweep
       // *archives* them, and archive emits no per-node event — so resync to
