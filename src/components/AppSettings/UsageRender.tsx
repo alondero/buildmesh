@@ -14,6 +14,8 @@
  *   - `BalanceCard`  — single `BillingBalance` → two-row wallet readout
  *   - `ExplicitUsageMeter` — capped, uncapped, unlimited, external, unavailable
  *   - `LastKnownNote` — "this meter is a cached reading, not a live one" caption
+ *   - header `Cached` badge — same signal at the row title, with the absolute
+ *     fetch instant on hover (`title`)
  *   - `UsagePanel`   — one provider's row on the glanceable surface
  *                      (icon + name + optional Refresh + meter body)
  *
@@ -301,6 +303,15 @@ export function UsagePanel({
       <div className="flex items-center gap-2 mb-2">
         <ProviderIcon providerId={account.id} className="h-4 w-4" />
         <span className="text-sm font-medium text-text-primary truncate">{account.name}</span>
+        {meter.cachedAt != null && (
+          <span
+            className="text-2xs text-text-muted border border-border-subtle rounded px-1 py-px shrink-0" /* allow-bare-rounded */
+            data-testid="usage-cached-badge"
+            title={`Last updated ${new Date(meter.cachedAt * 1000).toLocaleString()}`}
+          >
+            Cached
+          </span>
+        )}
         {onRefresh && (
           <button
             type="button"

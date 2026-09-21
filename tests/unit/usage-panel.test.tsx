@@ -405,4 +405,19 @@ describe('LastKnownNote (last-known fallback, ADR-0037)', () => {
     expect(screen.getByText('Unavailable')).toBeTruthy();
     expect(screen.getByTestId('usage-last-known')).toBeTruthy();
   });
+
+  it('badges the row header as cached with the fetch instant on hover', () => {
+    renderPanel({ cachedAt: FETCHED_AT_SECS, usage: rememberedReading() });
+
+    const badge = screen.getByTestId('usage-cached-badge');
+    expect(badge.textContent).toBe('Cached');
+    expect(badge.getAttribute('title')).toBe(
+      `Last updated ${new Date(FETCHED_AT_SECS * 1000).toLocaleString()}`,
+    );
+  });
+
+  it('leaves a live row header unbadged', () => {
+    renderPanel({ usage: rememberedReading() });
+    expect(screen.queryByTestId('usage-cached-badge')).toBeNull();
+  });
 });
