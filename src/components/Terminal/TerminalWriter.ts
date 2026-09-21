@@ -68,7 +68,33 @@ function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
   if (chunks.every(isByteChunk)) {
     return [mergeByteChunks(chunks)];
   }
-  return chunks;
+  // Mixed string + byte chunks (issue #1749): a bursty PTY flush with
+  // interleaved types would otherwise hit xterm with one write per chunk.
+  // Decode bytes to strings via a single streaming TextDecoder per flush
+  // so a multi-byte UTF-8 sequence split across contiguous byte chunks
+  // reassembles instead of emitting replacement characters, then join to
+  // one string. The string path is atomic for xterm's renderer (see
+  // `isFastPathSafe`), so a single string write preserves escape sequences
+  // exactly as the chunk order arrived.
+  //
+  // The decoder is flushed before each string chunk: a partial sequence
+  // buffered from an earlier byte chunk must not jump over an interleaved
+  // string when its remainder arrives later (`[0xE2 0x96], "X", [0x80]`
+  // renders "�X�" in arrival order, never a reordered "X▀"). Contiguous
+  // byte runs still stream through one decoder instance, so genuine PTY
+  // read-slice splits reassemble.
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  for (const chunk of chunks) {
+    if (typeof chunk === 'string') {
+      parts.push(decoder.decode());
+      parts.push(chunk);
+    } else {
+      parts.push(decoder.decode(chunk, { stream: true }));
+    }
+  }
+  parts.push(decoder.decode());
+  return [parts.join('')];
 }
 
 function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined): void {

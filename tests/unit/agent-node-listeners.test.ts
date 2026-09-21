@@ -47,6 +47,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
     patchCircuitOwnershipState: spy('patchCircuitOwnershipState', () => {}),
+    refreshCircuitOwnerships: spy('refreshCircuitOwnerships', async () => undefined),
     setSemanticTurn: spy('setSemanticTurn', () => {}),
     findAgentNode: spy('findAgentNode', (id: number) =>
       nodes.find(n => n.id === id),
@@ -148,8 +149,14 @@ describe('attachAgentNodeListeners', () => {
 
     expect(surface.__calls).toEqual([
       { method: 'patchCircuitOwnershipState', args: [9, 'pending'] },
+      // Live states also re-read the ownership ledger: the patch can only
+      // rewrite known rows, so the satellite read is what introduces a node
+      // to the map (e.g. the source node's first run).
+      { method: 'refreshCircuitOwnerships', args: [] },
       { method: 'patchCircuitOwnershipState', args: [9, 'running'] },
+      { method: 'refreshCircuitOwnerships', args: [] },
       { method: 'patchCircuitOwnershipState', args: [9, 'paused'] },
+      { method: 'refreshCircuitOwnerships', args: [] },
       { method: 'patchCircuitOwnershipState', args: [9, 'completed'] },
       // Terminal transitions also resync the node list — for the agents a
       // failed-run sweep archives (deleted agents ride `node-deleted`).

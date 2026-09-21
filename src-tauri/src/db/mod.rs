@@ -808,6 +808,33 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
             ON autopilot_circuit_runs(mesh_id, state, queue_position);
         CREATE INDEX IF NOT EXISTS idx_circuit_steps_run ON autopilot_circuit_run_steps(run_id);
         CREATE INDEX IF NOT EXISTS idx_circuit_runs_source_agent ON autopilot_circuit_runs(source_agent_node_id);
+        -- Hot-filter indexes (issue #1747). Startup recovery
+        -- (list_suspended_nodes_inner, recover_*_cli_session_id_inner) and the
+        -- Autopilot poller (COUNT_ACTIVE_AUTOPILOT_SQL +/- mesh_id,
+        -- list_stalled_finishing_autopilot_runs, list_active_autopilot_node_ids)
+        -- filtered these columns with no supporting index, so each pass was a
+        -- full table scan whose cost grew with the ledger. The cli_session_id
+        -- index is partial on IS NOT NULL (every probe is an equality against a
+        -- populated id) but NOT also on `!= ''`: SQLite cannot prove a bound
+        -- parameter is non-empty, so that form would go unused.
+        -- idx_autopilot_runs_node is deliberately absent -- node_id is the
+        -- INTEGER PRIMARY KEY (the rowid), already the lookup index -- and so is
+        -- a bare idx_autopilot_runs_updated, since idx_autopilot_runs_state
+        -- already removes the scan from list_stalled_finishing_autopilot_runs.
+        -- The pre-existing single-column idx_autopilot_runs_mesh and
+        -- idx_warm_worktrees_mesh stay in place: this change is additive-only.
+        CREATE INDEX IF NOT EXISTS idx_agent_nodes_status ON agent_nodes(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_nodes_cli_session
+            ON agent_nodes(cli_session_id)
+            WHERE cli_session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_state ON autopilot_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh_state
+            ON autopilot_runs(mesh_id, state);
+        -- Serves claim_warm_entry_for_mesh_inner's mesh_id + status filter and
+        -- its FIFO created_at ordering in one seek, dropping the temp B-tree
+        -- sort the status-only index needed.
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh_status_created
+            ON warm_worktrees(mesh_id, status, created_at);
         ",
     )
 }

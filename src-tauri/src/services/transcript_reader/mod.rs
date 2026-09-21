@@ -1472,11 +1472,12 @@ mod tests {
 
     /// `for_harness` routes each harness to its native format — codex to
     /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283),
-    /// grok to its own Grok shape (#1281), opencode to OpenCode (#1296).
+    /// grok to its own Grok shape (#1281), muse to Muse (#1708), mcode to
+    /// Mcode (#1799), opencode to OpenCode (#1296).
     /// Every Claude-backed executor id stays on Claude Code. The
-    /// Claude-routed list deliberately excludes "agy", "grok", and
-    /// "opencode" so the catch-all ClaudeCode assertion can't mask a
-    /// future routing regression.
+    /// Claude-routed list deliberately excludes "agy", "grok", "mcode",
+    /// "muse", and "opencode" so the catch-all ClaudeCode assertion can't
+    /// mask a future routing regression.
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
         assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
@@ -1487,7 +1488,12 @@ mod tests {
         assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
         assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
         assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
+        assert_eq!(TranscriptFormat::for_harness("muse"), TranscriptFormat::Muse);
         assert_eq!(TranscriptFormat::for_harness("mcode"), TranscriptFormat::Mcode);
+        // Issue #1794: mcode must never fall through to the Claude Code
+        // default - that fallback resolves the wrong transcript directory, so
+        // the explicit arm is what keeps observation off PTY inference alone.
+        assert_ne!(TranscriptFormat::for_harness("mcode"), TranscriptFormat::ClaudeCode);
         assert_eq!(TranscriptFormat::for_harness("opencode"), TranscriptFormat::OpenCode);
         for id in ["anthropic", "claude", "terminal", ""] {
             assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
@@ -2330,6 +2336,49 @@ mod tests {
         assert_eq!(assistant_report_from_file(&path, TranscriptFormat::Grok).unwrap().revision, report.revision);
         writeln!(writer, "{{\"type\":\"assistant\",\"content\":\"Module fixed. Tests passed.\"}}").unwrap();
         assert_ne!(assistant_report_from_file(&path, TranscriptFormat::Grok).unwrap().revision, report.revision);
+    }
+
+    /// Issue #1794 shape (a): MiniMax Code persists a readable
+    /// `messages.jsonl`, so the circuit report seam must derive a revision from
+    /// it rather than depending on PTY inference. A `toolResult` record does
+    /// not advance the assistant revision; a fresh assistant response does.
+    #[test]
+    fn mcode_native_transcript_recovers_circuit_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026/09/19/10-00-00-000-session_abc");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("manifest.json"),
+            r#"{"schemaVersion":1,"sessionId":"ses-123","createdAtMs":1788000000000}"#,
+        )
+        .unwrap();
+        let file = session.join("messages.jsonl");
+        std::fs::write(&file, concat!(
+            "{\"message_id\":\"m1\",\"turn_id\":\"t1\",\"message\":{\"role\":\"user\",\"timestamp\":1788000000000,\"content\":[{\"type\":\"text\",\"text\":\"Fix the parser\"}]}}\n",
+            "{\"message_id\":\"m2\",\"turn_id\":\"t1\",\"message\":{\"role\":\"assistant\",\"timestamp\":1788000001000,\"content\":[{\"type\":\"text\",\"text\":\"Parser fixed. Tests pass.\"}]}}\n",
+        )).unwrap();
+
+        let path = super::adapters::mcode::find_mcode_transcript_in(temp.path(), "ses-123")
+            .expect("manifest scan must resolve the session transcript");
+        assert_eq!(path, file);
+        let report = assistant_report_from_file(&path, TranscriptFormat::Mcode)
+            .expect("a completed mcode turn must be readable by the circuit");
+        assert_eq!(report.text, "Parser fixed. Tests pass.");
+
+        use std::io::Write;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "{{\"message_id\":\"m3\",\"turn_id\":\"t1\",\"message\":{{\"role\":\"toolResult\",\"timestamp\":1788000002000,\"content\":[{{\"type\":\"text\",\"text\":\"tool echo\"}}]}}}}").unwrap();
+        assert_eq!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode).unwrap().revision,
+            report.revision,
+            "a toolResult echo must not advance the assistant revision"
+        );
+        writeln!(writer, "{{\"message_id\":\"m4\",\"turn_id\":\"t2\",\"message\":{{\"role\":\"assistant\",\"timestamp\":1788000003000,\"content\":[{{\"type\":\"text\",\"text\":\"Next task done.\"}}]}}}}").unwrap();
+        assert_ne!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode).unwrap().revision,
+            report.revision,
+            "a fresh assistant response must advance the revision"
+        );
     }
 
     #[test]
