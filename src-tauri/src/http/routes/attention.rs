@@ -1170,11 +1170,24 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
 
             match decision {
                 Decision::Running => {
+                    // Every disposition must be visible in the log: a node
+                    // that was marked (or cleared) without a line explaining
+                    // why is undiagnosable after the fact (run 163 review).
+                    tracing::info!(
+                        "attention webhook for node {}: harness resumed the turn — \
+                         node lands in Running",
+                        session_id
+                    );
                     let _ = crate::agent::session_lifecycle::on_hook_running_with_detail(
                         &crate::agent::session_lifecycle::AppSessionLifecycleSink { app }, session_id, &detail,
                     );
                 }
                 Decision::MarkInput => {
+                    tracing::info!(
+                        "attention webhook for node {}: the agent is waiting for input — \
+                         node lands in AwaitingInput",
+                        session_id
+                    );
                     crate::node_turn::publish_with_signal(
                         session_id,
                         app,

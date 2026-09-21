@@ -689,6 +689,14 @@ pub fn trigger_circuit_now_locked(
 /// Retrying for an agent that already owns a live run returns that run's id and
 /// does not apply the new `reviewer_provider` or `max_rounds` — the first
 /// writer wins.
+///
+/// `allow_unobserved` (issue #1792) is the explicit override for the
+/// source-agent readiness gate. The built-in review preset refuses to mint
+/// a run on a source agent that has produced no observable evidence yet
+/// (no captured `cli_session_id`, no readable `assistant_report` revision);
+/// recovery and explicit user-selected circuits stay permissive. When the
+/// override is used on the agent-review path, the run's `context_json`
+/// carries `source.review_allow_unobserved = "1"` for audit.
 #[command]
 pub fn trigger_circuit_from_node(
     app: AppHandle,
@@ -696,6 +704,7 @@ pub fn trigger_circuit_from_node(
     circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    allow_unobserved: Option<bool>,
 ) -> Result<i64, String> {
     if !(1..=10).contains(&max_rounds) {
         return Err("Review rounds must be between 1 and 10.".into());
@@ -707,7 +716,8 @@ pub fn trigger_circuit_from_node(
     if node.provider == "terminal" {
         return Err("Review loops require an AI agent.".into());
     }
-    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
+    let allow_unobserved = allow_unobserved.unwrap_or(false);
+    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider, allow_unobserved)?;
     crate::autopilot::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?
