@@ -13,6 +13,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  blocksReviewCircuit,
   effortAllowedFor,
   getCapabilitiesFor,
   HARNESS_CAPABILITIES,
@@ -106,6 +107,77 @@ describe('effortAllowedFor', () => {
         }),
       ),
     ).toEqual(['none', 'xhigh']);
+  });
+});
+
+describe('blocksReviewCircuit', () => {
+  it('blocks the harnesses with no turn signal, and the plain shell', () => {
+    for (const id of ['dsh', 'freebuff', 'cline', 'terminal']) {
+      expect(blocksReviewCircuit(id), id).toBe(true);
+    }
+  });
+
+  it('allows a harness with either a native hook or a passive turn watcher', () => {
+    for (const id of ['anthropic', 'codex', 'commandcode', 'muse']) {
+      expect(blocksReviewCircuit(id), id).toBe(false);
+    }
+  });
+
+  it('resolves legacy and empty ids the provider column still carries', () => {
+    // `AgentNode.provider` is opaque and predates the harness/provider split.
+    // Empty is documented as "anthropic" for this column, and the rest of the
+    // frontend already accepts this same alias set (`harnessIdFromProvider` in
+    // the Inspector).
+    expect(blocksReviewCircuit('')).toBe(false);
+    expect(blocksReviewCircuit('claude_code')).toBe(false);
+    expect(blocksReviewCircuit('antigravity')).toBe(false);
+    expect(blocksReviewCircuit('minimax-code')).toBe(false);
+    expect(blocksReviewCircuit('command-code')).toBe(false);
+    expect(blocksReviewCircuit('cmdc')).toBe(false);
+    expect(blocksReviewCircuit('deepseek')).toBe(true);
+    expect(blocksReviewCircuit('deepseek-harness')).toBe(true);
+  });
+
+  it('resolves a Proxied Spawn Option id under its harness half', () => {
+    expect(blocksReviewCircuit('claude:minimax')).toBe(false);
+    expect(blocksReviewCircuit('cline:some-account')).toBe(true);
+  });
+
+  it('normalises case and whitespace', () => {
+    expect(blocksReviewCircuit('  DeepSeek  ')).toBe(true);
+    expect(blocksReviewCircuit('CLINE')).toBe(true);
+    expect(blocksReviewCircuit('  Codex ')).toBe(false);
+  });
+
+  it('does not block an id it cannot resolve', () => {
+    // User-defined harness profile ids live in this column and resolve to a
+    // real executor at the spawn seam. Blocking them would take a working
+    // review away from the user, so only positively-judged harnesses block.
+    expect(blocksReviewCircuit('my-custom-profile')).toBe(false);
+    expect(blocksReviewCircuit(null)).toBe(false);
+    expect(blocksReviewCircuit(undefined)).toBe(false);
+  });
+});
+
+/**
+ * Partition pin. The UI gate (the node title-bar review control and the
+ * reviewer provider pickers) is only as correct as this predicate, and the
+ * predicate is only as correct as the generated flags behind it. Naming the
+ * blocked set means a Rust-side flag flip that would silently open or close a
+ * reviewer slot trips here instead of shipping.
+ */
+describe('review-circuit eligibility across the shipped catalog', () => {
+  it('admits every harness that can yield a turn', () => {
+    expect(HARNESS_IDS.filter(id => !blocksReviewCircuit(id)))
+      .toEqual([
+        'anthropic', 'agy', 'opencode', 'codex', 'cursor', 'grok',
+        'kimi', 'mcode', 'commandcode', 'muse',
+      ]);
+  });
+
+  it('excludes the harnesses with no turn signal, plus the plain shell', () => {
+    expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id)))
+      .toEqual(['dsh', 'freebuff', 'cline', 'terminal']);
   });
 });
 

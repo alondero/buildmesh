@@ -1,4 +1,4 @@
-//! Transcript reader (ADR-0008) "— the deep module that, given an Agent Node's
+﻿//! Transcript reader (ADR-0008) "— the deep module that, given an Agent Node's
 //! CLI session id and working-directory path, locates and parses the harness's
 //! on-disk JSONL transcript and returns the **raw recent turns** (assistant
 //! text and tool calls) plus the last assistant message "— or a typed
@@ -249,7 +249,8 @@ pub enum TranscriptFormat {
 }
 
 impl TranscriptFormat {
-    /// Map a resolved harness adapter id to its transcript format. Every
+    /// Map a resolved harness adapter id to its transcript format, or `None`
+    /// when no reader is wired for it (issue #1817). Every
     /// Claude-Code-backed executors (the `anthropic` adapter behind the built-in
     /// subscription and all custom MiniMax/DeepSeek profiles) share the Claude
     /// Code format. Cursor has the same message shape but a workspace-scoped
@@ -263,17 +264,21 @@ impl TranscriptFormat {
     /// and routes through its own read entry point; the variant is included
     /// here so `for_harness` agrees with the dispatch table in
     /// [`read_tail`] / [`read_last_assistant_message`].
-    pub fn for_harness(harness_id: &str) -> Self {
+    pub fn for_harness(harness_id: &str) -> Option<Self> {
         match harness_id {
-            "codex" => TranscriptFormat::Codex,
-            "commandcode" => TranscriptFormat::CommandCode,
-            "cursor" => TranscriptFormat::Cursor,
-            "agy" => TranscriptFormat::Agy,
-            "grok" => TranscriptFormat::Grok,
-            "muse" => TranscriptFormat::Muse,
-            "mcode" => TranscriptFormat::Mcode,
-            "opencode" => TranscriptFormat::OpenCode,
-            _ => TranscriptFormat::ClaudeCode,
+            "codex" => Some(TranscriptFormat::Codex),
+            "commandcode" => Some(TranscriptFormat::CommandCode),
+            "cursor" => Some(TranscriptFormat::Cursor),
+            "agy" => Some(TranscriptFormat::Agy),
+            "grok" => Some(TranscriptFormat::Grok),
+            "muse" => Some(TranscriptFormat::Muse),
+            "mcode" => Some(TranscriptFormat::Mcode),
+            "opencode" => Some(TranscriptFormat::OpenCode),
+            "anthropic" | "claude" => Some(TranscriptFormat::ClaudeCode),
+            // No arm, no transcript directory (issue #1817): an unwired or
+            // unknown harness id resolves to `None` so callers degrade to
+            // `Unsupported` instead of reading the Claude Code directory.
+            _ => None,
         }
     }
 }
@@ -1472,26 +1477,122 @@ mod tests {
 
     /// `for_harness` routes each harness to its native format — codex to
     /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283),
-    /// grok to its own Grok shape (#1281), opencode to OpenCode (#1296).
-    /// Every Claude-backed executor id stays on Claude Code. The
-    /// Claude-routed list deliberately excludes "agy", "grok", and
-    /// "opencode" so the catch-all ClaudeCode assertion can't mask a
-    /// future routing regression.
+    /// grok to its own Grok shape (#1281), muse to Muse (#1708), mcode to
+    /// Mcode (#1799), opencode to OpenCode (#1296).
+    /// Only the Claude-backed ids resolve to Claude Code; unwired
+    /// harnesses (`kimi`, `dsh`, `freebuff`, `cline`, `terminal`) resolve
+    /// to `None` (issue #1817) instead of Claude Code.
+    /// A unit test below keeps this consistent with the capability catalog.
     #[test]
     fn transcript_format_for_harness_routes_each_format() {
-        assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        assert_eq!(
+            TranscriptFormat::for_harness("codex"),
+            Some(TranscriptFormat::Codex)
+        );
         assert_eq!(
             TranscriptFormat::for_harness("commandcode"),
-            TranscriptFormat::CommandCode
+            Some(TranscriptFormat::CommandCode)
         );
-        assert_eq!(TranscriptFormat::for_harness("cursor"), TranscriptFormat::Cursor);
-        assert_eq!(TranscriptFormat::for_harness("agy"), TranscriptFormat::Agy);
-        assert_eq!(TranscriptFormat::for_harness("grok"), TranscriptFormat::Grok);
-        assert_eq!(TranscriptFormat::for_harness("mcode"), TranscriptFormat::Mcode);
-        assert_eq!(TranscriptFormat::for_harness("opencode"), TranscriptFormat::OpenCode);
-        for id in ["anthropic", "claude", "terminal", ""] {
-            assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
+        assert_eq!(
+            TranscriptFormat::for_harness("cursor"),
+            Some(TranscriptFormat::Cursor)
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("agy"),
+            Some(TranscriptFormat::Agy)
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("grok"),
+            Some(TranscriptFormat::Grok)
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("mcode"),
+            Some(TranscriptFormat::Mcode)
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("muse"),
+            Some(TranscriptFormat::Muse)
+        );
+        assert_eq!(
+            TranscriptFormat::for_harness("opencode"),
+            Some(TranscriptFormat::OpenCode)
+        );
+        for id in ["anthropic", "claude"] {
+            assert_eq!(
+                TranscriptFormat::for_harness(id),
+                Some(TranscriptFormat::ClaudeCode),
+                "{id} is Claude-backed and must stay on Claude Code"
+            );
         }
+    }
+
+    /// Unwired harnesses must not silently resolve to Claude Code
+    /// (issue #1817): no arm, no transcript directory. Today `kimi`,
+    /// `dsh`, `freebuff`, and `cline` are saved only by
+    /// `produces_readable_transcript() == false`; the moment one flips
+    /// its flag (cf. #945 for Kimi Code) the resolver must report "no
+    /// reader" instead of reading the Claude Code directory.
+    #[test]
+    fn transcript_format_for_harness_rejects_unwired_harnesses() {
+        for id in ["kimi", "dsh", "freebuff", "cline", "terminal", "", "totally-unknown"] {
+            assert_eq!(
+                TranscriptFormat::for_harness(id),
+                None,
+                "{id} has no wired reader and must not resolve to ClaudeCode"
+            );
+        }
+    }
+
+    /// Issue #1817 acceptance criterion: every id in the generated harness
+    /// catalog (`src/types/generated/HarnessCapabilitiesTable.json`) resolves
+    /// consistently with its `produces_readable_transcript` flag — a wired
+    /// reader for a transcript-less harness, or a flag flip to `true`
+    /// without a new `for_harness` arm (the Kimi case in #945), trips this
+    /// test instead of degrading silently to "PTY tail or nothing".
+    #[test]
+    fn transcript_format_for_harness_matches_capability_catalog() {
+        let catalog: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../src/types/generated/HarnessCapabilitiesTable.json"
+        ))
+        .expect("generated HarnessCapabilitiesTable.json must parse");
+        let ids = catalog
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .expect("catalog JSON must include ids in Provider::all() order");
+        let capabilities = catalog
+            .get("capabilities")
+            .and_then(|v| v.as_object())
+            .expect("catalog JSON must include capabilities");
+        assert!(
+            !ids.is_empty(),
+            "catalog ids must not be empty or the consistency check is vacuous"
+        );
+        for id in ids {
+            let id = id.as_str().expect("catalog ids must be strings");
+            let produces = capabilities
+                .get(id)
+                .and_then(|caps| caps.get("produces_readable_transcript"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or_else(|| {
+                    panic!("catalog capabilities for {id} must carry produces_readable_transcript")
+                });
+            match TranscriptFormat::for_harness(id) {
+                Some(format) => assert!(
+                    produces,
+                    "{id} has a wired {format:?} reader but advertises produces_readable_transcript=false"
+                ),
+                None => assert!(
+                    !produces,
+                    "{id} advertises produces_readable_transcript=true but has no for_harness arm"
+                ),
+            }
+        }
+        // The `claude` profile alias is not a catalog id (it maps to
+        // `anthropic` via HARNESS_PROFILE_ALIASES) but must keep resolving.
+        assert_eq!(
+            TranscriptFormat::for_harness("claude"),
+            Some(TranscriptFormat::ClaudeCode)
+        );
     }
 
     #[test]
@@ -2332,6 +2433,49 @@ mod tests {
         assert_ne!(assistant_report_from_file(&path, TranscriptFormat::Grok).unwrap().revision, report.revision);
     }
 
+    /// Issue #1794 shape (a): MiniMax Code persists a readable
+    /// `messages.jsonl`, so the circuit report seam must derive a revision from
+    /// it rather than depending on PTY inference. A `toolResult` record does
+    /// not advance the assistant revision; a fresh assistant response does.
+    #[test]
+    fn mcode_native_transcript_recovers_circuit_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026/09/19/10-00-00-000-session_abc");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("manifest.json"),
+            r#"{"schemaVersion":1,"sessionId":"ses-123","createdAtMs":1788000000000}"#,
+        )
+        .unwrap();
+        let file = session.join("messages.jsonl");
+        std::fs::write(&file, concat!(
+            "{\"message_id\":\"m1\",\"turn_id\":\"t1\",\"message\":{\"role\":\"user\",\"timestamp\":1788000000000,\"content\":[{\"type\":\"text\",\"text\":\"Fix the parser\"}]}}\n",
+            "{\"message_id\":\"m2\",\"turn_id\":\"t1\",\"message\":{\"role\":\"assistant\",\"timestamp\":1788000001000,\"content\":[{\"type\":\"text\",\"text\":\"Parser fixed. Tests pass.\"}]}}\n",
+        )).unwrap();
+
+        let path = super::adapters::mcode::find_mcode_transcript_in(temp.path(), "ses-123")
+            .expect("manifest scan must resolve the session transcript");
+        assert_eq!(path, file);
+        let report = assistant_report_from_file(&path, TranscriptFormat::Mcode)
+            .expect("a completed mcode turn must be readable by the circuit");
+        assert_eq!(report.text, "Parser fixed. Tests pass.");
+
+        use std::io::Write;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "{{\"message_id\":\"m3\",\"turn_id\":\"t1\",\"message\":{{\"role\":\"toolResult\",\"timestamp\":1788000002000,\"content\":[{{\"type\":\"text\",\"text\":\"tool echo\"}}]}}}}").unwrap();
+        assert_eq!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode).unwrap().revision,
+            report.revision,
+            "a toolResult echo must not advance the assistant revision"
+        );
+        writeln!(writer, "{{\"message_id\":\"m4\",\"turn_id\":\"t2\",\"message\":{{\"role\":\"assistant\",\"timestamp\":1788000003000,\"content\":[{{\"type\":\"text\",\"text\":\"Next task done.\"}}]}}}}").unwrap();
+        assert_ne!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode).unwrap().revision,
+            report.revision,
+            "a fresh assistant response must advance the revision"
+        );
+    }
+
     #[test]
     fn grok_locator_recovers_native_windows_cwd_from_mixed_separators() {
         let temp = tempfile::tempdir().unwrap();
@@ -2911,7 +3055,7 @@ mod tests {
     fn opencode_transcript_format_for_harness_routes_opencode() {
         assert_eq!(
             TranscriptFormat::for_harness("opencode"),
-            TranscriptFormat::OpenCode,
+            Some(TranscriptFormat::OpenCode),
             "the dispatch table must include the OpenCode variant"
         );
     }

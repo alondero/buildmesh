@@ -29,8 +29,10 @@ fn transcript_dir(node: &AgentNode) -> String {
 pub(crate) fn native_turn_completion(node: &AgentNode) -> Option<transcript_reader::NativeTurnSnapshot> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
     if !adapter.produces_readable_transcript() { return None; }
+    // No reader wired (issue #1817) means no native completion to observe.
+    let format = TranscriptFormat::for_harness(adapter.id())?;
     transcript_reader::read_native_turn_completion(
-        TranscriptFormat::for_harness(adapter.id()), node.cli_session_id.as_deref(), &transcript_dir(node),
+        format, node.cli_session_id.as_deref(), &transcript_dir(node),
     )
 }
 
@@ -48,8 +50,15 @@ pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
             reason: UnavailableReason::Unsupported,
         };
     }
+    // No reader wired for this harness (issue #1817): degrade to
+    // `Unsupported` instead of reading another harness's directory.
+    let Some(format) = TranscriptFormat::for_harness(adapter.id()) else {
+        return TranscriptTail::Unavailable {
+            reason: UnavailableReason::Unsupported,
+        };
+    };
     scrub_tail(transcript_reader::read_tail(
-        TranscriptFormat::for_harness(adapter.id()),
+        format,
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
         tail,
@@ -119,8 +128,16 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
     if !adapter.produces_readable_transcript() {
         return None;
     }
+    // No reader wired for this harness (issue #1817): surface `Unsupported`
+    // rather than `None` so the digest flags a wiring gap instead of
+    // masquerading as an unsupported provider.
+    let Some(format) = TranscriptFormat::for_harness(adapter.id()) else {
+        return Some(TranscriptTail::Unavailable {
+            reason: UnavailableReason::Unsupported,
+        });
+    };
     Some(scrub_tail(transcript_reader::read_last_assistant_message(
-        TranscriptFormat::for_harness(adapter.id()),
+        format,
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
     )))
@@ -129,8 +146,11 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
     if !adapter.produces_readable_transcript() { return None; }
+    // No reader wired (issue #1817): fall back to live per-turn PTY
+    // observation like any other transcript-less harness.
+    let format = TranscriptFormat::for_harness(adapter.id())?;
     let mut report = transcript_reader::read_assistant_report(
-        TranscriptFormat::for_harness(adapter.id()),
+        format,
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
     )?;

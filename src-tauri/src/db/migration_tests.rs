@@ -352,6 +352,15 @@ mod tests {
             .unwrap()
     }
 
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
     /// Creates a v2 schema (before layout column) for migration testing.
     /// This simulates an existing DB that needs migration to v3/v4+.
     fn create_v2_schema(conn: &Connection) -> SqlResult<()> {
@@ -1594,15 +1603,107 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             "idx_autopilot_circuit_runs_state",
             "idx_circuit_runs_mesh_queue",
             "idx_circuit_steps_run",
+            "idx_agent_nodes_status",
+            "idx_agent_nodes_cli_session",
+            "idx_autopilot_runs_state",
+            "idx_autopilot_runs_mesh_state",
+            "idx_warm_worktrees_mesh_status_created",
         ] {
-            let present: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
-                    [index],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(present, "{index} must exist after schema initialization");
+            assert!(
+                index_present(&conn, index),
+                "{index} must exist after schema initialization"
+            );
         }
+    }
+
+    /// Issue #1747 — the hot-filter indexes must reach a database that is
+    /// already at the current schema version but predates them. The change is
+    /// index-only (no version bump), so the faithful simulation is a populated
+    /// current-schema DB with just those indexes dropped: the always-run
+    /// canonical index pass must restore them and leave the rows untouched.
+    #[test]
+    fn init_schema_adds_hot_filter_indexes_to_legacy_dbs() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            DROP INDEX idx_agent_nodes_status;
+            DROP INDEX idx_agent_nodes_cli_session;
+            DROP INDEX idx_autopilot_runs_state;
+            DROP INDEX idx_autopilot_runs_mesh_state;
+            DROP INDEX idx_warm_worktrees_mesh_status_created;
+            INSERT INTO meshes (id, name, path) VALUES (1, 'legacy', 'C:/legacy');
+            INSERT INTO agent_nodes (id, mesh_id, name, path, status)
+                VALUES (1, 1, 'suspended-node', 'C:/legacy', 'suspended');
+            INSERT INTO autopilot_runs (node_id, mesh_id, issue_number, state)
+                VALUES (1, 1, 1747, 'implementing');
+            INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status)
+                VALUES (1, 'C:/legacy/warm', 'warm-one', 'available');
+            ",
+        )
+        .unwrap();
+        // The scenario only means anything if the connection really is at the
+        // current version with the indexes absent.
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            crate::db::migrations::SCHEMA_VERSION.to_string()
+        );
+
+        super::super::init_schema(&conn).unwrap();
+
+        for index in [
+            "idx_agent_nodes_status",
+            "idx_agent_nodes_cli_session",
+            "idx_autopilot_runs_state",
+            "idx_autopilot_runs_mesh_state",
+            "idx_warm_worktrees_mesh_status_created",
+        ] {
+            assert!(
+                index_present(&conn, index),
+                "{index} must exist after re-running the initializer"
+            );
+        }
+
+        // Additive DDL: rows written before the indexes exist stay put.
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_nodes WHERE id = 1 AND status = 'suspended'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM autopilot_runs WHERE node_id = 1 AND state = 'implementing'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE preassigned_name = 'warm-one'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+
+        let fresh = Connection::open_in_memory().unwrap();
+        super::super::init_schema(&fresh).unwrap();
+        assert_eq!(
+            canonical_index_names(&conn),
+            canonical_index_names(&fresh),
+            "legacy and fresh databases must converge on the canonical indexes"
+        );
     }
 }

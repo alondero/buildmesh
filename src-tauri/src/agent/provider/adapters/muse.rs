@@ -77,6 +77,64 @@ use crate::models::EnvType;
 pub struct MuseAdapter;
 pub static MUSE: MuseAdapter = MuseAdapter;
 
+/// Post-spawn session-index capture window (issue #1794).
+///
+/// Muse self-assigns its session id and only publishes it through
+/// `session-index.db`, so a fresh node has no identity until the index row
+/// appears. The original schedule gave up after ~16 s
+/// (`200+500+1000+2000+4000+8000` ms); a slow first boot could still be
+/// publishing its index row then, leaving the node with no `cli_session_id`
+/// and therefore no observable progress for the life of the run.
+///
+/// This window extends capture to ~4 minutes so a slow boot is still caught,
+/// while staying bounded: once exhausted the node is left unobserved, which the
+/// circuit watchdog (issue #1791) turns into a fast failure instead of a silent
+/// full-budget stall.
+pub(crate) const MUSE_CAPTURE_RETRY_MS: &[u64] = &[
+    200, 500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000, 60_000, 60_000,
+];
+
+/// Result of the post-spawn identity-capture window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureOutcome {
+    /// A session identity (and its watcher) was established.
+    Captured,
+    /// The node's process exited before a session appeared.
+    Stopped,
+    /// The window was exhausted with no session identity — the node stays
+    /// unobserved, so the circuit watchdog fails it fast (issue #1791).
+    GaveUp,
+}
+
+/// Drive the post-spawn capture window. `capture` performs one attempt and
+/// reports whether the session identity and its watcher are now in place;
+/// `sleep` waits between attempts; `is_alive` ends the window early when the
+/// node's process has exited. Split out so the extended window, the early stop,
+/// and the give-up outcome are unit-testable without real time or a live
+/// process.
+async fn run_capture_window<C, CF, S, SF>(
+    mut capture: C,
+    mut sleep: S,
+    is_alive: impl Fn() -> bool,
+) -> CaptureOutcome
+where
+    C: FnMut() -> CF,
+    CF: std::future::Future<Output = bool>,
+    S: FnMut(u64) -> SF,
+    SF: std::future::Future<Output = ()>,
+{
+    for delay in MUSE_CAPTURE_RETRY_MS {
+        sleep(*delay).await;
+        if !is_alive() {
+            return CaptureOutcome::Stopped;
+        }
+        if capture().await {
+            return CaptureOutcome::Captured;
+        }
+    }
+    CaptureOutcome::GaveUp
+}
+
 impl AgentProvider for MuseAdapter {
     fn id(&self) -> &'static str {
         "muse"
@@ -217,40 +275,60 @@ impl AgentProvider for MuseAdapter {
         let spawn_path = spawn_path.to_string();
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            for delay in [200, 500, 1000, 2000, 4000, 8000] {
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                if !crate::agent::process::PROCESS_REGISTRY.contains(&node_id) {
-                    break;
-                }
-                let result = crate::blocking::run_blocking("muse_session_capture", move || {
-                    crate::services::session_recovery::recover_live_node(node_id)
-                })
-                .await;
-                let Ok(Some(session_id)) = result else {
-                    continue;
-                };
-                // Capture is the watcher's arm point: the same session index
-                // that supplied the id also resolves the log path.
-                let spawn_path = spawn_path.clone();
-                let app = app.clone();
-                let started = crate::blocking::run_blocking("muse watcher start", move || {
-                    crate::services::muse_watcher::start_for_session(
-                        node_id,
-                        &session_id,
-                        &spawn_path,
-                        &app,
-                    )
-                })
-                .await;
-                match started {
-                    Ok(()) => break,
-                    // The id is durable once captured, so a transient log-path
-                    // failure (e.g. a not-yet-visible WSL file) retries on the
-                    // next tick instead of stranding the watcher.
-                    Err(error) => {
-                        tracing::warn!("muse watcher: could not start for node {node_id}: {error}")
+            let outcome = run_capture_window(
+                || {
+                    // Capture is the watcher's arm point: the same session
+                    // index that supplies the id also resolves the log path.
+                    let spawn_path = spawn_path.clone();
+                    let app = app.clone();
+                    async move {
+                        let result =
+                            crate::blocking::run_blocking("muse_session_capture", move || {
+                                crate::services::session_recovery::recover_live_node(node_id)
+                            })
+                            .await;
+                        let Ok(Some(session_id)) = result else {
+                            return false;
+                        };
+                        let started =
+                            crate::blocking::run_blocking("muse watcher start", move || {
+                                crate::services::muse_watcher::start_for_session(
+                                    node_id,
+                                    &session_id,
+                                    &spawn_path,
+                                    &app,
+                                )
+                            })
+                            .await;
+                        match started {
+                            Ok(()) => true,
+                            // The id is durable once captured, so a transient
+                            // log-path failure (e.g. a not-yet-visible WSL
+                            // file) retries on the next tick instead of
+                            // stranding the watcher.
+                            Err(error) => {
+                                tracing::warn!(
+                                    "muse watcher: could not start for node {node_id}: {error}"
+                                );
+                                false
+                            }
+                        }
                     }
-                }
+                },
+                |ms| tokio::time::sleep(std::time::Duration::from_millis(ms)),
+                || crate::agent::process::PROCESS_REGISTRY.contains(&node_id),
+            )
+            .await;
+            // Giving up is not silent: the node stays without a session
+            // identity, so the circuit watchdog (issue #1791) fails any wait on
+            // it at the first-observation window instead of burning the full
+            // active budget. Say so once, with the window that elapsed.
+            if outcome == CaptureOutcome::GaveUp {
+                let window_s = MUSE_CAPTURE_RETRY_MS.iter().sum::<u64>() / 1_000;
+                tracing::warn!(
+                    "muse session capture: node {node_id} produced no session identity within \
+                     {window_s}s; circuit waits on it will fail fast as unobserved (#1791)"
+                );
             }
         });
     }
@@ -649,5 +727,70 @@ mod tests {
             true,
         );
         assert_eq!(find_session(&database, "/workspace", 10000, true), None);
+    }
+
+    // -- Issue #1794: extended session-index capture window --------------
+
+    /// The window must outlast a slow first boot (~60 s) while staying bounded,
+    /// so a genuinely failed capture gives up and leaves the node unobserved
+    /// rather than retrying forever.
+    #[test]
+    fn capture_window_extends_past_the_original_sixteen_second_budget() {
+        let total: u64 = MUSE_CAPTURE_RETRY_MS.iter().sum();
+        assert!(
+            total > 60_000,
+            "the window must still be polling after ~60 s (the slow-boot case); got {total} ms"
+        );
+        assert!(
+            total <= 5 * 60_000,
+            "the window must stay bounded so a failed capture surfaces as unobserved; got {total} ms"
+        );
+        assert!(
+            MUSE_CAPTURE_RETRY_MS.len() > 6,
+            "the window must extend the original six-attempt schedule"
+        );
+    }
+
+    /// A fake index that only becomes reachable after ~60 s still produces a
+    /// session identity, because the retry window now spans it. The clock is
+    /// virtual so the test does not actually wait.
+    #[tokio::test]
+    async fn capture_window_reaches_a_session_index_that_appears_after_sixty_seconds() {
+        use std::cell::Cell;
+        let elapsed = Cell::new(0u64);
+        let outcome = run_capture_window(
+            || {
+                let reachable = elapsed.get() >= 60_000;
+                async move { reachable }
+            },
+            |ms| {
+                elapsed.set(elapsed.get() + ms);
+                async move {}
+            },
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CaptureOutcome::Captured);
+        assert!(
+            elapsed.get() >= 60_000,
+            "capture must have reached the ~60 s index, only polled {} ms",
+            elapsed.get()
+        );
+    }
+
+    /// Exhausting the window is an explicit give-up, not an infinite retry —
+    /// that is what lets the #1791 fast fail surface instead of a silent stall.
+    #[tokio::test]
+    async fn exhausted_capture_window_gives_up() {
+        let outcome = run_capture_window(|| async { false }, |_| async {}, || true).await;
+        assert_eq!(outcome, CaptureOutcome::GaveUp);
+    }
+
+    /// A node whose process exited stops the window early; it must not keep
+    /// polling a dead session.
+    #[tokio::test]
+    async fn capture_window_stops_when_the_process_exits() {
+        let outcome = run_capture_window(|| async { false }, |_| async {}, || false).await;
+        assert_eq!(outcome, CaptureOutcome::Stopped);
     }
 }

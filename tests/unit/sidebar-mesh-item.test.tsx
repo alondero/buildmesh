@@ -87,7 +87,6 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
-    activeNodeId: null,
     onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
@@ -899,7 +898,6 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
                 onOpenIssuesProbe={vi.fn()}
                 onOpenSessionHistoryProbe={vi.fn()}
                 meshNodes={[]}
-                activeNodeId={null}
                 onActivateNode={vi.fn()}
                 selectMesh={vi.fn()}
                 onDeleteNode={vi.fn()}

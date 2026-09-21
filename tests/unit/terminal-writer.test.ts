@@ -436,6 +436,82 @@ describe('TerminalWriter', () => {
       expect(scheduledCallbacks).toHaveLength(1);
     });
 
+    it('coalesces mixed string + byte chunks into a single string write (issue #1749)', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      // First chunk is rAF-sized so the writer takes the rAF path; the
+      // rest accumulate in the same frame even though they are small.
+      // An ANSI SGR opener is split across the string/bytes boundary
+      // (`\x1b[3` | `1m` — the only splittable kind, since ASCII encodes
+      // identically on both sides), pinning that escapes never split
+      // mid-sequence in mixed output.
+      const first = 'hello ' + 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES) + '\x1b[3';
+      const middle = new TextEncoder().encode('1m▀');
+      const last = ' world' + 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES);
+      writer.append(1, first);
+      writer.append(1, middle);
+      writer.append(1, last);
+
+      expect(writeFn).not.toHaveBeenCalled();
+      expect(scheduledCallbacks).toHaveLength(1);
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      const written = writeFn.mock.calls[0][0];
+      expect(typeof written).toBe('string');
+      expect(written).toBe(first + '1m▀' + last);
+      expect(written).toContain('\x1b[31m▀');
+    });
+
+    it('preserves chunk order when a partial sequence spans a string chunk (issue #1749)', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      // Degenerate interleave: the remainder of a split codepoint arrives
+      // after an unrelated string chunk. The buffered partial must not
+      // jump over the string (no reordered "X▀") — the decoder flushes at
+      // the string boundary, so each chunk renders in arrival order.
+      const first = 'start-' + 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES);
+      writer.append(1, first);
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      writer.append(1, 'X');
+      writer.append(1, new Uint8Array([0x80]));
+
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn.mock.calls[0][0]).toBe(first + '�X�');
+    });
+
+    it('decodes a split multi-byte codepoint across mixed-chunk boundaries (issue #1749)', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      // ▀ U+2580 = 0xE2 0x96 0x80 split across two byte chunks with
+      // string chunks on either side. A per-chunk decoder would emit
+      // replacement characters; one streaming decoder per flush
+      // reassembles the codepoint.
+      const first = 'start-' + 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES);
+      const last = '-end' + 'y'.repeat(INTERACTIVE_FAST_PATH_BYTES);
+      writer.append(1, first);
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      writer.append(1, new Uint8Array([0x80]));
+      writer.append(1, last);
+
+      flush();
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn.mock.calls[0][0]).toBe(first + '▀' + last);
+    });
+
+    it('writes a 1-byte ASCII byte echo directly without scheduling rAF (issue #1749)', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+      writer.append(1, new Uint8Array([0x61]));
+      expect(writeFn).toHaveBeenCalledTimes(1);
+      expect(writeFn.mock.calls[0][0]).toBeInstanceOf(Uint8Array);
+      expect(scheduledCallbacks).toHaveLength(0);
+      expect(writer.pendingBytes(1)).toBe(0);
+    });
+
     it('still coalesces over-sized bursts into one rAF-driven write', () => {
       const writeFn = vi.fn();
       writer.register(1, writeFn);

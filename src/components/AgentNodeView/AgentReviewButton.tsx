@@ -8,6 +8,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { cancelCircuitRun, isAgentRunning, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
+import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { Modal } from '../shared/Modal';
@@ -24,7 +25,9 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   // Same bucketing the Spawn Menu renders (ADR-0016): harness headers with
   // their Proxied children nested, which keeps composite `harness:provider`
   // rows unambiguous. Terminal is not an agent, so it is filtered out before
-  // bucketing — the backend enforces the same invariant.
+  // bucketing — the backend enforces the same invariant. Agent harnesses that
+  // cannot yield a turn stay *visible but disabled* (see the option render
+  // below) so the gap is discoverable rather than a silently missing row.
   const reviewerGroups = useMemo(
     () => groupByHarness(providerList, { filter: provider => provider.harness_id !== 'terminal' }),
     [providerList],
@@ -47,7 +50,16 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
     || node.status === 'completed';
   const pollingLiveness = node.status === 'pending' || node.status === 'spawning';
   const processAlive = useAgentProcessAlive(node.id, pollingLiveness);
-  const eligible = node.provider !== 'terminal' && (statusEligible || processAlive);
+  // The source agent has to yield a turn before `await_source` can fire, and
+  // the reviewer has to yield one before `verdict` can rule — so a harness that
+  // cannot yield turns wedges the run instead of failing it. Mirror the
+  // backend's harness-side gate (`autopilot::compatibility::evaluate`) here so
+  // the control is disabled rather than silently minting a stuck circuit.
+  const circuitBlocked = blocksReviewCircuit(node.provider);
+  const eligible = !circuitBlocked && (statusEligible || processAlive);
+  const blockedReason = circuitBlocked
+    ? "This harness cannot run a review circuit: Buildmesh cannot tell when it finishes a turn, so the review would wait forever for a verdict."
+    : null;
 
   useEffect(() => {
     if (!open) return;
@@ -102,7 +114,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   return <>
     <button type="button"
       aria-label="Start review or circuit"
-      title="Start review or circuit"
+      title={!activeOwnership && blockedReason ? blockedReason : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
       onClick={() => { setReviewerProvider(''); setOpen(true); }}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
@@ -144,9 +156,17 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
             <option value="">Default (app Reviewer provider or this agent)</option>
             {reviewerGroups.map(([groupKey, rows]) => (
               <optgroup key={groupKey} label={rows.find(row => !row.is_proxied)?.label ?? groupKey}>
-                {rows.map(provider => (
-                  <option key={provider.id} value={provider.id}>{provider.label}</option>
-                ))}
+                {rows.map(provider => {
+                  // The reviewer's own turn must be observable, or the
+                  // `verdict` gate never fires — same predicate the source
+                  // node faces above, applied to the picked row's harness.
+                  const blocked = blocksReviewCircuit(provider.harness_id);
+                  return (
+                    <option key={provider.id} value={provider.id} disabled={blocked}>
+                      {blocked ? `${provider.label} (no review support)` : provider.label}
+                    </option>
+                  );
+                })}
               </optgroup>
             ))}
           </select>

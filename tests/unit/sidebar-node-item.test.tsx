@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
@@ -24,34 +24,41 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 const meshColor = getMeshColor(3);
 
 describe('NodeItem', () => {
+  // The row owns its active bit via the store (issue #1748) — reset it so
+  // an `activeNodeId` seeded by one test can't leak into the next.
+  beforeEach(() => {
+    useAgentNodeStore.setState({ activeNodeId: null });
+  });
+
   it('renders the node name and a status icon with a label', () => {
-    render(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByText('node-a')).toBeTruthy();
     expect(screen.getByTitle('Running')).toBeTruthy();
   });
 
   it('exposes the node id for e2e selectors', () => {
-    const { container } = render(<NodeItem node={makeNode({ id: 99 })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    const { container } = render(<NodeItem node={makeNode({ id: 99 })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(container.querySelector('[data-session-id="99"]')).toBeTruthy();
   });
 
   it('marks the active node with the accent border', () => {
-    const { container } = render(<NodeItem node={makeNode()} meshColor={meshColor} isActive onSelect={() => {}} onDelete={() => {}} />);
+    useAgentNodeStore.setState({ activeNodeId: 10 });
+    const { container } = render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(container.querySelector('[data-session-item]')!.className).toContain('border-accent-cyan/50');
   });
 
-  it('calls onSelect when clicked', async () => {
-    const onSelect = vi.fn();
-    render(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={onSelect} onDelete={() => {}} />);
+  it('calls onSelectNode with the row ids when clicked', async () => {
+    const onSelectNode = vi.fn();
+    render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={onSelectNode} onDeleteNode={() => {}} />);
     await userEvent.click(screen.getByText('node-a'));
-    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelectNode).toHaveBeenCalledWith(10, 3);
   });
 
-  it('calls onDelete when the delete button is clicked', () => {
-    const onDelete = vi.fn();
-    render(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={onDelete} />);
+  it('calls onDeleteNode when the delete button is clicked', () => {
+    const onDeleteNode = vi.fn();
+    render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={onDeleteNode} />);
     fireEvent.click(screen.getByTitle('Delete node'));
-    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDeleteNode).toHaveBeenCalledTimes(1);
   });
 
   it('renders the status dot in a fixed-size box so ●/○/⏸/✗ align in the sidebar', () => {
@@ -85,9 +92,9 @@ describe('NodeItem', () => {
         <NodeItem
           node={makeNode({ status })}
           meshColor={meshColor}
-          isActive={false}
-          onSelect={() => {}}
-          onDelete={() => {}}
+
+          onSelectNode={() => {}}
+          onDeleteNode={() => {}}
         />,
       );
       const wrapper = stripVariable(screen.getByTitle(label).className);
@@ -109,9 +116,9 @@ describe('NodeItem', () => {
         <NodeItem
           node={makeNode()}
           meshColor={meshColor}
-          isActive={false}
-          onSelect={() => {}}
-          onDelete={() => {}}
+
+          onSelectNode={() => {}}
+          onDeleteNode={() => {}}
         />,
       );
       const row = container.querySelector('[data-session-item]')!;
@@ -133,9 +140,9 @@ describe('NodeItem', () => {
         <NodeItem
           node={makeNode()}
           meshColor={meshColor}
-          isActive={false}
-          onSelect={() => {}}
-          onDelete={() => {}}
+
+          onSelectNode={() => {}}
+          onDeleteNode={() => {}}
         />,
       );
       const row = container.querySelector<HTMLElement>('[data-session-item]')!;
@@ -153,13 +160,13 @@ describe('NodeItem', () => {
       // don't need a mesh-tinted hover (their fill is the accent
       // treatment). Pin that the inline style stays clean so the
       // CSS-variable hover doesn't double-paint.
+      useAgentNodeStore.setState({ activeNodeId: 10 });
       const { container } = render(
         <NodeItem
           node={makeNode()}
           meshColor={meshColor}
-          isActive
-          onSelect={() => {}}
-          onDelete={() => {}}
+          onSelectNode={() => {}}
+          onDeleteNode={() => {}}
         />,
       );
       const row = container.querySelector<HTMLElement>('[data-session-item]')!;
@@ -172,14 +179,14 @@ describe('NodeItem', () => {
   it('keeps the 14px ownership cell aligned while hiding unpiloted indicators', () => {
     useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
     const { container, rerender } = render(
-      <NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />,
+      <NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />,
     );
     const cell = container.querySelector('[data-testid="autopilot-indicator-cell"]')!;
     expect(cell.className).toContain('w-3.5');
     expect(cell.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
 
     useAgentNodeStore.setState({ autopilotStates: { 10: 'implementing' } });
-    rerender(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot active' })).toBeTruthy();
   });
 
@@ -187,7 +194,7 @@ describe('NodeItem', () => {
     useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
       10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
     } });
-    render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy();
   });
 
@@ -196,17 +203,17 @@ describe('NodeItem', () => {
     useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
       10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
     } });
-    render(<NodeItem node={node} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    render(<NodeItem node={node} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Missing session ID' })).toBeTruthy();
   });
 
   it('uses the same waiting and failure presentations as the canvas header', () => {
     useAgentNodeStore.setState({ autopilotStates: { 10: 'finishing' }, circuitOwnerships: {} });
-    const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot waiting' })).toBeTruthy();
 
     useAgentNodeStore.setState({ autopilotStates: { 10: 'failed' }, circuitOwnerships: {} });
-    rerender(<NodeItem node={makeNode()} meshColor={meshColor} isActive={false} onSelect={() => {}} onDelete={() => {}} />);
+    rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot needs attention' })).toBeTruthy();
   });
 });
