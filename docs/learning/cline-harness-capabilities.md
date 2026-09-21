@@ -139,9 +139,9 @@ Cline runs as a **Native Provider**:
 >
 > Regression-pinned by
 > `preferences::compatibility::tests::cline_anthropic_default_endpoint_sets_anthropic_api_key`,
-> `→_custom_endpoint_sets_anthropic_api_key_not_blank`, `→_openai_custom_endpoint_sets_openai_api_key`,
+> `…_custom_endpoint_sets_anthropic_api_key_not_blank`, `…_openai_custom_endpoint_sets_openai_api_key`,
 > and the Claude-Code contract pinned by
-> `→_claude_anthropic_custom_endpoint_still_uses_auth_token_trap`.
+> `…_claude_anthropic_custom_endpoint_still_uses_auth_token_trap`.
 
 ## State and isolation
 
@@ -177,7 +177,7 @@ splice `--id <id>` into the spawn argv.
 - It picks the newest row that (a) matches the spawn directory under
   the platform-aware `env::directories_match` rules, (b) carries a valid
   Cline root id (`<epochms>_<5 base36>` legacy or
-  `session_<epochms>_<6 base36>` current, subagent ids excluded), and
+  `session_<epochms>_<5 or 6 base36>` current, subagent ids excluded), and
   (c) is tagged `interactive = 1` (one-shot prompt runs are excluded —
   they exit immediately per issue #1769).
 - The id is persisted via `db::set_cli_session_id_if_missing`, so a

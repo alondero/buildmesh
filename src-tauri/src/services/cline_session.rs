@@ -47,7 +47,7 @@
 //!
 //! - `<13digit_epoch>_<5 base36 chars>` — legacy form
 //!   (`1789757012702_7of3e`).
-//! - `session_<13digit_epoch>_<6 base36 chars>` — current form
+//! - `session_<13digit_epoch>_<5 or 6 base36 chars>` — current form
 //!   (`session_1789901791099_yrvad`).
 //!
 //! Subagent rows are shaped
@@ -108,7 +108,7 @@ fn root_id_token(id: &str) -> Option<&str> {
 
 /// Validate a Cline session id (round 1 review). Accepts the legacy
 /// `<13digit>_<5 base36>` shape and the current
-/// `session_<13digit>_<6 base36>` shape; rejects subagent ids, partial
+/// `session_<13digit>_<5 or 6 base36>` shape; rejects subagent ids, partial
 /// writes, and any other pattern. The leading epoch is at least 13
 /// digits (year 2026+) so a 10-digit legacy epoch or a 0-prefixed
 /// placeholder never binds a node.
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn accepts_session_prefixed_current_shape() {
-        // Round 1 review: real Cline 3.0.x mints `session_<epoch>_<6 base36>`
+        // Round 1 review: real Cline 3.0.x mints `session_<epoch>_<5 or 6 base36>`
         // ids; the validator must accept that and reject the subagent
         // continuation.
         assert!(is_cline_session_id("session_1789901791099_yrvad"));
@@ -992,6 +992,14 @@ mod tests {
     /// 600 newer interactive rows in another cwd would hide the wanted
     /// row because `ORDER BY rowid DESC` would scroll past it. We now
     /// drop the LIMIT when the upper bound is the sentinel.
+    ///
+    /// Round 5 review: this test now inserts the wanted row FIRST and
+    /// the 600 crowding rows AFTER it, so the wanted row holds the
+    /// lowest rowid. With `ORDER BY rowid DESC LIMIT 500` the wanted
+    /// row is below the cut and `LIMIT 500` would have hidden it;
+    /// without `LIMIT` (the open-ended fix) all 601 rows fit in the
+    /// result set and the wanted row is reachable. A mutation that
+    /// forces `open_ended = false` makes the test return `None`.
     #[test]
     fn historic_recovers_wanted_row_on_open_ended_upper_bound() {
         let temp = crate::env::test_helpers::TestDir::new("cline_session_open_ended");
@@ -1011,26 +1019,29 @@ mod tests {
              )",
         )
         .unwrap();
-        let mut stmt = conn
-            .prepare(
-                "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
-                 VALUES (?1, 'cli', 1, ?2, 'idle', 1, '/other', ?2)",
-            )
-            .unwrap();
-        // 600 NEWER rows in /other (after the wanted row's epoch).
-        for i in 0..600 {
-            let id = format!("session_1789757013000_n{i:04}_bbb");
-            let started_at = ms_to_iso8601(1_789_757_013_000 + i).unwrap();
-            stmt.execute(rusqlite::params![id, started_at]).unwrap();
-        }
-        drop(stmt);
-        // Wanted row in /repo at an earlier epoch.
+        // Wanted row FIRST so it holds the lowest rowid. With
+        // `ORDER BY rowid DESC LIMIT 500` the 600 crowd (inserted
+        // after) would scroll past it and hide the wanted row; the
+        // open-ended fix (no LIMIT) keeps the wanted row reachable.
         conn.execute(
             "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
              VALUES ('session_1789757012750_wantd', 'cli', 1, '2026-09-18T18:43:32.750Z', 'idle', 1, '/repo', '2026-09-18T18:43:32.750Z')",
             [],
         )
         .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
+                 VALUES (?1, 'cli', 1, ?2, 'idle', 1, '/other', ?2)",
+            )
+            .unwrap();
+        // 600 NEWER rows in /other (after the wanted row's epoch and
+        // with higher rowids).
+        for i in 0..600 {
+            let id = format!("session_1789757013000_n{i:04}_bbb");
+            let started_at = ms_to_iso8601(1_789_757_013_000 + i).unwrap();
+            stmt.execute(rusqlite::params![id, started_at]).unwrap();
+        }
         // Open-ended upper bound (legacy path: recorded_start=false).
         let id = find_historic_id_for_db_path(
             &db_path,
@@ -1038,7 +1049,7 @@ mod tests {
             1_789_757_012_800,
             false,
         )
-        .expect("historic recovery must find the wanted row even when 600 newer rows from another cwd fill the table; the open-ended upper bound has no LIMIT");
+        .expect("historic recovery must find the wanted row even when 600 newer rows from another cwd sit above it in rowid order; the open-ended upper bound has no LIMIT");
         assert_eq!(id, "session_1789757012750_wantd");
     }
 

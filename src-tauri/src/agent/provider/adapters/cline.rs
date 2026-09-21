@@ -478,7 +478,7 @@ mod tests {
 
     /// Fresh vs resume argv shapes through the real composition seam:
     /// `cline -i [--model m] [--thinking e] [--verbose] [-i <prefill>]` and
-    /// `cline -i --id <id> …. Pins the resume flag and the absence of a mint
+    /// `cline -i --id <id> …`. Pins the resume flag and the absence of a mint
     /// flag.
     #[test]
     fn default_prepare_fresh_and_resume_argv_shapes() {
@@ -621,11 +621,17 @@ mod tests {
     /// this test instead of silently leaving `cli_session_id` null on
     /// every Cline node.
     #[test]
-    fn self_assigns_disables_pty_capture_and_runs_a_poller() {
+    fn self_assigns_session_id_and_skips_pty_uuid_capture() {
+        // Cline mints its own session ids; auto-resume must drive --id
+        // (the registry reads `self_assigns_session_id` to know whether
+        // to wire the after_fresh_spawn poller).
         assert!(
             CLINE.self_assigns_session_id(),
             "Cline mints its own session ids; auto-resume must drive --id"
         );
+        // Cline ids are `<epochms>_<base36>`, not UUIDs, so the PTY
+        // labeled-UUID regex can never match — capture must stay off
+        // and a separate SQLite poller (issue #1774) reads the id.
         assert!(
             !CLINE.captures_session_id_from_pty(),
             "Cline ids are <epochms>_<base36>, not UUIDs — PTY capture must stay off"
@@ -633,17 +639,16 @@ mod tests {
     }
 
     /// `recover_suspended_session_id` is the durable path used by the
-    /// startup sweep (issue #1774 / issue #1224 family). It must defer
-    /// to the Cline SQLite helper rather than reimplementing the read,
-    /// and it must surface `None` when no home is resolvable (e.g. an
-    /// `$HOME`-less Linux container) — a real `None` is what lets the
-    /// sweep skip the node instead of binding garbage.
+    /// startup sweep (issue #1774 / issue #1224 family). It must surface
+    /// `None` when no home is resolvable (e.g. an `$HOME`-less Linux
+    /// container) — a real `None` is what lets the sweep skip the node
+    /// instead of binding garbage. The positive path is exercised by
+    /// `services::cline_session::tests::historic_*` against a controlled
+    /// SQLite fixture; this test pins the no-home contract for the
+    /// adapter seam itself.
     #[test]
-    fn recover_suspended_session_id_delegates_to_cline_session_helper() {
+    fn recover_suspended_session_id_returns_none_for_unresolvable_path() {
         // No home resolvable in a bare test env: the helper returns None.
-        // We don't assert on the positive path here — `services::cline_session`
-        // covers it under controlled SQLite fixtures, and the adapter's job
-        // is just to forward without re-implementing.
         let no_home_result = CLINE.recover_suspended_session_id("/no/such/path", EnvType::Wsl, 0, false);
         assert!(
             no_home_result.is_none(),
