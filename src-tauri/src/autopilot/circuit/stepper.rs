@@ -417,6 +417,16 @@ pub enum CircuitEvent {
         /// SpawnAgentNode may have completed before this gate runs.
         output: Option<String>,
     },
+    /// The seam observed the piloted agent's latest report for this gate and
+    /// deliberately did not classify it: the agent is still working, so the
+    /// report is not this gate's result. The stepper records the observation
+    /// (so an unchanged report is not re-observed on the next probe) and
+    /// nothing else — no classification, no *classifier-outage* error, and no
+    /// share of the classifier-failure budget, which is reserved for a real
+    /// outage (run 163's reviewer yielded mid-turn with a progress line). The
+    /// gate's generic yielded-wait reason and its deadline still arrive from
+    /// the separate `WaitObserved`, which is what bounds the wait.
+    TurnParked { node_id: String, output: String },
     /// The seam ran the DeterministicVerification command.
     VerificationResult { node_id: String, green: bool },
     /// The seam executed a GitHub action (e.g. OpenPr, AddLabel).
@@ -970,6 +980,32 @@ pub fn advance(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         outcome: None, error: Some(Some(error)), agent_node_id: None,
                         attempt, fresh_attempt: false,
                     });
+                }
+            }
+        }
+        CircuitEvent::TurnParked { node_id, output } => {
+            // A deliberate wait is not a verdict, an outage, or a failure. The
+            // report is recorded as observed so `should_classify_report` stops
+            // re-asking about an unchanged one, and nothing else is written by
+            // this event: no `classification`, no classifier-outage error, no
+            // failure budget, and no SpawnAgentNode output stamp, so a progress
+            // line never becomes this gate's recorded evidence. (The gate's
+            // generic yielded-wait reason and deadline come from the separate
+            // `WaitObserved`.) The gate is judged when the report changes.
+            let is_waiting_classifier = matches!(
+                run.step(node_id),
+                Some(s) if s.status == StepStatus::Running
+            ) && matches!(
+                run.graph.node(node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. }
+                    | CircuitNodeKind::LlmTurnClassifier { .. }
+                    | CircuitNodeKind::AwaitAgentTurn { .. })
+            );
+            if is_waiting_classifier && run.state == RunState::Running {
+                if let Some(attempt) = run.step(node_id).map(|step| step.attempt) {
+                    run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
+                    run.context.set(&format!("node.{node_id}.evaluated_output"), output.clone());
+                    t.context_changed = true;
                 }
             }
         }
@@ -3245,6 +3281,48 @@ mod tests {
         assert_eq!(run.step("classify").unwrap().outcome, None);
         assert!(run.step("keep-going").is_none());
         assert!(transition.step_writes[0].error.as_ref().unwrap().as_ref().is_some());
+    }
+
+    /// Run 163: a reviewer that yielded mid-work must not be read as a verdict.
+    /// The park records that the report was observed — so the prober stops
+    /// re-asking about an unchanged one — and records nothing else: no
+    /// classification, no classifier-outage error, no classifier-failure
+    /// budget, and no output stamp that would make the progress line this
+    /// gate's evidence. The gate's generic yielded-wait reason and its deadline
+    /// are written by the separate `WaitObserved`, not by this event.
+    #[test]
+    fn turn_parked_records_the_observation_and_nothing_else() {
+        let mut run = gate_run(
+            "verdict",
+            CircuitNodeKind::ReviewVerdict { target_node_id: None },
+            &[(StepOutcome::Working, "feedback"), (StepOutcome::Blocked, "blocked-path")],
+        );
+        fire_to_gate(&mut run, "verdict");
+        let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim.";
+        let transition = advance(&mut run, &CircuitEvent::TurnParked {
+            node_id: "verdict".into(),
+            output: progress.into(),
+        });
+
+        let gate = run.step("verdict").unwrap();
+        assert_eq!(gate.status, StepStatus::Running, "the gate keeps waiting");
+        assert!(gate.outcome.is_none());
+        assert!(gate.error.is_none(), "this event writes no error; got {:?}", gate.error);
+        assert!(run.step("feedback").is_none(), "a progress line must not request changes");
+        assert!(run.step("blocked-path").is_none());
+        assert!(transition.step_writes.is_empty(), "this event writes no step row");
+        assert_eq!(run.state, RunState::Running);
+
+        // Nothing that would look like a verdict, an outage, or a report.
+        assert_eq!(run.context.get("node.verdict.classification"), None);
+        assert_eq!(run.context.get("node.verdict.classifier_failures.1"), None);
+        assert_eq!(run.context.get("node.verdict.review_verdict"), None);
+        assert_eq!(run.context.get("node.work.output"), None);
+
+        // The observation itself is recorded, so this exact report is not
+        // observed again — the readiness question is asked when it changes.
+        assert_eq!(run.context.get("node.verdict.evaluated_attempt"), Some("1"));
+        assert_eq!(run.context.get("node.verdict.evaluated_output"), Some(progress));
     }
 
     #[test]
