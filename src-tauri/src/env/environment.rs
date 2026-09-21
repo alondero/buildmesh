@@ -688,7 +688,8 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
 // ── Cline CLI home ──────────────────────────────────────────────────────────
 //
 // Issue #1773 wired the Cline CLI as a first-class agent harness. Issue
-// #1774 captures the session id it self-assigns (`<epochms>_<5 chars>`)
+// #1774 captures the session id it self-assigns
+// (`<epochms>_<5 chars>` legacy, `session_<epochms>_<6 chars>` current)
 // from `~/.cline/data/db/sessions.db`. The capture helper below resolves
 // that home directory and SQLite store from the *spawn* environment
 // (matches `codex_dir_for_env` / `agy_dir_for_env`) so a Windows
@@ -697,19 +698,30 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
 // `--data-dir` is an explicit Cline runtime override for parallel runs;
 // `CLINE_DATA_DIR` is the matching env var. Issue #1769 research pinned
 // `--help` as the source of truth, so we honour both with the same
-// precedence Cline does: explicit flag > env > `~/.cline/data`.
+// precedence Cline does: explicit flag > env > default `~/.cline/data`.
+// Round 1 review note: `CLINE_DATA_DIR` IS the data directory (it does
+// not point at `~/.cline`); the DB sits at `$CLINE_DATA_DIR/db/sessions.db`,
+// not `$CLINE_DATA_DIR/data/db/sessions.db`. The split below keeps the
+// two shapes separate.
+///
+/// WSL guests run on the Linux userland, so the path returned by
+/// [`cline_db_path_for_env`] is a guest POSIX path. The Windows-side
+/// SQLite `Connection::open` call in
+/// `services::cline_session::try_capture_from_db_path` must convert
+/// that to a `\\wsl$\…` UNC path via [`cline_db_path_for_host`] (the
+/// `host_path` module is the only place a UNC string is built — see
+/// CLAUDE.md rule 21 / the `HostPath` sub-module).
 
 /// Honour the Cline `--data-dir` / `CLINE_DATA_DIR` override for the
 /// resolved environment. `get` lets tests inject a fake env without
-/// mutating process state.
+/// mutating process state. The `env_type` parameter is reserved for
+/// future per-env override shapes (e.g. a WSL-specific lookup) — for
+/// now the same env var is honoured on every runtime.
 fn cline_data_dir_override_for_env<F: Fn(&str) -> Option<std::ffi::OsString>>(
-    env_type: EnvType,
+    _env_type: EnvType,
     get: F,
 ) -> Option<PathBuf> {
-    let raw = match env_type {
-        EnvType::WindowsInterop | EnvType::Windows => get("CLINE_DATA_DIR"),
-        EnvType::Wsl => get("CLINE_DATA_DIR"),
-    }?;
+    let raw = get("CLINE_DATA_DIR")?;
     let raw = raw.to_string_lossy().trim().to_string();
     if raw.is_empty() {
         return None;
@@ -740,10 +752,38 @@ pub(crate) fn cline_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<P
 }
 
 /// Absolute path to Cline's authoritative session store:
+/// `<data dir>/db/sessions.db` when `CLINE_DATA_DIR` is set, otherwise
 /// `<cline home>/data/db/sessions.db` (issue #1769 research). Returns
 /// `None` when the home directory is unknown (no `$HOME` / `$USERPROFILE`).
+///
+/// The returned path is in the *spawn* environment's native syntax. For
+/// a Windows-side reader driving a WSL Cline, the caller must route
+/// through [`cline_db_path_for_host`] to convert the guest POSIX path
+/// to a Windows-host UNC path.
 pub(crate) fn cline_db_path_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
-    cline_dir_for_env(env_type, spawn_path).map(|dir| dir.join("data").join("db").join("sessions.db"))
+    let dir = cline_dir_for_env(env_type, spawn_path)?;
+    if env::var_os("CLINE_DATA_DIR").is_some() {
+        // Round 1 review: the override IS the data directory; the DB
+        // sits under it directly (no extra `data/` prefix). The default
+        // derivation (above) still needs the `data/db/sessions.db` tail
+        // because the home directory IS `~/.cline`, not `~/.cline/data`.
+        Some(dir.join("db").join("sessions.db"))
+    } else {
+        Some(dir.join("data").join("db").join("sessions.db"))
+    }
+}
+
+/// Windows-host form of the Cline session store. For Windows and
+/// WindowsInterop spawn paths this is a no-op (the spawn path already
+/// lives on the host); for `EnvType::Wsl` the guest POSIX path is
+/// converted to the matching `\\wsl$\…` UNC path that a Rust
+/// `Connection::open` can read. The conversion runs through
+/// `host_path::to_host_path`, the single module allowed to build UNC
+/// strings (CLAUDE.md rule 21).
+pub(crate) fn cline_db_path_for_host(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let db_path = cline_db_path_for_env(env_type, spawn_path)?;
+    let db_str = db_path.to_string_lossy();
+    Some(PathBuf::from(super::to_host_path(&db_str)))
 }
 
 /// Cline session-id capture root for the **current** (running) Buildmesh
