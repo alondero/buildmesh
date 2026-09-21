@@ -1721,6 +1721,22 @@ fn classify_gate_report(
     if review_turn_is_complete(view, node_id, status) {
         return Some(evaluator::Classification::Completed);
     }
+    // A clean reviewer turn (ready/completed with a non-empty report) first
+    // consults the live classifier exactly as before. Only when that backend
+    // is absent or fails does the gate fall back to reading the report's
+    // explicit verdict deterministically (issue #1815), so a review completes
+    // on meshes with no classifier CLI instead of parking. The fallback never
+    // overrides a live verdict. AwaitingInput turns (permission prompts,
+    // questions) keep the classifier below as the tie-breaker.
+    if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. }))
+        && matches!(status, SessionStatus::Ready | SessionStatus::Completed)
+    {
+        let prompt = evaluator::review_prompt(output);
+        if let Some(classification) = classify(&prompt) {
+            return Some(classification);
+        }
+        return Some(evaluator::review_verdict_from_report(output));
+    }
     let prompt = if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
         evaluator::review_prompt(output)
     } else if awaits_review_turn(view, node_id) {
@@ -3037,7 +3053,12 @@ mod tests {
         }), Some(Classification::Blocked));
         assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::AwaitingInput, "Tests running", |_| Some(Classification::Working)), Some(Classification::Working));
         assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::AwaitingInput, "Report", |_| None), None);
-        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::Ready, "Changes requested", |prompt| {
+        // Without a backend the clean reviewer turn falls back to reading
+        // the report deterministically (issue #1815).
+        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::Ready, "Changes requested",
+            |_| None), Some(Classification::Working));
+        // AwaitingInput keeps the classifier as the tie-breaker.
+        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::AwaitingInput, "Changes requested", |prompt| {
             assert!(prompt.contains("explicitly approves"));
             Some(Classification::Working)
         }), Some(Classification::Working));
@@ -3052,6 +3073,50 @@ mod tests {
             assert!(prompt.contains("the assigned work is finished"));
             Some(Classification::Working)
         }), Some(Classification::Working));
+    }
+
+    #[test]
+    fn review_verdict_falls_back_without_classifier_backend() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        view.context.set("source.review_preset", "1");
+        // Absent backend: the classifier yields nothing, so the gate reads
+        // the report's explicit verdict instead of parking.
+        let absent_backend = |_: &str| -> Option<Classification> { None };
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Approved. No remaining findings.", absent_backend),
+            Some(Classification::Completed));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Completed,
+                "Round 3: Approved", absent_backend),
+            Some(Classification::Completed));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Changes requested: add regression tests", absent_backend),
+            Some(Classification::Working));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Cannot assess this diff: missing access to the base ref.", absent_backend),
+            Some(Classification::Blocked));
+        // A live backend keeps precedence: its verdict stands even when the
+        // report text would read differently.
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Approved. No remaining findings.", |prompt| {
+                assert!(prompt.contains("explicitly approves"));
+                Some(Classification::Working)
+            }),
+            Some(Classification::Working));
+        // AwaitingInput is not a clean yield: the classifier stays the
+        // tie-breaker for permission prompts and questions.
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::AwaitingInput, "Allow tests?", |prompt| {
+                assert!(prompt.contains("explicitly approves"));
+                Some(Classification::Blocked)
+            }),
+            Some(Classification::Blocked));
     }
 
     #[test]
