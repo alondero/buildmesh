@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -91,7 +91,47 @@ interface MeshItemProps {
   onOpenWorktreesProbe: (meshId: number) => void;
 }
 
-export function MeshItem({
+/// Issue #1748 — the sidebar re-rendered every row on every node update:
+/// `Sidebar` maps all meshes on each store change, so without memo every
+/// `MeshItem` (and through it every `NodeItem`) re-rendered on any node
+/// patch. The comparator below bails out unless this mesh's own data
+/// changed. `meshNodes` is compared element-wise (not by array identity):
+/// `Sidebar`'s grouped map rebuilds the per-mesh arrays on each store
+/// update while the store's shallow reconciliation (issue #1384) preserves
+/// per-node references, so identical element references mean "nothing in
+/// this mesh changed". All callbacks come from `Sidebar`'s `useCallback`
+/// set, so reference equality on them holds in the steady state.
+function sameMeshNodeRefs(left: AgentNode[], right: AgentNode[]): boolean {
+  return left.length === right.length && left.every((node, index) => node === right[index]);
+}
+
+function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
+  return (
+    previous.mesh === next.mesh
+    && previous.isSelected === next.isSelected
+    && previous.isDropdownOpen === next.isDropdownOpen
+    && previous.isSpawning === next.isSpawning
+    && previous.providerList === next.providerList
+    && previous.activeNodeId === next.activeNodeId
+    && sameMeshNodeRefs(previous.meshNodes, next.meshNodes)
+    && previous.onSelectMesh === next.onSelectMesh
+    && previous.onNewNode === next.onNewNode
+    && previous.onSelectProvider === next.onSelectProvider
+    && previous.onOpenFilesProbe === next.onOpenFilesProbe
+    && previous.onOpenIssuesProbe === next.onOpenIssuesProbe
+    && previous.onOpenSessionHistoryProbe === next.onOpenSessionHistoryProbe
+    && previous.onOpenPropertiesProbe === next.onOpenPropertiesProbe
+    && previous.onOpenWorktreesProbe === next.onOpenWorktreesProbe
+    && previous.onActivateNode === next.onActivateNode
+    && previous.selectMesh === next.selectMesh
+    && previous.onDeleteNode === next.onDeleteNode
+    && previous.getDefaultProvider === next.getDefaultProvider
+  );
+}
+
+export const MeshItem = memo(MeshItemView, areMeshItemPropsEqual);
+
+function MeshItemView({
   mesh,
   isSelected,
   isDropdownOpen,
@@ -123,7 +163,10 @@ export function MeshItem({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [recolorOpen, setRecolorOpen] = useState(false);
-  const meshColor = getMeshColor(mesh.id, mesh.color);
+  // Issue #1748 — palette entries already have stable identity, but a custom
+  // hex builds a fresh object per call; memoize so `NodeItem` rows (which
+  // compare `meshColor` by reference) don't re-render with this mesh.
+  const meshColor = useMemo(() => getMeshColor(mesh.id, mesh.color), [mesh.id, mesh.color]);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   // The header no longer carries a sync *button* — the background sync (ADR

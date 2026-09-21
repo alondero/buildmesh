@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
@@ -53,7 +53,29 @@ interface NodeItemProps {
   onDelete: (e: React.MouseEvent) => void;
 }
 
-export function NodeItem({ node, meshColor, isActive, providerList, onSelect, onDelete }: NodeItemProps) {
+/// Issue #1748 — every sidebar row re-rendered on every node update because
+/// `NodeItem` was a plain component receiving fresh per-row closures from
+/// `MeshItem` on each pass. The comparator below covers everything that
+/// affects the rendered output: the node entity itself (the store's shallow
+/// reconciliation in issue #1384 preserves the reference for untouched
+/// nodes), the row visuals (`meshColor`, `isActive`), and the Regenerate
+/// menu targets (`providerList`). `onSelect`/`onDelete` are intentionally
+/// excluded: `MeshItem` builds them as per-row closures
+/// (`() => onActivateNode(node.id)`), so they are never referentially
+/// stable — but they capture only stable store actions plus the row's own
+/// id, making them semantically constant for the row's lifetime.
+function areNodeItemPropsEqual(previous: NodeItemProps, next: NodeItemProps): boolean {
+  return (
+    previous.node === next.node
+    && previous.meshColor === next.meshColor
+    && previous.isActive === next.isActive
+    && previous.providerList === next.providerList
+  );
+}
+
+export const NodeItem = memo(NodeItemView, areNodeItemPropsEqual);
+
+function NodeItemView({ node, meshColor, isActive, providerList, onSelect, onDelete }: NodeItemProps) {
   const config = getStatusConfig(node.status);
   const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);

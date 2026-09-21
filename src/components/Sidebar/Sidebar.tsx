@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useMemo, useCallback } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
-import { useAgentNodeStore, useAllAgentNodes } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
@@ -23,6 +23,17 @@ import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
+// Issue #1748 — shared empty list so meshes without visible nodes keep a
+// stable `meshNodes` reference instead of allocating a fresh `[]` per mesh
+// on every render (which would defeat the memoized `MeshItem` rows below).
+const EMPTY_NODES: AgentNode[] = [];
+
+// Issue #1748 — module-level keyboard-sensor options so `useSensors` below
+// returns a referentially stable array. An inline options literal would hand
+// `DndContext` a new `sensors` prop on every render, re-rendering the whole
+// provider subtree (and, through it, every sortable row) on each node update.
+const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
+
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
   // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
@@ -41,9 +52,26 @@ export function Sidebar() {
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
   const getDefaultProvider = useMeshStore(state => state.getDefaultProvider);
   // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
-  // The per-mesh filter below only re-computes when the array reference
-  // changes (useShallow equality on the underlying selector).
+  // Issue #1748 — group nodes per mesh in ONE memo pass instead of running
+  // `filter` per mesh during render (O(M x N) work plus a fresh array per
+  // row on every render, which would defeat the memoized `MeshItem` rows).
+  // Per-node object identity comes from the store's shallow reconciliation
+  // (`agentNodeStore.ts`), so untouched meshes keep identical element
+  // references and their rows bail out via the `MeshItem` comparator.
+  // Archived nodes are excluded here (issue #788 — they live in the
+  // Archive probe tab, not the actionable sidebar list; mirrors mobile's
+  // `visibleNodes` filter in src/mobile/screens/NodeList.tsx).
   const agentNodes = useAllAgentNodes();
+  const nodesByMesh = useMemo(() => {
+    const grouped = new Map<number, AgentNode[]>();
+    for (const node of agentNodes) {
+      if (node.status === 'archived') continue;
+      const list = grouped.get(node.mesh_id);
+      if (list) list.push(node);
+      else grouped.set(node.mesh_id, [node]);
+    }
+    return grouped;
+  }, [agentNodes]);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const activateNode = useNodeActivityStore(state => state.activateNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
@@ -87,11 +115,19 @@ export function Sidebar() {
   // any other surface that shares the mesh's numeric id.
   useClickOutside<string>(openDropdownFor, () => setOpenDropdownFor(null));
 
-  const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
-  const handleToggleDropdown = (mesh: Mesh) => {
+  // Issue #1748 — row callbacks are `useCallback`-stable so the memoized
+  // `MeshItem` rows actually skip: `selectMesh`/`openProbeTab`/`activateNode`
+  // are stable zustand actions, and the two pieces of render state read here
+  // (`selectedMeshId`, `openDropdownFor`) go through `getState`/functional
+  // updates instead of the dependency array.
+  const handleSelectMesh = useCallback((meshId: number) => {
+    const current = useMeshStore.getState().selectedMeshId;
+    selectMesh(current === meshId ? null : meshId);
+  }, [selectMesh]);
+  const handleToggleDropdown = useCallback((mesh: Mesh) => {
     const key = dropdownId('mesh', mesh.id);
-    setOpenDropdownFor(openDropdownFor === key ? null : key);
-  };
+    setOpenDropdownFor(prev => (prev === key ? null : key));
+  }, []);
 
   // Issue #375 — the right-click "Properties" entry opens the Probe
   // Panel on the ⚙️ Mesh Properties tab. We select the mesh first so
@@ -99,35 +135,39 @@ export function Sidebar() {
   // Issue #767 split out the drift `!` badge (see handleOpenWorktreesProbe
   // below) — the two intents ("edit config" vs "fix the drift") must
   // not share a handler.
-  const handleOpenPropertiesProbe = (meshId: number) => {
+  const handleOpenFilesProbe = useCallback(() => {
+    openProbeTab('files');
+  }, [openProbeTab]);
+
+  const handleOpenPropertiesProbe = useCallback((meshId: number) => {
     selectMesh(meshId);
     openProbeTab('properties');
-  };
+  }, [selectMesh, openProbeTab]);
 
   // Issue #767 — the drift `!` badge in the sidebar opens the Probe
   // Panel on the 🌳 Worktree Manager tab, where the HealthBlock's
   // Restore/Free actions live. The badge's intent is "your mesh is
   // drifted and needs recovery"; the Properties tab has no such
   // controls, so routing there (the pre-#767 behaviour) was a dead-end.
-  const handleOpenWorktreesProbe = (meshId: number) => {
+  const handleOpenWorktreesProbe = useCallback((meshId: number) => {
     selectMesh(meshId);
     openProbeTab('worktrees');
-  };
+  }, [selectMesh, openProbeTab]);
 
   // Issue #378 — the right-click "GitHub Issues" and "Archive" entries
   // open the Probe Panel on the 🐙 / 🕒 tabs respectively. The mesh is
   // selected first (same dance as the Properties entry point) so
   // `useProbeContext` resolves to the right row before the tab mounts.
-  const handleOpenIssuesProbe = (meshId: number) => {
+  const handleOpenIssuesProbe = useCallback((meshId: number) => {
     selectMesh(meshId);
     openProbeTab('issues');
-  };
-  const handleOpenSessionHistoryProbe = (meshId: number) => {
+  }, [selectMesh, openProbeTab]);
+  const handleOpenSessionHistoryProbe = useCallback((meshId: number) => {
     selectMesh(meshId);
     openProbeTab('sessions');
-  };
+  }, [selectMesh, openProbeTab]);
 
-  const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => {
+  const handleSelectProvider = useCallback(async (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => {
     setOpenDropdownFor(null);
     // Guard against a double-spawn: if a spawn for this mesh is already in
     // flight, ignore the click (the button is also disabled once the state
@@ -146,21 +186,21 @@ export function Sidebar() {
       spawningMeshRef.current.delete(mesh.id);
       setSpawningMeshIds(new Set(spawningMeshRef.current));
     }
-  };
+  }, [selectProviderForMesh, activateNode]);
 
-  const handleDeleteNode = async (e: React.MouseEvent, nodeId: number) => {
+  const handleDeleteNode = useCallback(async (e: React.MouseEvent, nodeId: number) => {
     e.stopPropagation();
     await deleteAgentNode(nodeId);
-  };
+  }, [deleteAgentNode]);
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const activeIndex = meshes.findIndex(p => p.id === active.id);
     const overIndex = meshes.findIndex(p => p.id === over.id);
     if (activeIndex === -1 || overIndex === -1) return;
     reorderMeshes(active.id as number, overIndex);
-  };
+  }, [meshes, reorderMeshes]);
 
   // Issue #727 — register KeyboardSensor alongside the default
   // PointerSensor so the mesh-reorder drag handle is operable from the
@@ -175,8 +215,15 @@ export function Sidebar() {
   // select the mesh) is unchanged.
   const sensors = useSensors(
     useSensor(PointerSensor),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(KeyboardSensor, KEYBOARD_SENSOR_OPTIONS),
   );
+
+  // Issue #1748 — `SortableContext` keys its context value on the `items`
+  // array identity, and every `MeshItem` subscribes through `useSortable` —
+  // a fresh `meshes.map(...)` per render would re-render every row via
+  // context even with memoized props. The id list only changes when the
+  // mesh list itself changes, never on node updates.
+  const sortableMeshIds = useMemo(() => meshes.map(p => p.id), [meshes]);
 
   return (
     <div className="relative flex h-full" style={{ width }}>
@@ -212,7 +259,7 @@ export function Sidebar() {
               </div>
             ) : (
               <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-                <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
+                <SortableContext items={sortableMeshIds} strategy={verticalListSortingStrategy}>
                   {meshes.map(mesh => (
                     <MeshItem
                       key={mesh.id}
@@ -224,15 +271,12 @@ export function Sidebar() {
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleToggleDropdown}
                       onSelectProvider={handleSelectProvider}
-                      onOpenFilesProbe={() => openProbeTab('files')}
+                      onOpenFilesProbe={handleOpenFilesProbe}
                       onOpenPropertiesProbe={handleOpenPropertiesProbe}
                       onOpenWorktreesProbe={handleOpenWorktreesProbe}
                       onOpenIssuesProbe={handleOpenIssuesProbe}
                       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
-                      // Issue #788 — archived nodes live in the Archive probe
-                      // tab, not the actionable sidebar list (mirrors mobile's
-                      // `visibleNodes` filter in src/mobile/screens/NodeList.tsx).
-                      meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id && w.status !== 'archived')}
+                      meshNodes={nodesByMesh.get(mesh.id) ?? EMPTY_NODES}
                       activeNodeId={activeNodeId}
                       onActivateNode={activateNode}
                       selectMesh={selectMesh}
