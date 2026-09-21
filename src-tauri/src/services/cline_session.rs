@@ -249,6 +249,14 @@ pub fn list_recent_interactive_sessions(
 /// (`9999-12-31T23:59:59.999Z`) for the legacy `i64::MAX` open-ended
 /// window — `chrono::DateTime::from_timestamp_millis(i64::MAX)` returns
 /// `None`, so we cannot just pass the raw ms.
+///
+/// Round 4 review: the original sentinel branch applied `LIMIT 500`
+/// even on the open-ended upper bound, which would let 500 newer
+/// interactive rows hide the target. We drop `LIMIT` when the upper
+/// bound is the sentinel (no real ceiling). The `LIMIT 500` only kicks
+/// in when `recorded_start=true` and we already constrained the upper
+/// bound to `anchor_ms + INITIAL_SPAWN_WINDOW_MS`; that's a small,
+/// realistic ceiling where 500 is generous headroom.
 pub fn list_sessions_in_window(
     conn: &Connection,
     not_before: i64,
@@ -258,18 +266,26 @@ pub fn list_sessions_in_window(
         .ok_or_else(|| "not_before ms out of ISO range".to_string())?;
     let not_after_iso = ms_to_iso8601(not_after)
         .unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
-    let mut stmt = conn
-        .prepare(
-            "SELECT session_id, cwd, interactive \
-             FROM sessions \
-             WHERE interactive = 1 \
-               AND session_id NOT LIKE '%__agent_%' \
-               AND started_at >= ?1 \
-               AND started_at <= ?2 \
-             ORDER BY rowid DESC \
-             LIMIT 500",
-        )
-        .map_err(|e| e.to_string())?;
+    let open_ended = ms_to_iso8601(not_after).is_none();
+    let sql = if open_ended {
+        "SELECT session_id, cwd, interactive \
+         FROM sessions \
+         WHERE interactive = 1 \
+           AND session_id NOT LIKE '%__agent_%' \
+           AND started_at >= ?1 \
+           AND started_at <= ?2 \
+         ORDER BY rowid DESC"
+    } else {
+        "SELECT session_id, cwd, interactive \
+         FROM sessions \
+         WHERE interactive = 1 \
+           AND session_id NOT LIKE '%__agent_%' \
+           AND started_at >= ?1 \
+           AND started_at <= ?2 \
+         ORDER BY rowid DESC \
+         LIMIT 500"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([&not_before_iso, &not_after_iso], |row| {
             let interactive: i64 = row.get(2)?;
@@ -967,6 +983,62 @@ mod tests {
             true,
         )
         .expect("historic recovery must find the wanted row even when 600 older rows from a different cwd fill the table");
+        assert_eq!(id, "session_1789757012750_wantd");
+    }
+
+    /// Round 4 review: the SQL `LIMIT 500` was leaking onto the
+    /// open-ended legacy path (`recorded_start=false` →
+    /// `not_after = i64::MAX` → sentinel `9999-12-31T23:59:59.999Z`).
+    /// 600 newer interactive rows in another cwd would hide the wanted
+    /// row because `ORDER BY rowid DESC` would scroll past it. We now
+    /// drop the LIMIT when the upper bound is the sentinel.
+    #[test]
+    fn historic_recovers_wanted_row_on_open_ended_upper_bound() {
+        let temp = crate::env::test_helpers::TestDir::new("cline_session_open_ended");
+        let db_path = temp.path().join("sessions.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL,
+                interactive INTEGER NOT NULL,
+                cwd TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             )",
+        )
+        .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
+                 VALUES (?1, 'cli', 1, ?2, 'idle', 1, '/other', ?2)",
+            )
+            .unwrap();
+        // 600 NEWER rows in /other (after the wanted row's epoch).
+        for i in 0..600 {
+            let id = format!("session_1789757013000_n{i:04}_bbb");
+            let started_at = ms_to_iso8601(1_789_757_013_000 + i).unwrap();
+            stmt.execute(rusqlite::params![id, started_at]).unwrap();
+        }
+        drop(stmt);
+        // Wanted row in /repo at an earlier epoch.
+        conn.execute(
+            "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
+             VALUES ('session_1789757012750_wantd', 'cli', 1, '2026-09-18T18:43:32.750Z', 'idle', 1, '/repo', '2026-09-18T18:43:32.750Z')",
+            [],
+        )
+        .unwrap();
+        // Open-ended upper bound (legacy path: recorded_start=false).
+        let id = find_historic_id_for_db_path(
+            &db_path,
+            "/repo",
+            1_789_757_012_800,
+            false,
+        )
+        .expect("historic recovery must find the wanted row even when 600 newer rows from another cwd fill the table; the open-ended upper bound has no LIMIT");
         assert_eq!(id, "session_1789757012750_wantd");
     }
 

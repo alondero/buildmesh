@@ -23,7 +23,7 @@
 //!   never validated against a static list) and `--thinking
 //!   none|low|medium|high|xhigh` (bare `--thinking` means `medium`).
 //! - **Spawn**: on Windows the npm install is a `cline.cmd` shim, so the recipe
-//!   wraps with `WindowsShell::Cmd` → `cmd.exe /c cline →; `CreateProcess`
+//!   wraps with `WindowsShell::Cmd` → `cmd.exe /c cline …`; `CreateProcess`
 //!   cannot execute a `.cmd` directly. macOS/Linux spawn the real executable
 //!   directly (`WindowsShell::Direct`).
 //!
@@ -478,7 +478,7 @@ mod tests {
 
     /// Fresh vs resume argv shapes through the real composition seam:
     /// `cline -i [--model m] [--thinking e] [--verbose] [-i <prefill>]` and
-    /// `cline -i --id <id> →. Pins the resume flag and the absence of a mint
+    /// `cline -i --id <id> …. Pins the resume flag and the absence of a mint
     /// flag.
     #[test]
     fn default_prepare_fresh_and_resume_argv_shapes() {
