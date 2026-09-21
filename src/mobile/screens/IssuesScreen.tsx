@@ -148,7 +148,7 @@ export default function IssuesScreen({
                 <span
                   style={{
                     fontSize: 13,
-                    color: "#fff",
+                    color: "var(--text)",
                     fontWeight: 500,
                     overflow: "hidden",
                     flex: 1,

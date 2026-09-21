@@ -7,6 +7,7 @@ import { attachTouchPan } from "./attachTouchPan";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
 import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widths";
+import { DARK_TERMINAL_THEME } from "../../components/Terminal/terminalConfig";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
@@ -211,14 +212,11 @@ export default function TerminalScreen({
       cursorBlink: true,
       fontSize: 13,
       fontFamily:
-        '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
-      theme: {
-        background: "#0f0f0f",
-        foreground: "#e0e0e0",
-        cursor: "#e0e0e0",
-        cursorAccent: "#0f0f0f",
-        selectionBackground: "#3a3a3a",
-      },
+        '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
+      // The shared desktop dark palette — one terminal look across
+      // platforms (xterm.js takes literals, not CSS vars, so the palette
+      // lives in code rather than in styles.css).
+      theme: DARK_TERMINAL_THEME,
       scrollback: 1000,
       // Required so Unicode11Addon can override the glyph-width tables below.
       allowProposedApi: true,
@@ -626,8 +624,8 @@ export default function TerminalScreen({
               position: "absolute",
               right: 14,
               bottom: 14,
-              background: "rgba(33, 150, 243, 0.95)",
-              color: "#fff",
+              background: "var(--accent)",
+              color: "var(--on-accent)",
               border: "none",
               borderRadius: 999,
               padding: "8px 14px",

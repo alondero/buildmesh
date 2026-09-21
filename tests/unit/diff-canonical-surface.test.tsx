@@ -32,11 +32,11 @@ import type { DiffHunk, DiffLine, FileDiff } from '../../src/lib/tauri';
 describe('fileDiffStatusMeta (canonical, lib/status.ts)', () => {
   it('returns a known meta for each FileDiffStatus', () => {
     const expected: Array<[string, FileDiffStatusMeta]> = [
-      ['added', { letter: 'A', label: 'Added', color: 'text-accent-green' }],
-      ['modified', { letter: 'M', label: 'Modified', color: 'text-accent-amber' }],
-      ['deleted', { letter: 'D', label: 'Deleted', color: 'text-accent-red' }],
-      ['renamed', { letter: 'R', label: 'Renamed', color: 'text-accent-violet' }],
-      ['untracked', { letter: '?', label: 'Untracked', color: 'text-text-muted' }],
+      ['added', { letter: 'A', label: 'Added', color: 'text-accent-green', hex: '#22c55e', hexBg: 'rgba(34, 197, 94, 0.15)' }],
+      ['modified', { letter: 'M', label: 'Modified', color: 'text-accent-amber', hex: '#f59e0b', hexBg: 'rgba(245, 158, 11, 0.15)' }],
+      ['deleted', { letter: 'D', label: 'Deleted', color: 'text-accent-red', hex: '#ef4444', hexBg: 'rgba(239, 68, 68, 0.15)' }],
+      ['renamed', { letter: 'R', label: 'Renamed', color: 'text-accent-violet', hex: '#8b5cf6', hexBg: 'rgba(139, 92, 246, 0.15)' }],
+      ['untracked', { letter: '?', label: 'Untracked', color: 'text-text-muted', hex: '#7a8492', hexBg: '#1b1b23' }],
     ];
     for (const [status, meta] of expected) {
       expect(fileDiffStatusMeta(status)).toEqual(meta);

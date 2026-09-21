@@ -148,7 +148,7 @@ export default function ArchivedNodesScreen({
               <div
                 style={{
                   fontSize: 13,
-                  color: "#fff",
+                  color: "var(--text)",
                   fontWeight: 500,
                   marginBottom: 4,
                   overflow: "hidden",

@@ -294,7 +294,7 @@ export default function App() {
               href={prCreatedUrl}
               target="_blank"
               rel="noreferrer"
-              style={{ color: "#a5d6a7", textDecoration: "underline" }}
+              style={{ color: "inherit", textDecoration: "underline" }}
             >
               {prCreatedUrl}
             </a>
@@ -305,7 +305,7 @@ export default function App() {
             style={{
               background: "transparent",
               border: "none",
-              color: "#a5d6a7",
+              color: "inherit",
               fontSize: 18,
               cursor: "pointer",
               padding: "0 4px",
@@ -328,7 +328,7 @@ export default function App() {
             alignItems: "center",
             justifyContent: "center",
             gap: 12,
-            color: "#fff",
+            color: "var(--text)",
             padding: 24,
             textAlign: "center",
           }}

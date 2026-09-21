@@ -88,6 +88,8 @@ codex.local.md
 .claude/memory/
 .claude/scheduled_tasks.lock
 CLAUDE.local.md
+# Cline agent memory bank (local-only, same convention as .claude/memory/)
+memory-bank/
 
 # Antigravity CLI and .agents open standard runtime / local state (.agents/skills is tracked)
 .agents/hooks.json
@@ -140,6 +142,9 @@ coverage/
 # spike's test_user_buf.exe). Build output belongs under target/, never here.
 /*.exe
 /*.pdb
+# Repo-root scratch/build log dir (cargo-check.*, vitest-all.*, …) — not the
+# Rust target dir; src-tauri/target is covered by src-tauri/.gitignore.
+/target/
 .altitude-findings.json
 
 # diagnostic scratch files dropped by ad-hoc Bash commands

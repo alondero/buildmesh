@@ -61,7 +61,9 @@ export function onTerminalFontSizeChange(cb: FontSizeListener): () => void {
 // construction time; TerminalRegistry's ThemeManager subscribes to
 // onThemeChange and pushes the new palette to every live terminal on flip.
 
-const DARK_TERMINAL_THEME = {
+// Exported: the mobile terminal (src/mobile/screens/TerminalScreen.tsx)
+// renders this same palette — one terminal look across platforms.
+export const DARK_TERMINAL_THEME = {
   background: '#0a0a0e',
   foreground: '#e2e8f0',
   cursor: '#00d4ff',

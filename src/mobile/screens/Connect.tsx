@@ -97,7 +97,8 @@ export default function Connect({ onConnected, notice }: Props) {
           width: 56,
           height: 56,
           borderRadius: 16,
-          background: "linear-gradient(135deg, #2196f3, #0d47a1)",
+          background: "linear-gradient(135deg, var(--accent), var(--accent-dim))",
+          color: "var(--on-accent)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -107,7 +108,7 @@ export default function Connect({ onConnected, notice }: Props) {
       >
         ⬡
       </div>
-      <h1 style={{ fontSize: 22, fontWeight: 600, color: "#fff", margin: 0 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 600, color: "var(--text)", margin: 0 }}>
         Buildmesh Remote
       </h1>
       <p
@@ -128,7 +129,7 @@ export default function Connect({ onConnected, notice }: Props) {
         <p
           data-testid="connect-notice"
           style={{
-            color: "#ffb74d",
+            color: "var(--amber)",
             fontSize: 12,
             textAlign: "center",
             maxWidth: 320,

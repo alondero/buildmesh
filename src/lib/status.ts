@@ -86,7 +86,10 @@ export const STATUS_CONFIG = {
     bgColor: 'bg-accent-green',
     dot: '✓',
     label: 'Ready',
-    hex: '#10b981',
+    // Same green as `completed` — both render `text-accent-green` on
+    // desktop, so the mobile hex mirrors that token (#22c55e), not a
+    // second green.
+    hex: '#22c55e',
   },
   // Issue #788 — an archived node is historical, not actionable work.
   // Muted grey keeps it distinct from live idle/running nodes in the
@@ -119,6 +122,15 @@ export interface FileDiffStatusMeta {
   label: string;
   /** Tailwind text colour token for the badge. */
   color: string;
+  /** Literal hex mirror of `color` (the `--color-accent-*` /
+      `--color-text-muted` tokens in src/App.css) for surfaces that render
+      inline styles instead of Tailwind — the mobile diff badge reads these
+      so both platforms share the one vocabulary. */
+  hex: string;
+  /** Translucent chip fill for the same badge: the canonical 15% accent
+      wash (see DIFF_LINE_BG in components/Diff/Diff.tsx), or a solid
+      surface for the hue-less untracked state. */
+  hexBg: string;
 }
 
 // Mirrors `FileDiffStatus` in `lib/tauri.ts` (which is the hand-typed
@@ -126,11 +138,11 @@ export interface FileDiffStatusMeta {
 // — see ADR-0009). Unknown statuses fall back to the `modified` row so a
 // drifted vocabulary doesn't render blank badges.
 const FILE_DIFF_STATUS_META: Record<FileDiffStatus, FileDiffStatusMeta> = {
-  added: { letter: 'A', label: 'Added', color: 'text-accent-green' },
-  modified: { letter: 'M', label: 'Modified', color: 'text-accent-amber' },
-  deleted: { letter: 'D', label: 'Deleted', color: 'text-accent-red' },
-  renamed: { letter: 'R', label: 'Renamed', color: 'text-accent-violet' },
-  untracked: { letter: '?', label: 'Untracked', color: 'text-text-muted' },
+  added: { letter: 'A', label: 'Added', color: 'text-accent-green', hex: '#22c55e', hexBg: 'rgba(34, 197, 94, 0.15)' },
+  modified: { letter: 'M', label: 'Modified', color: 'text-accent-amber', hex: '#f59e0b', hexBg: 'rgba(245, 158, 11, 0.15)' },
+  deleted: { letter: 'D', label: 'Deleted', color: 'text-accent-red', hex: '#ef4444', hexBg: 'rgba(239, 68, 68, 0.15)' },
+  renamed: { letter: 'R', label: 'Renamed', color: 'text-accent-violet', hex: '#8b5cf6', hexBg: 'rgba(139, 92, 246, 0.15)' },
+  untracked: { letter: '?', label: 'Untracked', color: 'text-text-muted', hex: '#7a8492', hexBg: '#1b1b23' },
 };
 
 export function fileDiffStatusMeta(status: string): FileDiffStatusMeta {

@@ -51,6 +51,7 @@ Claude hooks catch a subset of these mistakes for Edit/Write/MultiEdit; shell wr
 - Comment only non-obvious *why*; let names carry the *what*.
 
 ## Pointers
+- Design system: `DESIGN.md` — token/typography/component contract. `src/App.css` `@theme` is the source of truth (dark + light); mobile mirrors it in `src/mobile/styles.css` `:root`. No hardcoded colours in components.
 - Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`. Durable architecture and boundaries only (no release-note narratives, no speculative rules, no hardcoded line numbers).
 - Domain language and mental model: `CONTEXT.md`. Ubiquitous language only (no code symbols, file paths, store keys, or DOM gestures). README.md is user-facing only (no internal issue numbers or backlog notes).
 - DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.

@@ -50,7 +50,7 @@ export default function CreatePrSheet({
         style={{
           fontSize: 15,
           fontWeight: 600,
-          color: "#fff",
+          color: "var(--text)",
           margin: 0,
           marginBottom: 12,
         }}
@@ -70,7 +70,7 @@ export default function CreatePrSheet({
         }}
       >
         From{" "}
-        <code style={{ color: "#ccc", overflowWrap: "anywhere" }}>
+        <code style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>
           {currentBranch}
         </code>{" "}
         into

@@ -10,6 +10,7 @@ import {
   isAuthError,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
+import { fileDiffStatusMeta } from "../../lib/status";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
@@ -84,7 +85,7 @@ export default function ChangesScreen({
                 <>
                   {" · "}
                   <span style={{ color: "var(--green)" }}>+{summary.added}</span>{" "}
-                  <span style={{ color: "var(--accent)" }}>~{summary.modified}</span>{" "}
+                  <span style={{ color: "var(--amber)" }}>~{summary.modified}</span>{" "}
                   <span style={{ color: "var(--red)" }}>-{summary.deleted}</span>
                 </>
               )}
@@ -116,7 +117,7 @@ export default function ChangesScreen({
           <div
             className="banner warn"
             data-testid="gh-hint"
-            style={{ borderRadius: 8, marginBottom: 8, border: "1px solid #3e3120" }}
+            style={{ borderRadius: 8, marginBottom: 8, border: "1px solid var(--amber-border)" }}
           >
             PR creation disabled — the GitHub CLI isn't authenticated on the
             desktop.
@@ -159,9 +160,9 @@ export default function ChangesScreen({
                   <span
                     style={{
                       fontFamily:
-                        '"JetBrains Mono", "Cascadia Code", monospace',
+                        '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
                       fontSize: 13,
-                      color: "#ddd",
+                      color: "var(--text)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -185,16 +186,21 @@ export default function ChangesScreen({
 }
 
 function StatusBadge({ code }: { code: string }) {
+  // Letters and colours come from the canonical diff vocabulary
+  // (fileDiffStatusMeta, src/lib/status.ts) — never re-derived locally.
+  // Mobile renders the badge as a translucent chip: token hex + accent wash.
   const first = code.trim().charAt(0).toUpperCase();
-  const color =
-    first === "A" || first === "?"
-      ? "#4caf50"
+  const meta = fileDiffStatusMeta(
+    first === "A"
+      ? "added"
       : first === "D"
-      ? "#f44336"
+      ? "deleted"
       : first === "R"
-      ? "#9c27b0"
-      : "#2196f3";
-  const letter = first === "?" ? "U" : first; // "U"ntracked reads better
+      ? "renamed"
+      : first === "?"
+      ? "untracked"
+      : "modified",
+  );
   return (
     <span
       style={{
@@ -204,14 +210,14 @@ function StatusBadge({ code }: { code: string }) {
         width: 22,
         height: 22,
         borderRadius: 4,
-        background: color,
-        color: "#fff",
+        background: meta.hexBg,
+        color: meta.hex,
         fontSize: 11,
         fontWeight: 700,
         flexShrink: 0,
       }}
     >
-      {letter}
+      {meta.letter}
     </span>
   );
 }
