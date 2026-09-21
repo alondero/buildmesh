@@ -115,14 +115,14 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
 /// arrived" semantics of a transient fetch failure that didn't produce
 /// even a `logged_out` envelope).
 ///
-/// **Last-known fallback (ADR-0037).** The keep/drop predicate above is exactly
-/// the set of cases where the meter is hidden today, which is also the set where
-/// a fallback is wanted: no usable credential right now. So when the predicate
-/// says drop, the row is instead served from `previous` — the durable store of
+/// **Last-known fallback (ADR-0037).** When the predicate says drop (no usable
+/// credential right now), the row is instead served from `previous` — the durable store of
 /// the last reading each provider reported, read before this round's fan-out —
-/// with `cached_at` stamped so the UI can label it. Deliberately *not* applied to
-/// the kept outcomes: `RateLimited`/`Unavailable` must keep showing their live
-/// error, and a rejected-but-configured key must keep its re-entry affordance.
+/// with `cached_at` stamped so the UI can label it. Transient failures
+/// (`RateLimited`/`Unavailable`) fall back the same way when a reading is
+/// remembered: a slightly outdated meter beats a bare error, and the stamp
+/// keeps it labelled as last known. Deliberately *not* applied to a
+/// rejected-but-configured key (its re-entry affordance must stay).
 /// An empty `previous` (fresh install, or nothing within the 7-day TTL) leaves
 /// behaviour exactly as it was.
 fn assemble_meters(
@@ -171,15 +171,34 @@ fn assemble_meters(
             // adapter bug, but the gate stays safe). `Rejected` drops
             // when no key is configured, keeps when configured (the
             // "Invalid API key" affordance). Every other variant keeps
-            // the row so the user sees the transient failure or the
-            // degraded/managed-externally hint.
-            let usage = usages.get(&a.id)?;
+            // the row: transient failures serve the remembered reading
+            // when one exists (transient arm below), otherwise the live
+            // error; degraded and managed-externally rows show their hint.
             let outcome = outcomes.get(&a.id);
+            let usage = usages.get(&a.id);
             if outcome.is_some_and(|o| o.keep(configured_keys, &a.id)) {
+                // Transient failures prefer a remembered reading when one
+                // exists: a slightly outdated meter beats a bare error (for example
+                // Muse reporting no subscription usage). With nothing
+                // remembered the live error stays, exactly as before.
+                let transient = matches!(
+                    outcome,
+                    Some(UsageOutcome::RateLimited { .. } | UsageOutcome::Unavailable { .. })
+                );
+                if transient {
+                    if let Some(last_known) = previous.get(&a.id) {
+                        return Some(ProviderMeters {
+                            provider: a.id.clone(),
+                            usage_tracked: tracked,
+                            usage: Some(last_known.usage.clone()),
+                            cached_at: Some(last_known.cached_at),
+                        });
+                    }
+                }
                 return Some(ProviderMeters {
                     provider: a.id.clone(),
                     usage_tracked: tracked,
-                    usage: Some(usage.clone()),
+                    usage: Some(usage?.clone()),
                     cached_at: None,
                 });
             }
@@ -204,8 +223,9 @@ fn assemble_meters(
 /// only for installed harnesses; keyed providers only when enabled; Generic
 /// providers carry `usage_tracked = false`. Reuses the `ProviderUsage` wire shape.
 ///
-/// Rows whose fetch yields no usable credential are served from the durable
-/// last-known store instead of being dropped (ADR-0037); see [`assemble_meters`].
+/// Rows whose fetch yields no usable credential, or a transient failure while
+/// a reading is remembered, are served from the durable last-known store
+/// instead of being dropped or erroring (ADR-0037); see [`assemble_meters`].
 #[command]
 pub async fn get_provider_meters(
     force_refresh: bool,
@@ -931,8 +951,52 @@ mod tests {
         assert!(rows.is_empty(), "nothing remembered means no row: {rows:?}");
     }
 
-    /// A transient failure is a live signal the user can act on; the fallback
-    /// must not paper over it with stale numbers.
+    /// A transient failure with a remembered reading serves the cached row:
+    /// a slightly outdated meter beats a bare error (the Muse
+    /// "did not report subscription usage" case). The row is stamped so the
+    /// UI labels it as last known rather than live.
+    #[test]
+    fn assemble_meters_serves_last_known_for_a_transient_failure_when_remembered() {
+        for outcome in [
+            UsageOutcome::Unavailable {
+                reason: "Muse did not report subscription usage.".into(),
+            },
+            UsageOutcome::RateLimited {
+                reason: "Rate limited.".into(),
+            },
+        ] {
+            let muse = vec![profile("muse", "muse")];
+            let mut usages = HashMap::new();
+            usages.insert(
+                "muse-code".to_string(),
+                unavailable_usage("muse-code", "Muse did not report subscription usage."),
+            );
+            let mut outcomes = HashMap::new();
+            outcomes.insert("muse-code".to_string(), outcome);
+            let previous: HashMap<String, LastKnown> =
+                [remembered("muse-code", 72.5, 1_700_000_000)]
+                    .into_iter()
+                    .collect();
+
+            let rows = assemble_meters(
+                &[account("muse-code", true)],
+                &muse,
+                &usages,
+                &outcomes,
+                &HashSet::new(),
+                &previous,
+            );
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cached_at, Some(1_700_000_000));
+            let shown = rows[0].usage.as_ref().unwrap();
+            assert_eq!(shown.windows[0].used_percent, Some(72.5));
+        }
+    }
+
+    /// A transient failure with nothing remembered is a live signal the user
+    /// can act on; the row keeps showing the error (the with-cache case is
+    /// pinned by the test above).
     #[test]
     fn assemble_meters_keeps_the_live_error_for_a_transient_failure() {
         let grok = vec![profile("grok", "grok")];
@@ -948,9 +1012,7 @@ mod tests {
                 reason: "API error 500: upstream down".into(),
             },
         );
-        let previous: HashMap<String, LastKnown> = [remembered("grok", 72.5, 1_700_000_000)]
-            .into_iter()
-            .collect();
+        let previous: HashMap<String, LastKnown> = HashMap::new();
 
         let rows = assemble_meters(
             &[account("grok", true)],

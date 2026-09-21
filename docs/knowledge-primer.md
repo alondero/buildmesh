@@ -83,10 +83,13 @@ When a fetch cannot produce a reading because no usable credential is available
 (a harness not signed into yet today, an expired native token),
 `assemble_meters` serves that remembered reading instead of hiding the row and
 stamps `ProviderMeters.cachedAt` (epoch seconds, `null` for a live fetch) so the
-Usage tab can render "Last known value · …". It is keyed by **provider id**, not
+Usage tab can render "Last known value · …" plus a `Cached` header badge with
+the fetch instant on hover. A transient failure (rate limit, transport error, or
+a provider answering without usable quota) falls back the same way while a
+reading is remembered. It is keyed by **provider id**, not
 the identity fingerprint (which is process-salted, and for Muse *is* the rotating
-access token). It never replaces a live reading, a live transient error, or a
-rejected-key prompt; with nothing remembered the row is hidden as before. See
+access token). It never replaces a live reading or a
+rejected-key prompt; with nothing remembered the row is hidden (or errors) as before. See
 [ADR-0037](adr/0037-usage-last-known-fallback.md).
 
 **Claude Code authentication source.** The Anthropic meter follows Claude's
