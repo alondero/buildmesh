@@ -42,7 +42,8 @@ pub struct LocateCtx<'a> {
 /// and attention modules have one dispatch site per concern.
 pub(crate) trait TranscriptAdapter: Send + Sync {
     /// Harness id this adapter handles (`"claude_code"`, `"codex"`, …).
-    /// Matches the keys returned by `TranscriptFormat::for_harness` today; the
+    /// Overlaps the ids `TranscriptFormat::for_harness` resolves (which
+    /// returns `None` for unwired harnesses since issue #1817); the
     /// enum is replaced by a registry lookup in step 1.
     fn id(&self) -> &'static str;
 
@@ -147,10 +148,11 @@ static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
 static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
 
 static ADAPTERS: [&'static dyn TranscriptAdapter; 9] = [
-    // Claude Code is the default format for any harness id that doesn't have
-    // a registered adapter (mirrors `TranscriptFormat::for_harness`'s default
-    // arm). Listed first so a future "explicit claude-code harness id" maps
-    // there directly.
+    // Claude Code is the registry default for hook classification when no
+    // adapter claims the payload (`default_adapter`). This is NOT the
+    // transcript-format resolver: `TranscriptFormat::for_harness` returns
+    // `None` for unwired harness ids since issue #1817. Listed first so a
+    // future "explicit claude-code harness id" maps there directly.
     &CLAUDE_CODE_ADAPTER,
     // Every other adapter is keyed by its harness id; an unknown harness id
     // falls back to Claude Code.
