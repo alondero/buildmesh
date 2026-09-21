@@ -96,41 +96,45 @@ verdict, and the gate fix below prevents the failure either way.
 - The `verdict` gate now confirms the reviewer's turn is finished before it
   consumes the report as a verdict. An `AwaitingInput` yield is judged by a
   **reviewer-specific** readiness question first
-  (`evaluator::reviewer_turn_prompt`); `WORKING`, `CONTINUE`, and an unavailable
-  classifier leave the gate waiting with the reviewer running, so its next
-  report is judged on its own merits. A finished report, and a reviewer that
-  will not continue without a person, still reach the verdict prompt unchanged.
-  `Ready` and `Completed` yields keep the existing fast path.
+  (`evaluator::reviewer_turn_prompt`) and takes one of three paths: a finished
+  report, or a reviewer that will not continue without a person, reaches the
+  verdict prompt unchanged; a reviewer that is still working is parked; an
+  unreachable classifier is reported as an outage. `Ready` and `Completed`
+  yields keep the existing fast path.
   The dedicated question matters: the implementation gate's `review_turn_prompt`
   counts "reports a provider/API failure" as `BLOCKED`, so run 163's
   `PowerShell NativeCommandError. Let me retry …` line could answer `BLOCKED`
   and reach the verdict classifier after all. The reviewer question treats a
   failure the reviewer is retrying as `WORKING`, and reserves `BLOCKED` for a
   reviewer that needs a decision, a permission, credentials, or a person.
-- The wait is published as `TurnParked`, not as a verdict and not as an outage.
-  The stepper's only vocabulary for "no classification" is `unavailable`: it
-  writes `node.<gate>.classification = "unavailable"`, a user-visible step error
-  naming the Mesh Autopilot provider, spends the five-strike classifier-failure
-  budget that ends a wedged run, and records the in-progress line as the gate's
-  output. `TurnParked` instead records the observation alone — the evaluated
-  attempt and report — so the step keeps `Running` with no classification, no
+- A *working* reviewer parks (`CircuitEvent::TurnParked`), and the park is what
+  keeps the wait off the classifier-outage path. The stepper's only vocabulary
+  for "no classification" is `unavailable`: it writes
+  `node.<gate>.classification = "unavailable"`, a user-visible step error naming
+  the Mesh Autopilot provider, spends the five-strike classifier-failure budget
+  that ends a wedged run, and records the report as the gate's output.
+  `TurnParked` instead records the observation alone — the evaluated attempt and
+  report — so the step keeps `Running` with no classification, no
   *classifier-outage* error, no failure budget, and no output stamp. The gate's
   generic yielded-wait reason (*"Waiting for a fresh agent report; retrying
   observation every 10 seconds."*) and its deadline still arrive from the
   separate `WaitObserved` event, which is what bounds the wait; the park does
   not suppress that. Recording the observation is also what bounds classifier
   cost while a reviewer sits mid-turn: `should_classify_report` refuses an
-  unchanged report, so the readiness question is asked once per distinct report
-  (and, after a recorded outage, on the existing 60-second retry), not once per
-  2-second tick.
-- An unavailable readiness classifier waits rather than guessing. This gate
-  cannot separate a progress line from a final report without it, and reading a
-  progress line as a verdict is the failure this change exists to prevent, so
-  the wait is the safe answer. The trade-off is explicit: a *sustained*
-  classifier outage on a reviewer's verdict gate shows up as the gate's wait
-  deadline — fifteen minutes by default, or the step's own budget — plus a
-  warning, instead of the provider-naming message the `unavailable` path
-  produces on other gates.
+  unchanged report, so the readiness question is asked once per distinct report —
+  not once per 2-second tick.
+- An unreachable readiness classifier is **reported, not parked**. It cannot
+  separate a progress line from a final report, and reading a progress line as a
+  verdict is the failure this change exists to prevent, so no verdict is taken
+  from the report. But it must not be parked either: a reviewer that has finished
+  produces no further output, so an observation-only park would leave that
+  unchanged report unobserved until the gate's wait deadline — the cooldown retry
+  would never fire. Taking the ordinary classification channel records
+  `classification = "unavailable"`, which admits the existing 60-second retry, so
+  a transient outage recovers and a sustained one ends the run with the
+  provider-naming message and the existing five-strike bound. The cost of the
+  design: on a *finished* review turn the gate now makes one readiness call
+  followed by one verdict call, sequentially.
 - The attention route logs every disposition. `Running` and `MarkInput` were the
   two decisions that produced no log line, so a node could change lifecycle
   state with nothing in the record saying why.
@@ -145,27 +149,28 @@ verdict, and the gate fix below prevents the failure either way.
   Claude Code transcript scan that mcode's projection cannot satisfy. Closing
   that needs mcode-owned evidence: pending background tasks counted from mcode's
   own canonical history, or a pending-work signal on its hook envelope.
-- A waiting gate is re-judged when the reviewer's report changes, when the
-  probe's own retry interval admits a fresh observation, and otherwise runs
-  until the reviewer's wait deadline expires. A reviewer that yields mid-work
-  repeatedly therefore stays live for as long as it keeps working rather than
-  failing, and a reviewer that yields once and never reports again is bounded by
-  that deadline rather than by this change. Neither is a silent state: each wait
-  logs, and the step stays `Running` on the run card.
-- Verification is source-level. The gate decision is covered by
-  `verdict_gate_waits_for_a_reviewer_that_yielded_mid_turn`, which also pins the
-  question the gate asks — it asserts the reviewer readiness prompt, and that
-  the implementation gate's "reports a provider/API failure" clause is absent
-  from it. The recording contract is covered by
-  `turn_parked_records_the_observation_and_nothing_else` (the step keeps
-  `Running` with no error written by that event, no classification, no failure
-  budget, and the observation recorded) and the wait's bound by
-  `parked_observation_is_not_reclassified_until_the_report_changes`. Neither can
-  fail against the pre-change code, because the functions and the event they
-  drive did not exist; the red/green evidence for the old behaviour is the
-  pre-fix probe recorded in this investigation, where the verdict prompt
-  received the run-163 progress line. No live circuit run was started, so no
-  claim is made about how a model answers the new readiness question in
-  practice — the prompt is pinned, its accuracy is not, and existing running
-  application processes require a rebuilt binary before this change affects
-  them.
+- A parked gate is re-judged when the reviewer's report changes, when the probe's
+  own retry interval admits a fresh observation, and otherwise runs until the
+  reviewer's wait deadline expires; an *outage* additionally retries on the
+  60-second classifier cooldown, and ends the run on the shared five-strike
+  bound. A reviewer that yields mid-work repeatedly therefore stays live for as
+  long as it keeps working rather than failing, and a reviewer that yields once
+  and never reports again is bounded by that deadline rather than by this change.
+  Neither is a silent state: each wait logs, and the step stays `Running` on the
+  run card.
+- Verification is source-level. The readiness decision is covered by
+  `verdict_gate_waits_for_a_reviewer_that_yielded_mid_turn`, which pins the
+  question the gate asks (including that the implementation gate's "reports a
+  provider/API failure" clause is absent). The outage retry is covered red/green
+  by `reviewer_classifier_outage_is_retried_after_the_cooldown`: it fails when
+  `ReviewerReadiness::parks` is flipped to park an outage — the first revision of
+  this fix did exactly that and stalled a finished reviewer until the deadline —
+  and passes with the outage on the classification channel, asserting the retry
+  is refused inside 60 seconds and admitted after it. The park's recording
+  contract is covered by `turn_parked_records_the_observation_and_nothing_else`
+  and its cost bound by
+  `parked_observation_is_not_reclassified_until_the_report_changes`. No live
+  circuit run was started, so no claim is made about how a model answers the
+  readiness question in practice — the prompt is pinned, its accuracy is not, and
+  existing running application processes require a rebuilt binary before this
+  change affects them.
