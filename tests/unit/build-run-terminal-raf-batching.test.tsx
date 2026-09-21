@@ -155,6 +155,43 @@ describe('BuildRunTerminal RAF batching (issue #303)', () => {
     expect(written.indexOf('Compiling')).toBeLessThan(written.lastIndexOf('Compiling'));
   });
 
+  it('coalesces mixed string + byte payloads into one term.write per frame (issue #1749)', async () => {
+    render(<BuildRunTerminal sessionId={9} />);
+    await waitFor(() => {
+      expect(terminalInstances).toHaveLength(1);
+      expect(terminalInstances[0].write).toHaveBeenCalled();
+    });
+
+    const term = terminalInstances[0];
+    term.write.mockClear();
+    rafQueue.length = 0;
+
+    // Interleaved string and base64-byte events in one frame. The first
+    // string is sized to exceed the 16-byte interactive fast path so the
+    // writer takes the rAF path and the rest accumulate in the same flush.
+    // ▀ U+2580 = 0xE2 0x96 0x80 arrives split across two byte events to
+    // pin the streaming decode across the string/bytes boundary.
+    const b64 = (bytes: number[]) =>
+      globalThis.btoa(String.fromCharCode(...bytes));
+
+    const first = 'hello ' + 'x'.repeat(20) + '\n';
+    const last = ' world' + 'y'.repeat(20) + '\n';
+    await emit('build-run-output-9', first);
+    await emit('build-run-output-9', { data: b64([0xe2, 0x96]) });
+    await emit('build-run-output-9', { data: b64([0x80]) });
+    await emit('build-run-output-9', last);
+
+    expect(rafQueue).toHaveLength(1);
+    expect(term.write).not.toHaveBeenCalled();
+
+    rafQueue.shift()!();
+
+    expect(term.write).toHaveBeenCalledTimes(1);
+    const written = term.write.mock.calls[0][0];
+    expect(typeof written).toBe('string');
+    expect(written).toBe(first + '▀' + last);
+  });
+
   it('coalesces base64 byte payloads without UTF-8 corruption across chunk boundaries', async () => {
     render(<BuildRunTerminal sessionId={8} />);
     await waitFor(() => {
