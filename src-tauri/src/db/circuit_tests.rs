@@ -373,13 +373,25 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     // The locked helper trusts the caller to have run the readiness
     // gate (#1792) — no `cli_session_id` stamp needed here.
-    // The picker filters Terminal, but the backend holds its own invariant: the
-    // spawn cascade treats any non-empty string as the preset winner, so an
-    // unchecked invoke would otherwise spawn the "reviewer" on a plain shell.
-    // Bare, padded, and composite (the harness segment decides) all reject.
+    // The picker disables ineligible harnesses, but the backend holds its
+    // own invariant: the spawn cascade treats any non-empty string as the
+    // preset winner, so an unchecked invoke would otherwise spawn the
+    // "reviewer" on a harness that can never yield a turn. Bare, padded,
+    // and composite (the harness segment decides) all reject.
     for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
         let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
         assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
+    }
+    // Issue #1816: the gate is attention compatibility, not a
+    // Terminal-only denylist — `dsh`, `freebuff`, and `cline` have
+    // neither an attention hook nor a passive turn watcher, so they are
+    // rejected with a reason naming the harness and the missing
+    // turn-completion signal. Rejections happen before any DB work, so
+    // the same source row is reusable across picks here.
+    for (picked, name) in [("dsh", "Dsh"), ("freebuff", "Freebuff"), ("cline", "Cline"), ("cline:minimax", "Cline")] {
+        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
+        assert!(err.contains(name), "{picked:?} must name the harness ({name}), got {err:?}");
+        assert!(err.contains("turn-completion"), "{picked:?} must name the missing capability, got {err:?}");
     }
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.

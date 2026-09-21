@@ -16,14 +16,21 @@ use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunSt
 /// The id is a Spawn Option id — `<harness>` or the composite
 /// `harness:provider_id` — so the segment that decides whether this is a real
 /// agent is the harness. A blank value collapses to `None` (inherit the
-/// app-wide Reviewer provider, then the source agent); the Terminal harness is
-/// rejected outright.
+/// app-wide Reviewer provider, then the source agent).
 ///
-/// The Start Review picker already omits Terminal, but the backend must hold
-/// its own invariant: the reviewer-provider cascade treats any non-empty string
-/// as the winner, so an unchecked `invoke` would mint a review run whose
-/// "reviewer" is a plain shell. Validation is input-only, so it applies to
-/// authored Circuits too, even though they ignore the value.
+/// A reviewer must be able to **yield a turn**, or the `verdict` gate parks
+/// forever: the reviewer's status has to reach `awaiting_input` / `ready` /
+/// `completed` before `classify_step_turn` will do anything at all
+/// (`if !yielded { return None; }`). So the gate is attention
+/// compatibility — the harness half of `autopilot::compatibility::evaluate`
+/// (`!is_plain_terminal && (requires_attention_hook ||
+/// supports_passive_turn_watcher)`) — not a Terminal-only denylist. The
+/// Start Review picker already disables ineligible harnesses, but the
+/// backend must hold its own invariant: the reviewer-provider cascade
+/// treats any non-empty string as the winner, so an unchecked `invoke`
+/// would mint a review run whose reviewer can never yield.
+/// Validation is input-only, so it applies to authored Circuits too, even
+/// though they ignore the value.
 fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, String> {
     let Some(value) = value else { return Ok(None) };
     let trimmed = value.trim();
@@ -37,10 +44,46 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
     // (`"terminal:<provider>"`) — rejected today by
     // `BUILTIN_HARNESS_IDS` but the contract holds regardless —
     // would also match.
-    if SpawnOptionId::from(trimmed).harness_id() == "terminal" {
+    let harness_id = SpawnOptionId::from(trimmed).harness_id().trim().to_string();
+    // Issue #1816: reuse the Autopilot compatibility lookup so the reviewer
+    // gate and the client-side `blocksReviewCircuit` predicate agree on one
+    // set. Unknown harness ids stay permissive — `AgentNode.provider` holds
+    // user-defined harness profile ids the spawn seam resolves to a real
+    // executor, and refusing those would take a working review away from
+    // the user (mirrors the frontend, which only blocks what it can prove).
+    if let Some(caps) = crate::autopilot::compatibility::lookup_capabilities(&harness_id) {
+        if caps.is_plain_terminal {
+            return Err("Terminal cannot be used as the reviewer provider.".into());
+        }
+        if !caps.requires_attention_hook && !caps.supports_passive_turn_watcher {
+            // Same vocabulary as `AutopilotCompatibilityReason`:
+            // `PlainTerminal` keeps its distinct message above;
+            // `MissingAttentionHook { harness_id }` becomes the message
+            // below, naming the harness and the missing capability.
+            let display = reviewer_harness_display_name(&harness_id);
+            return Err(format!(
+                "{display} cannot be used as the reviewer provider: it has no turn-completion signal."
+            ));
+        }
+    } else if harness_id.eq_ignore_ascii_case("terminal") {
+        // Defensive: keep the distinct Terminal message even if the
+        // capability catalog ever stops resolving `"terminal"`.
         return Err("Terminal cannot be used as the reviewer provider.".into());
     }
     Ok(Some(trimmed.to_string()))
+}
+
+/// Display name for a reviewer-rejection message: the harness half with its
+/// first character upper-cased (`"cline"` → `"Cline"`), matching the
+/// issue's `"Cline cannot be used as the reviewer provider: …"` wording.
+/// Falls back to `"Terminal"` for the degenerate empty case (unreachable —
+/// blank inputs collapse to `None` above — but total anyway).
+fn reviewer_harness_display_name(harness_id: &str) -> String {
+    let mut chars = harness_id.chars();
+    match chars.next() {
+        None => "Terminal".to_string(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
 }
 
 /// Atomically claim a source agent and create its review run. The source id is
@@ -1650,4 +1693,111 @@ pub(crate) fn count_active_circuit_runs_inner(db: &Connection, mesh_id: i64) -> 
         params![mesh_id],
         |row| row.get(0),
     )
+}
+
+#[cfg(test)]
+mod reviewer_tests {
+    use super::*;
+    use crate::agent::capabilities::capabilities_for;
+    use crate::models::Provider;
+
+    /// Issue #1816: every harness with neither an attention hook nor a
+    /// passive turn watcher is rejected as a reviewer provider, with a
+    /// reason naming the harness; every eligible harness is accepted.
+    /// The expectation is derived from the live capability descriptors
+    /// (not a hardcoded list) so the test agrees with the frontend's
+    /// `blocksReviewCircuit` predicate by construction — a harness that
+    /// gains a turn signal flips both sides together.
+    #[test]
+    fn reviewer_gate_matches_attention_compatibility_for_every_harness() {
+        for provider in Provider::all() {
+            let caps = capabilities_for(provider.adapter());
+            let blocked =
+                caps.is_plain_terminal || (!caps.requires_attention_hook && !caps.supports_passive_turn_watcher);
+            let id = provider.to_string();
+            match normalize_reviewer_provider(Some(id.clone())) {
+                Ok(_) => assert!(
+                    !blocked,
+                    "{id:?} was accepted but has no turn-completion signal"
+                ),
+                Err(err) => {
+                    assert!(
+                        blocked,
+                        "{id:?} was rejected but can yield a turn: {err:?}"
+                    );
+                    if caps.is_plain_terminal {
+                        assert!(
+                            err.contains("Terminal"),
+                            "{id:?} must keep the distinct Terminal message, got {err:?}"
+                        );
+                    } else {
+                        assert!(
+                            err.contains("turn-completion"),
+                            "{id:?} must name the missing capability, got {err:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Terminal keeps its existing distinct error message (bare, padded,
+    /// composite, and case variants all route through the harness half).
+    #[test]
+    fn reviewer_terminal_keeps_distinct_message() {
+        for picked in ["terminal", "  terminal  ", "terminal:minimax", "Terminal", "TERMINAL:foo"] {
+            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            assert_eq!(
+                err,
+                "Terminal cannot be used as the reviewer provider.",
+                "{picked:?} must keep the Terminal message"
+            );
+        }
+    }
+
+    /// The issue's named cases: `dsh`, `freebuff`, and `cline` are
+    /// rejected with a reason naming the harness (not the Terminal
+    /// message), including through a composite `harness:provider` id.
+    #[test]
+    fn reviewer_rejects_harnesses_without_turn_signal() {
+        for (picked, name) in [
+            ("dsh", "Dsh"),
+            ("freebuff", "Freebuff"),
+            ("cline", "Cline"),
+            ("cline:minimax", "Cline"),
+            ("  freebuff  ", "Freebuff"),
+        ] {
+            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            assert!(
+                err.contains(name),
+                "{picked:?} must name the harness ({name}), got {err:?}"
+            );
+            assert!(
+                err.contains("turn-completion"),
+                "{picked:?} must name the missing capability, got {err:?}"
+            );
+        }
+    }
+
+    /// Eligible harnesses pass through untouched (value preserved), the
+    /// `claude` profile alias resolves to the eligible Anthropic adapter,
+    /// unknown harness profile ids stay permissive (the spawn seam
+    /// resolves them; mirrors the frontend gate), and blanks collapse to
+    /// `None` (inherit) exactly as before.
+    #[test]
+    fn reviewer_accepts_eligible_unknown_and_blank() {
+        for picked in ["claude", "anthropic", "codex", "agy", "opencode", "commandcode", "muse", "codex:minimax"] {
+            let got = normalize_reviewer_provider(Some(picked.into())).unwrap();
+            assert_eq!(got.as_deref(), Some(picked), "{picked:?} must pass through");
+        }
+        // Unknown / user-defined harness profile ids stay permissive.
+        for picked in ["my-custom-harness", "made-up:provider"] {
+            assert!(
+                normalize_reviewer_provider(Some(picked.into())).is_ok(),
+                "{picked:?} (unknown) must stay permissive"
+            );
+        }
+        assert_eq!(normalize_reviewer_provider(None).unwrap(), None);
+        assert_eq!(normalize_reviewer_provider(Some("   ".into())).unwrap(), None);
+    }
 }

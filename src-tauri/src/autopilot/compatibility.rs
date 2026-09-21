@@ -230,6 +230,7 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "claude" | "anthropic" => Some("anthropic"),
         "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
         "agy" => Some("agy"),
         "opencode" => Some("opencode"),
         "grok" => Some("grok"),
@@ -238,6 +239,8 @@ pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
         "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
         "commandcode" | "command-code" | "cmdc" => Some("commandcode"),
         "muse" => Some("muse"),
+        "freebuff" => Some("freebuff"),
+        "cline" => Some("cline"),
         "terminal" => Some("terminal"),
         _ => None,
     }
@@ -477,6 +480,23 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("  MUSE  "), Some("muse"));
     }
 
+    /// Issue #1816: cursor, freebuff, and cline resolve to their own
+    /// adapters so the compatibility gate sees their real turn-signal
+    /// capability instead of reporting them as unknown. Before this,
+    /// `lookup_capabilities` returned `None` for all three, which meant
+    /// the reviewer gate (which reuses this lookup) could not reject
+    /// freebuff/cline as reviewers.
+    #[test]
+    fn resolve_harness_adapter_id_maps_cursor_freebuff_cline() {
+        assert_eq!(resolve_harness_adapter_id("cursor"), Some("cursor"));
+        assert_eq!(resolve_harness_adapter_id("Cursor"), Some("cursor"));
+        assert_eq!(resolve_harness_adapter_id("freebuff"), Some("freebuff"));
+        assert_eq!(resolve_harness_adapter_id("Freebuff"), Some("freebuff"));
+        assert_eq!(resolve_harness_adapter_id("cline"), Some("cline"));
+        assert_eq!(resolve_harness_adapter_id("Cline"), Some("cline"));
+        assert_eq!(resolve_harness_adapter_id("  CLINE  "), Some("cline"));
+    }
+
     /// Unknown harness ids return `None` (no silent fallback to Anthropic,
     /// unlike `Provider::from_db_str` which falls back and logs a warning —
     /// the compatibility layer must surface unknowns explicitly so the UI
@@ -680,6 +700,46 @@ mod tests {
         });
         assert!(result.allowed, "Command Code watcher should allow Autopilot: {:?}", result.reasons);
         assert!(result.reasons.is_empty());
+    }
+
+    /// Issue #1816: freebuff and cline have neither an attention hook nor a
+    /// passive turn watcher, so the gate emits `MissingAttentionHook` naming
+    /// the harness — the same reason the reviewer gate reuses. Cursor has a
+    /// native hook and stays allowed.
+    #[test]
+    fn evaluate_freebuff_and_cline_emit_missing_attention_hook_cursor_allowed() {
+        for harness in ["freebuff", "cline", "dsh"] {
+            let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
+            assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
+            assert!(!caps.supports_passive_turn_watcher, "{harness} must lack a watcher");
+            let result = evaluate(AutopilotCompatibilityInput {
+                resolved_spawn_option: harness,
+                resolved_harness_id: harness,
+                capabilities: Some(caps),
+                mesh_use_worktree: true,
+                explicit_autopilot_provider: false,
+            });
+            assert!(!result.allowed, "{harness} must be rejected");
+            assert!(
+                result.reasons.iter().any(|r| matches!(
+                    r,
+                    AutopilotCompatibilityReason::MissingAttentionHook { harness_id }
+                    if harness_id == harness
+                )),
+                "{harness} must surface MissingAttentionHook; got {:?}",
+                result.reasons
+            );
+        }
+        let cursor = lookup_capabilities("cursor").expect("cursor known");
+        assert!(cursor.requires_attention_hook);
+        let allowed = evaluate(AutopilotCompatibilityInput {
+            resolved_spawn_option: "cursor",
+            resolved_harness_id: "cursor",
+            capabilities: Some(cursor),
+            mesh_use_worktree: true,
+            explicit_autopilot_provider: false,
+        });
+        assert!(allowed.allowed, "cursor must be allowed: {:?}", allowed.reasons);
     }
 
     /// A custom or future harness with only prefill missing remains eligible:
