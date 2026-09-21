@@ -46,7 +46,8 @@ export default function DiffScreen({
         title={
           <span
             style={{
-              fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
+              fontFamily:
+                '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
               fontSize: 13,
               fontWeight: 400,
             }}
@@ -91,10 +92,10 @@ function DiffBody({ diff }: { diff: DiffResult }) {
       data-testid="diff-body"
       style={{
         margin: 0,
-        fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
+        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
         fontSize: 12,
         lineHeight: 1.4,
-        color: "#ddd",
+        color: "var(--text)",
         whiteSpace: "pre",
         // Overflow-wrap intentionally OFF — long lines scroll horizontally
         // so users see exact bytes rather than artificial breaks.
@@ -115,8 +116,8 @@ function Hunk({ hunk }: { hunk: DiffHunk }) {
       <div
         data-testid="hunk-header"
         style={{
-          color: "#7aa2c4",
-          background: "rgba(33, 150, 243, 0.08)",
+          color: "var(--accent)",
+          background: "var(--accent-glow)",
           padding: "3px 8px",
           fontSize: 11,
           borderRadius: 4,
@@ -129,18 +130,18 @@ function Hunk({ hunk }: { hunk: DiffHunk }) {
       {hunk.lines.map((l, i) => {
         const bg =
           l.line_type === "add"
-            ? "rgba(76, 175, 80, 0.12)"
+            ? "var(--green-dim)"
             : l.line_type === "remove"
-            ? "rgba(244, 67, 54, 0.12)"
+            ? "var(--red-dim)"
             : "transparent";
         const prefix =
           l.line_type === "add" ? "+" : l.line_type === "remove" ? "-" : " ";
         const prefixColor =
           l.line_type === "add"
-            ? "#4caf50"
+            ? "var(--green)"
             : l.line_type === "remove"
-            ? "#f44336"
-            : "#666";
+            ? "var(--red)"
+            : "var(--text-faint)";
         return (
           <div
             key={i}

@@ -35,12 +35,16 @@ describe('STATUS_CONFIG', () => {
 
   it('renders ready as a distinct done state, not PR opened', () => {
     // Issue #1364 — an ordinary finished turn is `ready`: green ✓ but the
-    // copy says "Ready", never Autopilot's "PR opened".
+    // copy says "Ready", never Autopilot's "PR opened". The green itself is
+    // NOT the distinguisher: hex mirrors the entry's `text-accent-green`
+    // class (#22c55e in src/App.css) so desktop and mobile paint the same
+    // hue — an emerald #10b981 here made mobile-only drift.
     const config = getStatusConfig('ready');
     expect(config).toBe(STATUS_CONFIG.ready);
     expect(config.label).toBe('Ready');
     expect(config.dot).toBe('✓');
-    expect(config.hex).toBe('#10b981');
+    expect(config.hex).toBe('#22c55e');
+    expect(config.hex).toBe(STATUS_CONFIG.completed.hex);
     expect(config.label).not.toBe(STATUS_CONFIG.completed.label);
   });
 

@@ -13,6 +13,7 @@ the complete product manual.
 | Installing or evaluating Buildmesh | [README](../README.md) | Supported platforms, downloads, prerequisites, security limitations, and a feature overview |
 | Contributor | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution contract, checks, issue flow, and PR evidence |
 | Developer | [Development guide](development/README.md) | Repository map, test matrix, seams, generated types, and feature checklists |
+| UI contributor | [DESIGN.md](../DESIGN.md) | Design tokens, typography, and component patterns shared by desktop and mobile |
 | Maintainer | [Releasing](development/releasing.md) and [release notes](releases/README.md) | Release procedure, updater signing, and release-note discipline |
 | AI coding agent | [CLAUDE.md](../CLAUDE.md) and [AI context](knowledge-primer.md) | Always-on rules, architecture, conventions, and anti-patterns |
 

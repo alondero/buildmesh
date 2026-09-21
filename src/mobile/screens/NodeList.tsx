@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AgentNode,
   Mesh,
-  NodeStatus,
   Provider,
   createNode,
   isAuthError,
@@ -23,7 +22,7 @@ import {
 // per pixel (review feedback #1). No need to import the numeric
 // `PULL_REFRESH_THRESHOLD_PX` from the hook in this file.
 import { groupByHarness } from "../../lib/groups";
-import { STATUS_CONFIG } from "../../lib/status";
+import { getStatusConfig } from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -33,24 +32,12 @@ type Props = {
   onAuthFailed: () => void;
 };
 
-// `archived` sits outside the shared `STATUS_CONFIG` (desktop never shows a
-// status badge for it — see the "Regenerate unavailable" comment in
-// `Sidebar/NodeItem.tsx`). Mobile filters archived nodes out of the list
-// entirely (see `visibleNodes` below), but `statusMeta` must stay total
-// over the full `NodeStatus` union since `NodeRow` is a generic renderer.
-const ARCHIVED_STATUS_META = { hex: "#555555", label: "Archived" };
-
 // Module-scope type alias for the triage-deck chip action enum
 // (issue #1377). Hoisted so `AttentionCard`'s `sent?: SentAction` prop
 // doesn't have to repeat the literal union, and so the `useState<Map<...>>`
 // calls in NodeList can avoid the `.tsx` JSX-vs-generic ambiguity that
 // comes with back-to-back `<Map<...>>(...)` expressions.
 type SentAction = "approve" | "reject";
-
-function statusMeta(status: NodeStatus): { hex: string; label: string } {
-  if (status === "archived") return ARCHIVED_STATUS_META;
-  return STATUS_CONFIG[status];
-}
 
 // Issue #328 — the badge and the provider picker both consume the live
 // `listProviders()` payload directly (no fallback list). Before the fetch
@@ -654,7 +641,7 @@ function SheetButton({
       className="card"
       style={{ display: "block", background: "var(--surface-2)" }}
     >
-      <div style={{ fontSize: 14, fontWeight: 500, color: "#fff" }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text)" }}>{label}</div>
       <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
         {hint}
       </div>
@@ -749,7 +736,7 @@ function AttentionCard({
               minWidth: 0,
               fontSize: 14,
               fontWeight: 500,
-              color: "#fff",
+              color: "var(--text)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -823,7 +810,10 @@ export function NodeRow({
   onClick: () => void;
   providers?: Provider[];
 }) {
-  const meta = statusMeta(node.status);
+  // getStatusConfig (src/lib/status.ts) is total over the SessionStatus union
+  // — `archived` included (#788) — and safely falls back to idle on unknown
+  // or missing statuses.
+  const meta = getStatusConfig(node.status);
   const needsInput = node.status === "awaiting_input";
   // Single source of truth for the badge + label: the live `listProviders()`
   // payload (issue #328). The fallback (`'?' / '#555'` + raw id) fires when:
@@ -840,7 +830,7 @@ export function NodeRow({
       onClick={onClick}
       data-testid={`node-${node.id}`}
       className="card"
-      style={needsInput ? { borderColor: "rgba(255, 152, 0, 0.4)" } : undefined}
+      style={needsInput ? { borderColor: "var(--attention-ring)" } : undefined}
     >
       <ProviderIcon
         // `backgroundColor` drives the chip from the live `meta.color`
@@ -866,7 +856,7 @@ export function NodeRow({
           style={{
             fontSize: 14,
             fontWeight: 500,
-            color: "#fff",
+            color: "var(--text)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -936,7 +926,7 @@ function ProviderPicker({
 
   const configurationsFor = (provider: Provider) => (provider.configurations?.length ? (
     <details style={{ marginLeft: 18, marginBottom: 8 }}>
-      <summary style={{ padding: 10, color: "var(--text-muted)", fontSize: 13 }}>{provider.label} configurations</summary>
+      <summary style={{ padding: 10, color: "var(--text-dim)", fontSize: 13 }}>{provider.label} configurations</summary>
       {provider.configurations.map((configuration) => (
         <button type="button" className="card" key={configuration.id} onClick={() => onPick(provider, configuration.id)}>{configuration.name}</button>
       ))}
@@ -949,7 +939,7 @@ function ProviderPicker({
         style={{
           fontSize: 15,
           fontWeight: 600,
-          color: "#fff",
+          color: "var(--text)",
           margin: 0,
           marginBottom: 14,
         }}
@@ -984,7 +974,7 @@ function ProviderPicker({
                 className="h-4 w-4"
               />
               <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}</span>
-              <span style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
+              <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
             </button>
             {configurationsFor(native)}
             {children.map((child) => (
