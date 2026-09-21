@@ -72,7 +72,9 @@ export function Sidebar() {
     }
     return grouped;
   }, [agentNodes]);
-  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  // Issue #1748 — `Sidebar` no longer subscribes to `activeNodeId`: each
+  // `NodeItem` owns its own active bit, so activating a node re-renders
+  // only the rows whose bit flips instead of the whole sidebar.
   const activateNode = useNodeActivityStore(state => state.activateNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
@@ -277,7 +279,6 @@ export function Sidebar() {
                       onOpenIssuesProbe={handleOpenIssuesProbe}
                       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
                       meshNodes={nodesByMesh.get(mesh.id) ?? EMPTY_NODES}
-                      activeNodeId={activeNodeId}
                       onActivateNode={activateNode}
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}

@@ -1,21 +1,28 @@
 /**
- * Issue #1748 — Sidebar integration: one node update must not re-render rows
- * of other meshes, and archived nodes must stay out of the list.
+ * Issue #1748 — Sidebar integration: one store update must commit the
+ * minimum set of rows, and archived nodes must stay out of the list.
  *
- * The real `Sidebar` + real (memoized) `MeshItem` render here. `NodeItem` is
- * replaced by a counting wrapper around the REAL memoized component
- * (`importOriginal`): the wrapper observes every render attempt the parent
- * `MeshItem` makes per row without duplicating any production comparator
- * logic. Within-mesh row isolation (only the changed `NodeItem` body
- * executes) is proven in `sidebar-row-memo.test.tsx`; together the two files
- * prove a single `patchAgentNode` commits exactly one row.
+ * The real `Sidebar` + real (memoized) `MeshItem` render here. Two
+ * observation seams, each honest about what it measures:
+ *
+ *   - `CountingNodeItem` (a pass-through around the REAL memoized
+ *     `NodeItem`) counts every render attempt the parent `MeshItem` makes
+ *     per row. It observes `MeshItem` body execution, used by the
+ *     `MeshItem`-level regroup tests below.
+ *   - `CountingInlineEditableText` (a pass-through around the real name
+ *     cell, which every `NodeItem` body renders exactly once) counts real
+ *     `NodeItem` BODY executions. It observes the memoized component from
+ *     INSIDE the memo boundary, so untouched siblings must read strictly
+ *     zero — this is the signal the store-update tests assert on.
+ *
+ * Neither wrapper duplicates production comparator logic.
  *
  * The per-mesh async hooks (`useMeshHealth`, `useGitBranchStatus`,
  * `useMeshGitHubUrl`) are pinned to their static "clean mesh" values so no
  * background fetch can self-render a row inside the measured window — those
  * subscriptions are orthogonal to row memoization. `useProviderList` stays
  * real (its reference stability is part of the production contract) and the
- * test settles it before baselining.
+ * tests settle it before baselining.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, waitFor } from '@testing-library/react';
@@ -32,7 +39,10 @@ import type { SpawnOption } from '../../src/lib/groups';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // Per-file mocks (do not affect the sibling sidebar-*.test.tsx files).
-const { renderCounts } = vi.hoisted(() => ({ renderCounts: {} as Record<number, number> }));
+const { renderCounts, ietRenders } = vi.hoisted(() => ({
+  renderCounts: {} as Record<number, number>,
+  ietRenders: {} as Record<string, number>,
+}));
 
 vi.mock('../../src/components/Sidebar/NodeItem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/components/Sidebar/NodeItem')>();
@@ -42,6 +52,17 @@ vi.mock('../../src/components/Sidebar/NodeItem', async (importOriginal) => {
     return <RealNodeItem {...props} />;
   }
   return { ...actual, NodeItem: CountingNodeItem };
+});
+
+vi.mock('../../src/components/shared/InlineEditableText', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/components/shared/InlineEditableText')>();
+  const RealInlineEditableText = actual.InlineEditableText;
+  function CountingInlineEditableText(props: ComponentProps<typeof RealInlineEditableText>) {
+    const key = typeof props.id === 'string' ? props.id : 'unknown';
+    ietRenders[key] = (ietRenders[key] ?? 0) + 1;
+    return <RealInlineEditableText {...props} />;
+  }
+  return { ...actual, InlineEditableText: CountingInlineEditableText };
 });
 
 vi.mock('../../src/hooks/useMeshHealth', () => ({
@@ -113,15 +134,21 @@ function seed() {
     selectedMeshId: null,
   });
   seedAgentNodes([A1(), A2(), AX(), B1(), B2()]);
-  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, closingNodeIds: new Set(), error: null });
+  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, closingNodeIds: new Set(), error: null, activeNodeId: null });
 }
 
 function clearCounts() {
   for (const k of Object.keys(renderCounts)) delete renderCounts[k];
+  for (const k of Object.keys(ietRenders)) delete ietRenders[k];
 }
 
 function totalCounts() {
   return Object.values(renderCounts).reduce((a, b) => a + b, 0);
+}
+
+/** `NodeItem` body executions for one row (name-cell id doubling as key). */
+function ietCount(nodeId: number): number {
+  return ietRenders[`node-item-name-${nodeId}`] ?? 0;
 }
 
 beforeEach(() => {
@@ -173,9 +200,23 @@ function meshProps(overrides: Partial<MeshItemProps> = {}): MeshItemProps {
     providerList: PROVIDERS,
     ...stableMeshCallbacks(),
     meshNodes: [],
-    activeNodeId: null,
     ...overrides,
   };
+}
+
+/** Settle the async provider-list snapshot, then baseline both counters. */
+async function settleSidebar() {
+  await waitFor(() => expect(screen.getByText('alpha-one')).toBeTruthy());
+  expect(screen.getByText('beta-two')).toBeTruthy();
+  let last = -1;
+  for (let i = 0; i < 10; i++) {
+    await act(async () => {});
+    const total = totalCounts();
+    if (total === last) break;
+    last = total;
+    if (i === 9) throw new Error('sidebar did not settle before baselining');
+  }
+  clearCounts();
 }
 
 describe('Sidebar render isolation (issue #1748)', () => {
@@ -210,8 +251,7 @@ describe('Sidebar render isolation (issue #1748)', () => {
     await act(async () => {});
     clearCounts();
 
-    // Control: a genuinely changed member (new reference) must render so
-    // the count badge and the row stay current.
+    // Control: a genuinely changed member (new reference) must render.
     rerender(
       <DndContext>
         <SortableContext items={SORTABLE_ITEMS}>
@@ -223,22 +263,9 @@ describe('Sidebar render isolation (issue #1748)', () => {
     expect(totalCounts()).toBeGreaterThan(0);
   });
 
-  it('patching one node leaves the other mesh untouched; archived nodes stay hidden', async () => {
+  it('patching one node executes only that row body; archived nodes stay hidden', async () => {
     render(<Sidebar />);
-    // Settle the async snapshot subscription (provider list) before
-    // baselining the counters; fail loudly instead of flaking if the tree
-    // keeps rendering on its own.
-    await waitFor(() => expect(screen.getByText('alpha-one')).toBeTruthy());
-    expect(screen.getByText('beta-two')).toBeTruthy();
-    let last = -1;
-    for (let i = 0; i < 10; i++) {
-      await act(async () => {});
-      const total = totalCounts();
-      if (total === last) break;
-      last = total;
-      if (i === 9) throw new Error('sidebar did not settle before baselining');
-    }
-    clearCounts();
+    await settleSidebar();
 
     // Issue #788 — archived nodes live in the Archive probe tab, never in
     // the sidebar list.
@@ -248,18 +275,33 @@ describe('Sidebar render isolation (issue #1748)', () => {
       useAgentNodeStore.getState().patchAgentNode(11, { status: 'awaiting_input' });
     });
 
-    // The untouched mesh must not re-render any row.
-    expect(renderCounts[21] ?? 0).toBe(0);
-    expect(renderCounts[22] ?? 0).toBe(0);
-    // The affected mesh re-rendered (its count badge derives from the
-    // grouped nodes), so its rows were visited again...
-    expect(renderCounts[11] ?? 0).toBeGreaterThan(0);
-    expect(renderCounts[12] ?? 0).toBeGreaterThan(0);
-    // ...while the archived node never renders on any pass.
-    expect(renderCounts[13] ?? 0).toBe(0);
+    // Only the patched row's body executed — the same-mesh sibling, the
+    // other mesh, and the archived node all read strictly zero.
+    expect(ietCount(11)).toBeGreaterThan(0);
+    expect(ietCount(12)).toBe(0);
+    expect(ietCount(21)).toBe(0);
+    expect(ietCount(22)).toBe(0);
+    expect(ietCount(13)).toBe(0);
     expect(screen.queryByText('alpha-archived')).toBeNull();
     // The status flip itself is visible on the changed row.
     expect(screen.getByTitle('Needs attention')).toBeTruthy();
+  });
+
+  it('activating a node executes only that row body', async () => {
+    render(<Sidebar />);
+    await settleSidebar();
+
+    act(() => {
+      useAgentNodeStore.getState().setActiveNode(22);
+    });
+
+    // No `MeshItem` re-rendered (the active bit is owned per row, not
+    // drilled through the mesh), and only the activated row body executed.
+    expect(totalCounts()).toBe(0);
+    expect(ietCount(22)).toBe(1);
+    expect(ietCount(11)).toBe(0);
+    expect(ietCount(12)).toBe(0);
+    expect(ietCount(21)).toBe(0);
   });
 
   it('Sidebar groups nodes in one memo pass instead of filtering per mesh in render', () => {

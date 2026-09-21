@@ -1,11 +1,15 @@
 /**
  * Issue #1748 — `NodeItem` must skip re-renders on unrelated parent updates.
  *
- * A re-rendered `MeshItem` hands every row fresh per-row closures, so the
- * row memo cannot rely on callback identity. This file proves (through the
- * real component, with no duplicated comparator logic) that a parent
- * re-render keeping the same node reference does not re-execute the row
- * body, while a genuinely changed node still does.
+ * `MeshItem` passes id-keyed stable handlers, so the row memo covers every
+ * prop by reference. This file proves (through the real component, with no
+ * duplicated comparator logic) that:
+ *
+ *   - a parent re-render keeping the same node reference AND stable
+ *     handlers does not re-execute the row body;
+ *   - a changed handler reference DOES re-render (the comparator is not
+ *     blind to callbacks — a stale-closure guard);
+ *   - a genuinely changed node still re-renders.
  *
  * Technique: `InlineEditableText` (the always-mounted name cell) is wrapped
  * in a counting pass-through around the real component. The counter ticks
@@ -19,6 +23,7 @@ import type { ComponentProps } from 'react';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
 import { getMeshColor } from '../../src/lib/meshColors';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import type { SpawnOption } from '../../src/lib/groups';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const { ietRenders } = vi.hoisted(() => ({ ietRenders: { count: 0 } }));
@@ -51,37 +56,69 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
+const stableHandlers = {
+  onSelectNode: () => {},
+  onDeleteNode: () => {},
+};
+
+// Shared across renders: a fresh literal here would defeat the memo on
+// `providerList` identity and confound every assertion below.
+const PROVIDERS: SpawnOption[] = [];
+
 beforeEach(() => {
   ietRenders.count = 0;
   seedAgentNodes([]);
-  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, activeNodeId: null });
 });
 
 describe('NodeItem memo (issue #1748)', () => {
-  it('skips a parent re-render that keeps the same node reference', () => {
+  it('skips a parent re-render that keeps the same node reference and handlers', () => {
     const node = makeNode();
     seedAgentNodes([node]);
     const { rerender } = render(
-      <NodeItem node={node} meshColor={getMeshColor(3)} isActive={false} onSelect={() => {}} onDelete={() => {}} />,
+      <NodeItem node={node} meshColor={getMeshColor(3)} providerList={PROVIDERS} {...stableHandlers} />,
     );
     expect(screen.getByText('node-a')).toBeTruthy();
     const baseline = ietRenders.count;
     expect(baseline).toBeGreaterThan(0);
 
-    // Same node reference, brand-new per-row closures — exactly what a
-    // re-rendered MeshItem hands down when it maps its rows.
+    // Same node reference, same handler references — what a memoized
+    // parent hands down when nothing in this row changed.
     rerender(
-      <NodeItem node={node} meshColor={getMeshColor(3)} isActive={false} onSelect={() => {}} onDelete={() => {}} />,
+      <NodeItem node={node} meshColor={getMeshColor(3)} providerList={PROVIDERS} {...stableHandlers} />,
     );
 
     expect(ietRenders.count).toBe(baseline);
+  });
+
+  it('re-renders when a handler reference changes (comparator is not blind)', () => {
+    const node = makeNode();
+    seedAgentNodes([node]);
+    const { rerender } = render(
+      <NodeItem node={node} meshColor={getMeshColor(3)} providerList={PROVIDERS} {...stableHandlers} />,
+    );
+    const baseline = ietRenders.count;
+
+    // Fresh closures must defeat the memo — otherwise a future caller
+    // closing over transient state would go stale silently.
+    rerender(
+      <NodeItem
+        node={node}
+        meshColor={getMeshColor(3)}
+        providerList={PROVIDERS}
+        onSelectNode={() => {}}
+        onDeleteNode={() => {}}
+      />,
+    );
+
+    expect(ietRenders.count).toBe(baseline + 1);
   });
 
   it('still re-renders when its own node reference changes', () => {
     const node = makeNode();
     seedAgentNodes([node]);
     const { rerender } = render(
-      <NodeItem node={node} meshColor={getMeshColor(3)} isActive={false} onSelect={() => {}} onDelete={() => {}} />,
+      <NodeItem node={node} meshColor={getMeshColor(3)} providerList={PROVIDERS} {...stableHandlers} />,
     );
     const baseline = ietRenders.count;
 
@@ -91,9 +128,8 @@ describe('NodeItem memo (issue #1748)', () => {
       <NodeItem
         node={{ ...node, status: 'awaiting_input' }}
         meshColor={getMeshColor(3)}
-        isActive={false}
-        onSelect={() => {}}
-        onDelete={() => {}}
+        providerList={PROVIDERS}
+        {...stableHandlers}
       />,
     );
 

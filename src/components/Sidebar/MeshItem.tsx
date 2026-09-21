@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { memo, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -62,7 +62,6 @@ interface MeshItemProps {
   // toggled the deleted SessionView left-pane `FileExplorerPanel`.
   onOpenFilesProbe: () => void;
   meshNodes: AgentNode[];
-  activeNodeId: number | null;
   onActivateNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
@@ -112,7 +111,6 @@ function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): bo
     && previous.isDropdownOpen === next.isDropdownOpen
     && previous.isSpawning === next.isSpawning
     && previous.providerList === next.providerList
-    && previous.activeNodeId === next.activeNodeId
     && sameMeshNodeRefs(previous.meshNodes, next.meshNodes)
     && previous.onSelectMesh === next.onSelectMesh
     && previous.onNewNode === next.onNewNode
@@ -142,7 +140,6 @@ function MeshItemView({
   onSelectProvider,
   onOpenFilesProbe,
   meshNodes,
-  activeNodeId,
   onActivateNode,
   selectMesh,
   onDeleteNode,
@@ -167,6 +164,25 @@ function MeshItemView({
   // hex builds a fresh object per call; memoize so `NodeItem` rows (which
   // compare `meshColor` by reference) don't re-render with this mesh.
   const meshColor = useMemo(() => getMeshColor(mesh.id, mesh.color), [mesh.id, mesh.color]);
+
+  // Issue #1748 — one id-keyed select handler for every row in this mesh,
+  // stable across renders (both captured actions are stable), so the
+  // memoized `NodeItem` rows can cover it by reference instead of
+  // receiving a fresh closure per row per render.
+  // Single mode stays single (wayfinder #982 / #983): it renders
+  // the active node, so the click retargets the solo view
+  // automatically — this replaces the old setMaximizedNode
+  // retarget. In any grid mode we also select the node's mesh,
+  // which flips the canvas to Mesh Grid via the uiStore sync
+  // (calling selectMesh unconditionally would break out of
+  // Single). Ctrl+Arrow from Single still exits in App.tsx —
+  // keyboard parity follow-up is #987.
+  const handleSelectNode = useCallback((nodeId: number, meshId: number) => {
+    onActivateNode(nodeId);
+    if (useUIStore.getState().viewMode !== 'single') {
+      selectMesh(meshId);
+    }
+  }, [onActivateNode, selectMesh]);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   // The header no longer carries a sync *button* — the background sync (ADR
@@ -470,27 +486,13 @@ function MeshItemView({
           key={node.id}
           node={node}
           meshColor={meshColor}
-          isActive={activeNodeId === node.id}
           // Issue #774 — the Regenerate submenu shows every available
           // Spawn Option as a picker; threading `providerList` keeps the
           // submenu visually consistent with `ProviderDropdown` (same
           // harness-grouped render, same icons).
           providerList={providerList}
-          onSelect={() => {
-            onActivateNode(node.id);
-            // Single mode stays single (wayfinder #982 / #983): it renders
-            // the active node, so the click retargets the solo view
-            // automatically — this replaces the old setMaximizedNode
-            // retarget. In any grid mode we also select the node's mesh,
-            // which flips the canvas to Mesh Grid via the uiStore sync
-            // (calling selectMesh unconditionally would break out of
-            // Single). Ctrl+Arrow from Single still exits in App.tsx —
-            // keyboard parity follow-up is #987.
-            if (useUIStore.getState().viewMode !== 'single') {
-              selectMesh(node.mesh_id);
-            }
-          }}
-          onDelete={(e) => onDeleteNode(e, node.id)}
+          onSelectNode={handleSelectNode}
+          onDeleteNode={onDeleteNode}
         />
       ))}
 

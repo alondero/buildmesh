@@ -39,7 +39,6 @@ import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
 interface NodeItemProps {
   node: AgentNode;
   meshColor: ReturnType<typeof getMeshColor>;
-  isActive: boolean;
   /**
    * Issue #774 / ticket 03 — the Spawn Options available on this mesh.
    * Issue #1502 — the Regenerate submenu renders this list INCLUDING
@@ -49,34 +48,42 @@ interface NodeItemProps {
    * greyed-out (the user can still see the affordance exists).
    */
   providerList?: SpawnOption[];
-  onSelect: () => void;
-  onDelete: (e: React.MouseEvent) => void;
+  // Issue #1748 — id-keyed stable handlers (not per-row closures), so the
+  // memo comparator below can cover every function prop by reference.
+  onSelectNode: (nodeId: number, meshId: number) => void;
+  onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
 }
 
 /// Issue #1748 — every sidebar row re-rendered on every node update because
 /// `NodeItem` was a plain component receiving fresh per-row closures from
-/// `MeshItem` on each pass. The comparator below covers everything that
-/// affects the rendered output: the node entity itself (the store's shallow
-/// reconciliation in issue #1384 preserves the reference for untouched
-/// nodes), the row visuals (`meshColor`, `isActive`), and the Regenerate
-/// menu targets (`providerList`). `onSelect`/`onDelete` are intentionally
-/// excluded: `MeshItem` builds them as per-row closures
-/// (`() => onActivateNode(node.id)`), so they are never referentially
-/// stable — but they capture only stable store actions plus the row's own
-/// id, making them semantically constant for the row's lifetime.
+/// `MeshItem` on each pass. The comparator below covers every prop by
+/// reference: the node entity itself (the store's shallow reconciliation in
+/// issue #1384 preserves the reference for untouched nodes), the row
+/// visuals (`meshColor`), the Regenerate menu targets (`providerList`), and
+/// the id-keyed handlers (`onSelectNode`/`onDeleteNode`, stable because
+/// `MeshItem` binds ids at most once via `useCallback` and forwards the
+/// delete action unchanged). Active styling is NOT a prop — the row
+/// subscribes to its own active bit below, so flipping the active node
+/// re-renders only the two affected rows instead of every memo in the list.
 function areNodeItemPropsEqual(previous: NodeItemProps, next: NodeItemProps): boolean {
   return (
     previous.node === next.node
     && previous.meshColor === next.meshColor
-    && previous.isActive === next.isActive
     && previous.providerList === next.providerList
+    && previous.onSelectNode === next.onSelectNode
+    && previous.onDeleteNode === next.onDeleteNode
   );
 }
 
 export const NodeItem = memo(NodeItemView, areNodeItemPropsEqual);
 
-function NodeItemView({ node, meshColor, isActive, providerList, onSelect, onDelete }: NodeItemProps) {
+function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNode }: NodeItemProps) {
   const config = getStatusConfig(node.status);
+  // Issue #1748 — the row owns its active bit (a per-id boolean) instead of
+  // receiving `isActive` through `MeshItem`. Flipping the active node then
+  // re-renders only the rows whose bit actually changed; every other row's
+  // selector result is identical and zustand skips the render.
+  const isActive = useAgentNodeStore((s) => s.activeNodeId === node.id);
   const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);
   const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
@@ -186,6 +193,12 @@ function NodeItemView({ node, meshColor, isActive, providerList, onSelect, onDel
     closeContextMenu();
     regen.pickRegenerateProvider(providerId, providerLabel);
   };
+
+  // Issue #1748 — bind the row's ids here, inside the body that already
+  // executes per render, so `MeshItem` can pass the id-keyed handlers
+  // straight through without allocating per-row closures of its own.
+  const handleSelect = () => onSelectNode(node.id, node.mesh_id);
+  const handleDelete = (e: React.MouseEvent) => onDeleteNode(e, node.id);
 
   // Issue #814 — outside-mousedown close goes through the shared
   // `useClickOutside` hook (#492). Both the parent menu AND the
@@ -381,7 +394,7 @@ function NodeItemView({ node, meshColor, isActive, providerList, onSelect, onDel
       // the menu can return focus to its trigger on Escape, without
       // putting the row in the natural Tab order.
       tabIndex={-1}
-      onClick={isClosing ? undefined : onSelect}
+      onClick={isClosing ? undefined : handleSelect}
       onContextMenu={(e) => {
         e.preventDefault();
         setContextMenu({ x: e.clientX, y: e.clientY });
@@ -499,7 +512,7 @@ function NodeItemView({ node, meshColor, isActive, providerList, onSelect, onDel
       ) : (
         <button
           type="button"
-          onClick={onDelete}
+          onClick={handleDelete}
           className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
           title="Delete node"
           aria-label={`Delete ${node.name}`}
