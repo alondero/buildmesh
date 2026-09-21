@@ -621,9 +621,14 @@ mod tests {
     /// the flags**: it would NOT catch a refactor that left the flags
     /// intact but emptied the `after_fresh_spawn` body, or rewired the
     /// hook to call a different helper. The flag pins are the
-    /// contract; the hook body is pinned by code review and the
-    /// `services::cline_session::tests::start_capture_poller`-shaped
-    /// integration coverage in the helper's own module.
+    /// contract; the hook body itself (the call into
+    /// `services::cline_session::start_capture_poller`) is currently
+    /// unpinned — the helper's tests cover the historic-recovery path
+    /// via `find_historic_id_for_db_path`, which exercises
+    /// `list_sessions_in_window` and `select_recovery_identity`, but
+    /// neither `try_capture_from_db_path` (the fresh-capture SQLite
+    /// read) nor the retry loop in `start_capture_poller` has a
+    /// dedicated test today.
     #[test]
     fn self_assigns_session_id_and_skips_pty_uuid_capture() {
         // Cline mints its own session ids; auto-resume must drive --id
