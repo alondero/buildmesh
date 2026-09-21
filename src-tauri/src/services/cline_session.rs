@@ -130,12 +130,25 @@ pub fn is_cline_session_id(id: &str) -> bool {
     epoch.parse::<i64>().is_ok()
 }
 
-/// Extract the spawn epoch ms embedded in a Cline session id. Returns
-/// `None` for any id that does not match [`is_cline_session_id`]. Used
-/// as the freshness gate in the SQLite read — the leading epoch ms is
+/// Extract the spawn epoch ms embedded in a Cline session id. The
+/// `session_id` always starts with `<digits>_<suffix>` (optionally
+/// `session_<digits>_<suffix>`); this returns the leading `<digits>`
+/// parsed as `i64` for any input that survives the structural shape
+/// check. The round-1 reviewer flagged that this did not also gate on
+/// [`is_cline_session_id`] — that gate now applies, so an id like
+/// `12345_invalid` (wrong suffix length) returns `None`. The freshness
+/// comparator downstream still treats `None` as "no match", so the
+/// behaviour is the same as the original docstring claim for every
+/// row that the SQLite read actually surfaces (the SQL filter
+/// `interactive = 1` plus the `__agent_` exclusion pre-narrows the
+/// set to ids that *do* pass [`is_cline_session_id`]). Used as the
+/// freshness gate in the SQLite read — the leading epoch ms is
 /// authoritative for spawn ordering, so a freshly spawned TUI can be
 /// matched without parsing the ISO `started_at` column.
 pub fn session_id_epoch_ms(id: &str) -> Option<i64> {
+    if !is_cline_session_id(id) {
+        return None;
+    }
     let token = root_id_token(id)?;
     let epoch = token.split_once('_')?.0;
     epoch.parse::<i64>().ok()
@@ -468,6 +481,36 @@ mod tests {
             "session_1789767699203_rfzyx__agent_1789771309502_ctlfb6"
         )
         .is_none());
+    }
+
+    #[test]
+    fn session_id_epoch_ms_rejects_non_conforming_shapes() {
+        // Round 2 review: the docstring on `session_id_epoch_ms` claims
+        // it returns `None` for any id that does not pass
+        // `is_cline_session_id`. The original implementation only ran
+        // the structural shape check, so a syntactically well-formed
+        // but semantically invalid id (e.g. wrong suffix length or
+        // characters) parsed a phantom epoch. The fix is to gate on
+        // the validator; the test pins the predicate.
+        assert!(session_id_epoch_ms("12345_invalid").is_none(),
+                "wrong suffix length must not leak a phantom epoch");
+        assert!(session_id_epoch_ms("12345_INVALID").is_none(),
+                "upper-case suffix must not leak a phantom epoch");
+        assert!(session_id_epoch_ms("12345_").is_none(),
+                "empty suffix must not leak a phantom epoch");
+        assert!(session_id_epoch_ms("").is_none(),
+                "empty input must not leak a phantom epoch");
+        assert!(session_id_epoch_ms("_7of3e").is_none(),
+                "no epoch prefix must not leak a phantom epoch");
+        // But a valid Cline id still parses its leading epoch.
+        assert_eq!(
+            session_id_epoch_ms("1789757012702_7of3e"),
+            Some(1_789_757_012_702)
+        );
+        assert_eq!(
+            session_id_epoch_ms("session_1789901791099_yrvad"),
+            Some(1_789_901_791_099)
+        );
     }
 
     // ── select_id_for_directory ────────────────────────────────────────

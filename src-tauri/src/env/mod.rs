@@ -311,25 +311,98 @@ mod tests {
     /// Round 1 review: `CLINE_DATA_DIR` IS the data directory (per
     /// `cline --help`); the DB sits under it directly. The override
     /// must NOT double up the `data/` prefix or the SQLite open lands
-    /// on a non-existent path.
+    /// on a non-existent path. Round 2 review: drive the resolver via
+    /// the injected closure rather than mutating `std::env` — the
+    /// latter races with concurrent cargo test threads.
     #[test]
     fn cline_db_path_honours_cline_data_dir_override() {
+        use crate::env::cline_db_path_with_resolver;
         use crate::models::EnvType;
-        // Pin the override for the duration of this test.
-        let prior = std::env::var_os("CLINE_DATA_DIR");
-        let data_dir = std::path::PathBuf::from(r"C:\custom\data");
-        std::env::set_var("CLINE_DATA_DIR", &data_dir);
-        let path = cline_db_path_for_env(EnvType::Windows, "")
-            .expect("override must resolve to a DB path");
-        let expected = data_dir.join("db").join("sessions.db");
+        let data_dir: std::ffi::OsString =
+            std::path::PathBuf::from(r"C:\custom\data").into_os_string();
+        let injected = data_dir.clone();
+        let path = cline_db_path_with_resolver(EnvType::Windows, "", move |key| {
+            if key == "CLINE_DATA_DIR" {
+                Some(injected.clone())
+            } else {
+                None
+            }
+        })
+        .expect("override must resolve to a DB path");
+        let expected = std::path::PathBuf::from(r"C:\custom\data")
+            .join("db")
+            .join("sessions.db");
         assert_eq!(
             path, expected,
             "override must append db/sessions.db directly (no extra data/)"
         );
-        match prior {
-            Some(prev) => std::env::set_var("CLINE_DATA_DIR", prev),
-            None => std::env::remove_var("CLINE_DATA_DIR"),
+    }
+
+    /// Round 2 review: an empty `CLINE_DATA_DIR` must NOT trigger the
+    /// override-suffix branch. `std::env::var_os` reports `Some("")`
+    /// for an empty value, so the production code keys off the
+    /// override resolver (which trims and rejects empty), not the
+    /// raw env-var presence. A regression that swapped the suffix
+    /// decision back to `env::var_os("CLINE_DATA_DIR").is_some()`
+    /// would re-introduce the empty-string bug — pin the predicate
+    /// here with the same closure-injection pattern.
+    #[test]
+    fn cline_db_path_treats_empty_cline_data_dir_as_unset() {
+        use crate::env::cline_db_path_with_resolver;
+        use crate::models::EnvType;
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let expected = windows_home
+            .join(".cline")
+            .join("data")
+            .join("db")
+            .join("sessions.db");
+        for empty_value in ["", " ", "\t", "  \t "] {
+            let injected: std::ffi::OsString = empty_value.into();
+            let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
+                if key == "CLINE_DATA_DIR" {
+                    Some(injected.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("default path must resolve when override is empty");
+            assert_eq!(
+                path, expected,
+                "empty {empty_value:?} must fall through to the bare-home data/db/sessions.db suffix"
+            );
         }
+    }
+
+    /// Round 2 review: when `CLINE_DATA_DIR` is unset, the production
+    /// helper goes through the bare-home `~/.cline/data/db/sessions.db`
+    /// path even if a sibling var (e.g. `OPENCODE_DATA_DIR`) is set.
+    /// The injection closure returns `None` for the Cline key, and
+    /// the path must reflect the default derivation.
+    #[test]
+    fn cline_db_path_ignores_unrelated_env_vars() {
+        use crate::env::cline_db_path_with_resolver;
+        use crate::models::EnvType;
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let expected = windows_home
+            .join(".cline")
+            .join("data")
+            .join("db")
+            .join("sessions.db");
+        let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
+            if key == "SOME_OTHER_VAR" {
+                Some("/totally/different/path".into())
+            } else {
+                None
+            }
+        })
+        .expect("default path must resolve when CLINE_DATA_DIR is unset");
+        assert_eq!(path, expected);
     }
 
     /// Round 1 review: a Windows Buildmesh driving a WSL Cline must

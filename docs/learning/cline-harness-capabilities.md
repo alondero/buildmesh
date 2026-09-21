@@ -169,12 +169,17 @@ splice `--id <id>` into the spawn argv.
   from
   [`AgentProvider::after_fresh_spawn`](../../src-tauri/src/agent/provider/mod.rs).
   The poller retries at 400 ms / 800 ms / 1.6 s / 2.5 s / 4 s (â‰ˆ9.3 s
-  total budget) until a row whose `time_created >= spawn - 2 s` appears
-  in the SQLite store for the spawn `cwd`.
+  total budget) until a row whose `session_id`'s embedded epoch ms is
+  at or after `spawn - 2 s` appears in the SQLite store for the spawn
+  `cwd` (round 1 review: Cline's `sessions.started_at` is an ISO 8601
+  string, but the freshness gate operates on the epoch ms encoded in
+  `session_id` directly — no ISO parsing needed).
 - It picks the newest row that (a) matches the spawn directory under
   the platform-aware `env::directories_match` rules, (b) carries a valid
-  `<epochms>_<5 base36>` id, and (c) is tagged `interactive = 1` (one-shot
-  prompt runs are excluded â€” they exit immediately per issue #1769).
+  Cline root id (`<epochms>_<5 base36>` legacy or
+  `session_<epochms>_<6 base36>` current, subagent ids excluded), and
+  (c) is tagged `interactive = 1` (one-shot prompt runs are excluded â€”
+  they exit immediately per issue #1769).
 - The id is persisted via `db::set_cli_session_id_if_missing`, so a
   later, more authoritative capture (the on-disk `sessions/<id>/`
   fallback, when added) cannot clobber it.

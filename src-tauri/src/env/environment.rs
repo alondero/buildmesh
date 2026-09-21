@@ -717,6 +717,12 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
 /// mutating process state. The `env_type` parameter is reserved for
 /// future per-env override shapes (e.g. a WSL-specific lookup) — for
 /// now the same env var is honoured on every runtime.
+///
+/// Round 2 review: returns `None` when `CLINE_DATA_DIR` is unset,
+/// empty, or whitespace-only. `is_some()` on a process env var is
+/// *not* the same predicate (empty strings still report `Some`), so
+/// the suffix decision in [`cline_db_path_with_resolver`] routes
+/// through this helper, never through `std::env::var_os`.
 fn cline_data_dir_override_for_env<F: Fn(&str) -> Option<std::ffi::OsString>>(
     _env_type: EnvType,
     get: F,
@@ -729,48 +735,58 @@ fn cline_data_dir_override_for_env<F: Fn(&str) -> Option<std::ffi::OsString>>(
     Some(PathBuf::from(raw))
 }
 
-/// Cline CLI home directory: `<home>/.cline/`. Override precedence:
-/// `CLINE_DATA_DIR` (env) → otherwise `~/.cline` under the *spawn*
-/// environment. WSL guests use `wsl_home()` (cached guest login-shell
-/// probe) so a Windows username and a guest username can disagree
-/// without aliasing to the wrong account.
-pub(crate) fn cline_dir_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
-    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, |k| env::var_os(k)) {
-        return Some(override_dir);
+/// Absolute path to Cline's authoritative session store, with an
+/// injectable env resolver. The resolver closes over `std::env` in
+/// production and over an in-memory map in tests; tests therefore
+/// never touch process state and stay race-free under cargo's default
+/// multi-threaded runner.
+///
+/// Suffix decision: the override path *is* the data directory, so the
+/// DB sits at `<override>/db/sessions.db`. The bare-home derivation
+/// points at `~/.cline`, so the DB sits at `<home>/data/db/sessions.db`.
+/// Round 2 review: the suffix decision keys off whether the override
+/// actually resolved (post-trim, post-non-empty check), not whether the
+/// env var is set — `CLINE_DATA_DIR=""` reports `Some("")` via
+/// `var_os`, but the override returns `None` here, so the bare-home
+/// path picks the `data/db/sessions.db` suffix (the bug the empty-string
+/// guard prevents).
+pub(crate) fn cline_db_path_with_resolver<
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+>(
+    env_type: EnvType,
+    spawn_path: &str,
+    get: F,
+) -> Option<PathBuf> {
+    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, get) {
+        return Some(override_dir.join("db").join("sessions.db"));
     }
-    match env_type {
-        EnvType::WindowsInterop => super::windows_cli_home(".cline"),
+    // Default derivation: cline home + data/db/sessions.db.
+    let dir = match env_type {
+        EnvType::WindowsInterop => super::windows_cli_home(".cline")?,
         EnvType::Windows => {
             let _ = spawn_path;
-            Some(cline_dir())
+            cline_dir()
         }
         EnvType::Wsl => {
             let _ = spawn_path;
-            wsl_home().map(|home| home.join(".cline"))
+            wsl_home()?.join(".cline")
         }
-    }
+    };
+    Some(dir.join("data").join("db").join("sessions.db"))
 }
 
 /// Absolute path to Cline's authoritative session store:
-/// `<data dir>/db/sessions.db` when `CLINE_DATA_DIR` is set, otherwise
-/// `<cline home>/data/db/sessions.db` (issue #1769 research). Returns
-/// `None` when the home directory is unknown (no `$HOME` / `$USERPROFILE`).
+/// `<data dir>/db/sessions.db` when `CLINE_DATA_DIR` resolves to a
+/// non-empty path, otherwise `<cline home>/data/db/sessions.db` (issue
+/// #1769 research). Returns `None` when the home directory is unknown
+/// (no `$HOME` / `$USERPROFILE`).
 ///
 /// The returned path is in the *spawn* environment's native syntax. For
 /// a Windows-side reader driving a WSL Cline, the caller must route
 /// through [`cline_db_path_for_host`] to convert the guest POSIX path
 /// to a Windows-host UNC path.
 pub(crate) fn cline_db_path_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
-    let dir = cline_dir_for_env(env_type, spawn_path)?;
-    if env::var_os("CLINE_DATA_DIR").is_some() {
-        // Round 1 review: the override IS the data directory; the DB
-        // sits under it directly (no extra `data/` prefix). The default
-        // derivation (above) still needs the `data/db/sessions.db` tail
-        // because the home directory IS `~/.cline`, not `~/.cline/data`.
-        Some(dir.join("db").join("sessions.db"))
-    } else {
-        Some(dir.join("data").join("db").join("sessions.db"))
-    }
+    cline_db_path_with_resolver(env_type, spawn_path, |k| env::var_os(k))
 }
 
 /// Windows-host form of the Cline session store. For Windows and
