@@ -1349,8 +1349,9 @@ export const triggerCircuitFromNode = (
   circuitId: number | null,
   maxRounds: number,
   reviewerProvider: string | null = null,
+  allowUnobserved: boolean | null = null,
 ) =>
-  _invoke<number>('trigger_circuit_from_node', { nodeId, circuitId, maxRounds, reviewerProvider });
+  _invoke<number>('trigger_circuit_from_node', { nodeId, circuitId, maxRounds, reviewerProvider, allowUnobserved });
 
 /** Graceful pause: the graph stops advancing; current steps finish (#1207). */
 export const pauseCircuitRun = (runId: number) =>

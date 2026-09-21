@@ -58,16 +58,49 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
 /// **First writer wins.** If the source agent already owns a live run, the
 /// early-return below hands back that run's id and `max_rounds` /
 /// `reviewer_provider` are not applied — the dialog hides the form in this
-/// state, so the only way here is a retry or IPC race.
+/// state, so the only way here is a retry or IPC race. The dedupe check
+/// runs BEFORE the readiness gate (#1792) so a retry on an unobserved
+/// source still returns the existing run id (issue #1660 dedupe wins
+/// over the gate, otherwise the gate would silently strip the live
+/// borrower's run id on every retry).
+///
+/// `allow_unobserved` (issue #1792) is the explicit override for the
+/// source-agent readiness gate enforced by [`assert_source_observed`].
+/// The built-in review preset refuses to mint a run on a never-observed
+/// source (no `cli_session_id`, no readable `assistant_report`); recovery
+/// and explicit user-selected circuits stay permissive because both paths
+/// have already proven the source is observed in another context. The
+/// override is recorded on the run's `context_json`
+/// (`source.review_allow_unobserved = "1"`) for audit.
+///
+/// The readiness gate runs **before** the writer mutex is acquired —
+/// `assistant_report` does filesystem I/O and the writer mutex cannot be
+/// released mid-call (issue #1228). The locked helper trusts the caller
+/// and does not re-check.
 pub fn create_node_circuit_run(
     node_id: i64,
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
+    // Pre-gate decisions: dedupe-before-gate then gate. Done under the
+    // process-global reader so the writer mutex is not held during the
+    // `assistant_report` filesystem I/O (issue #1228). The composition
+    // is testable on a per-test private in-memory DB via
+    // `create_node_circuit_run_pre_gate` (see below).
+    {
+        let db = crate::db::read_conn();
+        if let Some(existing) =
+            create_node_circuit_run_pre_gate(&db, node_id, selected_circuit_id, allow_unobserved)?
+        {
+            return Ok(existing);
+        }
+    }
+    // Mint (acquires the writer mutex).
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
-        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider,
+        &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider, allow_unobserved,
     )
 }
 
@@ -78,22 +111,156 @@ pub fn create_node_circuit_run(
 /// normalised *inside* the helper so the validation is not duplicated
 /// between the public wrapper and the test path (issue #1691 review
 /// cleanup) — a bare `terminal` is rejected before any DB work happens.
+///
+/// The helper trusts the caller: it assumes the readiness gate has
+/// already been enforced by [`assert_source_observed`] (the public
+/// wrapper runs that before `write_conn()`) or that the override /
+/// recovery / explicit-circuit carve-out applies. Tests that call the
+/// locked helper directly model the "caller has already verified"
+/// state — they do not need to stamp `cli_session_id` to satisfy a
+/// gate that is no longer in this function.
 pub(crate) fn create_node_circuit_run_locked(
     db: &mut Connection,
     node_id: i64,
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
-    create_node_circuit_run_with_recovery_locked(db, node_id, selected_circuit_id, max_rounds, reviewer_provider, None)
+    create_node_circuit_run_with_recovery_locked(
+        db, node_id, selected_circuit_id, max_rounds, reviewer_provider, None, allow_unobserved,
+    )
 }
 
+/// Recovery path: the source is already known to be observed (it has a
+/// previous run whose evidence the recovery plan reads), so the readiness
+/// check is irrelevant. The locked helper records `allow_unobserved = true`
+/// purely so the audit field is *not* emitted on this path — the
+/// `if selected_circuit_id.is_none() && recovery.is_none()` guard below
+/// already drops the audit on recovery, but the helper still uses
+/// `allow_unobserved = true` so any future "always audit" tweak lands on
+/// the right side of the carve-out.
 pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
 ) -> Result<i64, String> {
-    create_node_circuit_run_with_recovery_locked(db, recovery.source_id, None, max_rounds, None, Some(recovery))
+    create_node_circuit_run_with_recovery_locked(
+        db, recovery.source_id, None, max_rounds, None, Some(recovery), true,
+    )
+}
+
+/// Exact reason returned when the built-in review preset is asked to mint
+/// a run on a source agent that has produced no observable evidence yet
+/// (no captured `cli_session_id`, no readable `assistant_report` revision).
+/// Pinned by `node_review_refuses_unstarted_source_with_exact_message`
+/// (issue #1792).
+pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
+    "Source agent has not started yet — wait for its first turn before starting a review.";
+
+/// First-writer-wins dedupe (issue #1660). Returns the id of the source's
+/// currently-live run if any. Driven from
+/// [`create_node_circuit_run_pre_gate`] before the readiness gate so a
+/// retry on an unobserved source still hands back the live borrower's
+/// run id. The locked helper re-checks this under the writer transaction
+/// as defense in depth for concurrent inserts.
+pub(crate) fn find_live_run_for_source_inner(
+    conn: &Connection,
+    node_id: i64,
+) -> SqlResult<Option<i64>> {
+    conn.query_row(
+        &format!(
+            "SELECT id FROM autopilot_circuit_runs
+             WHERE source_agent_node_id = ?1 AND state IN ({})
+             LIMIT 1",
+            RunState::SQL_IN_LIVE
+        ),
+        params![node_id], |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Source-agent readiness gate (issue #1792). Lock-free: callers MUST run
+/// this before acquiring the writer mutex because `assistant_report` does
+/// filesystem I/O. Refuses to mint a run on a source agent that has
+/// produced no observable evidence yet — neither a non-empty
+/// `cli_session_id` nor a readable `assistant_report` revision.
+///
+/// Carve-outs (the gate is permissive):
+/// - `allow_unobserved` — the user explicitly opted in to the override
+///   on the Start Review dialog.
+/// - `has_selected_circuit` — the user is asking for a specific
+///   authored blueprint, not the built-in review preset.
+///
+/// Note: today's `assistant_report` reader returns `None` whenever
+/// `cli_session_id` is `None` (every harness stores the session id
+/// alongside the report, so the report branch never produces
+/// independent evidence). The check is kept for the spec's
+/// `cli_session_id OR assistant_report` contract and to defend against
+/// future harness adapters that may diverge.
+pub(crate) fn assert_source_observed(
+    node: &crate::models::AgentNode,
+    allow_unobserved: bool,
+    has_selected_circuit: bool,
+) -> Result<(), String> {
+    if allow_unobserved || has_selected_circuit {
+        return Ok(());
+    }
+    if node.cli_session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+        return Ok(());
+    }
+    // `assistant_report` is filesystem I/O. The caller must run this
+    // helper before acquiring any DB writer mutex (issue #1228).
+    if crate::coordinator::enrichment::assistant_report(node).is_some() {
+        return Ok(());
+    }
+    Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into())
+}
+
+/// Pre-gate composition for the public wrapper (#1792). Returns:
+/// - `Ok(Some(existing_run_id))` when first-writer-wins dedupe (#1660)
+///   wins — a retry on an unobserved source returns the live borrower's
+///   run id instead of re-firing the refusal.
+/// - `Ok(None)` when the gate passes (or is permissive), and the caller
+///   should proceed to the locked helper.
+/// - `Err(msg)` when the gate refuses the source agent.
+///
+/// This is the single decision point the wrapper relies on. The
+/// recovery path bypasses it entirely via `create_node_circuit_run_recovery_locked`
+/// (the recovery source is already observed via its previous run),
+/// so the helper has no `is_recovery` carve-out — keeping the helper's
+/// parameters honest about the only flags the public wrapper passes.
+///
+/// Lock-free: takes `&Connection` so the caller controls transaction /
+/// mutex scope. Tests drive this on a per-test private in-memory DB
+/// (issue #1691) so the dedupe-before-gate ordering is covered
+/// end-to-end without touching the process-global writer.
+pub(crate) fn create_node_circuit_run_pre_gate(
+    conn: &Connection,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    allow_unobserved: bool,
+) -> Result<Option<i64>, String> {
+    // First-writer-wins dedupe (#1660). Runs BEFORE the readiness
+    // gate (#1792) so a retry on an unobserved source hands back the
+    // live borrower's run id without re-firing the refusal.
+    if let Some(existing) = find_live_run_for_source_inner(conn, node_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(Some(existing));
+    }
+    // Load the source node (cheap DB read on the same connection).
+    let node = crate::db::agent_node::get_agent_node_by_id_inner(conn, node_id)
+        .map_err(|e| e.to_string())?;
+    // Source-agent readiness gate (#1792). The wrapper always calls
+    // this with the real flags — no conditional call at the call site
+    // (which would be the same lie the round-3 review flagged).
+    assert_source_observed(
+        &node,
+        allow_unobserved,
+        selected_circuit_id.is_some(),
+    )?;
+    Ok(None)
 }
 
 fn create_node_circuit_run_with_recovery_locked(
@@ -103,6 +270,7 @@ fn create_node_circuit_run_with_recovery_locked(
     max_rounds: i32,
     reviewer_provider: Option<String>,
     recovery: Option<super::recovery::ReviewRecovery>,
+    allow_unobserved: bool,
 ) -> Result<i64, String> {
     let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
@@ -119,15 +287,8 @@ fn create_node_circuit_run_with_recovery_locked(
             return Err("The implementation agent is still being stopped. Try Continue review again in a moment.".into());
         }
     }
-    let existing: Option<i64> = tx.query_row(
-        &format!(
-            "SELECT id FROM autopilot_circuit_runs
-             WHERE source_agent_node_id = ?1 AND state IN ({})
-             LIMIT 1",
-            RunState::SQL_IN_LIVE
-        ),
-        params![node_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let existing: Option<i64> = find_live_run_for_source_inner(&tx, node_id)
+        .map_err(|e| e.to_string())?;
     if let Some(id) = existing { return Ok(id); }
     let owned: bool = tx.query_row(
         &format!(
@@ -204,6 +365,14 @@ fn create_node_circuit_run_with_recovery_locked(
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() && recovery.is_none() {
+        if allow_unobserved {
+            // Audit field for the readiness-gate override (issue #1792):
+            // a user who knowingly reviewed an unobserved source leaves a
+            // permanent breadcrumb on the run. Absent means the source
+            // either had a captured `cli_session_id` or a readable
+            // `assistant_report` at create time.
+            context.set("source.review_allow_unobserved", "1");
+        }
         if let Some(provider) = reviewer_override.as_deref() {
             context.set("review.provider", provider);
         }

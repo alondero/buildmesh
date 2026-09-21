@@ -22,6 +22,13 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   const [circuits, setCircuits] = useState<AutopilotCircuit[]>([]);
   const [circuitId, setCircuitId] = useState<number | null>(null);
   const [reviewerProvider, setReviewerProvider] = useState('');
+  // Override for the source-agent readiness gate (issue #1792): the
+  // built-in review preset refuses to mint a run on a source that has not
+  // produced any observable evidence yet (no captured `cli_session_id`,
+  // no readable `assistant_report` revision). Power users can opt in to
+  // bypass the gate; the override is recorded on the run's `context_json`
+  // (`source.review_allow_unobserved = "1"`) for audit.
+  const [allowUnobserved, setAllowUnobserved] = useState(false);
   // Same bucketing the Spawn Menu renders (ADR-0016): harness headers with
   // their Proxied children nested, which keeps composite `harness:provider`
   // rows unambiguous. Terminal is not an agent, so it is filtered out before
@@ -87,7 +94,16 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
     setBusy(true);
     setError(null);
     try {
-      await triggerCircuitFromNode(node.id, circuitId, rounds, circuitId === null ? reviewerProvider || null : null);
+      await triggerCircuitFromNode(
+        node.id,
+        circuitId,
+        rounds,
+        circuitId === null ? reviewerProvider || null : null,
+        // The override only applies on the built-in review preset path;
+        // the user-selected circuit path bypasses the readiness gate
+        // regardless. Forwarding `false` there is a no-op.
+        allowUnobserved,
+      );
       setOpen(false);
       showRun();
     } catch (reason) {
@@ -116,7 +132,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
       aria-label="Start review or circuit"
       title={!activeOwnership && blockedReason ? blockedReason : 'Start review or circuit'}
       disabled={!activeOwnership && !eligible}
-      onClick={() => { setReviewerProvider(''); setOpen(true); }}
+      onClick={() => { setReviewerProvider(''); setAllowUnobserved(false); setOpen(true); }}
       className="p-1 rounded-md text-accent-violet hover:bg-accent-violet/15 disabled:opacity-40"
     ><CircuitsIcon className="h-4 w-4" /></button>
     {open && createPortal(
@@ -184,6 +200,18 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
           <input type="number" min={1} max={10} value={rounds}
             onChange={e => setRounds(Number(e.target.value))}
             className="w-16 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary" />
+        </label>
+        <label className="text-xs flex items-start gap-2 mb-4 cursor-pointer">
+          <input type="checkbox" checked={allowUnobserved} onChange={e => setAllowUnobserved(e.target.checked)}
+            className="mt-0.5" />
+          <span>
+            Review an agent that hasn't started yet
+            <span className="block text-text-secondary mt-1">
+              Bypass the readiness gate that refuses reviews on agents with no
+              captured session id or readable report. The override is recorded on
+              the run for audit.
+            </span>
+          </span>
         </label></> : <p className="text-xs text-text-secondary mb-4">
           Start this Circuit with {node.name} as its triggering agent. Its configured steps control when work starts.
           You can pause or cancel in Circuits.
