@@ -189,18 +189,7 @@ function StatusBadge({ code }: { code: string }) {
   // Letters and colours come from the canonical diff vocabulary
   // (fileDiffStatusMeta, src/lib/status.ts) — never re-derived locally.
   // Mobile renders the badge as a translucent chip: token hex + accent wash.
-  const first = code.trim().charAt(0).toUpperCase();
-  const meta = fileDiffStatusMeta(
-    first === "A"
-      ? "added"
-      : first === "D"
-      ? "deleted"
-      : first === "R"
-      ? "renamed"
-      : first === "?"
-      ? "untracked"
-      : "modified",
-  );
+  const meta = fileDiffStatusMeta(code);
   return (
     <span
       style={{

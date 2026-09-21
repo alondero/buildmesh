@@ -87,7 +87,8 @@ export default function CreatePrSheet({
             padding: "4px 8px",
             borderRadius: 6,
             background: "var(--surface-2)",
-            fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
+            fontFamily:
+              '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
           }}
         />
       </p>

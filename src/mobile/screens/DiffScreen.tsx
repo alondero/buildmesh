@@ -46,7 +46,8 @@ export default function DiffScreen({
         title={
           <span
             style={{
-              fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
+              fontFamily:
+                '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
               fontSize: 13,
               fontWeight: 400,
             }}

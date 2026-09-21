@@ -22,7 +22,7 @@ import {
 // per pixel (review feedback #1). No need to import the numeric
 // `PULL_REFRESH_THRESHOLD_PX` from the hook in this file.
 import { groupByHarness } from "../../lib/groups";
-import { STATUS_CONFIG } from "../../lib/status";
+import { getStatusConfig } from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -810,10 +810,10 @@ export function NodeRow({
   onClick: () => void;
   providers?: Provider[];
 }) {
-  // STATUS_CONFIG (src/lib/status.ts) is total over the SessionStatus union
-  // — `archived` included (#788) — so this lookup needs no local overrides;
-  // a missing key would fail typechecking, not render.
-  const meta = STATUS_CONFIG[node.status];
+  // getStatusConfig (src/lib/status.ts) is total over the SessionStatus union
+  // — `archived` included (#788) — and safely falls back to idle on unknown
+  // or missing statuses.
+  const meta = getStatusConfig(node.status);
   const needsInput = node.status === "awaiting_input";
   // Single source of truth for the badge + label: the live `listProviders()`
   // payload (issue #328). The fallback (`'?' / '#555'` + raw id) fires when:

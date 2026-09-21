@@ -733,7 +733,7 @@ export default function TerminalScreen({
               whiteSpace: "pre-wrap",
               overflowWrap: "anywhere",
               fontFamily:
-                '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
+                '"JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace',
               fontSize: 13,
               lineHeight: 1.4,
               color: "var(--text)",

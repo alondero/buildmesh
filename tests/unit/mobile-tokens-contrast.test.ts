@@ -91,6 +91,12 @@ describe('mobile text contrast (WCAG AA)', () => {
     }
   }
 
+  it('--on-accent clears 4.5:1 on --accent and --accent-dim', () => {
+    const onAccent = readMobileVar('on-accent');
+    expect(contrastRatio(onAccent, readMobileVar('accent'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(onAccent, readMobileVar('accent-dim'))).toBeGreaterThanOrEqual(4.5);
+  });
+
   it('the text hierarchy stays monotonic on --bg', () => {
     const bg = readMobileVar('bg');
     const primary = contrastRatio(readMobileVar('text'), bg);
@@ -108,6 +114,8 @@ describe('mobile ↔ desktop token parity (DESIGN.md mapping table)', () => {
     ['surface', 'bg-surface'],
     ['surface-2', 'bg-card'],
     ['surface-3', 'bg-card-hover'],
+    ['border', 'border-default'],
+    ['border-strong', 'border-strong'],
     ['text', 'text-primary'],
     ['text-dim', 'text-secondary'],
     ['text-faint', 'text-muted'],

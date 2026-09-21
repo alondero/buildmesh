@@ -146,7 +146,20 @@ const FILE_DIFF_STATUS_META: Record<FileDiffStatus, FileDiffStatusMeta> = {
 };
 
 export function fileDiffStatusMeta(status: string): FileDiffStatusMeta {
+  const raw = (status || '').trim().toLowerCase();
+  const key: FileDiffStatus =
+    raw === 'a' || raw === 'added'
+      ? 'added'
+      : raw === 'd' || raw === 'deleted'
+      ? 'deleted'
+      : raw === 'r' || raw === 'renamed'
+      ? 'renamed'
+      : raw === '?' || raw === 'u' || raw === 'untracked'
+      ? 'untracked'
+      : raw === 'm' || raw === 'modified'
+      ? 'modified'
+      : (raw as FileDiffStatus);
   return (
-    FILE_DIFF_STATUS_META[status as FileDiffStatus] ?? FILE_DIFF_STATUS_META.modified
+    FILE_DIFF_STATUS_META[key] ?? FILE_DIFF_STATUS_META.modified
   );
 }

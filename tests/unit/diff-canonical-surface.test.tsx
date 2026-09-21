@@ -43,6 +43,20 @@ describe('fileDiffStatusMeta (canonical, lib/status.ts)', () => {
     }
   });
 
+  it('normalizes porcelain and shorthand status codes', () => {
+    expect(fileDiffStatusMeta('A')).toEqual(fileDiffStatusMeta('added'));
+    expect(fileDiffStatusMeta('a')).toEqual(fileDiffStatusMeta('added'));
+    expect(fileDiffStatusMeta('M')).toEqual(fileDiffStatusMeta('modified'));
+    expect(fileDiffStatusMeta('m')).toEqual(fileDiffStatusMeta('modified'));
+    expect(fileDiffStatusMeta('D')).toEqual(fileDiffStatusMeta('deleted'));
+    expect(fileDiffStatusMeta('d')).toEqual(fileDiffStatusMeta('deleted'));
+    expect(fileDiffStatusMeta('R')).toEqual(fileDiffStatusMeta('renamed'));
+    expect(fileDiffStatusMeta('r')).toEqual(fileDiffStatusMeta('renamed'));
+    expect(fileDiffStatusMeta('?')).toEqual(fileDiffStatusMeta('untracked'));
+    expect(fileDiffStatusMeta('U')).toEqual(fileDiffStatusMeta('untracked'));
+    expect(fileDiffStatusMeta('u')).toEqual(fileDiffStatusMeta('untracked'));
+  });
+
   it('falls back to "modified" for unknown statuses (open-set vocabulary)', () => {
     // The generated `FileDiff.status` is a wider `string`; the function
     // accepts anything and tints it amber rather than rendering blank.
