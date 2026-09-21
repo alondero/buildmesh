@@ -48,6 +48,16 @@ describe('STATUS_CONFIG', () => {
     expect(config.label).not.toBe(STATUS_CONFIG.completed.label);
   });
 
+  it('renders lost as a distinct terminal state, not idle', () => {
+    // Issue #1793 — a reaped node is terminal and must not fall through to the
+    // idle dot the way an unrecognised status would.
+    const config = getStatusConfig('lost');
+    expect(config).toBe(STATUS_CONFIG.lost);
+    expect(config.label).toBe('Lost');
+    expect(config).not.toBe(STATUS_CONFIG.idle);
+    expect(config.dot).not.toBe(STATUS_CONFIG.idle.dot);
+  });
+
   it('keeps completed as PR opened (Autopilot terminal state)', () => {
     // Issue #485 — `completed` is Autopilot's PR-opened terminal state and
     // must not be confused with the new `ready` (issue #1364).

@@ -53,7 +53,7 @@ export type ActivityStatusTone = 'warning' | 'error' | 'active' | 'idle';
 export type ActivityStatus = { label: string; tone: ActivityStatusTone };
 
 export function activityStatus(root: AgentNode, members: readonly AgentNode[]): ActivityStatus {
-  if (members.some(n => n.status === 'error')) return { label: 'Needs attention', tone: 'error' };
+  if (members.some(n => n.status === 'error' || n.status === 'lost')) return { label: 'Needs attention', tone: 'error' };
   if (members.some(n => n.status === 'awaiting_input')) return { label: 'Needs input', tone: 'warning' };
   const implementing = root.status === 'running';
   const reviewing = members.some(n => n.id !== root.id && n.status === 'running');

@@ -60,6 +60,17 @@ export const STATUS_CONFIG = {
     label: 'Error',
     hex: '#ef4444',
   },
+  // Issue #1793 — the reaper's terminal state for a circuit-piloted node that
+  // stayed running with no session identity and no readable report. Not the
+  // same as `error` (nothing was ever observed), so it gets distinct copy on
+  // the same red token, with a hollow glyph.
+  lost: {
+    color: 'status-error',
+    bgColor: 'bg-status-error',
+    dot: '⊘',
+    label: 'Lost',
+    hex: '#ef4444',
+  },
   suspended: {
     color: 'text-violet',
     bgColor: 'bg-accent-violet',
