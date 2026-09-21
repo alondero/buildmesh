@@ -253,10 +253,7 @@ impl AgentProvider for MuseAdapter {
         anchor_ms: i64,
         recorded_start: bool,
     ) -> Option<String> {
-        let native = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .map(std::path::PathBuf::from)?
-            .join(".local/share/muse");
-        let home = crate::env::cli_dir_for_spawn(native, ".local/share/muse", spawn_path)?;
+        let home = crate::services::muse_sessions::data_root(spawn_path)?;
         find_session(
             &home.join("session-index.db"),
             spawn_path,
@@ -359,80 +356,25 @@ impl AgentProvider for MuseAdapter {
     }
 }
 
+/// Resolve a node's Muse session identity from `session-index.db` **and** the
+/// on-disk session tree, then let the launch anchor pick between them. The
+/// index alone is insufficient: a live session has no index row until a later
+/// Muse process flushes it (run 183 — the node stayed unobserved, so its
+/// circuit wait failed fast). See [`crate::services::muse_sessions`].
 fn find_session(
     database: &std::path::Path,
     workspace: &str,
     anchor_ms: i64,
     recorded_start: bool,
 ) -> Option<String> {
-    let connection =
-        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    connection
-        .busy_timeout(std::time::Duration::from_millis(200))
-        .ok()?;
-    // Muse's index can leave workspace/timestamp columns NULL. Read only
-    // the session metadata frame from the indexed log, never transcript text.
-    let mut statement = connection.prepare("SELECT session_id, session_log_path FROM sessions ORDER BY session_log_path DESC LIMIT 128").ok()?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .ok()?;
-    let indexed: Vec<_> = rows.filter_map(Result::ok).collect();
-    drop(statement);
-    drop(connection);
-    let candidates = indexed.into_iter().filter_map(|(id, path)| {
-        let path = crate::env::to_host_path(&path);
-        let (recorded_id, cwd, timestamp) = session_metadata(std::path::Path::new(&path))?;
-        (id == recorded_id && crate::env::directories_match(&cwd, workspace))
-            .then_some((id, timestamp))
-    });
+    let root = database.parent()?;
+    let candidates =
+        crate::services::muse_sessions::workspace_candidates(root, workspace, anchor_ms);
     crate::services::session_recovery::select_recovery_identity(
         candidates,
         anchor_ms,
         recorded_start,
     )
-}
-
-fn session_metadata(path: &std::path::Path) -> Option<(String, String, i64)> {
-    use std::io::{BufRead, Read};
-    let file = std::fs::File::open(path).ok()?;
-    for line in std::io::BufReader::new(file.take(262_144)).lines().take(64) {
-        let line = line.ok()?;
-        let frame: serde_json::Value = serde_json::from_str(&line).ok()?;
-        if let Some(metadata) = metadata_record(&frame) {
-            return Some(metadata);
-        }
-        let Some(children) = frame.get("children").and_then(|c| c.as_array()) else {
-            continue;
-        };
-        for child in children {
-            let Some(json) = child.get("record_json").and_then(|r| r.as_str()) else {
-                continue;
-            };
-            let Ok(record) = serde_json::from_str::<serde_json::Value>(json) else {
-                continue;
-            };
-            if let Some(metadata) = metadata_record(&record) {
-                return Some(metadata);
-            }
-        }
-    }
-    None
-}
-
-fn metadata_record(record: &serde_json::Value) -> Option<(String, String, i64)> {
-    if record.get("payload_type").and_then(|p| p.as_str()) != Some("runtime.session.metadata")
-        || record.pointer("/stream/kind").and_then(|s| s.as_str()) != Some("session")
-    {
-        return None;
-    }
-    let id = record.pointer("/stream/id")?.as_str()?;
-    uuid::Uuid::parse_str(id).ok()?;
-    let cwd = record.pointer("/payload/record/workspace_root")?.as_str()?;
-    let timestamp = record.get("recorded_at")?.as_i64()?;
-    Some((id.into(), cwd.into(), timestamp / 1000))
 }
 
 #[cfg(test)]
@@ -727,6 +669,41 @@ mod tests {
             true,
         );
         assert_eq!(find_session(&database, "/workspace", 10000, true), None);
+    }
+
+    /// Run 183: a live Muse session has no `session-index.db` row, so capture
+    /// must still find the identity from the on-disk session log. Without the
+    /// fallback the node stayed unobserved and #1791 failed its circuit wait.
+    #[test]
+    fn find_session_recovers_a_live_session_absent_from_the_index() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "01a0c54b-5ed4-7a61-91d7-a7a72c42fe24";
+        let workspace = "F:\\src\\buildmesh\\.claude\\worktrees\\gh1816";
+        let dir = root
+            .path()
+            .join("sessions/1970/01/01")
+            .join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = serde_json::json!({
+            "payload_type": "runtime.session.metadata",
+            "stream": {"kind": "session", "id": id},
+            "recorded_at": 10_000_000i64,
+            "payload": {"record": {"workspace_root": workspace}},
+        });
+        // The metadata frame follows a retained-frame envelope, as on disk.
+        let envelope = serde_json::json!({
+            "retained_frame": "session_permission_transaction",
+            "children": [{"record_json": record.to_string()}],
+        });
+        std::fs::write(dir.join("session.jsonl"), format!("{envelope}\n{record}\n")).unwrap();
+
+        // No `session-index.db` at all.
+        let database = root.path().join("session-index.db");
+        assert_eq!(
+            find_session(&database, workspace, 10_000, true).as_deref(),
+            Some(id),
+            "the on-disk session log must supply the identity the index omitted"
+        );
     }
 
     // -- Issue #1794: extended session-index capture window --------------
