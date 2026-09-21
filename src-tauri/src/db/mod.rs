@@ -94,12 +94,14 @@ pub(crate) use agent_node::{
 pub(crate) use agent_node::{
     adopt_manual_pool_slug_inner,
     create_agent_node_inner,
+    update_agent_node_positions_batch_inner,
 };
 
 #[cfg(test)]
 pub(crate) use mesh::{
     create_mesh_inner,
     delete_mesh_inner,
+    update_mesh_positions_batch_inner,
 };
 
 #[allow(unused_imports)]
@@ -121,7 +123,8 @@ pub(crate) use warm_pool::{
     list_all_droppable_warm_entries_for_mesh_inner,
     is_warm_pool_path_inner,
     warm_pool_claims_path_inner,
-    list_worktree_enabled_meshes_for_warm_inner
+    list_worktree_enabled_meshes_for_warm_inner,
+    batch_delete_warm_worktrees_by_id,
 };
 
 #[cfg(test)]

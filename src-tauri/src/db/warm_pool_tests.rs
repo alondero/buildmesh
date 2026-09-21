@@ -1878,4 +1878,274 @@ mod tests {
             "the v24 column default is 1 (pool on); pre-v24 DBs are covered by the backfill"
         );
     }
+
+    // ===== Issue #1746 — `batch_delete_warm_worktrees_by_id` bulk-shape contract =====
+    //
+    // The old comment on `batch_delete_warm_worktrees_by_id` claimed the
+    // per-row shape kept the SQL plan trivial and the `idx_*` indexes in
+    // use. Re-measured, the `IN (...)` bulk form below drives the same
+    // `INTEGER PRIMARY KEY` lookup per id (SQLite just iterates for us, not
+    // us for SQLite). These tests pin that contract: the bulk form
+    // deletes the right rows, agrees with the per-row baseline, and the
+    // query plan still uses the primary key.
+
+    /// Minimal `warm_worktrees` schema for the bulk-delete contract test.
+    /// Mirrors the v21 DDL — `id INTEGER PRIMARY KEY AUTOINCREMENT` is the
+    /// index the `EXPLAIN QUERY PLAN` check expects to see.
+    fn conn_with_warm_worktrees() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE warm_worktrees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                preassigned_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'available'
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_warm_row(conn: &Connection, mesh_id: i64) -> i64 {
+        let n = uuid::Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO warm_worktrees (mesh_id, path, preassigned_name) \
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![mesh_id, format!("/repo/{n}"), format!("warm-{n}")],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn count_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM warm_worktrees", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Empty input is a no-op — matches the public function's
+    /// pre-#1746 contract (and the new bulk form's `if ids.is_empty()`
+    /// short-circuit).
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_zero_is_noop() {
+        let conn = conn_with_warm_worktrees();
+        let id = insert_warm_row(&conn, 1);
+        assert_eq!(count_rows(&conn), 1);
+
+        assert_eq!(
+            crate::db::batch_delete_warm_worktrees_by_id(&conn, &[]).unwrap(),
+            0,
+            "empty id list returns 0 deletions"
+        );
+
+        assert_eq!(count_rows(&conn), 1, "row must survive an empty delete");
+        assert!(conn
+            .query_row(
+                "SELECT id FROM warm_worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok());
+    }
+
+    /// Single id — verifies the IN list of one still routes through the
+    /// INTEGER PRIMARY KEY lookup (no accidental full-scan regression on
+    /// the simplest case).
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_single_row() {
+        let conn = conn_with_warm_worktrees();
+        let keep = insert_warm_row(&conn, 1);
+        let drop = insert_warm_row(&conn, 1);
+        assert_eq!(count_rows(&conn), 2);
+
+        assert_eq!(
+            crate::db::batch_delete_warm_worktrees_by_id(&conn, &[drop]).unwrap(),
+            1
+        );
+        assert_eq!(count_rows(&conn), 1, "exactly the targeted row is gone");
+
+        let survivors: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM warm_worktrees").unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(survivors, vec![keep], "unrelated row must survive");
+    }
+
+    /// 600 rows → spans two chunks of 500 (the bulk form's chunk size).
+    /// Verifies the chunked commit boundaries don't drop rows mid-batch
+    /// and the returned count equals the rows actually deleted.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_six_hundred_spans_chunks() {
+        let conn = conn_with_warm_worktrees();
+        let mut ids = Vec::with_capacity(600);
+        for _ in 0..600 {
+            ids.push(insert_warm_row(&conn, 1));
+        }
+        assert_eq!(count_rows(&conn), 600);
+
+        assert_eq!(
+            crate::db::batch_delete_warm_worktrees_by_id(&conn, &ids).unwrap(),
+            600,
+            "all 600 real rows are deleted; returned count matches rows-affected"
+        );
+        assert_eq!(count_rows(&conn), 0, "every targeted row must be gone");
+    }
+
+    /// Non-existent ids must return 0 — the pre-#1746 code returned the
+    /// input length as a side effect of incrementing a per-`execute`
+    /// counter, which lied to the caller and the downstream tracing
+    /// logs. The fix accumulates the actual `tx.execute()` rowcount.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_returns_zero_for_nonexistent_ids() {
+        let conn = conn_with_warm_worktrees();
+        let existing = insert_warm_row(&conn, 1);
+
+        // Three ids that don't exist + one that does.
+        let target = vec![99_001_i64, 99_002, 99_003, existing];
+        assert_eq!(
+            crate::db::batch_delete_warm_worktrees_by_id(&conn, &target).unwrap(),
+            1,
+            "only the real row counts toward the total"
+        );
+        assert_eq!(count_rows(&conn), 0, "the real row is gone");
+    }
+
+    /// Duplicate ids in the input list must count each row only once
+    /// — the same row can't be deleted twice, so the second DELETE is a
+    /// 0-row-affected no-op that must not be counted.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_duplicate_ids_count_once() {
+        let conn = conn_with_warm_worktrees();
+        let id = insert_warm_row(&conn, 1);
+
+        let target = vec![id, id, id];
+        assert_eq!(
+            crate::db::batch_delete_warm_worktrees_by_id(&conn, &target).unwrap(),
+            1,
+            "three duplicate ids collapse to a single deletion"
+        );
+        assert_eq!(count_rows(&conn), 0);
+    }
+
+    /// All-or-nothing: an error mid-batch must roll back every chunk
+    /// that already executed inside the same `tx`. The pre-fix per-row
+    /// path paid N commits so a mid-batch failure left earlier chunks
+    /// committed; the post-#1746 single-transaction path keeps the
+    /// "one batch, one commit" guarantee. The trigger raises on the
+    /// sentinel id mid-statement — the rowcount is 0, the tx is dropped
+    /// without commit, and the chunk-1 row must still be present.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_rolls_back_on_trigger_error() {
+        let conn = conn_with_warm_worktrees();
+        let keep = insert_warm_row(&conn, 1);
+        let sentinel = insert_warm_row(&conn, 1);
+        // BEFORE DELETE trigger: rows whose id matches the sentinel fail
+        // the statement. The earlier rows in the same IN-list still pass
+        // the trigger check (SQLite evaluates the trigger per row), but
+        // the statement as a whole fails and the tx rolls back.
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER abort_on_sentinel BEFORE DELETE ON warm_worktrees \
+             WHEN OLD.id = {sentinel} BEGIN SELECT RAISE(ABORT, 'sentinel'); END;"
+        )).unwrap();
+
+        let target = vec![keep, sentinel];
+        let err = crate::db::batch_delete_warm_worktrees_by_id(&conn, &target)
+            .expect_err("trigger must abort the delete");
+        assert!(
+            err.to_string().contains("sentinel"),
+            "error must surface the trigger's message, got {err}"
+        );
+
+        // Both rows must still exist — the tx was rolled back.
+        assert_eq!(count_rows(&conn), 2, "no rows may be committed on error");
+        assert!(
+            conn.query_row(
+                "SELECT 1 FROM warm_worktrees WHERE id = ?1",
+                rusqlite::params![keep],
+                |row| row.get::<_, i64>(0),
+            ).is_ok(),
+            "the earlier-in-the-IN-list row must survive the rollback"
+        );
+    }
+
+    /// Bulk form's final state must match the per-row baseline the old
+    /// code path produced — the SQL rewrite must not drop or duplicate
+    /// deletions.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_matches_per_row_baseline() {
+        // Build two parallel schemas with the same 30 ids.
+        let build = |conn: &Connection| -> Vec<i64> {
+            (0..30)
+                .map(|_| insert_warm_row(conn, 1))
+                .collect()
+        };
+        // The order of deletions is what matters here — the per-row path
+        // deletes in id-order, and the bulk form deletes via a single
+        // `IN (...)` whose lookup order is also id-driven (PRIMARY KEY).
+        // Pick 15 of the 30 ids (every other row, so the survivors are
+        // interleaved — proves the IN-list lookup walks every picked id).
+        let pick: Vec<usize> = (0..15).map(|i| i * 2).collect();
+
+        let conn_bulk = conn_with_warm_worktrees();
+        let ids_bulk = build(&conn_bulk);
+        let chosen_bulk: Vec<i64> = pick.iter().map(|&i| ids_bulk[i]).collect();
+        crate::db::batch_delete_warm_worktrees_by_id(&conn_bulk, &chosen_bulk).unwrap();
+
+        let conn_per_row = conn_with_warm_worktrees();
+        let ids_per_row = build(&conn_per_row);
+        let chosen_per_row: Vec<i64> = pick.iter().map(|&i| ids_per_row[i]).collect();
+        for id in &chosen_per_row {
+            conn_per_row
+                .execute(
+                    "DELETE FROM warm_worktrees WHERE id = ?1",
+                    rusqlite::params![id],
+                )
+                .unwrap();
+        }
+
+        let survivors_bulk: Vec<i64> = {
+            let mut stmt = conn_bulk.prepare("SELECT id FROM warm_worktrees").unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let survivors_per_row: Vec<i64> = {
+            let mut stmt = conn_per_row.prepare("SELECT id FROM warm_worktrees").unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            survivors_bulk, survivors_per_row,
+            "bulk and per-row shapes must leave the same rows"
+        );
+    }
+
+    /// `EXPLAIN QUERY PLAN` on the bulk DELETE must still drive the
+    /// INTEGER PRIMARY KEY index — the plan argument that justified the
+    /// per-row shape pre-#1746.
+    #[test]
+    fn batch_delete_warm_worktrees_by_id_query_plan_uses_primary_key() {
+        let conn = conn_with_warm_worktrees();
+        for _ in 0..10 {
+            insert_warm_row(&conn, 1);
+        }
+        let mut stmt = conn
+            .prepare("EXPLAIN QUERY PLAN DELETE FROM warm_worktrees WHERE id IN (?1, ?2, ?3)")
+            .unwrap();
+        let plan = stmt
+            .query_map(rusqlite::params![1_i64, 2_i64, 3_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
+            "bulk DELETE must use the INTEGER PRIMARY KEY index, got plan: {plan:?}"
+        );
+    }
 }

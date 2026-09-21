@@ -1,6 +1,8 @@
 //! Agent Node persistence, coordinator node digest rows, and the pending
 //! worktree-removal queue.
 
+use std::fmt::Write as _;
+
 use rusqlite::{Connection, params};
 
 use crate::models::*;
@@ -328,13 +330,46 @@ pub(crate) fn create_agent_node_configured_inner(
 pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
     let db = write_conn();
-    for (id, pos) in updates {
-        db.execute(
-            "UPDATE agent_nodes SET position = ?1 WHERE id = ?2",
-            params![pos, id],
-        )?;
+    update_agent_node_positions_batch_inner(&db, updates)
+}
+
+/// Test-facing entry point mirroring [`update_agent_node_positions_batch`]
+/// (issue #1746). See [`crate::db::mesh::update_mesh_positions_batch_inner`]
+/// for the rationale and the chunk-size math; the two helpers share the
+/// same shape — only the table name differs.
+pub(crate) fn update_agent_node_positions_batch_inner(
+    conn: &Connection,
+    updates: &[(i64, i64)],
+) -> SqlResult<()> {
+    if updates.is_empty() { return Ok(()); }
+    const CHUNK_SIZE: usize = 300;
+    let tx = conn.unchecked_transaction()?;
+    for chunk in updates.chunks(CHUNK_SIZE) {
+        let mut case_sql = String::with_capacity(64 + chunk.len() * 24);
+        case_sql.push_str("UPDATE agent_nodes SET position = CASE id ");
+        for i in 0..chunk.len() {
+            let _ = write!(
+                case_sql,
+                "WHEN ?{} THEN ?{} ",
+                2 * i + 1,
+                2 * i + 2,
+            );
+        }
+        case_sql.push_str("END WHERE id IN (");
+        for i in 0..chunk.len() {
+            if i > 0 { case_sql.push(','); }
+            let _ = write!(case_sql, "?{}", 2 * i + 1);
+        }
+        case_sql.push(')');
+
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() * 2);
+        for (id, pos) in chunk {
+            params_vec.push(id);
+            params_vec.push(pos);
+        }
+        tx.execute(&case_sql, params_vec.as_slice())?;
     }
-    Ok(())
+    tx.commit()
 }
 
 /// Rename IPC only — writes `name` alone and is **not** the spawn-path

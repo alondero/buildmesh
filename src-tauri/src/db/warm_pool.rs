@@ -495,11 +495,13 @@ pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
 
     // ---- Phase 3: batch row DELETEs under the re-acquired mutex ----
     //
-    // One short lock acquisition per row keeps the SQL plan trivial for
-    // SQLite and the existing `idx_*` indexes unchanged. The DELETE phase
-    // is purely a bookkeeping sweep: the FS work above already happened
-    // and its outcomes don't influence what we commit here (Branch 1
-    // "preserve dir" and Branch 3 "no dir on disk" both delete the row).
+    // One short lock acquisition for the whole batch (issue #1746):
+    // `batch_delete_warm_worktrees_by_id` does all chunks in a single
+    // transaction so we pay one commit / fsync instead of N. The DELETE
+    // phase is purely a bookkeeping sweep: the FS work above already
+    // happened and its outcomes don't influence what we commit here
+    // (Branch 1 "preserve dir" and Branch 3 "no dir on disk" both delete
+    // the row).
     let ids: Vec<i64> = plan.iter().map(|(id, _, _)| *id).collect();
     let db = write_conn();
     batch_delete_warm_worktrees_by_id(&db, &ids)
@@ -618,15 +620,43 @@ fn tear_down_warm_worktree_path(path: &str) {
 }
 
 /// Phase 3 helper: DELETE the supplied row ids. Pure write against the DB.
-/// Caller holds whatever mutex protects the connection. One statement per
-/// id keeps the SQL plan trivial and the existing `idx_*` indexes in use;
-/// the row count here is bounded by `claimed`-rows-per-mesh in practice.
-fn batch_delete_warm_worktrees_by_id(conn: &Connection, ids: &[i64]) -> SqlResult<usize> {
-    let mut deleted = 0;
-    for id in ids {
-        conn.execute("DELETE FROM warm_worktrees WHERE id = ?1", params![id])?;
-        deleted += 1;
+/// Caller holds whatever mutex protects the connection.
+///
+/// Pre-issue-#1746 this loop paid one commit / fsync per id while holding
+/// the process-global writer Mutex. The `idx_*` plan was the (correct)
+/// reason cited at the time, but the cost was real — every reconcile pass
+/// stalled the whole app behind the writer while N rows went one at a
+/// time. Re-measured against the `IN (...)` shape below, the bulk form
+/// still drives the same `INTEGER PRIMARY KEY` lookup per id (SQLite just
+/// does the iteration itself, not us) — so we keep the index use AND
+/// collapse N commits into one. Chunked at 500 to stay below the default
+/// `SQLITE_MAX_VARIABLE_NUMBER=999` (one bind per id) with headroom for
+/// future schema work that may widen the IN list.
+///
+/// Returns the number of rows actually deleted (sum of `tx.execute()`
+/// rowcount across chunks), **not** the input length — duplicate ids and
+/// already-deleted ids must not be counted. The pre-#1746 code returned
+/// the input length as a side effect of incrementing a counter once per
+/// `execute`; that lied to the caller when an id was missing and to the
+/// tracing logs that reported the count downstream.
+pub(crate) fn batch_delete_warm_worktrees_by_id(
+    conn: &Connection,
+    ids: &[i64],
+) -> SqlResult<usize> {
+    if ids.is_empty() { return Ok(0); }
+    const CHUNK_SIZE: usize = 500;
+    let tx = conn.unchecked_transaction()?;
+    let mut deleted = 0usize;
+    for chunk in ids.chunks(CHUNK_SIZE) {
+        let placeholders =
+            std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM warm_worktrees WHERE id IN ({})",
+            placeholders
+        );
+        deleted += tx.execute(&sql, rusqlite::params_from_iter(chunk))?;
     }
+    tx.commit()?;
     Ok(deleted)
 }
 
