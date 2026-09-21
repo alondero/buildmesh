@@ -36,14 +36,13 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
-function renderNode(node: AgentNode, onSelect: () => void = vi.fn()) {
+function renderNode(node: AgentNode, onSelectNode: (nodeId: number, meshId: number) => void = vi.fn()) {
   return render(
     <NodeItem
       node={node}
       meshColor={{ name: 'default', hex: '#000000', textOnDark: '#fff' }}
-      isActive={false}
-      onSelect={onSelect}
-      onDelete={vi.fn()}
+      onSelectNode={onSelectNode}
+      onDeleteNode={vi.fn()}
     />,
   );
 }
@@ -64,7 +63,7 @@ describe('NodeItem restart button', () => {
     expect(screen.getByRole('img', { name: 'Missing session ID' })).toBeTruthy();
     useAgentNodeStore.setState({ autopilotStates: { [node.id]: 'implementing' } });
     rerender(<NodeItem node={node} meshColor={{ name: 'default', hex: '#000', textOnDark: '#fff' }}
-      isActive={false} onSelect={vi.fn()} onDelete={vi.fn()} />);
+      onSelectNode={vi.fn()} onDeleteNode={vi.fn()} />);
     expect(screen.queryByRole('img', { name: 'Missing session ID' })).toBeNull();
   });
 
@@ -134,16 +133,16 @@ describe('NodeItem restart button', () => {
     );
   });
 
-  it('clicking Restart does NOT also fire the row onSelect (stopPropagation guard)', () => {
+  it('clicking Restart does NOT also fire the row onSelectNode (stopPropagation guard)', () => {
     // The Restart button sits inside the row's clickable div. Without
     // e.stopPropagation, a single click would both restart the agent
     // AND switch the active node — confusing UX. The handler stops
     // propagation; this test pins that behaviour so a future refactor
     // can't silently regress it.
-    const onSelect = vi.fn();
-    renderNode(makeNode({ status: 'error' }), onSelect);
+    const onSelectNode = vi.fn();
+    renderNode(makeNode({ status: 'error' }), onSelectNode);
     fireEvent.click(screen.getByTestId('restart-button'));
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelectNode).not.toHaveBeenCalled();
   });
 
   it('clicking Resume invokes spawn_agent with the stored cli_session_id so the resume re-attempts', async () => {
@@ -174,17 +173,17 @@ describe('NodeItem restart button', () => {
     );
   });
 
-  it('clicking Resume does NOT also fire the row onSelect (stopPropagation guard)', () => {
+  it('clicking Resume does NOT also fire the row onSelectNode (stopPropagation guard)', () => {
     // Same propagation contract as the Restart button — pinning it for
     // the Resume affordance so a future refactor can't silently
     // regress it.
-    const onSelect = vi.fn();
+    const onSelectNode = vi.fn();
     renderNode(makeNode({
       status: 'suspended',
       cli_session_id: 'a53dd36f-e703-4f27-9356-8e523472d94e',
-    }), onSelect);
+    }), onSelectNode);
     fireEvent.click(screen.getByTitle('Resume agent'));
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelectNode).not.toHaveBeenCalled();
   });
 });
 

@@ -94,10 +94,10 @@ function renderNode(node: AgentNode = makeNode(), providerList?: SpawnOption[]) 
     <NodeItem
       node={node}
       meshColor={meshColor}
-      isActive={false}
+
       providerList={providerList}
-      onSelect={vi.fn()}
-      onDelete={vi.fn()}
+      onSelectNode={vi.fn()}
+      onDeleteNode={vi.fn()}
     />,
   );
 }
