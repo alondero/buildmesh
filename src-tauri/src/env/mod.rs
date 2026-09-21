@@ -261,6 +261,193 @@ mod tests {
         assert_eq!(grok_dir(), expected);
     }
 
+    /// Issue #1774: the Cline CLI home directory must match the current
+    /// environment's home — `~/.cline` everywhere, with the same
+    /// `$HOME`/`$USERPROFILE` fallback rules the other CLI helpers
+    /// already pin. The capture poller reads its SQLite store under
+    /// `<cline home>/data/db/sessions.db`, so the path the helper emits
+    /// must land in a place that actually exists on a real install.
+    #[test]
+    fn cline_dir_uses_the_current_environment_home() {
+        let expected = match current_env() {
+            Environment::Wsl => std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                .join(".cline"),
+            Environment::Windows => std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                    std::path::PathBuf::from(format!("C:\\Users\\{user}"))
+                })
+                .join(".cline"),
+        };
+        assert_eq!(cline_dir(), expected);
+    }
+
+    /// Issue #1774: `cline_db_path_for_env` must always append the
+    /// authoritative `data/db/sessions.db` suffix onto whatever home
+    /// the spawn-aware resolver picked (override or `~/.cline`). The
+    /// SQLite store is the canonical capture source — `~/.cline/data/
+    /// sessions/<id>/` is the fallback. If the suffix drifts, the
+    /// capture poller silently reads the wrong file.
+    #[test]
+    fn cline_db_path_for_env_appends_canonical_suffix() {
+        use crate::models::EnvType;
+        // Windows path: bare-home derivation, suffix must still apply.
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let path = cline_db_path_for_env(EnvType::Windows, "")
+            .expect("windows home must resolve to a Cline DB path");
+        let expected = windows_home.join(".cline").join("data").join("db").join("sessions.db");
+        assert_eq!(path, expected, "windows DB path must end in data/db/sessions.db");
+        assert!(path.ends_with("data/db/sessions.db") || path.ends_with("data\\db\\sessions.db"),
+                "DB path must carry the data/db/sessions.db suffix regardless of separator");
+    }
+
+    /// Round 1 review: `CLINE_DATA_DIR` IS the data directory (per
+    /// `cline --help`); the DB sits under it directly. The override
+    /// must NOT double up the `data/` prefix or the SQLite open lands
+    /// on a non-existent path. Round 2 review: drive the resolver via
+    /// the injected closure rather than mutating `std::env` — the
+    /// latter races with concurrent cargo test threads.
+    #[test]
+    fn cline_db_path_honours_cline_data_dir_override() {
+        use crate::env::cline_db_path_with_resolver;
+        use crate::models::EnvType;
+        let data_dir: std::ffi::OsString =
+            std::path::PathBuf::from(r"C:\custom\data").into_os_string();
+        let injected = data_dir.clone();
+        let path = cline_db_path_with_resolver(EnvType::Windows, "", move |key| {
+            if key == "CLINE_DATA_DIR" {
+                Some(injected.clone())
+            } else {
+                None
+            }
+        })
+        .expect("override must resolve to a DB path");
+        let expected = std::path::PathBuf::from(r"C:\custom\data")
+            .join("db")
+            .join("sessions.db");
+        assert_eq!(
+            path, expected,
+            "override must append db/sessions.db directly (no extra data/)"
+        );
+    }
+
+    /// Round 2 review: an empty `CLINE_DATA_DIR` must NOT trigger the
+    /// override-suffix branch. `std::env::var_os` reports `Some("")`
+    /// for an empty value, so the production code keys off the
+    /// override resolver (which trims and rejects empty), not the
+    /// raw env-var presence. A regression that swapped the suffix
+    /// decision back to `env::var_os("CLINE_DATA_DIR").is_some()`
+    /// would re-introduce the empty-string bug — pin the predicate
+    /// here with the same closure-injection pattern.
+    #[test]
+    fn cline_db_path_treats_empty_cline_data_dir_as_unset() {
+        use crate::env::cline_db_path_with_resolver;
+        use crate::models::EnvType;
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let expected = windows_home
+            .join(".cline")
+            .join("data")
+            .join("db")
+            .join("sessions.db");
+        for empty_value in ["", " ", "\t", "  \t "] {
+            let injected: std::ffi::OsString = empty_value.into();
+            let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
+                if key == "CLINE_DATA_DIR" {
+                    Some(injected.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("default path must resolve when override is empty");
+            assert_eq!(
+                path, expected,
+                "empty {empty_value:?} must fall through to the bare-home data/db/sessions.db suffix"
+            );
+        }
+    }
+
+    /// Round 2 review: when `CLINE_DATA_DIR` is unset, the production
+    /// helper goes through the bare-home `~/.cline/data/db/sessions.db`
+    /// path even if a sibling var (e.g. `OPENCODE_DATA_DIR`) is set.
+    /// The injection closure returns `None` for the Cline key, and
+    /// the path must reflect the default derivation.
+    #[test]
+    fn cline_db_path_ignores_unrelated_env_vars() {
+        use crate::env::cline_db_path_with_resolver;
+        use crate::models::EnvType;
+        let windows_home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        let expected = windows_home
+            .join(".cline")
+            .join("data")
+            .join("db")
+            .join("sessions.db");
+        let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
+            if key == "SOME_OTHER_VAR" {
+                Some("/totally/different/path".into())
+            } else {
+                None
+            }
+        })
+        .expect("default path must resolve when CLINE_DATA_DIR is unset");
+        assert_eq!(path, expected);
+    }
+
+    /// Round 1 review: a Windows Buildmesh driving a WSL Cline must
+    /// convert the guest POSIX path to a `\\wsl$\—` UNC path before
+    /// opening the SQLite store. `cline_db_path_for_host` is the
+    /// single seam that does this; passing the raw POSIX path to a
+    /// host `Connection::open` fails silently. On non-WSL env types
+    /// the helper is a no-op.
+    ///
+    /// Windows-only: the WSL→UNC translation lives in
+    /// `host_path::to_host_path`, which only branches into the UNC
+    /// prefix on `cfg!(target_os = "windows")`. On macOS / native Linux
+    /// the helper is a no-op, so `guest == host` and the difference
+    /// assertion would fire spuriously (Linux CI is
+    /// `.github/workflows/build.yml:25, :158`).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cline_db_path_for_host_translates_wsl_guest_path() {
+        use crate::models::EnvType;
+        // On non-WSL hosts the host-path helper must equal the raw
+        // helper (Windows / WindowsInterop stay on the host).
+        let raw_windows = cline_db_path_for_env(EnvType::Windows, "")
+            .expect("windows home must resolve");
+        let host_windows = cline_db_path_for_host(EnvType::Windows, "")
+            .expect("windows host-path must resolve");
+        assert_eq!(raw_windows, host_windows, "Windows paths must be no-ops");
+        // On WSL the host-path helper must differ from the raw guest
+        // path — every Windows-side reader needs the UNC translation.
+        // The test only asserts the difference, not the exact UNC
+        // string (which depends on the active distro).
+        let guest = cline_db_path_for_env(EnvType::Wsl, "/home/alond/repo")
+            .expect("WSL guest home must resolve");
+        let host = cline_db_path_for_host(EnvType::Wsl, "/home/alond/repo")
+            .expect("WSL host-path must resolve");
+        let host_str = host.to_string_lossy();
+        assert_ne!(
+            guest, host,
+            "WSL host-path must differ from raw guest path (UNC translation)"
+        );
+        assert!(
+            host_str.starts_with("\\\\wsl") || host_str.starts_with("//wsl"),
+            "WSL host-path must start with the UNC prefix; got: {host_str}"
+        );
+    }
+
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
     #[test]
