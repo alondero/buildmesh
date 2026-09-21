@@ -480,18 +480,35 @@ fn node_review_skips_readiness_for_user_selected_circuit() {
 }
 
 /// The recovery path bypasses the readiness gate: the source is already
-/// known to be observed via its previous run.
+/// known to be observed via its previous run. `assert_source_observed`
+/// itself does not know about recovery — recovery bypass happens
+/// architecturally, in `create_node_circuit_run_recovery_locked`, which
+/// never calls the pre-gate helper. This test pins that architectural
+/// property by running the recovery locked helper directly on an
+/// unobserved source and confirming the run mints (without the
+/// refusal).
 #[test]
-fn node_review_skips_readiness_for_recovery_path() {
-    use super::circuit::ledger::assert_source_observed;
-    let conn = isolated_test_conn();
+fn node_review_recovery_path_bypasses_gate_architecturally() {
+    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
+    let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "ready-gate-recovery", "/tmp/ready-gate-recovery").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Recoverable", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
-    // No `cli_session_id` set — same unobserved setup as the refusal
-    // test. The recovery carve-out must let it through.
-    assert_source_observed(&source, true, false).expect("recovery path bypasses the gate");
+    crate::db::set_cli_session_id_if_missing_inner(&conn, source.id, "recoverable-sid").unwrap();
+    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
+    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "completed".into(),
+        outcome: Some(Some("working".into())), error: Some(Some("Latest findings".into())),
+        agent_node_id: None, attempt: 3, fresh_attempt: false,
+    }]).unwrap();
+    // Wipe the cli_session_id to prove the recovery path does not re-check.
+    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
+        rusqlite::params![source.id]).unwrap();
+    let plan = review_recovery_inner(&conn, old, 1).unwrap();
+    let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    assert_eq!(get_circuit_run_inner(&conn, next).unwrap().unwrap().state, "pending");
 }
 
 /// The override flag lets the user mint a run on an unobserved source.
@@ -527,11 +544,11 @@ fn node_review_override_records_audit_field_on_context_json() {
 
 /// First-writer-wins dedupe (issue #1660) is preserved at the locked
 /// helper level. The public wrapper also runs a dedupe ahead of the
-/// readiness gate (#1792) so a retry on an unobserved source hands
-/// back the live borrower's run id; the locked helper's own check is
-/// defense in depth for concurrent inserts. Modelling the locked
-/// helper path: a duplicate call returns the original run id without
-/// re-asserting the gate.
+/// readiness gate (#1792) via `create_node_circuit_run_pre_gate` so a
+/// retry on an unobserved source hands back the live borrower's run
+/// id; the locked helper's own check is defense in depth for
+/// concurrent inserts. Modelling the locked helper path: a duplicate
+/// call returns the original run id without re-asserting the gate.
 #[test]
 fn node_review_dedupe_survives_after_override_mints() {
     let mut conn = isolated_test_conn();
@@ -542,7 +559,8 @@ fn node_review_dedupe_survives_after_override_mints() {
     let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
     // A second call without the override must NOT re-mint the gate —
     // the locked helper's dedupe (mirrored by the public wrapper's
-    // pre-gate `find_live_run_for_source` check) hands back the same id.
+    // pre-gate `create_node_circuit_run_pre_gate` check) hands back
+    // the same id.
     let second = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
     assert_eq!(first, second, "first-writer-wins dedupe wins over the readiness gate");
     let third = create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("codex".into()), false).unwrap();
@@ -555,31 +573,90 @@ fn node_review_dedupe_survives_after_override_mints() {
         "and so is the first round limit");
 }
 
-/// Models the public wrapper's pre-gate dedupe: a retry on a source
-/// that already owns a live run returns the live borrower's id without
-/// ever reaching the readiness gate (#1792). The wrapper uses
-/// `find_live_run_for_source` (lock-free read via `read_conn()`); this
-/// test drives that helper directly on a per-test in-memory DB so the
-/// lock-free SQL itself is covered.
+// ---------------------------------------------------------------------------
+// Composition tests (#1792 round 3 review):
+//
+// The pre-gate composition — `create_node_circuit_run_pre_gate(&Connection, ...)` —
+// is the single decision point the public wrapper relies on. Each
+// ordering rule (dedupe-before-gate; gate before refusal; permissive
+// for override / selected-circuit / captured cli_session_id) needs a
+// pinned regression test, otherwise a future reorder of two `if`s in
+// the wrapper passes the suite and reintroduces silent run-id dropping
+// on retry. The helper takes `&Connection` so the test can drive it
+// against a per-test private in-memory DB (issue #1691 pattern) —
+// process-global reader / writer mutexes are out of reach for the test
+// harness.
+// ---------------------------------------------------------------------------
+
+/// Dedupes before the gate: an unobserved source with a live run
+/// returns the live borrower's run id, never reaches the gate, and
+/// the retry does not produce a refusal. This is the bug the round-2
+/// refactor fixed; the test pins the order so it cannot regress.
 #[test]
-fn node_review_public_wrapper_dedupe_runs_before_readiness_gate() {
-    use super::circuit::ledger::find_live_run_for_source_inner;
+fn node_review_pre_gate_dedupes_before_gate_on_unobserved_retry() {
+    use super::circuit::ledger::create_node_circuit_run_pre_gate;
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "ready-gate-public-dedupe", "/tmp/ready-gate-public-dedupe").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Public dedupe", &mesh.path, "main", EnvType::Windows,
+    let mesh = create_mesh_inner(&conn, "ready-gate-pre-dedupe", "/tmp/ready-gate-pre-dedupe").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Pre-gate dedupe", &mesh.path, "main", EnvType::Windows,
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
-    // No live run yet — the wrapper would proceed to the readiness gate.
-    assert!(find_live_run_for_source_inner(&conn, source.id).unwrap().is_none(),
-        "with no live run, the dedupe query returns None and the wrapper falls through to the gate");
-    // Mint a live run via the override path.
+    // Mint a live run via the override path so the source is "unobserved"
+    // from the gate's perspective but already has an active borrower.
     let first = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, true).unwrap();
-    // Now the dedupe query returns the live run id BEFORE the wrapper
-    // would call `assert_source_observed` — so a retry on an
-    // unobserved source hands back the existing run id without ever
-    // firing the refusal error.
-    assert_eq!(find_live_run_for_source_inner(&conn, source.id).unwrap(), Some(first),
-        "the public wrapper's pre-gate dedupe must hand back the live borrower's run id");
+    // Wipe cli_session_id so the gate would refuse if it ran.
+    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = ?1",
+        rusqlite::params![source.id]).unwrap();
+    // Now call the pre-gate helper. Without the override, this would
+    // be refused — but the dedupe MUST come first and short-circuit
+    // to the existing live run id.
+    let result = create_node_circuit_run_pre_gate(&conn, source.id, None, false).unwrap();
+    assert_eq!(result, Some(first),
+        "dedupe must run before the gate so an unobserved retry hands back the live borrower's run id, not the refusal");
+}
+
+/// The pre-gate refuses an unobserved source with no live run and no
+/// permissive flag.
+#[test]
+fn node_review_pre_gate_refuses_unobserved_source_with_exact_message() {
+    use super::circuit::ledger::create_node_circuit_run_pre_gate;
+    let conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-pre-refuse", "/tmp/ready-gate-pre-refuse").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Pre-gate refuse", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    let err = create_node_circuit_run_pre_gate(&conn, source.id, None, false).unwrap_err();
+    assert_eq!(err, super::circuit::ledger::SOURCE_NOT_YET_OBSERVED_MESSAGE,
+        "the pre-gate composition must surface the issue's exact refusal string");
+}
+
+/// The pre-gate passes when the override is on, even for an
+/// unobserved source.
+#[test]
+fn node_review_pre_gate_passes_with_override() {
+    use super::circuit::ledger::create_node_circuit_run_pre_gate;
+    let conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-pre-override", "/tmp/ready-gate-pre-override").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Pre-gate override", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    let result = create_node_circuit_run_pre_gate(&conn, source.id, None, true).unwrap();
+    assert_eq!(result, None, "override must let the caller proceed to mint");
+}
+
+/// The pre-gate passes when a user-selected circuit is requested, even
+/// for an unobserved source.
+#[test]
+fn node_review_pre_gate_passes_with_user_selected_circuit() {
+    use super::circuit::ledger::create_node_circuit_run_pre_gate;
+    let conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "ready-gate-pre-circuit", "/tmp/ready-gate-pre-circuit").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Pre-gate circuit", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Running).unwrap();
+    let manual = CircuitGraph::walking_skeleton("user-authored circuit");
+    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "user manual", "", 1, &manual.to_json().unwrap()).unwrap();
+    let result = create_node_circuit_run_pre_gate(&conn, source.id, Some(circuit.id), false).unwrap();
+    assert_eq!(result, None, "user-selected-circuit path must bypass the gate");
 }
 
 // ---------------------------------------------------------------------------

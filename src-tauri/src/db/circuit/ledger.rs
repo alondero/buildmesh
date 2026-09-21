@@ -84,24 +84,20 @@ pub fn create_node_circuit_run(
     reviewer_provider: Option<String>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
-    // First-writer-wins dedupe (#1660). Lock-free read via the
-    // process-global reader — runs BEFORE the readiness gate so a
-    // duplicate call on an unobserved source hands back the live
-    // borrower's run id (otherwise the gate would refuse the retry and
-    // silently drop the existing run). The locked helper re-checks
-    // this under the writer transaction as defense in depth for
-    // concurrent inserts.
-    if let Some(existing) = find_live_run_for_source(node_id).map_err(|e| e.to_string())? {
-        return Ok(existing);
+    // Pre-gate decisions: dedupe-before-gate then gate. Done under the
+    // process-global reader so the writer mutex is not held during the
+    // `assistant_report` filesystem I/O (issue #1228). The composition
+    // is testable on a per-test private in-memory DB via
+    // `create_node_circuit_run_pre_gate` (see below).
+    {
+        let db = crate::db::read_conn();
+        if let Some(existing) =
+            create_node_circuit_run_pre_gate(&db, node_id, selected_circuit_id, allow_unobserved)?
+        {
+            return Ok(existing);
+        }
     }
-    // Source-agent readiness gate (#1792). Only run when the override
-    // is off AND the user is on the built-in review preset path — the
-    // user-selected-circuit and recovery carve-outs are permissive and
-    // the override is the explicit user opt-out.
-    if !allow_unobserved && selected_circuit_id.is_none() {
-        let node = crate::db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-        assert_source_observed(&node, false, false)?;
-    }
+    // Mint (acquires the writer mutex).
     let mut db = crate::db::write_conn();
     create_node_circuit_run_locked(
         &mut db, node_id, selected_circuit_id, max_rounds, reviewer_provider, allow_unobserved,
@@ -163,16 +159,11 @@ pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
     "Source agent has not started yet — wait for its first turn before starting a review.";
 
 /// First-writer-wins dedupe (issue #1660). Returns the id of the source's
-/// currently-live run if any. Lock-free read via `read_conn()` — runs
-/// BEFORE the readiness gate so a retry on an unobserved source still
-/// hands back the live borrower's run id. The locked helper re-checks
-/// this under the writer transaction as defense in depth for concurrent
-/// inserts.
-pub(crate) fn find_live_run_for_source(node_id: i64) -> SqlResult<Option<i64>> {
-    let db = crate::db::read_conn();
-    find_live_run_for_source_inner(&db, node_id)
-}
-
+/// currently-live run if any. Driven from
+/// [`create_node_circuit_run_pre_gate`] before the readiness gate so a
+/// retry on an unobserved source still hands back the live borrower's
+/// run id. The locked helper re-checks this under the writer transaction
+/// as defense in depth for concurrent inserts.
 pub(crate) fn find_live_run_for_source_inner(
     conn: &Connection,
     node_id: i64,
@@ -200,8 +191,6 @@ pub(crate) fn find_live_run_for_source_inner(
 ///   on the Start Review dialog.
 /// - `has_selected_circuit` — the user is asking for a specific
 ///   authored blueprint, not the built-in review preset.
-/// - `is_recovery` — the recovery path always points at a source that
-///   is already observed via its previous run.
 ///
 /// Note: today's `assistant_report` reader returns `None` whenever
 /// `cli_session_id` is `None` (every harness stores the session id
@@ -211,10 +200,10 @@ pub(crate) fn find_live_run_for_source_inner(
 /// future harness adapters that may diverge.
 pub(crate) fn assert_source_observed(
     node: &crate::models::AgentNode,
-    is_recovery: bool,
+    allow_unobserved: bool,
     has_selected_circuit: bool,
 ) -> Result<(), String> {
-    if is_recovery || has_selected_circuit {
+    if allow_unobserved || has_selected_circuit {
         return Ok(());
     }
     if node.cli_session_id.as_deref().is_some_and(|s| !s.is_empty()) {
@@ -226,6 +215,52 @@ pub(crate) fn assert_source_observed(
         return Ok(());
     }
     Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into())
+}
+
+/// Pre-gate composition for the public wrapper (#1792). Returns:
+/// - `Ok(Some(existing_run_id))` when first-writer-wins dedupe (#1660)
+///   wins — a retry on an unobserved source returns the live borrower's
+///   run id instead of re-firing the refusal.
+/// - `Ok(None)` when the gate passes (or is permissive), and the caller
+///   should proceed to the locked helper.
+/// - `Err(msg)` when the gate refuses the source agent.
+///
+/// This is the single decision point the wrapper relies on. The
+/// recovery path bypasses it entirely via `create_node_circuit_run_recovery_locked`
+/// (the recovery source is already observed via its previous run),
+/// so the helper has no `is_recovery` carve-out — keeping the helper's
+/// parameters honest about the only flags the public wrapper passes.
+///
+/// Lock-free: takes `&Connection` so the caller controls transaction /
+/// mutex scope. Tests drive this on a per-test private in-memory DB
+/// (issue #1691) so the dedupe-before-gate ordering is covered
+/// end-to-end without touching the process-global writer.
+pub(crate) fn create_node_circuit_run_pre_gate(
+    conn: &Connection,
+    node_id: i64,
+    selected_circuit_id: Option<i64>,
+    allow_unobserved: bool,
+) -> Result<Option<i64>, String> {
+    // First-writer-wins dedupe (#1660). Runs BEFORE the readiness
+    // gate (#1792) so a retry on an unobserved source hands back the
+    // live borrower's run id without re-firing the refusal.
+    if let Some(existing) = find_live_run_for_source_inner(conn, node_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(Some(existing));
+    }
+    // Load the source node (cheap DB read on the same connection).
+    let node = crate::db::agent_node::get_agent_node_by_id_inner(conn, node_id)
+        .map_err(|e| e.to_string())?;
+    // Source-agent readiness gate (#1792). The wrapper always calls
+    // this with the real flags — no conditional call at the call site
+    // (which would be the same lie the round-3 review flagged).
+    assert_source_observed(
+        &node,
+        allow_unobserved,
+        selected_circuit_id.is_some(),
+    )?;
+    Ok(None)
 }
 
 fn create_node_circuit_run_with_recovery_locked(
