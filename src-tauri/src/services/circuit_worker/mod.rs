@@ -1437,9 +1437,16 @@ fn observe_gates(
                     events.push(CircuitEvent::ContinuationRetry { node_id: step.node_id.clone(), attempt: step.attempt });
                     continue;
                 }
-                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation }) =
+                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn }) =
                     classify_step_turn(active, view, &step.node_id)
                 {
+                    if waiting_for_a_finished_turn {
+                        events.push(CircuitEvent::TurnParked {
+                            node_id: step.node_id.clone(),
+                            output,
+                        });
+                        continue;
+                    }
                     if let Some((stamp, revision, input_stamp)) = continuation {
                         events.push(CircuitEvent::ContinuationObserved { node_id: step.node_id.clone(), attempt: step.attempt, stamp, revision, input_stamp });
                     }
@@ -1494,6 +1501,9 @@ struct ClassifiedTurn {
     classification: Option<crate::autopilot::evaluator::Classification>,
     output: String,
     continuation: Option<(String, String, String)>,
+    /// The gate deliberately did not classify this report because the agent is
+    /// still working. The caller publishes `TurnParked`, not `TurnClassified`.
+    waiting_for_a_finished_turn: bool,
 }
 
 fn classify_step_turn(
@@ -1534,7 +1544,7 @@ fn classify_step_turn(
             .unwrap_or_else(|| "Source agent finished its turn; no assistant report is available. Review the source working directory.".into());
         if observed_stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
             || input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
-        return Some(ClassifiedTurn { agent_node_id, classification: Some(evaluator::Classification::Completed), output, continuation: None });
+        return Some(ClassifiedTurn { agent_node_id, classification: Some(evaluator::Classification::Completed), output, continuation: None, waiting_for_a_finished_turn: false });
     }
     // Do not open a transcript, clone/scrub the PTY tail, or hit the regex
     // cleaner unless this gate/attempt has fresh output, needs its one
@@ -1577,9 +1587,7 @@ fn classify_step_turn(
         evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
         return None;
     }
-    evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
-    evaluator::note_evaluation(agent_node_id);
-    let classification = classify_gate_report(view, node_id, agent_node.status, &output, |prompt| {
+    let classify = |prompt: &str| {
         // Clean review turns need neither a classifier nor its credentials.
         // Other gates use the mesh Autopilot side-channel, not the node model.
         let backend_provider = db::get_mesh_by_id(active.run.mesh_id)
@@ -1588,7 +1596,28 @@ fn classify_step_turn(
             .unwrap_or_else(|| "claude".to_string());
         let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
         evaluator::classify_with_prompt(agent_node_id, &backend_env, prompt)
-    });
+    };
+    // A `verdict` gate consumes its report as the reviewer's verdict, so a
+    // reviewer that yielded mid-work must be left running rather than judged.
+    let waiting_for_a_finished_turn =
+        reviewer_verdict_must_wait(view, node_id, agent_node.status, &output, classify);
+    // The clock is stamped on both paths: the readiness question is an LLM
+    // evaluation like any other, and `retry_due` reads this clock to bound how
+    // often a silent gate is re-observed.
+    evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
+    evaluator::note_evaluation(agent_node_id);
+    let classification = if waiting_for_a_finished_turn {
+        tracing::info!(
+            "circuits: run {} step {} agent {} yielded without a finished report — \
+             waiting for the reviewer's next turn",
+            active.run.id,
+            node_id,
+            agent_node_id
+        );
+        None
+    } else {
+        classify_gate_report(view, node_id, agent_node.status, &output, classify)
+    };
     if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten() { return None; }
     if input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
     let mut classification = classification.filter(|c|
@@ -1608,7 +1637,7 @@ fn classify_step_turn(
         agent_node_id,
         classification
     );
-    Some(ClassifiedTurn { agent_node_id, classification, output, continuation })
+    Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn })
 }
 
 fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
@@ -1655,7 +1684,7 @@ fn classify_gate_report(
     if review_turn_is_complete(view, node_id, status) {
         return Some(evaluator::Classification::Completed);
     }
-    let prompt = if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
+    let prompt = if is_reviewer_verdict_gate(view, node_id) {
         evaluator::review_prompt(output)
     } else if awaits_review_turn(view, node_id) {
         evaluator::review_turn_prompt(output)
@@ -1663,6 +1692,70 @@ fn classify_gate_report(
         evaluator::circuit_classify_prompt(output)
     };
     classify(&prompt)
+}
+
+/// True when `node_id` is the gate whose classification *is* another agent's
+/// review verdict, so its report must be a finished turn.
+fn is_reviewer_verdict_gate(view: &RunView, node_id: &str) -> bool {
+    matches!(
+        view.graph.node(node_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::ReviewVerdict { .. })
+    )
+}
+
+/// True when a `verdict` gate must wait for the reviewer's next yield instead
+/// of consuming this report as its verdict.
+///
+/// An `AwaitingInput` yield is not evidence that the reviewer finished: an
+/// intermediate progress line, a background-task hand-off, and a permission
+/// prompt all reach the lifecycle identically. This gate's classification *is*
+/// the reviewer's verdict, so judging a progress line here fails the run with a
+/// verdict about a progress message — run 163 recorded an mcode reviewer's
+/// "…Let me retry…" line as its review and ended the run `BLOCKED`. The
+/// reviewer-specific readiness question separates the two
+/// (`evaluator::reviewer_turn_prompt`, which deliberately does not treat a
+/// failure the reviewer is retrying as "needs a person"); only a finished
+/// report, or a reviewer that will not continue without a person, may reach the
+/// verdict prompt. `None` (an unavailable classifier) is unknown rather than
+/// finished, so it waits for the next probe.
+///
+/// The caller publishes `TurnParked`, never a `TurnClassified`: the stepper's
+/// only vocabulary for "no verdict" is a classifier outage, which would record
+/// this deliberate wait as `unavailable`, show the in-progress line as the
+/// reviewer's report, and spend the failure budget the stepper uses to end a
+/// wedged run.
+fn reviewer_verdict_must_wait(
+    view: &RunView,
+    node_id: &str,
+    status: SessionStatus,
+    output: &str,
+    readiness: impl Fn(&str) -> Option<crate::autopilot::evaluator::Classification>,
+) -> bool {
+    use crate::autopilot::evaluator::{reviewer_turn_prompt, Classification};
+    if !is_reviewer_verdict_gate(view, node_id) || status != SessionStatus::AwaitingInput {
+        return false;
+    }
+    match readiness(&reviewer_turn_prompt(output)) {
+        // Intermediate progress, a background hand-off, and a failure the
+        // reviewer is retrying are one state from here: the reviewer has not
+        // finished, so there is no verdict yet.
+        Some(Classification::Working | Classification::Continue) => true,
+        // An unavailable classifier cannot separate an unfinished report from a
+        // finished one, and consuming a progress line as a verdict is the
+        // failure this path exists to prevent, so the gate waits — loudly,
+        // because the wait deadline is otherwise the only trace of an outage
+        // here (see `docs/development/circuit-run-163-review-verdict.md`).
+        None => {
+            tracing::warn!(
+                "circuits: step {node_id} turn-readiness classifier unavailable — \
+                 waiting instead of reading the report as a verdict"
+            );
+            true
+        }
+        // A finished report, or a reviewer that will not continue without a
+        // person — both are gate outcomes the verdict prompt can speak to.
+        Some(_) => false,
+    }
 }
 
 fn select_turn_report(
@@ -2901,6 +2994,93 @@ mod tests {
             assert!(prompt.contains("the assigned work is finished"));
             Some(Classification::Working)
         }), Some(Classification::Working));
+    }
+
+    #[test]
+    fn verdict_gate_waits_for_a_reviewer_that_yielded_mid_turn() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        view.context.set("source.review_preset", "1");
+        // Run 163's reviewer yielded `awaiting_input` mid-work; its latest
+        // assistant text was the progress line below, not a review. The gate
+        // must ask the turn-readiness question and wait instead of recording
+        // that line as the reviewer's verdict.
+        let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim \
+                        correctly and pick off the impacted suites plus a broader window.";
+        assert!(
+            reviewer_verdict_must_wait(&view, "verdict", SessionStatus::AwaitingInput, progress, |prompt| {
+                assert!(
+                    prompt.contains("whether this independent reviewer has finished its turn"),
+                    "an unfinished reviewer must be judged by the reviewer readiness question, \
+                     not the verdict question: {prompt}"
+                );
+                assert!(
+                    !prompt.contains("reports a provider/API failure"),
+                    "the implementation gate's readiness question calls a reported failure \
+                     `BLOCKED`, which would send run 163's `…Let me retry…` line to the verdict \
+                     classifier anyway: {prompt}"
+                );
+                Some(Classification::Working)
+            }),
+            "a mid-turn progress line must never be consumed as the reviewer's verdict (run 163)"
+        );
+        // Once the reviewer reports for real, the verdict question is asked as
+        // before — the wait is not a permanent state.
+        assert!(!reviewer_verdict_must_wait(&view, "verdict", SessionStatus::AwaitingInput, progress, |_| {
+            Some(Classification::Completed)
+        }));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::AwaitingInput, progress, |prompt| {
+                assert!(prompt.contains("explicitly approves"), "{prompt}");
+                Some(Classification::Completed)
+            }),
+            Some(Classification::Completed)
+        );
+        // A clean lifecycle turn is authoritative and is not re-judged; a
+        // reviewer that will not continue without a person is a real gate
+        // outcome; an unavailable readiness classifier is unknown rather than a
+        // finished report; and only the verdict gate consumes a review result.
+        assert!(!reviewer_verdict_must_wait(&view, "verdict", SessionStatus::Ready, progress, |_| {
+            panic!("a clean lifecycle turn needs no readiness judgement")
+        }));
+        assert!(!reviewer_verdict_must_wait(&view, "verdict", SessionStatus::AwaitingInput, "May I install a package to run the suite?", |_| {
+            Some(Classification::Blocked)
+        }));
+        assert!(reviewer_verdict_must_wait(&view, "verdict", SessionStatus::AwaitingInput, progress, |_| None));
+        assert!(!reviewer_verdict_must_wait(&view, "await_source", SessionStatus::AwaitingInput, "Allow tests?", |_| {
+            panic!("only the verdict gate consumes a review result")
+        }));
+    }
+
+    /// The park's recorded observation is what bounds the readiness question:
+    /// an unchanged report is not observed again, so a reviewer that sits
+    /// mid-turn is not re-classified on every tick. The next report is.
+    #[test]
+    fn parked_observation_is_not_reclassified_until_the_report_changes() {
+        let mut view = RunView {
+            run_id: 27,
+            graph: CircuitGraph::agent_review(None, None, 3),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![StepView {
+                node_id: "verdict".into(), status: StepStatus::Running,
+                agent_node_id: Some(1), attempt: 1, outcome: None, error: None,
+            }],
+        };
+        let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim.";
+        advance(&mut view, &CircuitEvent::TurnParked {
+            node_id: "verdict".into(),
+            output: progress.into(),
+        });
+        assert!(
+            !should_classify_report(&view, "verdict", SessionStatus::AwaitingInput, progress, None),
+            "an unchanged parked report must not be observed again"
+        );
+        assert!(
+            should_classify_report(&view, "verdict", SessionStatus::AwaitingInput, "Findings: none. Verdict: approved.", None),
+            "the reviewer's next report must be observed"
+        );
     }
 
     #[test]
