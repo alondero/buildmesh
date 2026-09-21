@@ -417,57 +417,120 @@ pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option
     classify_with_prompt(node_id, backend_env, &review_prompt(&cleaned_turn_tail(node_id)))
 }
 
-/// Deterministic verdict for a cleanly-yielded reviewer turn (issue #1815).
+/// Deterministic verdict fallback for a cleanly-yielded reviewer turn
+/// (issue #1815).
 ///
-/// `ReviewVerdict` used to reach `classify_with_prompt` on every turn, so a
-/// review could never complete without the classifier backend even when the
-/// reviewer had plainly approved or requested changes. A reviewer that yields
-/// `ready`/`completed` with a non-empty report now resolves here without an
-/// LLM call; `awaiting_input` turns (permission prompts, questions) still go
-/// to the classifier, which stays the tie-breaker.
+/// This runs only when the live classifier backend is absent or failed — it
+/// never overrides a live verdict. A reviewer that yields `ready`/`completed`
+/// with a non-empty report then resolves from that report instead of parking
+/// the gate; `awaiting_input` turns (permission prompts, questions) still go
+/// to the classifier only.
 ///
-/// The bias is deliberate: only an explicit approval with no contrary signal
-/// is `Completed`. A report with no recognizable verdict is `Blocked` — an
-/// attention checkpoint — never a silent approval and never a burned fix
-/// round. Pure function, unit-tested below.
+/// Signals are read per segment (split on sentence/line boundaries) so a
+/// negation or resolution in one clause cannot silence — or invent — a
+/// verdict in another. In particular an echoed prompt template such as
+/// "Review completion alone is not approval." must not cancel a real
+/// "Approved." two lines later, and one resolved finding must not hide an
+/// open one.
+///
+/// The bias is deliberate: only an explicit, non-negated approval with no
+/// contrary signal is `Completed`. A report with no recognizable verdict is
+/// `Blocked` — an attention checkpoint — never a silent approval. Pure
+/// function, unit-tested below.
 pub(crate) fn review_verdict_from_report(output: &str) -> Classification {
     let lower = output.to_lowercase();
-    let has = |needle: &str| lower.contains(needle);
-    // "findings" contains "finding", so one needle covers both.
-    let negated_findings = has("no remaining finding")
-        || has("no actionable finding")
-        || has("no finding")
-        || has("no further finding")
-        || has("without finding")
-        || has("zero finding");
-    let resolved_findings =
-        !has("unresolv") && (has("addressed") || has("resolved") || has("fixed"));
-    let says_findings = has("finding") && !negated_findings && !resolved_findings;
-    let says_changes =
-        has("change") && (has("request") || has("requir") || has("need")) && !has("no change");
-    // Bare "fix" is too broad as a substring ("prefix"), so match whole words.
-    let says_fix = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|token| token == "fix")
-        && !has("fixed")
-        && !has("no fix");
-    let says_blocked = has("block")
-        || has("cannot")
-        || has("can't")
-        || has("unable to")
-        || has("could not")
-        || has("couldn't")
-        || has("incomplete")
-        || has("ambiguous")
-        || has("no access")
-        || has("missing access");
-    let says_approve =
-        (has("approv") && !has("disapprov")) || has("lgtm") || has("looks good");
-    // Findings win over approval: "approved, but ..." still has open work.
-    if says_changes || says_findings || says_fix {
+    let segments: Vec<&str> = lower
+        .split(['.', '!', '?', ';', ':', '\n'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    fn tokens_of(segment: &str) -> Vec<&str> {
+        segment
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect()
+    }
+    // "No further changes needed" negates a change request; the "no" may be
+    // up to two words before "change(s)". Contractions ("don't") split into
+    // "don"/"t" tokens, so those are matched as substrings instead.
+    let negated_change = |segment: &str, tokens: &[&str]| {
+        tokens.iter().enumerate().any(|(i, token)| {
+            (*token == "no" || *token == "without")
+                && tokens[i + 1..tokens.len().min(i + 4)]
+                    .iter()
+                    .any(|next| *next == "change" || *next == "changes")
+        }) || tokens.windows(2).any(|pair| {
+            pair[0] == "not"
+                && (pair[1] == "require" || pair[1] == "requires" || pair[1] == "need" || pair[1] == "needs")
+        }) || segment.contains("n't need")
+            || segment.contains("n't require")
+    };
+    let mut says_changes = false;
+    let mut says_findings = false;
+    let mut says_blocked = false;
+    let mut says_approve = false;
+    let mut says_fix = false;
+    for segment in &segments {
+        let has = |needle: &str| segment.contains(needle);
+        let tokens = tokens_of(segment);
+        // "findings" contains "finding", so one needle covers both.
+        let negated_findings = has("no remaining finding")
+            || has("no actionable finding")
+            || has("no finding")
+            || has("no further finding")
+            || has("without finding")
+            || has("zero finding");
+        let resolved =
+            !has("unresolv") && (has("addressed") || has("resolved") || has("fixed"));
+        says_findings |= has("finding") && !negated_findings && !resolved;
+        says_changes |= has("change")
+            && (has("request") || has("requir") || has("need"))
+            && !negated_change(segment, &tokens);
+        // "non-blocking" (the review contract's own guidance) and code nouns
+        // like "match block" are not blockers; only blocker word forms count.
+        let blocked_word = tokens.iter().any(|token| {
+            matches!(*token, "blocked" | "blocker" | "blockers" | "blocks" | "blocking")
+        }) && !has("non-blocking")
+            && !has("nonblocking");
+        let negated_block =
+            has("no block") || has("not block") || has("n't block") || has("without block");
+        says_blocked |= (blocked_word
+            || has("cannot")
+            || has("can't")
+            || has("unable to")
+            || has("could not")
+            || has("couldn't")
+            || has("incomplete")
+            || has("ambiguous")
+            || has("no access")
+            || has("missing access"))
+            && !negated_block;
+        // "Do not approve" / "is not approval" negate; "disapprove" never
+        // approves. Scoped to the segment so an echoed template cannot veto
+        // a genuine verdict elsewhere in the report.
+        let negated_approve = has("not approv")
+            || has("n't approv")
+            || has("never approv")
+            || has("no approv")
+            || has("without approv");
+        says_approve |= ((has("approv") && !has("disapprov")) || has("lgtm") || has("looks good"))
+            && !negated_approve;
+        // Bare "fix" is too broad as a substring ("prefix"), so match whole
+        // words. Past-tense "fixed" is done work, not a new request.
+        says_fix |= tokens.contains(&"fix") && !has("fixed") && !has("no fix");
+    }
+    // Findings win over approval: "approved, but ..." still has open work. A
+    // bare "fix" alongside approval is a verified fix ("Verified the fix.
+    // Approved.") unless contrastive/imperative language ("but", "however",
+    // "please") shows work is still being demanded.
+    if says_changes || says_findings {
         Classification::Working
     } else if says_blocked {
         Classification::Blocked
+    } else if says_fix
+        && (!says_approve || lower.contains("but") || lower.contains("however") || lower.contains("please"))
+    {
+        Classification::Working
     } else if says_approve {
         Classification::Completed
     } else {
@@ -703,6 +766,15 @@ mod tests {
             "Review complete: no remaining findings. Approved.",
             "LGTM",
             "Looks good to me, approving.",
+            // A verified fix is done work, not a new change request.
+            "Verified the fix. Approved.",
+            "The fix looks great, approving.",
+            "Good fix. Approved.",
+            // Negated change requests are approval, not fresh work.
+            "Approved. No changes needed.",
+            "Approved. No further changes needed.",
+            "Approved. Does not require any changes.",
+            "All findings addressed; approving.",
         ] {
             assert_eq!(review_verdict_from_report(report), Classification::Completed, "{report}");
         }
@@ -713,11 +785,20 @@ mod tests {
             "Unresolved actionable findings in auth.rs:12.",
             "Please fix the off-by-one in retry.rs.",
             "I approve the approach but request changes to the error path.",
+            "Approved, but please fix the error path.",
+            "Findings: 1. Resolved the previous race condition. 2. Missing input validation on line 42.",
+            "Review completion alone is not approval. Verdict: changes requested.",
         ] {
             assert_eq!(review_verdict_from_report(report), Classification::Working, "{report}");
         }
+        // Negated approvals never complete, even with "approve" in the text.
         // Blockers and ambiguous reports need attention, never approval.
         for report in [
+            "Do not approve. Critical security vulnerability in token validation.",
+            "I don't approve this change.",
+            "Will not approve until integration tests exist.",
+            "Should not approve.",
+            "Review completion alone is not approval.",
             "Cannot assess this diff: missing access to the base ref.",
             "Review is blocked on the failing provider call.",
             "Reviewed the diff; see notes above.",
@@ -725,13 +806,18 @@ mod tests {
         ] {
             assert_eq!(review_verdict_from_report(report), Classification::Blocked, "{report}");
         }
-        // Negated findings are approval, not fresh work.
-        assert_eq!(
-            review_verdict_from_report("Approved. No changes needed."),
-            Classification::Completed);
-        assert_eq!(
-            review_verdict_from_report("All findings addressed; approving."),
-            Classification::Completed);
+        // The contract's own "non-blocking" guidance and code nouns like
+        // "match block" are not blockers; an echoed template must not veto
+        // a genuine verdict elsewhere in the report.
+        for report in [
+            "Treating style suggestions as non-blocking. Approved.",
+            "Non-blocking comment: rename variable foo. Otherwise approved.",
+            "No blocking issues found. LGTM.",
+            "The match block looks solid. Approved.",
+            "Review completion alone is not approval. Verdict: Approved.",
+        ] {
+            assert_eq!(review_verdict_from_report(report), Classification::Completed, "{report}");
+        }
     }
 
     // ── parse_classification against mock classifier outputs ───────────────
