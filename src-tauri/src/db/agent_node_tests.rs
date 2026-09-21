@@ -347,4 +347,183 @@ mod tests {
             "empty forbidden list must error to keep the surface disjoint from update_agent_node_status_inner",
         );
     }
+
+    // ===== Issue #1746 — `update_agent_node_positions_batch` bulk-shape contract =====
+    //
+    // These tests mirror the mesh.rs set: 0/1/many rows, per-row baseline
+    // agreement, and an `EXPLAIN QUERY PLAN` check that the bulk UPDATE
+    // still drives the INTEGER PRIMARY KEY lookup. See
+    // `db::mesh::update_mesh_positions_batch_inner` for the rationale.
+
+    fn conn_with_agent_nodes_full() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'idle'
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_agent_node(conn: &Connection) -> i64 {
+        let n = uuid::Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![1_i64, format!("node-{n}"), format!("/tmp/{n}")],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn read_node_position(conn: &Connection, id: i64) -> i64 {
+        conn.query_row(
+            "SELECT position FROM agent_nodes WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn update_agent_node_positions_batch_inner_zero_rows_is_noop() {
+        let conn = conn_with_agent_nodes_full();
+        let id = insert_agent_node(&conn);
+        assert_eq!(read_node_position(&conn, id), 0);
+
+        crate::db::update_agent_node_positions_batch_inner(&conn, &[]).unwrap();
+
+        assert_eq!(read_node_position(&conn, id), 0);
+    }
+
+    #[test]
+    fn update_agent_node_positions_batch_inner_single_row() {
+        let conn = conn_with_agent_nodes_full();
+        let a = insert_agent_node(&conn);
+        let b = insert_agent_node(&conn);
+        let c = insert_agent_node(&conn);
+
+        crate::db::update_agent_node_positions_batch_inner(&conn, &[(b, 99)]).unwrap();
+
+        assert_eq!(read_node_position(&conn, a), 0);
+        assert_eq!(read_node_position(&conn, b), 99);
+        assert_eq!(read_node_position(&conn, c), 0);
+    }
+
+    #[test]
+    fn update_agent_node_positions_batch_inner_six_hundred_rows_spans_chunks() {
+        let conn = conn_with_agent_nodes_full();
+        let mut ids = Vec::with_capacity(600);
+        for _ in 0..600 {
+            ids.push(insert_agent_node(&conn));
+        }
+        let updates: Vec<(i64, i64)> =
+            ids.iter().enumerate().map(|(i, id)| (*id, (i + 1) as i64)).collect();
+
+        crate::db::update_agent_node_positions_batch_inner(&conn, &updates).unwrap();
+
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(read_node_position(&conn, *id), (i + 1) as i64);
+        }
+    }
+
+    #[test]
+    fn update_agent_node_positions_batch_inner_matches_per_row_baseline() {
+        let conn_new = conn_with_agent_nodes_full();
+        let mut ids_new = Vec::with_capacity(75);
+        for _ in 0..75 {
+            ids_new.push(insert_agent_node(&conn_new));
+        }
+        let updates: Vec<(i64, i64)> = ids_new
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, ((i + 3) * 11) as i64))
+            .collect();
+        crate::db::update_agent_node_positions_batch_inner(&conn_new, &updates).unwrap();
+
+        let conn_old = conn_with_agent_nodes_full();
+        let mut ids_old = Vec::with_capacity(75);
+        for _ in 0..75 {
+            ids_old.push(insert_agent_node(&conn_old));
+        }
+        let tx = conn_old.unchecked_transaction().unwrap();
+        for (id, pos) in &updates {
+            tx.execute(
+                "UPDATE agent_nodes SET position = ?1 WHERE id = ?2",
+                rusqlite::params![pos, id],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let positions_new: Vec<i64> = ids_new
+            .iter()
+            .map(|id| read_node_position(&conn_new, *id))
+            .collect();
+        let positions_old: Vec<i64> = ids_old
+            .iter()
+            .map(|id| read_node_position(&conn_old, *id))
+            .collect();
+        assert_eq!(positions_new, positions_old);
+    }
+
+    #[test]
+    fn update_agent_node_positions_batch_inner_query_plan_uses_primary_key() {
+        let conn = conn_with_agent_nodes_full();
+        for _ in 0..10 {
+            insert_agent_node(&conn);
+        }
+        let mut stmt = conn
+            .prepare("EXPLAIN QUERY PLAN UPDATE agent_nodes SET position = CASE id WHEN ?1 THEN ?2 WHEN ?3 THEN ?4 END WHERE id IN (?5, ?6)")
+            .unwrap();
+        let plan = stmt
+            .query_map(
+                rusqlite::params![1_i64, 10_i64, 2_i64, 20_i64, 1_i64, 2_i64],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
+            "bulk UPDATE must use the INTEGER PRIMARY KEY index, got plan: {plan:?}"
+        );
+    }
+
+    /// All-or-nothing: same contract as the mesh position batch — see
+    /// `update_mesh_positions_batch_inner_rolls_back_on_trigger_error`
+    /// for the rationale. Mirrored here because the two helpers are
+    /// intentional twins of the same hot path (drag-to-reorder).
+    #[test]
+    fn update_agent_node_positions_batch_inner_rolls_back_on_trigger_error() {
+        let conn = conn_with_agent_nodes_full();
+        let keep = insert_agent_node(&conn);
+        let sentinel = insert_agent_node(&conn);
+        assert_eq!(read_node_position(&conn, keep), 0);
+        assert_eq!(read_node_position(&conn, sentinel), 0);
+
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER abort_on_sentinel BEFORE UPDATE ON agent_nodes \
+             WHEN OLD.id = {sentinel} \
+             BEGIN SELECT RAISE(ABORT, 'sentinel'); END;"
+        )).unwrap();
+
+        let err = crate::db::update_agent_node_positions_batch_inner(
+            &conn,
+            &[(keep, 100), (sentinel, 200)],
+        )
+        .expect_err("trigger must abort the update");
+        assert!(
+            err.to_string().contains("sentinel"),
+            "error must surface the trigger's message, got {err}"
+        );
+
+        assert_eq!(read_node_position(&conn, keep), 0);
+        assert_eq!(read_node_position(&conn, sentinel), 0);
+    }
 }

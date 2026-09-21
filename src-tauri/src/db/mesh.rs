@@ -1,6 +1,8 @@
 //! Mesh persistence: mesh rows, harness overrides, scratchpad/sandbox,
 //! and the Autopilot run ledger keyed per mesh/node.
 
+use std::fmt::Write as _;
+
 use rusqlite::{Connection, params};
 
 use crate::models::*;
@@ -880,13 +882,62 @@ pub(crate) fn set_mesh_worktree_directory_inner(
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
     let db = write_conn();
-    for (id, pos) in updates {
-        db.execute(
-            "UPDATE meshes SET position = ?1 WHERE id = ?2",
-            params![pos, id],
-        )?;
+    update_mesh_positions_batch_inner(&db, updates)
+}
+
+/// Test-facing entry point mirroring [`update_mesh_positions_batch`]; takes
+/// a caller-supplied `&Connection` so the per-row vs bulk-shape contract can
+/// be exercised against an in-memory fixture (issue #1746). The public
+/// function locks the process-global writer; this helper takes an explicit
+/// connection so parallel tests can each operate against their own DB.
+pub(crate) fn update_mesh_positions_batch_inner(
+    conn: &Connection,
+    updates: &[(i64, i64)],
+) -> SqlResult<()> {
+    if updates.is_empty() { return Ok(()); }
+    // One bulk UPDATE per chunk, all chunks inside a single transaction.
+    // Pre-issue-#1746 the loop paid N commits / fsyncs while holding the
+    // process-global writer Mutex — every other DB user (UI reads via the
+    // 8-conn reader pool, HTTP, worker pollers) stalled behind it. After
+    // #1746 there is **one commit** for the whole batch (irrespective of
+    // how many chunks the parameter cap forces); the chunks exist solely
+    // to stay below `SQLITE_MAX_VARIABLE_NUMBER` (default 999) per
+    // prepared statement. SQLite still does the per-row lookup against
+    // the primary key — the `EXPLAIN QUERY PLAN` shape is unchanged.
+    //
+    // The CASE-WHEN shape binds 2 parameters per row (id + position).
+    // The IN list reuses the same `?2i+1` placeholders the CASE already
+    // referenced — SQLite lets a placeholder be referenced any number of
+    // times. Chunked at 300 → 600 binds per statement, well below the
+    // 999 cap with headroom for the prepare cache to add bind metadata.
+    const CHUNK_SIZE: usize = 300;
+    let tx = conn.unchecked_transaction()?;
+    for chunk in updates.chunks(CHUNK_SIZE) {
+        let mut case_sql = String::with_capacity(64 + chunk.len() * 24);
+        case_sql.push_str("UPDATE meshes SET position = CASE id ");
+        for i in 0..chunk.len() {
+            let _ = write!(
+                case_sql,
+                "WHEN ?{} THEN ?{} ",
+                2 * i + 1,
+                2 * i + 2,
+            );
+        }
+        case_sql.push_str("END WHERE id IN (");
+        for i in 0..chunk.len() {
+            if i > 0 { case_sql.push(','); }
+            let _ = write!(case_sql, "?{}", 2 * i + 1);
+        }
+        case_sql.push(')');
+
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() * 2);
+        for (id, pos) in chunk {
+            params_vec.push(id);
+            params_vec.push(pos);
+        }
+        tx.execute(&case_sql, params_vec.as_slice())?;
     }
-    Ok(())
+    tx.commit()
 }
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
