@@ -1110,19 +1110,74 @@ fn restore_run_evaluators(view: &RunView) {
     }
 }
 
+/// The passive turn watcher a recovered, already-live node must (re)attach.
+///
+/// Command Code (issue #1407) and Muse (issue #1709) both deliver their turn
+/// signal through a transcript watcher rather than an attention hook, so a
+/// restarted circuit must reattach the matching watcher — recovering the
+/// identity alone leaves the node unobservable. Every other harness either has
+/// an attention hook or no transcript to watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObserverRestart {
+    CommandCode,
+    Muse,
+}
+
+/// Which passive observer a recovered node needs, or `None` when its harness
+/// has no transcript watcher. Pure so the per-harness dispatch is unit-testable
+/// without an `AppHandle`.
+fn observer_restart(node: &crate::models::AgentNode) -> Option<ObserverRestart> {
+    node.cli_session_id.as_deref().filter(|id| !id.is_empty())?;
+    match crate::preferences::resolve_harness_provider(&node.provider).adapter().id() {
+        "commandcode" => Some(ObserverRestart::CommandCode),
+        "muse" => Some(ObserverRestart::Muse),
+        _ => None,
+    }
+}
+
+/// Reattach the passive observer a recovered node needs. Split from the
+/// watcher backends so the dispatch (which harness gets which watcher) is
+/// testable without an `AppHandle` or a live backend.
+fn restart_passive_observer_with(
+    node: &crate::models::AgentNode,
+    start_commandcode: impl FnOnce(&str, &str) -> Result<(), String>,
+    start_muse: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(restart) = observer_restart(node) else {
+        return Ok(());
+    };
+    let session_id = node.cli_session_id.as_deref().unwrap_or_default();
+    let path = crate::env::node_working_path(node).spawn_path;
+    match restart {
+        ObserverRestart::CommandCode => start_commandcode(session_id, &path),
+        ObserverRestart::Muse => start_muse(session_id, &path),
+    }
+}
+
+/// Reattach the real watcher backend for a recovered node. Both watcher
+/// registries are idempotent, so re-running recovery on a node that already
+/// observes its session is a no-op.
+fn restart_passive_observer(node: &crate::models::AgentNode, app: &AppHandle) -> Result<(), String> {
+    restart_passive_observer_with(
+        node,
+        |session_id, path| {
+            crate::services::commandcode_watcher::start_for_session(
+                node.id, session_id, path, node.env, app,
+            )
+        },
+        |session_id, path| {
+            crate::services::muse_watcher::start_for_session(node.id, session_id, path, app)
+        },
+    )
+}
+
 fn recover_run_observers(app: &AppHandle, view: &RunView) {
     recover_run_observers_with(view,
         |id| crate::agent::process::PROCESS_REGISTRY.is_alive(&id),
         |id| {
             crate::services::session_recovery::recover_live_node(id)?;
             let node = db::get_agent_node_by_id(id).map_err(|e| e.to_string())?;
-            if crate::preferences::resolve_harness_provider(&node.provider).adapter().id() == "commandcode" {
-                if let Some(session_id) = node.cli_session_id.as_deref().filter(|id| !id.is_empty()) {
-                    let path = crate::env::node_working_path(&node).spawn_path;
-                    crate::services::commandcode_watcher::start_for_session(id, session_id, &path, node.env, app)?;
-                }
-            }
-            Ok(())
+            restart_passive_observer(&node, app)
         });
 }
 
@@ -1665,6 +1720,22 @@ fn classify_gate_report(
     // task quality. Review must work even when the classifier is unavailable.
     if review_turn_is_complete(view, node_id, status) {
         return Some(evaluator::Classification::Completed);
+    }
+    // A clean reviewer turn (ready/completed with a non-empty report) first
+    // consults the live classifier exactly as before. Only when that backend
+    // is absent or fails does the gate fall back to reading the report's
+    // explicit verdict deterministically (issue #1815), so a review completes
+    // on meshes with no classifier CLI instead of parking. The fallback never
+    // overrides a live verdict. AwaitingInput turns (permission prompts,
+    // questions) keep the classifier below as the tie-breaker.
+    if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. }))
+        && matches!(status, SessionStatus::Ready | SessionStatus::Completed)
+    {
+        let prompt = evaluator::review_prompt(output);
+        if let Some(classification) = classify(&prompt) {
+            return Some(classification);
+        }
+        return Some(evaluator::review_verdict_from_report(output));
     }
     let prompt = if matches!(view.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
         evaluator::review_prompt(output)
@@ -2690,6 +2761,91 @@ mod tests {
         crate::autopilot::evaluator::unregister(source);
     }
 
+    fn observer_node(provider: &str, session: Option<&str>) -> crate::models::AgentNode {
+        crate::models::AgentNode {
+            provider: provider.into(),
+            cli_session_id: session.map(str::to_string),
+            path: "X:\\src\\proj".into(),
+            worktree_name: Some("gentle-fox".into()),
+            use_worktree: true,
+            ..Default::default()
+        }
+    }
+
+    /// Issue #1794: Muse delivers its turn signal through the passive watcher,
+    /// so recovery must dispatch a Muse watcher — not only Command Code's.
+    #[test]
+    fn observer_restart_dispatches_muse_and_commandcode_only() {
+        assert_eq!(
+            observer_restart(&observer_node("muse", Some("sid"))),
+            Some(ObserverRestart::Muse)
+        );
+        assert_eq!(
+            observer_restart(&observer_node("commandcode", Some("sid"))),
+            Some(ObserverRestart::CommandCode)
+        );
+        // A harness with an attention hook needs no passive watcher.
+        assert_eq!(observer_restart(&observer_node("claude", Some("sid"))), None);
+        // No durable identity means nothing to reattach yet.
+        assert_eq!(observer_restart(&observer_node("muse", None)), None);
+        assert_eq!(observer_restart(&observer_node("muse", Some(""))), None);
+    }
+
+    /// Issue #1794: a Muse watcher dropped mid-run is reattached by recovery.
+    /// The dispatch is exercised through injected starters so the Muse branch
+    /// is pinned without an `AppHandle` or a live backend.
+    #[test]
+    fn recovery_restarts_a_dropped_muse_watcher() {
+        let mut node = observer_node("muse", Some("12345678-1234-4234-8234-123456789abc"));
+        node.id = 9_860_777;
+        // The watcher is not observing anything at recovery time.
+        crate::services::muse_watcher::stop(node.id);
+
+        let mut muse_starts = Vec::new();
+        restart_passive_observer_with(
+            &node,
+            |_, _| panic!("a muse node must not start the Command Code watcher"),
+            |session_id, _| {
+                muse_starts.push(session_id.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            muse_starts,
+            vec!["12345678-1234-4234-8234-123456789abc".to_string()]
+        );
+    }
+
+    /// Issue #1794: muse-bound agents must be walked by the recovery pass even
+    /// when they are only a step's borrowed agent, matching Command Code.
+    #[test]
+    fn observer_recovery_covers_a_running_muse_agent() {
+        let muse_agent = 9_860_778;
+        let view = RunView {
+            run_id: 87,
+            graph: CircuitGraph::agent_review(None, None, 3),
+            context: CircuitContext::new(),
+            steps: vec![StepView {
+                node_id: "source".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: Some(muse_agent),
+                attempt: 1,
+            }],
+            state: RunState::Running,
+        };
+        restore_run_evaluators(&view);
+        let mut recovered = Vec::new();
+        recover_run_observers_with(&view, |_| true, |id| { recovered.push(id); Ok(()) });
+        assert!(
+            recovered.contains(&muse_agent),
+            "a muse agent must acquire an observer during recovery: {recovered:?}"
+        );
+        crate::autopilot::evaluator::unregister(muse_agent);
+    }
+
     #[test]
     fn cancellation_marker_invalidates_batches_until_durable_ack() {
         let run_id = 9_876_543_210_i64;
@@ -2897,7 +3053,12 @@ mod tests {
         }), Some(Classification::Blocked));
         assert_eq!(classify_gate_report(&view, "await_fixes", SessionStatus::AwaitingInput, "Tests running", |_| Some(Classification::Working)), Some(Classification::Working));
         assert_eq!(classify_gate_report(&view, "await_source", SessionStatus::AwaitingInput, "Report", |_| None), None);
-        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::Ready, "Changes requested", |prompt| {
+        // Without a backend the clean reviewer turn falls back to reading
+        // the report deterministically (issue #1815).
+        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::Ready, "Changes requested",
+            |_| None), Some(Classification::Working));
+        // AwaitingInput keeps the classifier as the tie-breaker.
+        assert_eq!(classify_gate_report(&view, "verdict", SessionStatus::AwaitingInput, "Changes requested", |prompt| {
             assert!(prompt.contains("explicitly approves"));
             Some(Classification::Working)
         }), Some(Classification::Working));
@@ -2912,6 +3073,50 @@ mod tests {
             assert!(prompt.contains("the assigned work is finished"));
             Some(Classification::Working)
         }), Some(Classification::Working));
+    }
+
+    #[test]
+    fn review_verdict_falls_back_without_classifier_backend() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        view.context.set("source.review_preset", "1");
+        // Absent backend: the classifier yields nothing, so the gate reads
+        // the report's explicit verdict instead of parking.
+        let absent_backend = |_: &str| -> Option<Classification> { None };
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Approved. No remaining findings.", absent_backend),
+            Some(Classification::Completed));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Completed,
+                "Round 3: Approved", absent_backend),
+            Some(Classification::Completed));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Changes requested: add regression tests", absent_backend),
+            Some(Classification::Working));
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Cannot assess this diff: missing access to the base ref.", absent_backend),
+            Some(Classification::Blocked));
+        // A live backend keeps precedence: its verdict stands even when the
+        // report text would read differently.
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::Ready,
+                "Approved. No remaining findings.", |prompt| {
+                assert!(prompt.contains("explicitly approves"));
+                Some(Classification::Working)
+            }),
+            Some(Classification::Working));
+        // AwaitingInput is not a clean yield: the classifier stays the
+        // tie-breaker for permission prompts and questions.
+        assert_eq!(
+            classify_gate_report(&view, "verdict", SessionStatus::AwaitingInput, "Allow tests?", |prompt| {
+                assert!(prompt.contains("explicitly approves"));
+                Some(Classification::Blocked)
+            }),
+            Some(Classification::Blocked));
     }
 
     #[test]
@@ -5006,8 +5211,17 @@ mod tests {
     /// Create a node and register it with the evaluator so `observe_waits`
     /// reads it. Returns its id.
     fn register_test_agent(mesh_id: i64, path: &str, name: &str) -> i64 {
+        register_test_agent_with_provider(mesh_id, path, name, "claude")
+    }
+
+    fn register_test_agent_with_provider(
+        mesh_id: i64,
+        path: &str,
+        name: &str,
+        provider: &str,
+    ) -> i64 {
         let agent = db::create_agent_node(mesh_id, name, path, "main",
-            crate::models::EnvType::Windows, "claude", None, None, None, None, true, None, None, None).unwrap();
+            crate::models::EnvType::Windows, provider, None, None, None, None, true, None, None, None).unwrap();
         crate::autopilot::evaluator::unregister(agent.id);
         crate::autopilot::evaluator::register_circuit(agent.id);
         agent.id
@@ -5081,6 +5295,35 @@ mod tests {
             CircuitEvent::WaitObserved { explicit_budget, timeout_ms, .. } => {
                 assert!(*explicit_budget, "an authored budget must be flagged as an override");
                 assert_eq!(*timeout_ms, 1_800_000);
+            }
+            other => panic!("expected WaitObserved, got {other:?}"),
+        }
+    }
+
+    /// Issue #1794: when muse's extended capture window gives up, the node has
+    /// neither a session identity nor a readable report — so `observe_waits`
+    /// reports it unobserved and the #1791 watchdog fails the wait at the
+    /// first-observation window instead of stalling silently for the full
+    /// active budget. The give-up is surfaced, not absorbed.
+    #[test]
+    fn observe_waits_marks_a_muse_agent_without_identity_as_unobserved() {
+        init_temp_db_at("wait-muse-unobserved");
+        let mesh = db::create_mesh("wait-muse-unobserved", "/tmp/wait-muse-unobserved").unwrap();
+        let agent_id =
+            register_test_agent_with_provider(mesh.id, &mesh.path, "muse-worker", "muse");
+        let view = spawn_wait_view(agent_id, None);
+
+        let mut events = Vec::new();
+        observe_waits(&view, &mut events);
+        crate::autopilot::evaluator::unregister(agent_id);
+
+        match wait_event(&events) {
+            CircuitEvent::WaitObserved { observed, reason, .. } => {
+                assert!(
+                    !*observed,
+                    "a muse node with no captured identity must be unobserved so #1791 trips"
+                );
+                assert!(reason.contains("session identity"), "discovery reason: {reason}");
             }
             other => panic!("expected WaitObserved, got {other:?}"),
         }
