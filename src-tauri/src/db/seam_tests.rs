@@ -21,6 +21,11 @@ const ALLOWED_PUB_CRATE_FNS: &[&str] = &[
     "init_schema",
     "ensure_baseline_tables",
     "create_canonical_indexes_after_evolution",
+    // Issue #1793 — a test-only, non-query lock probe: it runs no SQL and
+    // exists solely so the reaper's no-I/O-under-lock assertion can observe
+    // whether the writer mutex is held. Not a query function, so it does not
+    // breach the seam this file guards.
+    "try_write_conn",
 ];
 
 #[test]

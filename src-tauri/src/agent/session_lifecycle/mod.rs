@@ -229,6 +229,10 @@ pub enum LifecycleKind {
     /// The hook could not be installed, trusted, reached, or parsed — the
     /// harness state is unknown. Never "no attention needed".
     SignalUnavailable,
+    /// Issue #1793 — the reaper observed a circuit-piloted node stuck in
+    /// `Running` with no session identity and no readable report past the
+    /// observation window, and transitioned it to the terminal `Lost` status.
+    Lost,
 }
 
 /// Hook delivery health for a node (issue #1364 §3). A layered field on the

@@ -87,7 +87,7 @@ const CIRCUIT_WAITING_DETAILS: Record<'pending' | 'paused', string> = {
 };
 
 function waitingForNode(node: AgentNode, circuitState?: string): AutopilotNodePresentation {
-  if (node.status === 'error') return NEEDS_ATTENTION;
+  if (node.status === 'error' || node.status === 'lost') return NEEDS_ATTENTION;
   if (circuitState === 'pending' || circuitState === 'paused') {
     return { ...WAITING, detail: CIRCUIT_WAITING_DETAILS[circuitState] };
   }

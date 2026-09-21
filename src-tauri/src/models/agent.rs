@@ -245,6 +245,14 @@ pub enum SessionStatus {
     /// PR-opened terminal state (`Completed`). Written by
     /// `session_lifecycle::on_turn_completed`.
     Ready,
+    /// Issue #1793 — the reaper's terminal state for a circuit-piloted node
+    /// that claimed to be `Running` but produced neither a session identity
+    /// nor a readable assistant report within the observation window. The
+    /// node cannot legitimately be re-observed (nothing will ever attach to
+    /// it), so it is terminal: a review creation or circuit step must not
+    /// adopt it. Surfaced to the user through the normalized
+    /// `agent-lifecycle` event.
+    Lost,
 }
 
 /// Parse a session status from a DB string column
@@ -260,6 +268,7 @@ impl SessionStatus {
             "spawning" => SessionStatus::Spawning,
             "completed" => SessionStatus::Completed,
             "ready" => SessionStatus::Ready,
+            "lost" => SessionStatus::Lost,
             _ => SessionStatus::Idle,
         }
     }
@@ -276,6 +285,7 @@ impl SessionStatus {
             SessionStatus::Spawning => "spawning",
             SessionStatus::Completed => "completed",
             SessionStatus::Ready => "ready",
+            SessionStatus::Lost => "lost",
         }
     }
 }

@@ -720,12 +720,27 @@ pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, s
         params![id, stamp, chrono::Utc::now().to_rfc3339()])? == 1)
 }
 
+/// Parse an `agent_nodes.status_changed_at` value to epoch milliseconds.
+///
+/// Rows carry either RFC3339 (every status write since migration v14) or
+/// SQLite's `datetime('now')` text (the v14 backfill default). Unparseable /
+/// absent input yields `None` so callers can fail safe rather than treat a
+/// garbage timestamp as "ancient".
+pub(crate) fn parse_status_changed_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.timestamp_millis())
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|dt| dt.and_utc().timestamp_millis())
+        })
+}
+
 pub(crate) fn agent_turn_stamp_precedes(stamp: &str, completed_at_ms: i64) -> bool {
     let Some((generation, changed)) = stamp.split_once(':') else { return false; };
     let Ok(generation) = generation.parse::<i64>() else { return false; };
-    let changed_ms = chrono::DateTime::parse_from_rfc3339(changed).map(|dt| dt.timestamp_millis()).ok()
-        .or_else(|| chrono::NaiveDateTime::parse_from_str(changed, "%Y-%m-%d %H:%M:%S%.f").ok()
-            .map(|dt| dt.and_utc().timestamp_millis()));
+    let changed_ms = parse_status_changed_ms(changed);
     changed_ms.is_some_and(|changed| completed_at_ms >= generation && completed_at_ms >= changed)
 }
 
@@ -839,6 +854,83 @@ pub(crate) fn cli_session_id_present_inner(conn: &Connection, id: i64) -> SqlRes
         params![id],
         |row| row.get(0),
     )
+}
+
+// --- Zombie-agent reaper (issue #1793) ---
+//
+// The circuit watchdog cleans up the *run* (PTY reader thread, watcher) but
+// leaves the `agent_nodes` row `running`. A node that claimed to be running
+// but never produced a session identity or a readable assistant report cannot
+// be re-observed, so it is a zombie. The scan is deliberately scoped to
+// circuit-piloted nodes (referenced by an `autopilot_circuit_run_steps` row):
+// a user's interactive node — e.g. a `terminal`-harness shell that never
+// captures a session id — is a legitimate long-running `running` row and must
+// never be reaped.
+
+/// Ids of circuit-piloted `running` nodes with no captured session identity
+/// whose `status_changed_at` is at least `threshold_ms` old. Pure read.
+pub fn list_zombie_candidates(threshold_ms: i64, now_ms: i64) -> SqlResult<Vec<i64>> {
+    let db = read_conn();
+    list_zombie_candidates_inner(&db, threshold_ms, now_ms)
+}
+
+pub(crate) fn list_zombie_candidates_inner(
+    conn: &Connection,
+    threshold_ms: i64,
+    now_ms: i64,
+) -> SqlResult<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.status_changed_at FROM agent_nodes a \
+         WHERE a.status = 'running' \
+           AND (a.cli_session_id IS NULL OR TRIM(a.cli_session_id) = '') \
+           AND EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
+                       WHERE s.agent_node_id = a.id)",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (id, changed) = row?;
+        let stale = changed
+            .as_deref()
+            .and_then(parse_status_changed_ms)
+            .is_some_and(|ms| now_ms.saturating_sub(ms) >= threshold_ms);
+        if stale {
+            candidates.push(id);
+        }
+    }
+    Ok(candidates)
+}
+
+/// Transition the supplied nodes to the terminal `Lost` state in one
+/// transaction. The `status = 'running'` + session-absent predicate is
+/// re-checked per row, so a node that captured an identity (or otherwise left
+/// `running`) between the candidate scan and this write is left alone. Returns
+/// the ids actually transitioned so the caller can surface each one lock-free.
+pub fn reap_zombie_agents(ids: &[i64]) -> SqlResult<Vec<i64>> {
+    let mut db = write_conn();
+    reap_zombie_agents_inner(&mut db, ids)
+}
+
+pub(crate) fn reap_zombie_agents_inner(conn: &mut Connection, ids: &[i64]) -> SqlResult<Vec<i64>> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let lost = SessionStatus::Lost.to_db_str();
+    let tx = conn.transaction()?;
+    let mut flipped = Vec::new();
+    for id in ids {
+        let changed = tx.execute(
+            "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 \
+             WHERE id = ?3 AND status = 'running' \
+               AND (cli_session_id IS NULL OR TRIM(cli_session_id) = '')",
+            params![lost, now, id],
+        )?;
+        if changed > 0 {
+            flipped.push(*id);
+        }
+    }
+    tx.commit()?;
+    Ok(flipped)
 }
 
 // --- Pending worktree removal queue ---

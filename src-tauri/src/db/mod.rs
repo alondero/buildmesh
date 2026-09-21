@@ -998,6 +998,24 @@ pub fn write_conn() -> std::sync::MutexGuard<'static, Connection> {
     }
 }
 
+/// Non-blocking probe for whether the global writer mutex is currently held.
+///
+/// Test-only: the reaper's no-I/O-under-lock assertion (issue #1793/#1228)
+/// injects a notifier that panics unless this returns `Some` — i.e. unless the
+/// writer lock is free when the notification is dispatched. A poisoned-but-free
+/// mutex (another test panicked while holding it) counts as free, matching
+/// [`write_conn`]'s poison recovery; only `WouldBlock` means "held". Never
+/// call this from production: a successful probe *holds* the writer lock for
+/// the guard's lifetime.
+#[cfg(test)]
+pub(crate) fn try_write_conn() -> Option<std::sync::MutexGuard<'static, Connection>> {
+    match get().writer.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 /// Whether the global database has been initialised. Tests across the lib
 /// binary share the same `DB` OnceCell, so the first one to call
 /// `init` wins; later ones can use this to skip their own init and

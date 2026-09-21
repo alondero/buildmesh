@@ -57,6 +57,7 @@ use crate::autopilot::circuit::stepper::{
 };
 mod github;
 mod spawn;
+mod zombie_sweep;
 use crate::db;
 use crate::models::SessionStatus;
 use crate::process_util::run_worker_pass;
@@ -385,6 +386,12 @@ pub fn start_circuit_worker(app: AppHandle) {
                 run_worker_pass("circuits:drive", || run_pass(&app));
                 run_worker_pass("circuits:watchdog", || {
                     lost_turn_watchdog_pass(&app);
+                });
+                // Issue #1793: reap piloted nodes stuck `running` with no
+                // session identity or readable report. Self-throttled, so this
+                // is a cheap no-op on almost every tick.
+                run_worker_pass("circuits:zombie-sweep", || {
+                    zombie_sweep::zombie_sweep_pass(&app);
                 });
                 // Wait for the next tick OR an immediate wake, whichever
                 // first (`wait_timeout` returns either way).
@@ -1249,6 +1256,13 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
             }
             Some(n) => match n.status {
                 SessionStatus::Archived => {
+                    events.push(CircuitEvent::AgentLost { agent_node_id });
+                }
+                // Issue #1793: the reaper transitioned a never-observed
+                // piloted node to the terminal `Lost` state. It cannot be
+                // re-observed, so cancel the step now rather than waiting
+                // out the first-observation window.
+                SessionStatus::Lost => {
                     events.push(CircuitEvent::AgentLost { agent_node_id });
                 }
                 SessionStatus::Error => {
