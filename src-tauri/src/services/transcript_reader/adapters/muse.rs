@@ -61,9 +61,6 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use rusqlite::{Connection, OpenFlags};
 
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
@@ -71,14 +68,6 @@ use crate::services::transcript_reader::types::{
     cap_tool_calls, merge_into, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
     Turn, MAX_TOOL_STRING, MAX_TURN_TEXT,
 };
-
-/// SQLite busy_timeout the muse reader applies on every open: lets a
-/// concurrent writer (the live muse process committing a new line) hold
-/// the lock briefly instead of returning `SQLITE_BUSY`. Mirrors the
-/// existing `find_session` value at `agent/provider/adapters/muse.rs:152`
-/// — bounded to 200 ms so a Coordinator digest poll cannot park a Tokio
-/// worker thread indefinitely if the live harness is writing a new line.
-const MUSE_READER_BUSY_TIMEOUT_MS: u64 = 200;
 
 /// Drop-in [`TranscriptAdapter`] for Muse Code.
 pub(crate) struct MuseAdapter;
@@ -145,49 +134,18 @@ pub(crate) fn muse_index_path_for(node_path: &str) -> Option<PathBuf> {
 
 /// Look up a session's log path in `session-index.db`. Returns `None`
 /// when the DB is missing, the id is unknown, or the path column is NULL
-/// (the column is nullable per the on-disk schema — see
-/// `adapters/muse.rs::find_session`). `pub(crate)` so tests can drive it
-/// against a temp DB without touching `~/.local/share/muse`.
+/// (the column is nullable per the on-disk schema). `pub(crate)` so tests can
+/// drive it against a temp DB without touching `~/.local/share/muse`.
 ///
-/// The returned path is host-readable: the helper wraps the raw guest
-/// path the index stores through [`crate::env::to_host_path`], mirroring
-/// `find_session` in `agent/provider/adapters/muse.rs::find_session`
-/// (the same translation runs on every row before `File::open`). On
-/// Linux and macOS this is the identity function; on a Windows+WSL host
-/// a Linux absolute row becomes a WSL UNC path (issue #1227 canonical
-/// `\\wsl.localhost\\<distro>\\home\\...` form, or the
-/// `\\wsl$\\<distro>\\home\\...` legacy form) so the reader
-/// reaches the WSL filesystem rather than a non-existent Windows path.
-/// The reader still relies on `cli_dir_for_spawn` (called upstream
-/// from `locate`) to translate the *index* path itself; this helper owns
-/// the result-path translation that the index row carries.
+/// The index is only the fast path: a live session has no row until a later
+/// Muse process flushes it (run 183), so the shared resolver also scans the
+/// on-disk session tree ([`crate::services::muse_sessions`]). The returned path
+/// is host-readable — the resolver runs the raw guest path the index stores
+/// through [`crate::env::to_host_path`] (identity on Linux/macOS; on
+/// Windows+WSL a guest `/home/...` row becomes a WSL UNC path so the reader
+/// reaches the WSL filesystem rather than a non-existent Windows path).
 pub(crate) fn muse_locator_in(index_db: &Path, session_id: &str) -> Option<PathBuf> {
-    let connection = Connection::open_with_flags(index_db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    if connection
-        .busy_timeout(Duration::from_millis(MUSE_READER_BUSY_TIMEOUT_MS))
-        .is_err()
-    {
-        // best-effort — fall through with the default behaviour; a
-        // non-zero busy_timeout would have helped if the live harness
-        // is mid-write, but absence of one is not fatal.
-    }
-    let mut statement = connection
-        .prepare("SELECT session_log_path FROM sessions WHERE session_id = ?1 LIMIT 1")
-        .ok()?;
-    let mut rows = statement
-        .query(rusqlite::params![session_id])
-        .ok()?;
-    let row = rows.next().ok()?;
-    let path: String = row?.get(0).ok()?;
-    if path.is_empty() {
-        return None;
-    }
-    // Host-translate the guest-side row (mirrors `find_session` in
-    // `agent/provider/adapters/muse.rs`, which runs the same conversion
-    // on every row before `File::open`). Identity on Linux/macOS; on
-    // Windows+WSL a `/home/...` row becomes `\wsl$\...` so the
-    // subsequent `path.exists()` / `File::open` reaches the WSL FS.
-    Some(PathBuf::from(env::to_host_path(&path)))
+    crate::services::muse_sessions::log_path(index_db.parent()?, session_id)
 }
 
 /// Pull Muse `tool_calls` (`[{name, args, call_id, id}]`) into the
@@ -740,6 +698,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.db");
         assert!(muse_locator_in(&missing, "any").is_none());
+    }
+
+    /// Run 183: a live Muse session has no index row, so the reader must still
+    /// locate its log from the on-disk session tree. Without this the circuit
+    /// could never read a report and the source stayed unobserved.
+    #[test]
+    fn locator_resolves_the_session_tree_without_an_index() {
+        const SESSION: &str = "01a0c54b-5ed4-7a61-91d7-a7a72c42fe24";
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir
+            .path()
+            .join("sessions/2026/09/21")
+            .join(SESSION)
+            .join("session.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "{}\n").unwrap();
+
+        let database = dir.path().join("session-index.db");
+        assert_eq!(muse_locator_in(&database, SESSION), Some(log));
+        assert!(muse_locator_in(&database, "unknown-id").is_none());
     }
 
     #[test]

@@ -270,40 +270,18 @@ impl SessionLogTail {
 }
 
 /// Resolve the host-side path to a session's durable log. Muse's index maps a
-/// session UUID to its log path; the path is a guest path on WSL and must be
-/// translated before the Windows host can read it.
+/// session UUID to its log path, but a live session has no index row yet, so
+/// the lookup also scans the on-disk session tree
+/// ([`crate::services::muse_sessions`]).
 fn session_log_path(session_id: &str, spawn_path: &str) -> Option<PathBuf> {
-    let native = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)?
-        .join(".local/share/muse");
-    let home = crate::env::cli_dir_for_spawn(native, ".local/share/muse", spawn_path)?;
+    let home = crate::services::muse_sessions::data_root(spawn_path)?;
     session_log_path_in(&home, session_id)
 }
 
-/// Index lookup alone, against an already-resolved Muse data root. Split out so
-/// the `session-index.db` column contract is unit-testable without a real WSL
-/// home.
+/// Resolve a session log against an already-resolved Muse data root. Split out
+/// so the lookup is unit-testable without a real WSL home.
 fn session_log_path_in(home: &Path, session_id: &str) -> Option<PathBuf> {
-    let database = home.join("session-index.db");
-    // Scope the connection: no filesystem work may run while it is held.
-    let log_path = {
-        let connection = rusqlite::Connection::open_with_flags(
-            &database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .ok()?;
-        connection
-            .busy_timeout(std::time::Duration::from_millis(200))
-            .ok()?;
-        connection
-            .query_row(
-                "SELECT session_log_path FROM sessions WHERE session_id = ?1",
-                [session_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()?
-    };
-    Some(PathBuf::from(crate::env::to_host_path(&log_path)))
+    crate::services::muse_sessions::log_path(home, session_id)
 }
 
 /// Start observing a fresh Muse session from the beginning of its log. Its
@@ -836,5 +814,25 @@ mod tests {
     fn index_lookup_returns_none_without_an_index() {
         let dir = tempfile::tempdir().unwrap();
         assert!(session_log_path_in(dir.path(), "01a0").is_none());
+    }
+
+    /// Run 183: a live session is missing from `session-index.db`, so the
+    /// watcher must resolve its log from the on-disk session tree. Without this
+    /// the node published no turn signal, which also left the circuit wait
+    /// unobserved.
+    #[test]
+    fn session_log_resolves_from_the_session_tree_without_an_index() {
+        const SESSION: &str = "01a0c54b-5ed4-7a61-91d7-a7a72c42fe24";
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir
+            .path()
+            .join("sessions/2026/09/21")
+            .join(SESSION)
+            .join("session.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, format!("{}\n", run_started("run-1"))).unwrap();
+
+        assert_eq!(session_log_path_in(dir.path(), SESSION), Some(log));
+        assert!(session_log_path_in(dir.path(), "different-session").is_none());
     }
 }
