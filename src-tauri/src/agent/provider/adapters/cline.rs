@@ -614,12 +614,16 @@ mod tests {
 
     // —— Issue #1774: session-id capture wiring ——————————————————————————
 
-    /// Cline self-assigns and disables PTY capture. The fresh-spawn hook
-    /// must run a SQLite poller (`services::cline_session`) — pinning
-    /// both invariants in one place so a refactor that flips the PTY
-    /// flag back to `true` *or* drops the after_fresh_spawn call fails
-    /// this test instead of silently leaving `cli_session_id` null on
-    /// every Cline node.
+    /// Cline self-assigns and disables PTY capture. The fresh-spawn
+    /// hook must run a SQLite poller (`services::cline_session`) — the
+    /// two capability flags below are the contract the registry reads
+    /// to decide whether to wire that poller. **This test asserts only
+    /// the flags**: it would NOT catch a refactor that left the flags
+    /// intact but emptied the `after_fresh_spawn` body, or rewired the
+    /// hook to call a different helper. The flag pins are the
+    /// contract; the hook body is pinned by code review and the
+    /// `services::cline_session::tests::start_capture_poller`-shaped
+    /// integration coverage in the helper's own module.
     #[test]
     fn self_assigns_session_id_and_skips_pty_uuid_capture() {
         // Cline mints its own session ids; auto-resume must drive --id

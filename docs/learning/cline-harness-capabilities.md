@@ -215,7 +215,7 @@ of truth):
    (`env::wsl_home()`).
 
 A Windows-side Buildmesh driving a WSL Cline still reads the
-guest-side store via `cline_db_path_for_host(EnvType::Wsl, →)`; the same
+guest-side store via `cline_db_path_for_host(EnvType::Wsl, …)`; the same
 shape the Codex and AGY adapters use for cross-env capture.
 
 ### Limitations
