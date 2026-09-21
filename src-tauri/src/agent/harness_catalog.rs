@@ -66,6 +66,19 @@ fn inspector_label(provider: Provider) -> &'static str {
     }
 }
 
+/// Inspector/docs label for an adapter id ([`AgentProvider::id`](crate::agent::provider::AgentProvider::id)),
+/// e.g. `"dsh"` → `"DeepSeek Harness"`. `None` for unknown ids. The
+/// compatibility gate uses this for reviewer-refusal copy so user-facing
+/// harness names come from the one label table, not a hand-rolled
+/// capitaliser (issue #1816 review).
+pub fn inspector_label_for_adapter(adapter_id: &str) -> Option<&'static str> {
+    Provider::all()
+        .iter()
+        .copied()
+        .find(|p| p.adapter().id() == adapter_id)
+        .map(inspector_label)
+}
+
 /// Every built-in harness, independent of detection and configured accounts.
 ///
 /// Order matches [`Provider::all`].

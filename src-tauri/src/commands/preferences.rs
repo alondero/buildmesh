@@ -39,12 +39,21 @@ pub fn set_app_default_provider(provider: Option<String>) -> Result<(), String> 
 /// restore the source-agent fallback. This is deliberately independent from
 /// the ordinary default provider so adversarial reviews can use another
 /// harness without changing implementation spawns.
+///
+/// The stored value is the inherit-path reviewer for every built-in review
+/// run without a per-run override, so it passes the same
+/// attention-compatibility gate as the Start Review picker (issue #1816):
+/// a harness that can never yield a turn is refused here rather than
+/// minting runs that park forever at the `verdict` gate.
 #[command]
 pub fn set_app_reviewer_provider(provider: Option<String>) -> Result<(), String> {
     let mut prefs = preferences::load()?;
     prefs.reviewer_provider = provider
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    if let Some(ref value) = prefs.reviewer_provider {
+        crate::autopilot::compatibility::validate_reviewer_provider_id(value)?;
+    }
     preferences::save(prefs)
 }
 
@@ -978,6 +987,46 @@ mod resolved_view_tests {
             caps.supports_model_override,
             "anthropic harness must report model override support"
         );
+        crate::preferences::reset_for_tests();
+    }
+
+    /// Issue #1816: the app-wide Reviewer provider is the inherit-path
+    /// reviewer for runs without a per-run override, so the settings
+    /// command holds the same attention-compatibility gate as the Start
+    /// Review picker. Ineligible harnesses are refused (and leave the
+    /// stored value untouched); eligible ones persist; blank clears.
+    #[test]
+    fn app_reviewer_provider_rejects_harness_without_turn_signal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "buildmesh-app-reviewer-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        crate::preferences::init_for_tests(tmp);
+        // Eligible harness persists.
+        set_app_reviewer_provider(Some("codex".to_string())).expect("codex can yield a turn");
+        assert_eq!(
+            crate::preferences::reviewer_provider().as_deref(),
+            Some("codex")
+        );
+        // Ineligible harnesses are refused with the harness-named reason
+        // and the stored value is untouched.
+        for picked in ["cline", "terminal", "dsh:minimax"] {
+            let err = set_app_reviewer_provider(Some(picked.to_string())).unwrap_err();
+            assert!(
+                err.contains("reviewer provider"),
+                "{picked:?} must be refused, got {err:?}"
+            );
+        }
+        assert_eq!(
+            crate::preferences::reviewer_provider().as_deref(),
+            Some("codex"),
+            "refused writes must not clobber the stored value"
+        );
+        // Blank clears back to the source-agent fallback.
+        set_app_reviewer_provider(Some("   ".to_string())).expect("blank clears");
+        assert_eq!(crate::preferences::reviewer_provider(), None);
         crate::preferences::reset_for_tests();
     }
 }
