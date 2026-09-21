@@ -222,22 +222,31 @@ pub fn resolve_autopilot_spawn_option(
 ///   at the Anthropic executor; see `preferences::default_harness_profiles`).
 /// - `"minimax-code"` → `"mcode"` (legacy id, kept in
 ///   `Provider::from_db_str`).
+/// - `"antigravity"` → `"agy"`, `"claude_code"` → `"anthropic"`,
+///   `"cmd"` → `"commandcode"` (legacy ids the frontend
+///   `harnessIdForProvider` and stored provider rows still carry —
+///   issue #1816 review: every id the frontend judges must resolve
+///   here too, or the backend gate answers `UnknownHarness` where the
+///   UI claims eligibility).
 ///
 /// Stable case-folded lookup — `"Claude Code"`, `"  claude  "`, and
 /// `"ANTHROPIC"` all resolve to the same adapter.
 pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
     let normalized = harness_id.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "claude" | "anthropic" => Some("anthropic"),
+        "claude" | "anthropic" | "claude_code" => Some("anthropic"),
         "codex" => Some("codex"),
-        "agy" => Some("agy"),
+        "cursor" => Some("cursor"),
+        "agy" | "antigravity" => Some("agy"),
         "opencode" => Some("opencode"),
         "grok" => Some("grok"),
         "kimi" => Some("kimi"),
         "mcode" | "minimax-code" => Some("mcode"),
         "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
-        "commandcode" | "command-code" | "cmdc" => Some("commandcode"),
+        "commandcode" | "command-code" | "cmdc" | "cmd" => Some("commandcode"),
         "muse" => Some("muse"),
+        "freebuff" => Some("freebuff"),
+        "cline" => Some("cline"),
         "terminal" => Some("terminal"),
         _ => None,
     }
@@ -259,10 +268,105 @@ pub fn lookup_capabilities(harness_id: &str) -> Option<HarnessCapabilities> {
         .map(|p| capabilities_for(p.adapter()))
 }
 
-// Whether this capability descriptor has a backend-owned passive watcher
-// that publishes standard Node Turns. Keep this at the compatibility seam:
-// the adapter owns watcher startup, while this evaluator owns the question
-// of whether that signal is sufficient for Autopilot.
+// ---------------------------------------------------------------------------
+// Shared turn-signal predicate + reviewer gate (issue #1816)
+// ---------------------------------------------------------------------------
+
+/// Whether the harness supplies a turn-completion signal: a native
+/// attention hook or a backend-owned passive turn watcher that publishes
+/// standard Node Turns. The adapter owns watcher startup, while this
+/// evaluator owns the question of whether that signal is sufficient.
+///
+/// Shared by [`evaluate`]'s harness half and the circuit reviewer gate
+/// ([`reviewer_harness_reason`]) so the two predicates cannot drift: when
+/// a harness gains a signal, both sides flip together.
+pub fn harness_has_turn_signal(caps: &HarnessCapabilities) -> bool {
+    caps.requires_attention_hook || caps.supports_passive_turn_watcher
+}
+
+/// Reviewer-side harness check: the harness half of [`evaluate`] **minus**
+/// the `UnknownHarness` fail-closed arm. Unknown harness ids return `None`
+/// (fail-open) — `AgentNode.provider` holds user-defined harness profile
+/// ids the spawn seam resolves to a real executor, and refusing those
+/// would take a working review away from the user. That divergence from
+/// `evaluate` (which fails unknown harnesses closed) is deliberate: the
+/// reviewer gate only blocks what it can prove ineligible, mirroring the
+/// frontend `blocksReviewCircuit` predicate.
+pub fn reviewer_harness_reason(harness_id: &str) -> Option<AutopilotCompatibilityReason> {
+    let caps = lookup_capabilities(harness_id)?;
+    if caps.is_plain_terminal {
+        return Some(AutopilotCompatibilityReason::PlainTerminal);
+    }
+    if !harness_has_turn_signal(&caps) {
+        return Some(AutopilotCompatibilityReason::MissingAttentionHook {
+            harness_id: harness_id.trim().to_string(),
+        });
+    }
+    None
+}
+
+/// Gate one reviewer Spawn Option id (bare `<harness>` or composite
+/// `harness:provider`, issue #1659 first-`:`-split rule) against the
+/// attention-compatibility predicate. Blank collapses to `Ok(())`
+/// (inherit) — callers decide what inherit means. Unknown harness ids are
+/// fail-open (see [`reviewer_harness_reason`]). `Err` carries the
+/// user-facing refusal mapped from the reason enum in
+/// [`reviewer_refusal_message`], never a second vocabulary.
+pub fn validate_reviewer_provider_id(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let harness_id = SpawnOptionId::from(trimmed).harness_id().trim().to_string();
+    match reviewer_harness_reason(&harness_id) {
+        None => Ok(()),
+        Some(reason) => Err(reviewer_refusal_message(&reason)),
+    }
+}
+
+/// User-facing refusal text for a reviewer-harness rejection, mapped from
+/// the existing reason enum in one place. `PlainTerminal` keeps its
+/// distinct message; `MissingAttentionHook` names the harness
+/// (Inspector/docs label from the harness catalog) and the missing
+/// turn-completion signal. Any other variant is unreachable from
+/// [`reviewer_harness_reason`]; the arm stays total with a generic message
+/// rather than panicking on a future variant.
+pub fn reviewer_refusal_message(reason: &AutopilotCompatibilityReason) -> String {
+    match reason {
+        AutopilotCompatibilityReason::PlainTerminal => {
+            "Terminal cannot be used as the reviewer provider.".to_string()
+        }
+        AutopilotCompatibilityReason::MissingAttentionHook { harness_id } => {
+            format!(
+                "{} cannot be used as the reviewer provider: it has no turn-completion signal.",
+                harness_display_label(harness_id)
+            )
+        }
+        _ => "This provider cannot be used as the reviewer provider.".to_string(),
+    }
+}
+
+/// Display label for a harness-half string: resolves aliases and case
+/// through the adapter table, then returns the Inspector/docs label from
+/// the harness catalog (`"dsh"` → `"DeepSeek Harness"`, `"CLINE"` →
+/// `"Cline"`). Falls back to the trimmed input with a capitalised first
+/// letter for ids the catalog does not know — unreachable from the
+/// reviewer gate (unknown ids are fail-open, so no message is ever built
+/// for them), total anyway.
+fn harness_display_label(harness_half: &str) -> String {
+    let normalized = harness_half.trim().to_ascii_lowercase();
+    if let Some(adapter) = resolve_harness_adapter_id(&normalized) {
+        if let Some(label) = crate::agent::harness_catalog::inspector_label_for_adapter(adapter) {
+            return label.to_string();
+        }
+    }
+    let mut chars = normalized.chars();
+    match chars.next() {
+        None => "Unknown harness".to_string(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------
@@ -316,7 +420,9 @@ pub fn evaluate(input: AutopilotCompatibilityInput<'_>) -> AutopilotCompatibilit
             if caps.is_plain_terminal {
                 reasons.push(AutopilotCompatibilityReason::PlainTerminal);
             }
-            if !caps.requires_attention_hook && !caps.supports_passive_turn_watcher {
+            // Shared predicate with the reviewer gate (issue #1816) —
+            // same verdict here as in `reviewer_harness_reason`.
+            if !harness_has_turn_signal(caps) {
                 reasons.push(AutopilotCompatibilityReason::MissingAttentionHook {
                     harness_id: input.resolved_harness_id.to_string(),
                 });
@@ -475,6 +581,43 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("muse"), Some("muse"));
         assert_eq!(resolve_harness_adapter_id("Muse"), Some("muse"));
         assert_eq!(resolve_harness_adapter_id("  MUSE  "), Some("muse"));
+    }
+
+    /// Issue #1816: cursor, freebuff, and cline resolve to their own
+    /// adapters so the compatibility gate sees their real turn-signal
+    /// capability instead of reporting them as unknown. Before this,
+    /// `lookup_capabilities` returned `None` for all three, which meant
+    /// the reviewer gate (which reuses this lookup) could not reject
+    /// freebuff/cline as reviewers.
+    #[test]
+    fn resolve_harness_adapter_id_maps_cursor_freebuff_cline() {
+        assert_eq!(resolve_harness_adapter_id("cursor"), Some("cursor"));
+        assert_eq!(resolve_harness_adapter_id("Cursor"), Some("cursor"));
+        assert_eq!(resolve_harness_adapter_id("freebuff"), Some("freebuff"));
+        assert_eq!(resolve_harness_adapter_id("Freebuff"), Some("freebuff"));
+        assert_eq!(resolve_harness_adapter_id("cline"), Some("cline"));
+        assert_eq!(resolve_harness_adapter_id("Cline"), Some("cline"));
+        assert_eq!(resolve_harness_adapter_id("  CLINE  "), Some("cline"));
+    }
+
+    /// Issue #1816 review: legacy ids the frontend `harnessIdForProvider`
+    /// and stored provider rows still carry must resolve to the same
+    /// adapter the UI judges — otherwise the backend answers
+    /// `UnknownHarness` where the frontend claims eligibility.
+    #[test]
+    fn resolve_harness_adapter_id_maps_legacy_aliases() {
+        assert_eq!(resolve_harness_adapter_id("antigravity"), Some("agy"));
+        assert_eq!(resolve_harness_adapter_id("Antigravity"), Some("agy"));
+        assert_eq!(resolve_harness_adapter_id("claude_code"), Some("anthropic"));
+        assert_eq!(resolve_harness_adapter_id("Claude_Code"), Some("anthropic"));
+        assert_eq!(resolve_harness_adapter_id("cmd"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("CMD"), Some("commandcode"));
+        // Parity spot-checks: every other frontend alias still resolves.
+        assert_eq!(resolve_harness_adapter_id("minimax-code"), Some("mcode"));
+        assert_eq!(resolve_harness_adapter_id("deepseek"), Some("dsh"));
+        assert_eq!(resolve_harness_adapter_id("deepseek-harness"), Some("dsh"));
+        assert_eq!(resolve_harness_adapter_id("command-code"), Some("commandcode"));
+        assert_eq!(resolve_harness_adapter_id("cmdc"), Some("commandcode"));
     }
 
     /// Unknown harness ids return `None` (no silent fallback to Anthropic,
@@ -680,6 +823,121 @@ mod tests {
         });
         assert!(result.allowed, "Command Code watcher should allow Autopilot: {:?}", result.reasons);
         assert!(result.reasons.is_empty());
+    }
+
+    /// Issue #1816: freebuff and cline have neither an attention hook nor a
+    /// passive turn watcher, so the gate emits `MissingAttentionHook` naming
+    /// the harness — the same reason the reviewer gate reuses. Cursor has a
+    /// native hook and stays allowed.
+    #[test]
+    fn evaluate_freebuff_and_cline_emit_missing_attention_hook_cursor_allowed() {
+        for harness in ["freebuff", "cline", "dsh"] {
+            let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
+            assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
+            assert!(!caps.supports_passive_turn_watcher, "{harness} must lack a watcher");
+            let result = evaluate(AutopilotCompatibilityInput {
+                resolved_spawn_option: harness,
+                resolved_harness_id: harness,
+                capabilities: Some(caps),
+                mesh_use_worktree: true,
+                explicit_autopilot_provider: false,
+            });
+            assert!(!result.allowed, "{harness} must be rejected");
+            assert!(
+                result.reasons.iter().any(|r| matches!(
+                    r,
+                    AutopilotCompatibilityReason::MissingAttentionHook { harness_id }
+                    if harness_id == harness
+                )),
+                "{harness} must surface MissingAttentionHook; got {:?}",
+                result.reasons
+            );
+        }
+        let cursor = lookup_capabilities("cursor").expect("cursor known");
+        assert!(cursor.requires_attention_hook);
+        let allowed = evaluate(AutopilotCompatibilityInput {
+            resolved_spawn_option: "cursor",
+            resolved_harness_id: "cursor",
+            capabilities: Some(cursor),
+            mesh_use_worktree: true,
+            explicit_autopilot_provider: false,
+        });
+        assert!(allowed.allowed, "cursor must be allowed: {:?}", allowed.reasons);
+    }
+
+    /// Issue #1816 review: the reviewer gate reuses the reason enum rather
+    /// than a second vocabulary. `reviewer_harness_reason` returns the
+    /// harness half of `evaluate` minus the fail-closed unknown arm, and
+    /// `reviewer_refusal_message` maps those variants to copy in one
+    /// place — with Inspector/docs labels, normalised for case.
+    #[test]
+    fn reviewer_gate_reuses_reason_enum_and_catalog_labels() {
+        // PlainTerminal keeps its distinct message.
+        assert_eq!(
+            reviewer_refusal_message(&AutopilotCompatibilityReason::PlainTerminal),
+            "Terminal cannot be used as the reviewer provider."
+        );
+        assert!(matches!(
+            reviewer_harness_reason("terminal"),
+            Some(AutopilotCompatibilityReason::PlainTerminal)
+        ));
+        // MissingAttentionHook names the harness via the catalog label.
+        // (Composite ids split at the `validate_...` seam; `reason` takes
+        // the bare harness half.)
+        for (harness, label) in [("cline", "Cline"), ("freebuff", "Freebuff"), ("dsh", "DeepSeek Harness")] {
+            match reviewer_harness_reason(harness) {
+                Some(AutopilotCompatibilityReason::MissingAttentionHook { harness_id }) => {
+                    assert_eq!(harness_id, harness);
+                    let message = reviewer_refusal_message(
+                        &AutopilotCompatibilityReason::MissingAttentionHook { harness_id },
+                    );
+                    assert_eq!(
+                        message,
+                        format!("{label} cannot be used as the reviewer provider: it has no turn-completion signal.")
+                    );
+                }
+                other => panic!("{harness} must yield MissingAttentionHook, got {other:?}"),
+            }
+        }
+        // Uppercase input resolves through the same table for the message.
+        let message = reviewer_refusal_message(
+            &AutopilotCompatibilityReason::MissingAttentionHook { harness_id: "CLINE".to_string() },
+        );
+        assert_eq!(
+            message,
+            "Cline cannot be used as the reviewer provider: it has no turn-completion signal."
+        );
+        // Eligible harnesses (hook or passive watcher) yield no reason.
+        for harness in ["claude", "codex", "cursor", "agy", "commandcode", "muse", "antigravity", "claude_code", "cmd"] {
+            assert_eq!(
+                reviewer_harness_reason(harness),
+                None,
+                "{harness} can yield a turn and must pass the reviewer gate"
+            );
+        }
+        // Unknown ids are fail-open here (evaluate fails them closed as
+        // UnknownHarness) — the spawn seam resolves user-defined profiles.
+        assert_eq!(reviewer_harness_reason("made-up"), None);
+        assert_eq!(reviewer_harness_reason("my-custom-harness"), None);
+    }
+
+    /// `validate_reviewer_provider_id` applies the issue #1659
+    /// first-`:`-split rule before the gate: the harness half decides,
+    /// blanks collapse to inherit.
+    #[test]
+    fn validate_reviewer_provider_id_splits_composite_and_collapses_blank() {
+        assert!(validate_reviewer_provider_id("").is_ok());
+        assert!(validate_reviewer_provider_id("   ").is_ok());
+        assert!(validate_reviewer_provider_id("codex").is_ok());
+        assert!(validate_reviewer_provider_id("codex:minimax").is_ok());
+        assert!(validate_reviewer_provider_id("antigravity").is_ok());
+        let err = validate_reviewer_provider_id("cline:minimax").unwrap_err();
+        assert_eq!(
+            err,
+            "Cline cannot be used as the reviewer provider: it has no turn-completion signal."
+        );
+        let err = validate_reviewer_provider_id("  terminal:foo  ").unwrap_err();
+        assert_eq!(err, "Terminal cannot be used as the reviewer provider.");
     }
 
     /// A custom or future harness with only prefill missing remains eligible:

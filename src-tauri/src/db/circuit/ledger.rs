@@ -3,7 +3,6 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::agent::provider::SpawnOptionId;
 use crate::autopilot::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
@@ -14,33 +13,54 @@ use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunSt
 /// Normalise the title-bar reviewer override into the stored run-context value.
 ///
 /// The id is a Spawn Option id — `<harness>` or the composite
-/// `harness:provider_id` — so the segment that decides whether this is a real
-/// agent is the harness. A blank value collapses to `None` (inherit the
-/// app-wide Reviewer provider, then the source agent); the Terminal harness is
-/// rejected outright.
+/// `harness:provider_id`. A blank value collapses to `None` (inherit the
+/// app-wide Reviewer provider, then the source agent).
 ///
-/// The Start Review picker already omits Terminal, but the backend must hold
-/// its own invariant: the reviewer-provider cascade treats any non-empty string
-/// as the winner, so an unchecked `invoke` would mint a review run whose
-/// "reviewer" is a plain shell. Validation is input-only, so it applies to
-/// authored Circuits too, even though they ignore the value.
+/// The gate itself lives in `autopilot::compatibility`
+/// ([`validate_reviewer_provider_id`](crate::autopilot::compatibility::validate_reviewer_provider_id)):
+/// a reviewer must be able to **yield a turn**, or the `verdict` gate parks
+/// forever — the reviewer's status has to reach `awaiting_input` / `ready` /
+/// `completed` before `classify_step_turn` will do anything at all
+/// (`if !yielded { return None; }`). This is the harness half of
+/// `autopilot::compatibility::evaluate`, minus its fail-closed unknown arm
+/// (see `reviewer_harness_reason`) — not a Terminal-only denylist.
 fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, String> {
     let Some(value) = value else { return Ok(None) };
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    // Issue #1659 circuit-trigger entry seam: route the harness-half
-    // extraction through the typed `SpawnOptionId` so the same first-`:`-
-    // split rule every other entry seam uses applies here. A bare
-    // `"terminal"` parses as a native row; a Proxied form
-    // (`"terminal:<provider>"`) — rejected today by
-    // `BUILTIN_HARNESS_IDS` but the contract holds regardless —
-    // would also match.
-    if SpawnOptionId::from(trimmed).harness_id() == "terminal" {
-        return Err("Terminal cannot be used as the reviewer provider.".into());
-    }
+    crate::autopilot::compatibility::validate_reviewer_provider_id(trimmed)?;
     Ok(Some(trimmed.to_string()))
+}
+
+/// Effective reviewer decision for the built-in review preset path (issue
+/// #1816). The per-run override wins when non-blank; otherwise the run
+/// inherits the stored app-wide value (snapshotted below by
+/// `with_app_reviewer_provider`). Whichever wins must pass the
+/// attention-compatibility gate: an ineligible override is refused with
+/// the harness-named reason, while an ineligible *stored* value is refused
+/// with the same reason plus Settings guidance — the settings command
+/// validates new writes, but a value stored before the gate existed (or
+/// hand-edited into `preferences.json`) must refuse here rather than mint
+/// a run that can never reach a verdict.
+///
+/// Pure (no DB, no prefs reads): the caller supplies the stored app-wide
+/// value so this stays unit-testable without global state.
+fn resolve_preset_reviewer(
+    reviewer_provider: Option<String>,
+    stored_app_wide: Option<String>,
+) -> Result<Option<String>, String> {
+    let picked = normalize_reviewer_provider(reviewer_provider)?;
+    if picked.is_some() {
+        return Ok(picked);
+    }
+    if let Some(stored) = stored_app_wide.as_deref() {
+        crate::autopilot::compatibility::validate_reviewer_provider_id(stored).map_err(|message| {
+            format!("{message} It is stored as the app-wide Reviewer provider — pick another in Settings.")
+        })?;
+    }
+    Ok(None)
 }
 
 /// Atomically claim a source agent and create its review run. The source id is
@@ -52,8 +72,12 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
 /// Review control. When set it overrides the app-wide Reviewer provider
 /// snapshot in this run's context, so the reviewer agent spawns on the
 /// provider the user picked. It applies to the built-in review preset only:
-/// an authored Circuit carries its own reviewer provider in its graph.
-/// Validated by [`normalize_reviewer_provider`] regardless of Circuit kind.
+/// an authored Circuit carries its own reviewer provider in its graph and
+/// ignores this value entirely — including for validation (validating an
+/// ignored value would reject authored calls over a stale string, issue
+/// #1816 review). On the preset path the *effective* reviewer (override
+/// when set, else the stored app-wide snapshot) must pass the
+/// attention-compatibility gate via [`resolve_preset_reviewer`].
 ///
 /// **First writer wins.** If the source agent already owns a live run, the
 /// early-return below hands back that run's id and `max_rounds` /
@@ -108,9 +132,10 @@ pub fn create_node_circuit_run(
 /// The public function locks the process-global writer; this helper
 /// takes an explicit `&mut Connection` so parallel tests can each
 /// operate against their own in-memory DB. `reviewer_provider` is
-/// normalised *inside* the helper so the validation is not duplicated
+/// resolved *inside* the helper so the validation is not duplicated
 /// between the public wrapper and the test path (issue #1691 review
-/// cleanup) — a bare `terminal` is rejected before any DB work happens.
+/// cleanup) — an ineligible effective reviewer is rejected before any DB
+/// work happens, on the built-in preset path only.
 ///
 /// The helper trusts the caller: it assumes the readiness gate has
 /// already been enforced by [`assert_source_observed`] (the public
@@ -272,7 +297,17 @@ fn create_node_circuit_run_with_recovery_locked(
     recovery: Option<super::recovery::ReviewRecovery>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
-    let reviewer_override = normalize_reviewer_provider(reviewer_provider)?;
+    // Issue #1816: gate the *effective* reviewer on the built-in preset
+    // path only — authored Circuits (and recovery, which passes `None`)
+    // ignore this value, so validating it there would reject calls over a
+    // string that is never used. Lock-free: the stored app-wide read is
+    // filesystem I/O, and this runs before the writer transaction opens
+    // (issue #1228).
+    let reviewer_override = if selected_circuit_id.is_none() && recovery.is_none() {
+        resolve_preset_reviewer(reviewer_provider, crate::preferences::reviewer_provider())?
+    } else {
+        None
+    };
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
     if recovery.is_some() {
@@ -1650,4 +1685,152 @@ pub(crate) fn count_active_circuit_runs_inner(db: &Connection, mesh_id: i64) -> 
         params![mesh_id],
         |row| row.get(0),
     )
+}
+
+#[cfg(test)]
+mod reviewer_tests {
+    use super::*;
+    use crate::agent::capabilities::capabilities_for;
+    use crate::autopilot::compatibility::harness_has_turn_signal;
+    use crate::models::Provider;
+
+    /// Issue #1816: every harness with neither an attention hook nor a
+    /// passive turn watcher is rejected as a reviewer provider, with a
+    /// reason naming the harness; every eligible harness is accepted.
+    /// The expectation is derived from the live capability descriptors
+    /// through the *shared* predicate (not a re-spelled copy) so the test
+    /// agrees with the frontend's `blocksReviewCircuit` predicate by
+    /// construction — a harness that gains a turn signal flips both sides
+    /// together. The hardcoded pins below (not this loop) are what would
+    /// catch wrong capability data.
+    #[test]
+    fn reviewer_gate_matches_attention_compatibility_for_every_harness() {
+        for provider in Provider::all() {
+            let caps = capabilities_for(provider.adapter());
+            let blocked =
+                caps.is_plain_terminal || !harness_has_turn_signal(&caps);
+            let id = provider.to_string();
+            match normalize_reviewer_provider(Some(id.clone())) {
+                Ok(_) => assert!(
+                    !blocked,
+                    "{id:?} was accepted but has no turn-completion signal"
+                ),
+                Err(err) => {
+                    assert!(
+                        blocked,
+                        "{id:?} was rejected but can yield a turn: {err:?}"
+                    );
+                    if caps.is_plain_terminal {
+                        assert!(
+                            err.contains("Terminal"),
+                            "{id:?} must keep the distinct Terminal message, got {err:?}"
+                        );
+                    } else {
+                        assert!(
+                            err.contains("turn-completion"),
+                            "{id:?} must name the missing capability, got {err:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Terminal keeps its existing distinct error message (bare, padded,
+    /// composite, and case variants all route through the harness half).
+    #[test]
+    fn reviewer_terminal_keeps_distinct_message() {
+        for picked in ["terminal", "  terminal  ", "terminal:minimax", "Terminal", "TERMINAL:foo"] {
+            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            assert_eq!(
+                err,
+                "Terminal cannot be used as the reviewer provider.",
+                "{picked:?} must keep the Terminal message"
+            );
+        }
+    }
+
+    /// The issue's named cases: `dsh`, `freebuff`, and `cline` are
+    /// rejected with the Inspector/docs label naming the harness (not the
+    /// Terminal message), including through a composite `harness:provider`
+    /// id and uppercase input (lookup normalises case).
+    #[test]
+    fn reviewer_rejects_harnesses_without_turn_signal() {
+        for (picked, name) in [
+            ("dsh", "DeepSeek Harness"),
+            ("DSH", "DeepSeek Harness"),
+            ("freebuff", "Freebuff"),
+            ("cline", "Cline"),
+            ("CLINE", "Cline"),
+            ("cline:minimax", "Cline"),
+            ("  freebuff  ", "Freebuff"),
+        ] {
+            let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
+            assert!(
+                err.contains(name),
+                "{picked:?} must name the harness ({name}), got {err:?}"
+            );
+            assert!(
+                err.contains("turn-completion"),
+                "{picked:?} must name the missing capability, got {err:?}"
+            );
+        }
+    }
+
+    /// Eligible harnesses pass through untouched (value preserved), the
+    /// `claude` profile alias and the legacy frontend aliases resolve to
+    /// eligible adapters, unknown harness profile ids stay permissive
+    /// (the spawn seam resolves them; mirrors the frontend gate), and
+    /// blanks collapse to `None` (inherit) exactly as before.
+    #[test]
+    fn reviewer_accepts_eligible_unknown_and_blank() {
+        for picked in [
+            "claude", "anthropic", "claude_code", "codex", "agy", "antigravity",
+            "opencode", "commandcode", "cmd", "muse", "codex:minimax",
+        ] {
+            let got = normalize_reviewer_provider(Some(picked.into())).unwrap();
+            assert_eq!(got.as_deref(), Some(picked), "{picked:?} must pass through");
+        }
+        // Unknown / user-defined harness profile ids stay permissive.
+        for picked in ["my-custom-harness", "made-up:provider"] {
+            assert!(
+                normalize_reviewer_provider(Some(picked.into())).is_ok(),
+                "{picked:?} (unknown) must stay permissive"
+            );
+        }
+        assert_eq!(normalize_reviewer_provider(None).unwrap(), None);
+        assert_eq!(normalize_reviewer_provider(Some("   ".into())).unwrap(), None);
+    }
+
+    /// Issue #1816 review (inherit path): on a blank override the run
+    /// inherits the stored app-wide value, so an ineligible *stored*
+    /// value must refuse with Settings guidance instead of minting an
+    /// unwinnable run. A non-blank override wins and the stored value is
+    /// not consulted; an eligible stored value (or none) inherits
+    /// silently. Pure: the stored value is threaded in, no global prefs.
+    #[test]
+    fn preset_reviewer_gates_override_then_stored_app_wide_value() {
+        // Override wins; stored value never consulted.
+        assert_eq!(
+            resolve_preset_reviewer(Some("codex".into()), Some("cline".into())).unwrap().as_deref(),
+            Some("codex")
+        );
+        // Ineligible override refused with the harness-named reason.
+        let err = resolve_preset_reviewer(Some("cline".into()), None).unwrap_err();
+        assert!(err.contains("Cline"), "got {err:?}");
+        assert!(!err.contains("Settings"), "override refusal must not blame Settings, got {err:?}");
+        // Blank override + ineligible stored value: refuse with guidance.
+        for blank in [None, Some("   ".to_string())] {
+            let err = resolve_preset_reviewer(blank, Some("cline".into())).unwrap_err();
+            assert!(err.contains("Cline"), "got {err:?}");
+            assert!(err.contains("Settings"), "stale-value refusal must name Settings, got {err:?}");
+        }
+        // Blank override + eligible stored value: inherit (None).
+        assert_eq!(
+            resolve_preset_reviewer(Some("  ".into()), Some("codex".into())).unwrap(),
+            None
+        );
+        // Blank override + no stored value: inherit (None).
+        assert_eq!(resolve_preset_reviewer(None, None).unwrap(), None);
+    }
 }

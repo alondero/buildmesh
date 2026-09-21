@@ -373,13 +373,25 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     // The locked helper trusts the caller to have run the readiness
     // gate (#1792) — no `cli_session_id` stamp needed here.
-    // The picker filters Terminal, but the backend holds its own invariant: the
-    // spawn cascade treats any non-empty string as the preset winner, so an
-    // unchecked invoke would otherwise spawn the "reviewer" on a plain shell.
-    // Bare, padded, and composite (the harness segment decides) all reject.
+    // The picker disables ineligible harnesses, but the backend holds its
+    // own invariant: the spawn cascade treats any non-empty string as the
+    // preset winner, so an unchecked invoke would otherwise spawn the
+    // "reviewer" on a harness that can never yield a turn. Bare, padded,
+    // and composite (the harness segment decides) all reject.
     for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
         let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
         assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
+    }
+    // Issue #1816: the gate is attention compatibility, not a
+    // Terminal-only denylist — `dsh`, `freebuff`, and `cline` have
+    // neither an attention hook nor a passive turn watcher, so they are
+    // rejected with the Inspector/docs label naming the harness and the
+    // missing turn-completion signal. Rejections happen before any DB
+    // work, so the same source row is reusable across picks here.
+    for (picked, name) in [("dsh", "DeepSeek Harness"), ("freebuff", "Freebuff"), ("cline", "Cline"), ("cline:minimax", "Cline")] {
+        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
+        assert!(err.contains(name), "{picked:?} must name the harness ({name}), got {err:?}");
+        assert!(err.contains("turn-completion"), "{picked:?} must name the missing capability, got {err:?}");
     }
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.
@@ -392,6 +404,76 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
         Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
         "a blank pick collapses to the app-wide snapshot",
     );
+}
+
+/// Issue #1816 review: an authored Circuit ignores the per-run reviewer
+/// override, so validation must not reject an authored call over a value
+/// it never uses — even a stale ineligible one.
+#[test]
+fn node_review_ignores_ineligible_override_for_authored_circuit() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "authored-override-mesh", "/tmp/authored-override").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Authored", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
+    // Would be refused on the built-in preset path; the authored path
+    // ignores the value entirely, so the run mints.
+    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("cline".into()), false).unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
+    ).unwrap();
+    assert_eq!(
+        ctx.get("review.provider"),
+        Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
+        "the authored-Circuit override is ignored, not applied",
+    );
+}
+
+/// Issue #1816 review (inherit path): on a blank per-run override the run
+/// snapshots the stored app-wide Reviewer provider, so a stale ineligible
+/// value stored there (e.g. before the settings gate existed) must refuse
+/// the mint with Settings guidance instead of producing a run whose
+/// reviewer can never yield. Prefs are per-test-thread (issue #1386), so
+/// this never touches the real `preferences.json`.
+#[test]
+fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
+    let tmp = std::env::temp_dir().join(format!(
+        "buildmesh-circuit-reviewer-inherit-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    crate::preferences::init_for_tests(tmp);
+    // Store the stale value directly, bypassing the now-validating
+    // settings command — that is exactly the pre-gate state under test.
+    crate::preferences::save(crate::preferences::AppPreferences {
+        reviewer_provider: Some("cline".to_string()),
+        ..Default::default()
+    }).expect("store stale app-wide reviewer");
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "inherit-gate-mesh", "/tmp/inherit-gate").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Inherit", &mesh.path, "main", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err();
+    assert!(err.contains("Cline"), "stale value must name the harness, got {err:?}");
+    assert!(err.contains("Settings"), "stale value must point at Settings, got {err:?}");
+    assert!(
+        err.contains("turn-completion"),
+        "stale value must name the missing capability, got {err:?}"
+    );
+    // An eligible stored value still inherits silently.
+    crate::preferences::save(crate::preferences::AppPreferences {
+        reviewer_provider: Some("codex".to_string()),
+        ..Default::default()
+    }).expect("store eligible app-wide reviewer");
+    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap();
+    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
+    ).unwrap();
+    assert_eq!(ctx.get("review.provider"), Some("codex"));
+    crate::preferences::reset_for_tests();
 }
 
 // ---------------------------------------------------------------------------
