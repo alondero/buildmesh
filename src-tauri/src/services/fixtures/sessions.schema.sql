@@ -1,0 +1,35 @@
+-- Captured `sqlite3 ~/.cline/data/db/sessions.db ".schema sessions"`
+-- on Cline 3.0.x during issue #1769 / #1774 investigation. Pinned
+-- verbatim here so `services::cline_session::tests::open_test_db`
+-- cannot drift from production without a reviewer noticing the diff.
+-- See fixtures/README.md for the regeneration protocol.
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    exit_code INTEGER,
+    status TEXT NOT NULL,
+    status_lock INTEGER NOT NULL DEFAULT 0,
+    interactive INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    team_name TEXT,
+    enable_tools INTEGER NOT NULL,
+    enable_spawn INTEGER NOT NULL,
+    enable_teams INTEGER NOT NULL,
+    parent_session_id TEXT,
+    parent_agent_id TEXT,
+    agent_id TEXT,
+    conversation_id TEXT,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    prompt TEXT,
+    metadata_json TEXT,
+    transcript_path TEXT NOT NULL DEFAULT '',
+    hook_path TEXT NOT NULL,
+    messages_path TEXT,
+    updated_at TEXT NOT NULL
+);

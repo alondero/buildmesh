@@ -154,27 +154,37 @@ pub fn session_id_epoch_ms(id: &str) -> Option<i64> {
     epoch.parse::<i64>().ok()
 }
 
-/// Pick the session ID to store for a freshly spawned node. Mirrors
-/// [`crate::services::opencode_session::select_id_for_directory`] —
-/// only rows that (a) match `spawn_directory`, (b) carry a valid
-/// `<epochms>_<suffix>` id, (c) were created at or after the not-before
-/// timestamp, and (d) are tagged interactive are eligible. The
-/// `interactive = 1` filter is what excludes one-shot prompt runs (no
-/// `-i`, positional prompt — they exit immediately per issue #1769).
-/// Returns the newest match (created, then updated tiebreaker).
+/// Pick the session ID to store for a freshly spawned node.
+///
+/// Round 3 review: a Cline fresh-capture has no hook to disambiguate
+/// (issue #1770 / #1775 are still pending), so the SQL read is the
+/// only path. Two nodes spawned in the same `cwd` inside the 2 s skew
+/// window can both see the newest row and bind it — that cross-wires
+/// their `cli_session_id` so the second resume returns the first
+/// conversation. The AGY fresh path (which has a hook as the primary
+/// disambiguator) still refuses to bind when the SQLite read returns
+/// multiple viable candidates, and so does the Cline historic path
+/// (`services::session_recovery::select_recovery_identity`). The
+/// fresh path here now follows the same rule — `Some(_)` requires
+/// exactly one viable row. Multiple viable rows or zero rows both
+/// return `None`; the user can retry the spawn or the agent node
+/// stays suspended.
 pub fn select_id_for_directory<'a>(
     sessions: &'a [ListedSession],
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<&'a str> {
-    sessions
+    let viable: Vec<&ListedSession> = sessions
         .iter()
         .filter(|s| is_cline_session_id(&s.session_id))
         .filter(|s| s.interactive)
         .filter(|s| crate::env::directories_match(&s.cwd, spawn_directory))
         .filter(|s| s.created_ms >= created_not_before_ms)
-        .max_by_key(|s| s.created_ms)
-        .map(|s| s.session_id.as_str())
+        .collect();
+    match viable.len() {
+        1 => Some(viable[0].session_id.as_str()),
+        _ => None,
+    }
 }
 
 /// List interactive root sessions whose embedded epoch ms is at or
@@ -185,9 +195,10 @@ pub fn select_id_for_directory<'a>(
 /// keeps the freshness check a `split_once('_')` away.
 /// Directory matching stays in Rust so slash/case rules can apply
 /// uniformly across Windows, WSL, and macOS/Linux spawn paths. The
-/// `LIMIT 50` is a safety net for a corrupted store that mints a row
-/// per millisecond — the `session_id DESC` ordering still surfaces the
-/// newest candidate.
+/// `LIMIT 200` is a safety net for a corrupted store that mints a row
+/// per millisecond; the freshness floor (`created_ms >=
+/// created_not_before_ms`) filters older rows in Rust after the SQL
+/// returns its top-200 by rowid.
 pub fn list_recent_interactive_sessions(
     conn: &Connection,
     created_not_before_ms: i64,
@@ -216,34 +227,51 @@ pub fn list_recent_interactive_sessions(
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
         .filter(|s| s.created_ms >= created_not_before_ms)
-        .collect::<Vec<_>>();
-    Ok(rows)
+        .collect())
 }
 
 /// Bounded read for historic recovery: list interactive root sessions
 /// whose embedded epoch ms is inside the issue #1224 / issue #1769
-/// spawn window. Same predicate as the fresh poller minus the
-/// `not_before` clamp — the recovery caller owns the window and passes
-/// the bounds in.
+/// spawn window. Round 3 review: the time predicate MUST live in SQL
+/// before any result selection — the opencode sibling module (issue
+/// #1294 follow-up) hit a real bug where a global `LIMIT 50` over
+/// every project's rows hid the wanted row. Cline has the same shape:
+/// the embedded epoch lives inside `session_id`, so we convert the
+/// millisecond bounds to ISO 8601 strings (the schema stores
+/// `started_at TEXT` in ISO 8601 with `.fffZ` suffix) and compare in
+/// SQL via lexicographic ordering. ISO 8601 with consistent format
+/// sorts by absolute time. The upper bound falls back to a sentinel
+/// (`9999-12-31T23:59:59.999Z`) for the legacy `i64::MAX` open-ended
+/// window — `chrono::DateTime::from_timestamp_millis(i64::MAX)` returns
+/// `None`, so we cannot just pass the raw ms.
 pub fn list_sessions_in_window(
     conn: &Connection,
     not_before: i64,
     not_after: i64,
 ) -> Result<Vec<ListedSession>, String> {
+    let not_before_iso = ms_to_iso8601(not_before)
+        .ok_or_else(|| "not_before ms out of ISO range".to_string())?;
+    let not_after_iso = ms_to_iso8601(not_after)
+        .unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
     let mut stmt = conn
         .prepare(
             "SELECT session_id, cwd, interactive \
              FROM sessions \
              WHERE interactive = 1 \
                AND session_id NOT LIKE '%__agent_%' \
+               AND started_at >= ?1 \
+               AND started_at <= ?2 \
              ORDER BY rowid DESC \
              LIMIT 500",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([&not_before_iso, &not_after_iso], |row| {
             let interactive: i64 = row.get(2)?;
             let session_id: String = row.get(0)?;
             let cwd: String = row.get(1)?;
@@ -256,10 +284,21 @@ pub fn list_sessions_in_window(
             })
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .filter(|s| s.created_ms >= not_before && s.created_ms <= not_after)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// Convert Unix epoch milliseconds to an ISO 8601 string Cline uses
+/// for `started_at` (format `YYYY-MM-DDTHH:MM:SS.fffZ`). Lexicographic
+/// comparison of these strings orders by absolute time, which is what
+/// the SQL time predicate relies on. Returns `None` for pre-1970 or
+/// far-future values (millis outside `i64` chrono range — callers
+/// should use a sentinel string for the open-ended upper bound).
+fn ms_to_iso8601(ms: i64) -> Option<String> {
+    use chrono::{DateTime, Utc};
+    let dt: DateTime<Utc> = DateTime::<Utc>::from_timestamp_millis(ms)?;
+    Some(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
 /// Historic startup recovery entry point used by the Cline adapter.
@@ -563,9 +602,16 @@ mod tests {
     fn select_rejects_one_shot_runs() {
         // Cline without `-i` and a positional prompt is one-shot and exits;
         // its row has `interactive = 0` and must never bind a node.
+        // Round 3 review: the previous fixture used `1789757012702_one_sh`,
+        // whose suffix contains `_`, so `is_cline_session_id` already
+        // rejected it before the interactive filter ran — the test
+        // could not detect a regression that dropped the `interactive`
+        // predicate. The new fixture uses a valid Cline id suffix
+        // (`..._onesh`) so the validator passes and the interactive
+        // filter is the only thing keeping `onesh` out of the result.
         let sessions = vec![
             sess("1789757012702_inter", "/repo", 100, true),
-            sess("1789757012702_one_sh", "/repo", 101, false),
+            sess("1789757012702_onesh", "/repo", 101, false),
         ];
         assert_eq!(
             select_id_for_directory(&sessions, "/repo", 50),
@@ -584,14 +630,46 @@ mod tests {
     }
 
     #[test]
-    fn select_prefers_newest_in_time_window_for_same_directory() {
+    fn select_refuses_to_bind_two_viable_fresh_candidates() {
+        // Round 3 review: two fresh spawns in the same cwd inside the
+        // 2 s skew window both see the same SQLite row. The AGY fresh
+        // path (hook as primary) and the Cline historic path
+        // (`select_recovery_identity`) both refuse to bind under
+        // ambiguity; the fresh path now matches that policy.
         let sessions = vec![
             sess("1789757012702_old00", "/repo", 100, true),
             sess("1789757012702_newer", "/repo", 200, true),
             sess("1789757012702_newst", "/repo", 300, true),
         ];
-        let id = select_id_for_directory(&sessions, "/repo", 50);
-        assert_eq!(id, Some("1789757012702_newst"));
+        // Three viable rows → refuse to guess.
+        assert!(
+            select_id_for_directory(&sessions, "/repo", 50).is_none(),
+            "multiple viable fresh candidates must not bind a node"
+        );
+    }
+
+    #[test]
+    fn select_binds_single_viable_fresh_candidate() {
+        // Suffix must be 5 base36 chars to pass `is_cline_session_id`.
+        let sessions = vec![sess("1789757012702_solo0", "/repo", 100, true)];
+        assert_eq!(
+            select_id_for_directory(&sessions, "/repo", 50),
+            Some("1789757012702_solo0")
+        );
+    }
+
+    #[test]
+    fn select_refuses_when_two_viable_share_one_directory() {
+        // Two rows anchored to the same `cwd` — picking the newest
+        // would cross-wire the two spawns' `cli_session_id`.
+        let sessions = vec![
+            sess("1789757012702_aaaaa", "/repo", 100, true),
+            sess("1789757012702_bbbbb", "/repo", 200, true),
+        ];
+        assert!(
+            select_id_for_directory(&sessions, "/repo", 50).is_none(),
+            "two same-directory viable candidates must not bind"
+        );
     }
 
     #[test]
@@ -645,13 +723,19 @@ mod tests {
         interactive: bool,
         _started_at_ms: i64,
     ) {
-        // ISO 8601 string for the wall-clock columns. The freshness
-        // gate ignores them; only `session_id` is read for the
-        // embedded epoch ms.
+        // ISO 8601 string derived from the embedded epoch ms so the
+        // row's wall-clock and the session_id epoch agree. The
+        // freshness gate operates on the embedded epoch, and the SQL
+        // time predicate operates on this column — they must agree
+        // for the historic recovery window filter to behave like the
+        // production schema.
+        let started_at = session_id_epoch_ms(id)
+            .and_then(ms_to_iso8601)
+            .unwrap_or_else(|| "2026-09-18T18:00:00.000Z".to_string());
         conn.execute(
             "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
-             VALUES (?1, 'cli', 1, '2026-09-18T18:00:00.000Z', 'idle', ?2, ?3, '2026-09-18T18:00:00.000Z')",
-            params![id, i64::from(interactive), cwd],
+             VALUES (?1, 'cli', 1, ?4, 'idle', ?2, ?3, ?4)",
+            params![id, i64::from(interactive), cwd, started_at],
         )
         .unwrap();
     }
@@ -755,10 +839,18 @@ mod tests {
         )
         .unwrap();
         for (id, cwd, _created_ms, interactive) in rows {
+            // Set started_at from the embedded epoch ms in session_id,
+            // so the row's wall-clock and the session_id epoch agree.
+            // The fourth tuple element (`_created_ms`) is no longer
+            // needed but kept for backward compatibility with the
+            // existing tests.
+            let started_at = session_id_epoch_ms(id)
+                .and_then(ms_to_iso8601)
+                .unwrap_or_else(|| "2026-09-18T18:00:00.000Z".to_string());
             conn.execute(
                 "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
-                 VALUES (?1, 'cli', 1, '2026-09-18T18:00:00.000Z', 'idle', ?2, ?3, '2026-09-18T18:00:00.000Z')",
-                params![id, i64::from(*interactive), cwd],
+                 VALUES (?1, 'cli', 1, ?4, 'idle', ?2, ?3, ?4)",
+                params![id, i64::from(*interactive), cwd, started_at],
             )
             .unwrap();
         }
@@ -822,6 +914,60 @@ mod tests {
         )];
         let db_path = write_test_db(temp.path(), &rows);
         assert!(find_historic_id_for_db_path(&db_path, "/elsewhere", 1_789_757_012_500, true).is_none());
+    }
+
+    /// Round 3 review: the opencode sibling hit a real bug where a
+    /// global `LIMIT 50` over every project's rows hid the wanted
+    /// row (issue #1294 follow-up). Mirror the regression test for
+    /// Cline — fill the store with 600 older rows from a different
+    /// directory, then assert that the wanted row is still
+    /// recoverable because the SQL time predicate filters before
+    /// the LIMIT applies.
+    #[test]
+    fn historic_recovers_wanted_row_even_when_global_limit_is_smaller() {
+        let temp = crate::env::test_helpers::TestDir::new("cline_session_overflow");
+        let db_path = temp.path().join("sessions.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL,
+                interactive INTEGER NOT NULL,
+                cwd TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             )",
+        )
+        .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
+                 VALUES (?1, 'cli', 1, ?2, 'idle', 1, '/other', ?2)",
+            )
+            .unwrap();
+        for i in 0..600 {
+            let id = format!("session_1789756000000_o{i:04}_aaa");
+            let started_at = ms_to_iso8601(1_789_756_000_000 + i).unwrap();
+            stmt.execute(rusqlite::params![id, started_at]).unwrap();
+        }
+        drop(stmt);
+        conn.execute(
+            "INSERT INTO sessions (session_id, source, pid, started_at, status, interactive, cwd, updated_at) \
+             VALUES ('session_1789757012750_wantd', 'cli', 1, '2026-09-18T18:43:32.750Z', 'idle', 1, '/repo', '2026-09-18T18:43:32.750Z')",
+            [],
+        )
+        .unwrap();
+        let id = find_historic_id_for_db_path(
+            &db_path,
+            "/repo",
+            1_789_757_012_800,
+            true,
+        )
+        .expect("historic recovery must find the wanted row even when 600 older rows from a different cwd fill the table");
+        assert_eq!(id, "session_1789757012750_wantd");
     }
 
     #[test]

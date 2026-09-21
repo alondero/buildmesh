@@ -2,20 +2,20 @@
 //!
 //! Three sub-modules, one concern each (issue #248):
 //!
-//! - [`environment`] â€” pure detection (Windows vs WSL, distro, login shell,
+//! - [`environment`] � pure detection (Windows vs WSL, distro, login shell,
 //!   agent CLI home dirs). No path conversion happens here.
-//! - [`host_path`] â€” path conversion (`to_host_path`, `to_spawn_path`,
+//! - [`host_path`] � path conversion (`to_host_path`, `to_spawn_path`,
 //!   `env_for_path`) and the [`host_path::ResolvedPath`] machinery. This is
 //!   the **only** module in the Buildmesh tree that builds `\\wsl$\` UNC
 //!   strings or `/mnt/` rewrite strings (CLAUDE.md hard rule, structurally
 //!   enforced by module boundaries).
-//! - [`mesh_row`] â€” mesh-row DTO read helper.
+//! - [`mesh_row`] � mesh-row DTO read helper.
 //!
 //! Every public item in the sub-modules is re-exported here so the existing
 //! `crate::env::{to_host_path, node_working_path, ResolvedPath, Environment,
 //! claude_dir, codex_dir, wsl_login_shell, current_env, active_node_paths,
 //! active_node_branches, mesh_row, test_helpers::*}` import shape stays
-//! compile-stable â€” the split is internal, the API is unchanged.
+//! compile-stable � the split is internal, the API is unchanged.
 
 mod environment;
 mod host_path;
@@ -30,7 +30,7 @@ pub use mesh_row::mesh_row;
 /// Shared test fixtures used by both `mod tests` (worktree / base_ref
 /// regression suites) and `fetch_origin_tests` (issue #213). Lifted
 /// out of `mod tests` so the sibling fetch_origin module can reach
-/// them â€” `mod tests` items are private to that scope. Kept inside
+/// them � `mod tests` items are private to that scope. Kept inside
 /// env/mod.rs rather than a standalone file so the helpers stay
 /// co-located with the production code they exercise.
 #[cfg(test)]
@@ -151,7 +151,7 @@ mod tests {
     // be in scope from env/mod.rs's `use crate::models::{...}` import; the
     // split moved that import into `host_path.rs`, so we re-import here
     // for the test scope. (A `pub use` from host_path would leak the data
-    // type into the `crate::env` public surface â€” not desired.)
+    // type into the `crate::env` public surface � not desired.)
     use crate::models::AgentNode;
 
     #[test]
@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// Issue #1283: the AGY brain directory lives under the same home
-    /// directory every other CLI helper consults â€” `~/.gemini/antigravity-cli/
+    /// directory every other CLI helper consults � `~/.gemini/antigravity-cli/
     /// brain/`. Pin the path shape so the transcript reader's locator can
     /// rely on `env::agy_brain_dir()` returning exactly
     /// `<home>/.gemini/antigravity-cli/brain` (or `GEMINI_HOME` /
@@ -226,7 +226,7 @@ mod tests {
             Environment::Windows => ".gemini\\antigravity-cli\\brain",
         };
         // Path-builder/separator normalization makes a literal contains
-        // check the right pin â€” Windows separators and posix separators
+        // check the right pin � Windows separators and posix separators
         // both match via `ends_with` after the path was constructed.
         let path_str = brain.to_string_lossy().replace('\\', "/");
         assert!(
@@ -240,7 +240,7 @@ mod tests {
     /// is unset, `grok_dir()` derives from the current environment's home
     /// (`$HOME` on WSL; `$USERPROFILE`/`$HOME`/`$USERNAME` on Windows). Note:
     /// `GROK_HOME` honours the override here too (covered by the cursor /
-    /// codex tests in spirit) â€” this test pins the *base* derivation so a
+    /// codex tests in spirit) � this test pins the *base* derivation so a
     /// future refactor that breaks `.grok` suffixing catches it.
     #[test]
     fn grok_dir_uses_the_current_environment_home() {
@@ -262,7 +262,7 @@ mod tests {
     }
 
     /// Issue #1774: the Cline CLI home directory must match the current
-    /// environment's home â€” `~/.cline` everywhere, with the same
+    /// environment's home � `~/.cline` everywhere, with the same
     /// `$HOME`/`$USERPROFILE` fallback rules the other CLI helpers
     /// already pin. The capture poller reads its SQLite store under
     /// `<cline home>/data/db/sessions.db`, so the path the helper emits
@@ -289,7 +289,7 @@ mod tests {
     /// Issue #1774: `cline_db_path_for_env` must always append the
     /// authoritative `data/db/sessions.db` suffix onto whatever home
     /// the spawn-aware resolver picked (override or `~/.cline`). The
-    /// SQLite store is the canonical capture source â€” `~/.cline/data/
+    /// SQLite store is the canonical capture source � `~/.cline/data/
     /// sessions/<id>/` is the fallback. If the suffix drifts, the
     /// capture poller silently reads the wrong file.
     #[test]
@@ -312,7 +312,7 @@ mod tests {
     /// `cline --help`); the DB sits under it directly. The override
     /// must NOT double up the `data/` prefix or the SQLite open lands
     /// on a non-existent path. Round 2 review: drive the resolver via
-    /// the injected closure rather than mutating `std::env` — the
+    /// the injected closure rather than mutating `std::env` � the
     /// latter races with concurrent cargo test threads.
     #[test]
     fn cline_db_path_honours_cline_data_dir_override() {
@@ -344,7 +344,7 @@ mod tests {
     /// override resolver (which trims and rejects empty), not the
     /// raw env-var presence. A regression that swapped the suffix
     /// decision back to `env::var_os("CLINE_DATA_DIR").is_some()`
-    /// would re-introduce the empty-string bug — pin the predicate
+    /// would re-introduce the empty-string bug � pin the predicate
     /// here with the same closure-injection pattern.
     #[test]
     fn cline_db_path_treats_empty_cline_data_dir_as_unset() {
@@ -406,7 +406,7 @@ mod tests {
     }
 
     /// Round 1 review: a Windows Buildmesh driving a WSL Cline must
-    /// convert the guest POSIX path to a `\\wsl$\…` UNC path before
+    /// convert the guest POSIX path to a `\\wsl$\�` UNC path before
     /// opening the SQLite store. `cline_db_path_for_host` is the
     /// single seam that does this; passing the raw POSIX path to a
     /// host `Connection::open` fails silently. On non-WSL env types
@@ -422,17 +422,22 @@ mod tests {
             .expect("windows host-path must resolve");
         assert_eq!(raw_windows, host_windows, "Windows paths must be no-ops");
         // On WSL the host-path helper must differ from the raw guest
-        // path — every Windows-side reader needs the UNC translation.
+        // path � every Windows-side reader needs the UNC translation.
         // The test only asserts the difference, not the exact UNC
         // string (which depends on the active distro).
-        let guest = cline_db_path_for_env(EnvType::Wsl, "/home/alond/repo");
-        let host = cline_db_path_for_host(EnvType::Wsl, "/home/alond/repo");
-        if let (Some(guest), Some(host)) = (guest, host) {
-            assert_ne!(
-                guest, host,
-                "WSL host-path must differ from raw guest path (UNC translation)"
-            );
-        }
+        let guest = cline_db_path_for_env(EnvType::Wsl, "/home/alond/repo")
+            .expect("WSL guest home must resolve");
+        let host = cline_db_path_for_host(EnvType::Wsl, "/home/alond/repo")
+            .expect("WSL host-path must resolve");
+        let host_str = host.to_string_lossy();
+        assert_ne!(
+            guest, host,
+            "WSL host-path must differ from raw guest path (UNC translation)"
+        );
+        assert!(
+            host_str.starts_with("\\\\wsl") || host_str.starts_with("//wsl"),
+            "WSL host-path must start with the UNC prefix; got: {host_str}"
+        );
     }
 
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
@@ -519,7 +524,7 @@ mod tests {
         );
     }
 
-    /// A Root Node resolves to the Mesh root â€” never a worktree subdir.
+    /// A Root Node resolves to the Mesh root � never a worktree subdir.
     #[test]
     fn node_working_path_for_root_node_resolves_mesh_root() {
         let resolved = node_working_path(&node(false, Some("ignored")));
@@ -559,7 +564,7 @@ mod tests {
     }
 
     /// When present, the worktree path agrees with the working path (it's the
-    /// same dir â€” `node_worktree_path` is just the `Option` view of it).
+    /// same dir � `node_worktree_path` is just the `Option` view of it).
     #[test]
     fn node_worktree_path_agrees_with_working_path() {
         let n = node(true, Some("gentle-fox"));
@@ -572,7 +577,7 @@ mod tests {
     // ----- active_node_paths (#607 / #621) -----
     //
     // `n.path` alone is the mesh root. A Worktree Node's work lives at
-    // `<mesh>/.claude/worktrees/<name>` â€” that subdir must also enter the
+    // `<mesh>/.claude/worktrees/<name>` � that subdir must also enter the
     // active set, or `path_is_active` matches every linked worktree against
     // the mesh root alone and flags them all `is_active: false` in both
     // the Worktree Manager (#607) and Mesh Health (#621). Delegating to
@@ -598,7 +603,7 @@ mod tests {
         );
     }
 
-    /// A Root Node has no worktree dir to add â€” only its mesh path participates.
+    /// A Root Node has no worktree dir to add � only its mesh path participates.
     #[test]
     fn active_node_paths_root_node_contributes_only_mesh_path() {
         let paths = active_node_paths(&[node(false, None)]);
@@ -614,7 +619,7 @@ mod tests {
 
     /// A whitespace-only `worktree_name` collapses to "no worktree" per the
     /// canonical rule in `node_worktree_path`, so it contributes only the
-    /// mesh path â€” same as a Root Node.
+    /// mesh path � same as a Root Node.
     #[test]
     fn active_node_paths_blank_worktree_name_contributes_only_mesh_path() {
         let paths = active_node_paths(&[node(true, Some("   "))]);
@@ -634,7 +639,7 @@ mod tests {
     // `to_spawn_path`) and the string the GIT_CHANGED payload carries to the
     // frontend for `getNodeGitPath()` to subscribe on. These assertions pin
     // that `env::node_working_path` is now the SOLE Rust definition of the
-    // worktree rule â€” `file_watcher::node_internal_path` was deleted and
+    // worktree rule � `file_watcher::node_internal_path` was deleted and
     // consumes `raw_path` instead. If any case here drifts, the GIT_CHANGED
     // match contract breaks and changed-files go stale (issue #387).
 
@@ -659,7 +664,7 @@ mod tests {
         );
     }
 
-    /// No worktree name â†’ Mesh root.
+    /// No worktree name → Mesh root.
     #[test]
     fn raw_path_without_worktree_name_is_mesh_root() {
         assert_eq!(
@@ -678,7 +683,7 @@ mod tests {
         );
     }
 
-    /// Whitespace-only worktree name trims to empty â†’ Mesh root.
+    /// Whitespace-only worktree name trims to empty → Mesh root.
     #[test]
     fn raw_path_for_whitespace_only_worktree_name_is_mesh_root() {
         assert_eq!(
@@ -687,7 +692,7 @@ mod tests {
         );
     }
 
-    /// `raw_path` is the input to `to_host_path` / `to_spawn_path` â€” the
+    /// `raw_path` is the input to `to_host_path` / `to_spawn_path` � the
     /// "pre-transform" form. The raw/host/spawn triple is internally
     /// consistent in that `raw_path` does NOT go through `to_host_path`; a
     /// regression that routed `raw_path` through that conversion would
@@ -744,7 +749,7 @@ mod tests {
     }
 
     /// Service accounts whose login shell is `/usr/sbin/nologin` must
-    /// collapse to `None` â€” spawning that would exit immediately.
+    /// collapse to `None` � spawning that would exit immediately.
     #[test]
     fn parse_login_shell_rejects_nologin() {
         assert_eq!(
@@ -772,7 +777,7 @@ mod tests {
         );
     }
 
-    /// Lines with fewer than 7 fields are malformed â€” return `None` rather
+    /// Lines with fewer than 7 fields are malformed � return `None` rather
     /// than panic on the missing `nth(6)`.
     #[test]
     fn parse_login_shell_rejects_too_few_fields() {
@@ -782,7 +787,7 @@ mod tests {
     }
 
     /// The cached lookup must be safe to call and must return an `Option<&'static str>`
-    /// (not panic) â€” on a host where WSL is unavailable it is `None`, on a
+    /// (not panic) � on a host where WSL is unavailable it is `None`, on a
     /// Windows+WSL host it is `Some("/usr/bin/zsh")`. We only assert the type
     /// and that it doesn't panic; behavioural pinning lives in the
     /// `parse_login_shell_from_passwd` tests above.

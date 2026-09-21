@@ -1,4 +1,4 @@
-//! Application service layer â€” business logic between commands and DB/IO
+//! Application service layer — business logic between commands and DB/IO
 
 pub mod agent_node;
 pub mod agent_node_discovery;
@@ -29,7 +29,7 @@ pub mod transcript_paths;
 pub mod transcript_reader;
 pub mod usage;
 pub mod warm_pool;
-/// `advapi32!CredReadW` / `CredWriteW` / `CredDeleteW` FFI surface â€” only
+/// `advapi32!CredReadW` / `CredWriteW` / `CredDeleteW` FFI surface — only
 /// compiled on Windows; non-Windows callers see "not available" via the
 /// `NoCredential` return path inside `services::usage` and
 /// `services::opencode_oauth` instead.

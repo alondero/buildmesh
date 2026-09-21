@@ -75,12 +75,12 @@ section.
 
 ## Spawn recipe
 
-- **Fresh:** `cline -i` â€” the TUI opens with no session id.
-- **Resume:** `cline -i --id <id>` â€” the base `-i` survives composition.
+- **Fresh:** `cline -i` — the TUI opens with no session id.
+- **Resume:** `cline -i --id <id>` — the base `-i` survives composition.
 - **With prefill:** `cline -i "<prompt>"`. Prefill normalisation is
   platform-aware: Windows flattens CR/LF/CRLF to single spaces (the
   `cmd.exe /c` end-of-command trap); macOS / Linux preserve the line
-  structure and only normalise CRLFâ†’LF (direct spawn, argv elements
+  structure and only normalise CRLF→LF (direct spawn, argv elements
   carry newlines safely). The platform-agnostic flattening that lived
   in the adapter for the first draft of this slice destroyed multi-line
   prompts on Unix; it now lives in
@@ -125,7 +125,7 @@ Cline runs as a **Native Provider**:
 > **Important consumer-aware branch (issue #1773 review).** The
 > Anthropic surface emitter that targets **Claude Code** deliberately
 > emits `ANTHROPIC_AUTH_TOKEN=<key>` and blanks `ANTHROPIC_API_KEY=""` for
-> custom endpoints â€” that's the OpenRouter trap that forces Claude Code
+> custom endpoints — that's the OpenRouter trap that forces Claude Code
 > through the third-party token instead of a shell-set Anthropic key.
 > Cline does **not** read `ANTHROPIC_AUTH_TOKEN`. If we naively fed
 > that emitter to a Cline spawn, the Cline process would see
@@ -133,15 +133,15 @@ Cline runs as a **Native Provider**:
 > therefore branches on the consumer harness: a `cline:<account>` spawn
 > gets a Cline-shaped emitter (`ANTHROPIC_API_KEY=<key>` non-empty,
 > `ANTHROPIC_BASE_URL=<base>` when set, `ANTHROPIC_MODEL=<primary>` when
-> configured) â€” no `ANTHROPIC_AUTH_TOKEN`, no key-blanking. The
+> configured) — no `ANTHROPIC_AUTH_TOKEN`, no key-blanking. The
 > OpenAI surface emitter is already the right shape for Cline so it
 > is reused as-is.
 >
 > Regression-pinned by
 > `preferences::compatibility::tests::cline_anthropic_default_endpoint_sets_anthropic_api_key`,
-> `â€¦_custom_endpoint_sets_anthropic_api_key_not_blank`, `â€¦_openai_custom_endpoint_sets_openai_api_key`,
+> `→_custom_endpoint_sets_anthropic_api_key_not_blank`, `→_openai_custom_endpoint_sets_openai_api_key`,
 > and the Claude-Code contract pinned by
-> `â€¦_claude_anthropic_custom_endpoint_still_uses_auth_token_trap`.
+> `→_claude_anthropic_custom_endpoint_still_uses_auth_token_trap`.
 
 ## State and isolation
 
@@ -168,7 +168,7 @@ splice `--id <id>` into the spawn argv.
   [`services::cline_session::start_capture_poller`](../../src-tauri/src/services/cline_session.rs)
   from
   [`AgentProvider::after_fresh_spawn`](../../src-tauri/src/agent/provider/mod.rs).
-  The poller retries at 400 ms / 800 ms / 1.6 s / 2.5 s / 4 s (â‰ˆ9.3 s
+  The poller retries at 400 ms / 800 ms / 1.6 s / 2.5 s / 4 s (≈9.3 s
   total budget) until a row whose `session_id`'s embedded epoch ms is
   at or after `spawn - 2 s` appears in the SQLite store for the spawn
   `cwd` (round 1 review: Cline's `sessions.started_at` is an ISO 8601
@@ -178,13 +178,13 @@ splice `--id <id>` into the spawn argv.
   the platform-aware `env::directories_match` rules, (b) carries a valid
   Cline root id (`<epochms>_<5 base36>` legacy or
   `session_<epochms>_<6 base36>` current, subagent ids excluded), and
-  (c) is tagged `interactive = 1` (one-shot prompt runs are excluded â€”
+  (c) is tagged `interactive = 1` (one-shot prompt runs are excluded —
   they exit immediately per issue #1769).
 - The id is persisted via `db::set_cli_session_id_if_missing`, so a
   later, more authoritative capture (the on-disk `sessions/<id>/`
   fallback, when added) cannot clobber it.
 - The poller cancels if the node leaves the process registry (killed /
-  crashed before the TUI flushed) â€” no zombie writes for a node the
+  crashed before the TUI flushed) — no zombie writes for a node the
   user has already abandoned.
 
 ### Suspended-node recovery (startup sweep)
@@ -193,10 +193,10 @@ The startup resume path (`services::session_recovery`) calls
 `AgentProvider::recover_suspended_session_id`, which delegates to
 `services::cline_session::find_historic_id_for_directory`. The helper
 reads the same SQLite store without the spawn-anchor `not_before` floor
-and applies `services::session_recovery::select_recovery_identity` â€”
+and applies `services::session_recovery::select_recovery_identity` —
 the same one-candidate-in-window gate every other harness uses to avoid
 binding the wrong conversation when a user reopens the same directory
-twice. Two viable interactive rows in the spawn window â†’ recovery
+twice. Two viable interactive rows in the spawn window → recovery
 returns `None`, the node stays suspended, and the sweep retries on the
 next startup.
 
@@ -206,14 +206,16 @@ next startup.
 environment in this order, mirroring `--help` (the issue #1769 source
 of truth):
 
-1. `CLINE_DATA_DIR` env var (if set and non-empty) â€” points at a
-   different `data/db/sessions.db`.
+1. `CLINE_DATA_DIR` env var (if set and non-empty) — IS the data
+   directory itself (per `cline --help`: `--data-dir` default is
+   `~/.cline/data`), so the DB sits at `$CLINE_DATA_DIR/db/sessions.db`
+   rather than `<home>/data/db/sessions.db`.
 2. Otherwise the spawn environment's `~/.cline`, with the same WSL
    guest-home probe every other harness uses
    (`env::wsl_home()`).
 
 A Windows-side Buildmesh driving a WSL Cline still reads the
-guest-side store via `cline_dir_for_env(EnvType::Wsl, â€¦)`; the same
+guest-side store via `cline_db_path_for_host(EnvType::Wsl, →)`; the same
 shape the Codex and AGY adapters use for cross-env capture.
 
 ### Limitations
@@ -222,7 +224,7 @@ shape the Codex and AGY adapters use for cross-env capture.
   The on-disk `~/.cline/data/sessions/<id>/` tree is a documented
   fallback for future work; the capture poller does not consult it.
 - `--data-dir <path>` is honoured by the resolver, but Buildmesh never
-  sets it â€” concurrent Buildmesh-spawned Cline processes share one
+  sets it — concurrent Buildmesh-spawned Cline processes share one
   store, and the row matchers use `cwd` to disambiguate. The
   `interactive = 1` filter excludes one-shot prompt runs that would
   otherwise pollute that shared view.
@@ -232,7 +234,7 @@ shape the Codex and AGY adapters use for cross-env capture.
 - **Windows Application Control / antivirus blocks `cline.exe`.** Cline's own
   diagnostic asks you to run the binary path directly and check
   `Get-AuthenticodeSignature`. Buildmesh does **not** auto-unblock a blocked
-  binary â€” resolve the block with your organisation's tooling, then restart
+  binary — resolve the block with your organisation's tooling, then restart
   Buildmesh so detection refreshes.
 - **npm shim vs direct binary.** When the npm prefix (`%APPDATA%\npm`) is
   on `PATH`, Windows spawns through `cmd.exe /c cline`, which resolves
@@ -242,9 +244,9 @@ shape the Codex and AGY adapters use for cross-env capture.
   orchestrator hands the resolved absolute path to `cmd.exe /c` so the
   same `cmd.exe`-wrapped spawn shape is preserved. The CA-cert
   harvesting the npm shim does (`~/.cline/cli-node-extra-ca-certs.pem`
-  â†’ `NODE_EXTRA_CA_CERTS`) only fires on the npm-shim path; if you
+  → `NODE_EXTRA_CA_CERTS`) only fires on the npm-shim path; if you
   use the resolved-direct path you opt out of that wrapper. (Both
-  architectures â€” `x64` and `arm64` â€” are probed because `@cline/cli`
+  architectures — `x64` and `arm64` — are probed because `@cline/cli`
   ships separate platform-specific packages.)
 - **`CLINE_BIN_PATH`.** Set this environment variable to an absolute path to
   have detection prefer a specific Cline executable. The resolver walks
@@ -261,7 +263,7 @@ shape the Codex and AGY adapters use for cross-env capture.
   at startup.
 - **`cli_session_id` stays `NULL` after a fresh spawn.** The poller
   retries for ~9.3 s before giving up. The two most common causes:
-  - The Cline TUI was started without `-i` (a one-shot prompt run) â€”
+  - The Cline TUI was started without `-i` (a one-shot prompt run) —
     the SQLite row carries `interactive = 0` and is filtered out by
     design. Switch the Spawn Menu entry to **Cline (interactive)**.
   - The Cline process was killed before it flushed the `sessions`

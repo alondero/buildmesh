@@ -1,11 +1,11 @@
-//! Cline CLI adapter â€” the Cline terminal coding agent (`cline`, Cline 3.0.x).
+//! Cline CLI adapter — the Cline terminal coding agent (`cline`, Cline 3.0.x).
 //!
 //! Cline is a **Native Provider**: it owns its own authentication (`cline auth`
 //! writes `~/.cline/data/settings/providers.json`), so Buildmesh manages no
 //! Cline credentials and never writes Cline's config. The only Buildmesh-owned
 //! seam is the spawn-time env-var injection
 //! ([`crate::preferences::resolve_provider_env`]), which layers the user's
-//! Buildmesh Model Provider credentials onto the child process â€” see
+//! Buildmesh Model Provider credentials onto the child process — see
 //! `preferences::compatibility::resolve_pairing`'s surface-level fallback and
 //! `docs/learning/cline-harness-capabilities.md`.
 //!
@@ -19,32 +19,32 @@
 //!   (e.g. `1789757012702_7of3e`); there is no mint flag, so
 //!   [`AgentProvider::session_assign_args`] stays empty and live capture is a
 //!   follow-up (issue #1774).
-//! - **Model / effort**: `-m`/`--model <id>` (free-form and provider-scoped â€”
+//! - **Model / effort**: `-m`/`--model <id>` (free-form and provider-scoped —
 //!   never validated against a static list) and `--thinking
 //!   none|low|medium|high|xhigh` (bare `--thinking` means `medium`).
 //! - **Spawn**: on Windows the npm install is a `cline.cmd` shim, so the recipe
-//!   wraps with `WindowsShell::Cmd` â†’ `cmd.exe /c cline â€¦`; `CreateProcess`
+//!   wraps with `WindowsShell::Cmd` → `cmd.exe /c cline →; `CreateProcess`
 //!   cannot execute a `.cmd` directly. macOS/Linux spawn the real executable
 //!   directly (`WindowsShell::Direct`).
 //!
 //! **Never passed** ([`CLINE_NEVER_PASS`]): Cline's own orchestration surfaces
 //! duplicate Buildmesh's, or are inert/unwanted:
 //!
-//! - `--worktree`, `--kanban`, `-z`/`--zen`, `--team-name` â€” Cline's own
+//! - `--worktree`, `--kanban`, `-z`/`--zen`, `--team-name` — Cline's own
 //!   worktree / background-hub / board orchestration.
-//! - `--yolo` â€” named in some Cline docs but absent from 3.0.62's `--help`;
+//! - `--yolo` — named in some Cline docs but absent from 3.0.62's `--help`;
 //!   never depend on it.
-//! - `--hooks-dir` / `CLINE_HOOKS_DIR` â€” documented but inert in 3.0.62.
-//! - `--data-dir` â€” auto-enables Cline's sandbox mode, rejected as the default
+//! - `--hooks-dir` / `CLINE_HOOKS_DIR` — documented but inert in 3.0.62.
+//! - `--data-dir` — auto-enables Cline's sandbox mode, rejected as the default
 //!   by the state-isolation decision (#1779). `CLINE_DATA_DIR` stays available
 //!   as a per-Mesh escape hatch outside the recipe.
 //!
 //! **State**: a single shared `~/.cline`, so the capture/resume invariant
 //! collapses to "same `--cwd`" (the `--data-dir` half is deliberately absent).
-//! WSL is not a supported or tested target in this slice â€” the guest-side
+//! WSL is not a supported or tested target in this slice — the guest-side
 //! cross-runtime probes skip Cline (`detection::WSL_EXCLUDED`).
 //!
-//! **Attention / transcript**: honest-empty in this slice â€” `#1775` provisions
+//! **Attention / transcript**: honest-empty in this slice — `#1775` provisions
 //! the attention hook and `#1776` the transcript reader, so the descriptor
 //! reports [`AttentionCapability::None`](crate::agent::capabilities::AttentionCapability::None),
 //! `supports_passive_turn_watcher: false` and `produces_readable_transcript:
@@ -59,7 +59,7 @@ use crate::models::EnvType;
 pub struct ClineAdapter;
 pub static CLINE: ClineAdapter = ClineAdapter;
 
-/// Cline's own orchestration / inert flags. Never emitted on any platform â€”
+/// Cline's own orchestration / inert flags. Never emitted on any platform —
 /// regression-pinned by `spawn_recipe_never_carries_cline_orchestration_flags`.
 pub const CLINE_NEVER_PASS: &[&str] = &[
     "--worktree",
@@ -85,16 +85,16 @@ fn shell_for(platform: Platform) -> WindowsShell {
 /// Off-`PATH` install candidates for Cline, in the documented resolver order:
 ///
 /// 1. `CLINE_BIN_PATH` when set (wins unconditionally).
-/// 2. `%APPDATA%\npm\cline.cmd` â€” the npm shim `cmd.exe` resolves when the
+/// 2. `%APPDATA%\npm\cline.cmd` — the npm shim `cmd.exe` resolves when the
 ///    npm prefix is on `PATH`.
 /// 3. `%APPDATA%\npm\node_modules\@cline\cli-windows-{x64,arm64}\bin\cline.exe`
-///    â€” the platform binary spawned directly (avoids `cmd.exe` and Node, at
+///    — the platform binary spawned directly (avoids `cmd.exe` and Node, at
 ///    the cost of the wrapper's CA-cert harvesting:
-///    `~/.cline/cli-node-extra-ca-certs.pem` â†’ `NODE_EXTRA_CA_CERTS`). Both
+///    `~/.cline/cli-node-extra-ca-certs.pem` → `NODE_EXTRA_CA_CERTS`). Both
 ///    architectures are probed because `@cline/cli` ships separate
 ///    platform-specific binaries and the npm prefix doesn't symlink them.
 ///
-/// Pure â€” the caller supplies `appdata` â€” so the order is unit-testable
+/// Pure — the caller supplies `appdata` — so the order is unit-testable
 /// without touching the real filesystem. `detection::detect_installed_profiles`
 /// probes these in order before falling back to the generic `PATH` sweep.
 pub fn install_candidates(env_bin_path: Option<&str>, appdata: Option<&Path>) -> Vec<PathBuf> {
@@ -105,7 +105,7 @@ pub fn install_candidates(env_bin_path: Option<&str>, appdata: Option<&Path>) ->
     if let Some(appdata) = appdata {
         let npm = appdata.join("npm");
         candidates.push(npm.join("cline.cmd"));
-        // Both architectures â€” `@cline/cli` ships separate platform packages
+        // Both architectures — `@cline/cli` ships separate platform packages
         // and npm installs the one matching the host CPU. The walk can't
         // pre-know which is on disk, so it probes both in deterministic order
         // (x64 first to match the documented CLI naming) and lets the
@@ -123,9 +123,9 @@ pub fn install_candidates(env_bin_path: Option<&str>, appdata: Option<&Path>) ->
     candidates
 }
 
-/// The first [`install_candidates`] entry that exists â€” `CLINE_BIN_PATH` wins
+/// The first [`install_candidates`] entry that exists — `CLINE_BIN_PATH` wins
 /// when set. **The resolved absolute path is what `spawn_environment::wrap`
-/// receives as `executable_override`** (issue #1773 review â€” previously the
+/// receives as `executable_override`** (issue #1773 review — previously the
 /// path was discarded and `spawn_recipe.binary = "cline"` was always used,
 /// which fails with `'cline' is not recognized` for off-PATH installs).
 pub fn resolve_install(
@@ -221,7 +221,7 @@ impl AgentProvider for ClineAdapter {
     /// `<epochms>_<base36>` id, so the PTY labeled-UUID regex in
     /// `session_capture` can never match. Start the SQLite poller
     /// (`services::cline_session::start_capture_poller`) so the id lands
-    /// in `cli_session_id` within ~1-2s of spawn â€” the same shape AGY
+    /// in `cli_session_id` within ~1-2s of spawn — the same shape AGY
     /// and OpenCode use for their self-assigned ids.
     ///
     /// `spawn_path` is the spawn-time directory of the node (Root Node:
@@ -244,8 +244,8 @@ impl AgentProvider for ClineAdapter {
 
     /// Issue #1774: read Cline's `<home>/data/db/sessions.db` to find
     /// an interactive session row whose `cwd` matches the suspended
-    /// node and whose `time_created` sits inside the recovery window.
-    /// Returns the candidate id only â€” the startup service decides
+    /// node and whose embedded epoch ms is inside the recovery window.
+    /// Returns the candidate id only — the startup service decides
     /// whether to persist it (via `db::recover_suspended_cli_session_id`)
     /// based on the durable process generation.
     fn recover_suspended_session_id(
@@ -263,11 +263,11 @@ impl AgentProvider for ClineAdapter {
         )
     }
 
-    /// `cline -i "<prefill>"` â€” the positional prompt seeds the TUI's first
+    /// `cline -i "<prefill>"` — the positional prompt seeds the TUI's first
     /// turn. **Returns just the prefill text**; the base `-i` is already in
     /// `spawn_recipe.base_args` and `default_prepare` extends `base_args`
     /// with this list. Emitting `-i` here too would compose to
-    /// `cline -i -i "<text>"` â€” a flag the Cline CLI accepts (last write
+    /// `cline -i -i "<text>"` — a flag the Cline CLI accepts (last write
     /// wins) but that we shouldn't rely on. Regression-pinned by
     /// `launch::tests::cline_prefill_composes_without_repeating_the_tui_flag`.
     ///
@@ -322,7 +322,7 @@ mod tests {
             };
             assert_eq!(
                 recipe.windows_shell, expected,
-                "{platform:?} must use {expected:?} â€” the npm shim needs cmd.exe, \
+                "{platform:?} must use {expected:?} — the npm shim needs cmd.exe, \
                  the macOS/Linux executables spawn directly"
             );
         }
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn prefill_args_return_only_the_positional_prompt() {
-        // `prefill_args` carries the prefill text only â€” the base recipe's
+        // `prefill_args` carries the prefill text only — the base recipe's
         // `-i` is composed with this list by `default_prepare`. Pin both:
         // the lone token (so a future edit doesn't smuggle `-i` back in) and
         // its exact text.
@@ -385,7 +385,7 @@ mod tests {
     fn prefill_args_pass_text_through_unchanged() {
         // Platform-aware newline handling lives in
         // `launch::normalize_prefill_for_platform`. The adapter's contract
-        // is now strictly "return the prefill text verbatim" â€” the leading
+        // is now strictly "return the prefill text verbatim" — the leading
         // space-join for `cmd.exe /c` would destroy multi-line prompts on
         // macOS/Linux (issue #1773 review).
         let args = CLINE.prefill_args("fix auth\nthen run tests");
@@ -478,7 +478,7 @@ mod tests {
 
     /// Fresh vs resume argv shapes through the real composition seam:
     /// `cline -i [--model m] [--thinking e] [--verbose] [-i <prefill>]` and
-    /// `cline -i --id <id> â€¦`. Pins the resume flag and the absence of a mint
+    /// `cline -i --id <id> →. Pins the resume flag and the absence of a mint
     /// flag.
     #[test]
     fn default_prepare_fresh_and_resume_argv_shapes() {
@@ -577,14 +577,14 @@ mod tests {
             .join("cline.exe");
         let override_path = PathBuf::from("D:/override/cline.exe");
 
-        // Only the shim exists â†’ shim wins over the absent node_modules binaries.
+        // Only the shim exists → shim wins over the absent node_modules binaries.
         let only_shim = |p: &Path| p == shim;
         assert_eq!(
             resolve_install(None, Some(appdata), &only_shim).as_deref(),
             Some(shim.as_path())
         );
 
-        // Shim absent, x64 direct binary present â†’ falls through to the walk
+        // Shim absent, x64 direct binary present → falls through to the walk
         // in deterministic order. x64 is checked first (documented CLI order).
         let only_x64 = |p: &Path| p == direct_x64;
         assert_eq!(
@@ -592,14 +592,14 @@ mod tests {
             Some(direct_x64.as_path())
         );
 
-        // x64 absent, arm64 direct binary present â†’ falls through to arm64.
+        // x64 absent, arm64 direct binary present → falls through to arm64.
         let only_arm64 = |p: &Path| p == direct_arm64;
         assert_eq!(
             resolve_install(None, Some(appdata), &only_arm64).as_deref(),
             Some(direct_arm64.as_path())
         );
 
-        // Everything present â†’ the override wins (resolver order).
+        // Everything present → the override wins (resolver order).
         let all = |p: &Path| {
             p == shim || p == direct_x64 || p == direct_arm64 || p == override_path
         };
@@ -608,14 +608,14 @@ mod tests {
             Some(override_path.as_path())
         );
 
-        // Nothing present â†’ None (no false-positive menu row).
+        // Nothing present → None (no false-positive menu row).
         assert!(resolve_install(None, Some(appdata), &|_| false).is_none());
     }
 
-    // â”€â”€ Issue #1774: session-id capture wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // —— Issue #1774: session-id capture wiring ——————————————————————————
 
     /// Cline self-assigns and disables PTY capture. The fresh-spawn hook
-    /// must run a SQLite poller (`services::cline_session`) â€” pinning
+    /// must run a SQLite poller (`services::cline_session`) — pinning
     /// both invariants in one place so a refactor that flips the PTY
     /// flag back to `true` *or* drops the after_fresh_spawn call fails
     /// this test instead of silently leaving `cli_session_id` null on
@@ -628,7 +628,7 @@ mod tests {
         );
         assert!(
             !CLINE.captures_session_id_from_pty(),
-            "Cline ids are <epochms>_<base36>, not UUIDs â€” PTY capture must stay off"
+            "Cline ids are <epochms>_<base36>, not UUIDs — PTY capture must stay off"
         );
     }
 
@@ -636,12 +636,12 @@ mod tests {
     /// startup sweep (issue #1774 / issue #1224 family). It must defer
     /// to the Cline SQLite helper rather than reimplementing the read,
     /// and it must surface `None` when no home is resolvable (e.g. an
-    /// `$HOME`-less Linux container) â€” a real `None` is what lets the
+    /// `$HOME`-less Linux container) — a real `None` is what lets the
     /// sweep skip the node instead of binding garbage.
     #[test]
     fn recover_suspended_session_id_delegates_to_cline_session_helper() {
         // No home resolvable in a bare test env: the helper returns None.
-        // We don't assert on the positive path here â€” `services::cline_session`
+        // We don't assert on the positive path here — `services::cline_session`
         // covers it under controlled SQLite fixtures, and the adapter's job
         // is just to forward without re-implementing.
         let no_home_result = CLINE.recover_suspended_session_id("/no/such/path", EnvType::Wsl, 0, false);
