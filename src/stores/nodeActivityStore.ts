@@ -68,15 +68,19 @@ export const useNodeActivityStore = create<{
         .filter(ids => ids.length > 1);
       const selections = { ...s.selections };
       // A grouped selection is keyed by the card representative. Removing a
-      // member makes that selection's node standalone; repair the old card
-      // key before activateNode records the new standalone key below.
-      for (const [key, selection] of Object.entries(s.selections)) {
-        if (selection.nodeId !== root || Number(key) === root) continue;
-        const keyNode = nodesById[Number(key)];
-        if (keyNode && keyNode.status !== 'archived') {
-          selections[Number(key)] = { nodeId: Number(key), utility: false };
-        } else {
-          delete selections[Number(key)];
+      // member can make the selected source or reviewer standalone; repair the
+      // old representative key before activateNode records the new key below.
+      const oldRepresentative = currentGroups.find(ids => ids.includes(root))?.[0];
+      const representativeSelection = oldRepresentative == null ? undefined : s.selections[oldRepresentative];
+      if (oldRepresentative != null && oldRepresentative !== root && representativeSelection) {
+        const newRoot = activityRootId(representativeSelection.nodeId, nodesById, circuitOwnerships, groups);
+        if (newRoot !== oldRepresentative) {
+          const keyNode = nodesById[oldRepresentative];
+          if (keyNode && keyNode.status !== 'archived') {
+            selections[oldRepresentative] = { nodeId: oldRepresentative, utility: false };
+          } else {
+            delete selections[oldRepresentative];
+          }
         }
       }
       saveGroups(groups);

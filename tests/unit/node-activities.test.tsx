@@ -113,6 +113,16 @@ describe('node activities', () => {
     expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 1, utility: false });
   });
 
+  it('repairs the old card selection when ungrouping a selected reviewer', () => {
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    state.activateNode(2);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 2, utility: false });
+    state.ungroupNode(2);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 3, utility: false });
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 2, utility: false });
+  });
+
   it('prunes deleted IDs from groups and localStorage while preserving empty bootstrap state', () => {
     useNodeActivityStore.setState({ groups: [[3, 1, 99], [2, 4]] });
     localStorage.setItem('buildmesh.node-groups', JSON.stringify([[3, 1, 99], [2, 4]]));
