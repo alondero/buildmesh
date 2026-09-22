@@ -30,10 +30,11 @@
  * has to stay readable at `PROBE_PANEL_BOUNDS.MIN_WIDTH` (240px).
  */
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
+  isTerminalRunState,
   runDurationMs,
   statusTextClass,
   stepDurationMs,
@@ -62,13 +63,68 @@ import {
   type NodeIndex,
 } from '../Circuits/runStepPresentation';
 
+/**
+ * Pure duration/stale headline spans for one run at one clock reading.
+ * Split out so the ticking wrapper below re-renders only these spans,
+ * never the whole card (issue #1751).
+ */
+function RunTimingSpans({
+  run,
+  now,
+}: {
+  run: CircuitRunDetail['run'];
+  now: Date;
+}) {
+  const duration = runDurationMs(run, now);
+  const stale = isRunStale(run, now);
+  const staleMs = runStaleMs(run, now);
+  return (
+    <>
+      {duration !== null && (
+        <span className="text-2xs text-text-muted shrink-0">
+          {formatDurationMs(duration)}
+        </span>
+      )}
+      {stale && staleMs !== null && (
+        <span
+          className="text-2xs text-status-warning shrink-0"
+          data-testid={`run-stale-${run.id}`}
+          title="No state transition for a while — the worker watchdog also watches quiet turns. Cancel if this never moves."
+        >
+          No update in {formatDurationMs(staleMs)}
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * Self-ticking duration label for one run (issue #1751). Owns its 1s
+ * interval so the parent tab never re-renders on the clock: only this
+ * span updates. Terminal runs render a static reading with no interval
+ * — their duration is fixed by `updated_at`. Cleared on unmount or when
+ * the run reaches a terminal state.
+ */
+export function LiveRunDuration({ run }: { run: CircuitRunDetail['run'] }) {
+  const terminal = isTerminalRunState(run.state);
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    if (terminal) return;
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, [terminal]);
+  return <RunTimingSpans run={run} now={now} />;
+}
+
 interface CircuitRunCardProps {
   detail: CircuitRunDetail;
   capacity: CircuitCapacity;
   expanded: boolean;
   onToggleExpanded: () => void;
-  /** Clock for duration/age labels — injected so tests can pin it. */
-  now: Date;
+  /** Pinned clock for duration/age labels — tests only. When omitted
+   *  the card renders a self-ticking `LiveRunDuration` instead, so the
+   *  parent tab carries no 1s ticker (issue #1751). */
+  now?: Date;
   busy: boolean;
   onPause: () => void;
   onResume: () => void;
@@ -108,9 +164,6 @@ export function CircuitRunCard({
   const review = reviewResult(detail, reviewCircuit);
   const activity = runActivity(run, steps, capacity, review);
   const progress = runStepProgress(steps);
-  const duration = runDurationMs(run, now);
-  const stale = isRunStale(run, now);
-  const staleMs = runStaleMs(run, now);
   const blockedSteps = steps.filter((s) => s.status === 'blocked');
   const retried = steps.filter((s) => s.attempt > 1);
   // The run row carries no error column; the ledger's first errored step
@@ -163,19 +216,10 @@ export function CircuitRunCard({
           >
             {review?.label ?? runStateLabel(run.state)}
           </span>
-          {duration !== null && (
-            <span className="text-2xs text-text-muted shrink-0">
-              {formatDurationMs(duration)}
-            </span>
-          )}
-          {stale && staleMs !== null && (
-            <span
-              className="text-2xs text-status-warning shrink-0"
-              data-testid={`run-stale-${run.id}`}
-              title="No state transition for a while — the worker watchdog also watches quiet turns. Cancel if this never moves."
-            >
-              No update in {formatDurationMs(staleMs)}
-            </span>
+          {now !== undefined ? (
+            <RunTimingSpans run={run} now={now} />
+          ) : (
+            <LiveRunDuration run={run} />
           )}
         </span>
         {/* Activity line — the fact the old one-liner buried. Wraps

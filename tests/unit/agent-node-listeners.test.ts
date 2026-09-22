@@ -43,6 +43,7 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     }) as unknown as SpySurface[typeof method];
   return {
     fetchAgentNodes: spy('fetchAgentNodes', async () => undefined),
+    refreshIfStale: spy('refreshIfStale', async () => undefined),
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
@@ -488,7 +489,7 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('node-created triggers fetchAgentNodes (refetch, not append)', async () => {
+  it('node-created triggers refreshIfStale with the new id (issue #1751)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -503,8 +504,13 @@ describe('attachAgentNodeListeners', () => {
 
     await capturedHandler!({ payload: { id: 99 } });
 
-    expect(surface.__calls.map(c => c.method)).toEqual(['fetchAgentNodes']);
-    expect(surface.fetchAgentNodes).toHaveBeenCalledTimes(1);
+    // Scoped conditional refresh (issue #1751): the event carries the
+    // new row's id, so the store can skip a redundant fan-out for an
+    // already-known row instead of always refetching the full table.
+    expect(surface.__calls).toEqual([
+      { method: 'refreshIfStale', args: [[99]] },
+    ]);
+    expect(surface.fetchAgentNodes).not.toHaveBeenCalled();
   });
 
   it('node-deleted drops the retired node (Circuit CloseAgentNode cleanup)', async () => {
@@ -531,7 +537,7 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('autopilot-node-closed triggers fetchAgentNodes (no dispose)', async () => {
+  it('autopilot-node-closed triggers fetchAgentNodes (no dispose, never scoped)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -546,8 +552,11 @@ describe('attachAgentNodeListeners', () => {
 
     await capturedHandler!({ payload: { node_id: 7 } });
 
-    // archive keeps the row/branch/scrollback; only refetch. The
-    // terminal-persistence rule says only delete disposes.
+    // Archive keeps the row/branch/scrollback; only refetch. The
+    // terminal-persistence rule says only delete disposes. This stays a
+    // full fetch on purpose (issue #1751 review): an archive is an
+    // eviction, and presence in the cache must never guard the fetch
+    // that purges it — a scoped skip would strand a zombie card.
     expect(surface.__calls.map(c => c.method)).toEqual(['fetchAgentNodes']);
   });
 

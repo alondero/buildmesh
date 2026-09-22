@@ -386,6 +386,23 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     }
   });
 
+  it('clears the label ticker on unmount (issue #1751: no orphaned interval)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
+      mockBackend();
+      const { unmount } = render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+      // The clock lives in the label span now, not the tab — exactly one
+      // interval while mounted, zero after unmount.
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resets to "just now" when the user clicks Refresh after time has passed', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
     try {

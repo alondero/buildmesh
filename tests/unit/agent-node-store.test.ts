@@ -4,10 +4,12 @@ import { emit } from '@tauri-apps/api/event';
 import { createElement } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import {
+  REFRESH_IF_STALE_MS,
   setWorktreeCloseActionResolverForTests,
   useAgentNodeStore,
   type AgentNode,
 } from '../../src/stores/agentNodeStore';
+import { attachAgentNodeListeners } from '../../src/stores/agentNodeListeners';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
@@ -337,6 +339,82 @@ describe('useAgentNodeStore', () => {
     });
   });
 
+  describe('refreshIfStale (issue #1751)', () => {
+    function mockSingleNode(node: AgentNode) {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.resolve([]);
+      });
+    }
+
+    it('skips the fan-out when the snapshot is fresh and every scoped id is known', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      await useAgentNodeStore.getState().refreshIfStale([7]);
+
+      // Duplicate-event path: the row is already in the map on the heels
+      // of a snapshot, so no full-table refetch fires.
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('fetches for an unknown scoped id even when the snapshot is fresh', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      // Genuinely new row: the event carries an id the map has never
+      // seen, so the conditional refresh degrades to a full fetch.
+      await useAgentNodeStore.getState().refreshIfStale([7, 99]);
+
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('fetches again once the freshness window expires', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      // Unscoped + fresh still skips.
+      await useAgentNodeStore.getState().refreshIfStale();
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
+
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(Date.now() + REFRESH_IF_STALE_MS + 1000);
+        await useAgentNodeStore.getState().refreshIfStale([7]);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('a failed fetch does not stamp freshness, so the next event retries', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+
+      // A transient failure preserves the previous stamp instead of
+      // treating the failed snapshot as fresh...
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.reject(new Error('db locked'));
+        return Promise.resolve([]);
+      });
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      expect(useAgentNodeStore.getState().error).not.toBeNull();
+
+      // ...so a scoped check against the last good snapshot still skips.
+      mockSingleNode(node);
+      mockInvoke.mockClear();
+      await useAgentNodeStore.getState().refreshIfStale([7]);
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
+    });
+  });
+
   describe('getActiveNode', () => {
     it('returns null when no active node', () => {
       expect(useAgentNodeStore.getState().getActiveNode()).toBeNull();
@@ -486,6 +564,56 @@ describe('useAgentNodeStore', () => {
       await waitFor(() => expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy());
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
       expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    // Issue #1751 review: `autopilot-node-closed` is an eviction from the
+    // active nodes, not a patch. The backend archived the row, so the next
+    // `list_agent_nodes` snapshot excludes it (`WHERE status != 'archived'`)
+    // and the store must drop it from nodeIds/nodesById. Presence in the
+    // cache must never guard that eviction — even with a seconds-fresh
+    // snapshot, the closed node has to leave the grid.
+    it('evicts the archived node on autopilot-node-closed despite a fresh snapshot', async () => {
+      const node = makeNode({ id: 7, status: 'running' });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.resolve([]);
+      });
+      // Stamp a fresh snapshot with the node present.
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      expect(useAgentNodeStore.getState().nodeIds).toContain(7);
+
+      // The backend archived the row: snapshots from here on exclude it.
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([]);
+        return Promise.resolve([]);
+      });
+      // Attach with the real store surface (self-contained: unlisten
+      // afterwards so no handler leaks into sibling tests).
+      const s = useAgentNodeStore.getState();
+      const unlisten = await attachAgentNodeListeners({
+        fetchAgentNodes: s.fetchAgentNodes,
+        refreshIfStale: s.refreshIfStale,
+        setActiveNode: s.setActiveNode,
+        patchAgentNode: s.patchAgentNode,
+        patchAutopilotState: s.patchAutopilotState,
+        patchCircuitOwnershipState: s.patchCircuitOwnershipState,
+        refreshCircuitOwnerships: s.refreshCircuitOwnerships,
+        setSemanticTurn: s.setSemanticTurn,
+        findAgentNode: s.findAgentNode,
+        removeAgentNode: s.removeAgentNode,
+      });
+      try {
+        await mockEmit('autopilot-node-closed', { node_id: 7, pr_number: 12 });
+
+        await waitFor(() => {
+          expect(useAgentNodeStore.getState().nodeIds).not.toContain(7);
+        });
+        expect(useAgentNodeStore.getState().nodesById[7]).toBeUndefined();
+        expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
+        expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+      } finally {
+        unlisten();
+      }
     });
   });
 
