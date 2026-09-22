@@ -882,15 +882,28 @@ mod tests {
 
         // Issue #1773 — Cline is a Native Provider: it owns its own auth
         // (`cline auth`) and Buildmesh only injects the user's Model Provider
-        // credentials through the spawn env-var seam. Attention (#1775) and the
-        // transcript reader (#1776) are not shipped yet, so those flags stay
-        // honest-empty. Effort is Cline's closed `--thinking` vocabulary.
+        // credentials through the spawn env-var seam. Issue #1775 wired the
+        // file-hook attention integration (`TaskComplete`/`SessionShutdown`), so
+        // the hook flags are now honest-true; the transcript reader (#1776) is
+        // still not shipped. Effort is Cline's closed `--thinking` vocabulary.
         let cline = cline_caps();
         assert_eq!(cline.harness_id, "cline");
         assert!(cline.supports_resume);
         assert!(cline.auto_resume_on_startup);
-        assert!(!cline.requires_attention_hook);
-        assert_eq!(cline.attention_capability, AttentionCapability::None);
+        assert!(cline.requires_attention_hook);
+        // Issue #1775 — pin the Hook shape. Only a completed turn and a
+        // session exit are delivered; Cline auto-approves by default, so a
+        // permission/question/background/idle signal is impossible by
+        // construction and must not be advertised.
+        assert!(matches!(
+            cline.attention_capability,
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::SkipPermissions,
+                trust: None,
+                min_version: Some(ref v),
+                ..
+            } if v == crate::agent::provider::adapters::cline::CLINE_MIN_HOOK_VERSION
+        ));
         assert!(!cline.supports_passive_turn_watcher);
         assert!(!cline.produces_readable_transcript);
         assert!(cline.supports_model_override);

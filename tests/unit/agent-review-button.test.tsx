@@ -67,7 +67,7 @@ describe('agent workflow title-bar control', () => {
   // can never reach a yielded status, so `await_source` and `verdict` would
   // park forever. The button must not mint that run.
   it('disables the control and explains why when the node harness cannot yield a turn', () => {
-    renderButton({ ...node, provider: 'cline' });
+    renderButton({ ...node, provider: 'freebuff' });
     const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.title).toContain('cannot run a review circuit');
@@ -75,6 +75,15 @@ describe('agent workflow title-bar control', () => {
 
   it('still enables an attention-capable harness', () => {
     renderButton({ ...node, provider: 'codex' });
+    const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.title).toBe('Start review or circuit');
+  });
+
+  // Issue #1775: Cline provisions a native attention hook, so it is no longer
+  // outside the review contract.
+  it('enables the control for Cline after its attention hook landed', () => {
+    renderButton({ ...node, provider: 'cline' });
     const button = screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     expect(button.title).toBe('Start review or circuit');
@@ -100,13 +109,15 @@ describe('agent workflow title-bar control', () => {
   });
 
   it('greys out a reviewer harness that cannot yield a turn', () => {
-    renderButton(node, [...PROVIDERS, spawnOption('cline', 'Cline')]);
+    renderButton(node, [...PROVIDERS, spawnOption('cline', 'Cline'), spawnOption('freebuff', 'Freebuff')]);
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
     const options = Array.from(select.querySelectorAll('option'));
     expect(options.find(o => o.value === 'codex')?.disabled).toBe(false);
-    expect(options.find(o => o.value === 'cline')?.disabled).toBe(true);
-    expect(options.find(o => o.value === 'cline')?.textContent).toBe('Cline (no review support)');
+    // Issue #1775: Cline carries a hook now, so its row is pickable.
+    expect(options.find(o => o.value === 'cline')?.disabled).toBe(false);
+    expect(options.find(o => o.value === 'freebuff')?.disabled).toBe(true);
+    expect(options.find(o => o.value === 'freebuff')?.textContent).toBe('Freebuff (no review support)');
     // Terminal stays filtered out entirely — it is not an agent.
     expect(options.find(o => o.value === 'terminal')).toBeUndefined();
   });

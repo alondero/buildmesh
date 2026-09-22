@@ -140,7 +140,14 @@ export const HARNESS_CATALOG = {
     },
     "cline": {
       "attention_capability": {
-        "kind": "none"
+        "events": [
+          "turn_completed",
+          "session_exited"
+        ],
+        "kind": "hook",
+        "launch_mode": "skip_permissions",
+        "min_version": "3.0.62",
+        "trust": null
       },
       "auto_resume_on_startup": true,
       "available_on": [
@@ -161,7 +168,7 @@ export const HARNESS_CATALOG = {
       "harness_id": "cline",
       "is_plain_terminal": false,
       "produces_readable_transcript": false,
-      "requires_attention_hook": false,
+      "requires_attention_hook": true,
       "supports_effort_override": true,
       "supports_extra_args": true,
       "supports_model_override": true,

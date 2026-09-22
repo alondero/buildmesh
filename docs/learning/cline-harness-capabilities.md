@@ -31,8 +31,9 @@ Cline is an interactive terminal agent that Buildmesh drives as a **Native
 Provider**: Cline owns its own credentials (`cline auth`) and Buildmesh never
 writes Cline's configuration. Buildmesh spawns `cline -i`, resumes with
 `cline -i --id <id>`, and can forward a model, a reasoning effort, and a
-prefill prompt. Attention-hook provisioning and transcript reading are **not**
-wired yet, so those capabilities are advertised honestly as unsupported.
+prefill prompt. Attention is wired through Cline's file hooks (`TaskComplete`
+→ turn completion, `SessionShutdown` → session exit); transcript reading is
+**not** wired yet (issue #1776).
 
 ## What Buildmesh wants from a harness
 
@@ -47,7 +48,7 @@ wired yet, so those capabilities are advertised honestly as unsupported.
 | `effort_control` | Reasoning-effort vocabulary | `--thinking none\|low\|medium\|high\|xhigh` |
 | `supports_prefill` | Seed the first turn from issue / handover text | Yes (`-i "<prompt>"`) |
 | `supports_extra_args` | Verbatim circuit-author CLI flags | Yes |
-| `requires_attention_hook` | Autopilot attention gate | No (hook not shipped) |
+| `requires_attention_hook` | Autopilot attention gate | Yes (file hooks; issue #1775) |
 | `produces_readable_transcript` | Coordinator Node Digest / archive resume | No (reader not shipped) |
 | `available_on` | Spawn Menu filtering | Windows, macOS, Linux |
 
@@ -97,6 +98,45 @@ section.
   `cline.cmd` only when the npm prefix is on `PATH`; for everything
   else the orchestrator hands the absolute path to `cmd.exe /c`
   explicitly.
+
+## Attention hook (issue #1775)
+
+Cline's CLI resolves **file hooks** — executable files named exactly after an
+event — additively from four fixed directories:
+
+1. `~/Documents/Cline/Hooks`
+2. `~/.cline/hooks` (`CLINE_DIR` overrides `~/.cline`)
+3. `<workspace>/.clinerules/hooks`
+4. `<workspace>/.cline/hooks`
+
+All matching files for an event run together. The file's base name (case-
+insensitive, with one of the extensions
+`"" | .sh | .bash | .zsh | .js | .mjs | .cjs | .ts | .mts | .cts | .py | .ps1`
+stripped) must equal the event name, so a file cannot be namespaced.
+`--hooks-dir` / `CLINE_HOOKS_DIR` remain **inert** in 3.0.62.
+
+Buildmesh provisions only the user-global root (`~/.cline/hooks`) with the two
+events it can honestly normalise:
+
+| File | `hookName` on stdin | Normalised kind |
+|---|---|---|
+| `TaskComplete.{sh,ps1}` | `agent_end` | `turn_completed` (node → Ready) |
+| `SessionShutdown.{sh,ps1}` | `session_shutdown` | `session_exited` (node → Idle) |
+
+Windows gets `.ps1` (`powershell -File`); macOS/Linux get `.sh` (`bash`). Both
+extensions run without an exec bit. The script POSTs its stdin JSON to
+`http://127.0.0.1:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID`
+(the literal IPv4 loopback, so the callback never goes through DNS or the
+machine proxy), expanding the port and node id from the environment Cline hands
+the hook (`env: process.env`, no `env_clear`), so one node-agnostic file set
+serves every node and no node id is ever baked in. The write is additive and
+idempotent; a non-Buildmesh file at our exact path fails provisioning (surfaced
+as `SignalHealth::Unavailable`) rather than being overwritten.
+
+Cline auto-approves tools by default and Buildmesh passes no approval flag, so
+**no permission or question signal exists** — `permission_requested`,
+`question_requested`, `background_running`, and `process_idle` are deliberately
+not advertised. Hooks are disabled in `--yolo` mode; the recipe never passes it.
 
 ## Native Provider boundary and the env-var seam
 
