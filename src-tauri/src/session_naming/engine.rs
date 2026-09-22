@@ -566,7 +566,11 @@ pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String>
         let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
             .ok_or("Provider account is missing")?;
         crate::preferences::compatibility::surface_env(route.surface, route.base_url.as_deref(), account.api_key.as_deref(), &route.model_tiers)
-    } else { naming_backend_env_with(provider, |_| Vec::new()) };
+    } else if plan.harness.harness == "anthropic" {
+        naming_backend_env_with("anthropic", |_| Vec::new())
+    } else {
+        naming_backend_env_with(provider, |_| Vec::new())
+    };
     let adapter = crate::models::Provider::Anthropic.adapter();
     let mut args = Vec::new();
     if let Some(model) = &plan.model { args.extend(adapter.model_args(model)); }

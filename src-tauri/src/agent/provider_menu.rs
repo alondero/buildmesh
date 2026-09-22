@@ -295,7 +295,8 @@ fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::A
     for configuration in &prefs.spawn_configurations {
         let id = crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
         let fallback = crate::preferences::HarnessProfile {
-            id: id.harness_id.clone(), name: id.harness_id.clone(), harness: id.harness_id.clone(),
+            id: id.harness_id.clone(), name: id.harness_id.clone(),
+            harness: if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() },
             runtime: None, wsl_distro: None, executable: None,
         };
         let profile = prefs.harness_profiles.iter().find(|p| p.id == id.harness_id()).unwrap_or(&fallback);

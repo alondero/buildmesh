@@ -2,7 +2,7 @@
 .launch-config-form p { font-size: 12px; margin: 0 0 12px; }
 .launch-config-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
 .launch-config-form label { display: grid; gap: 4px; font-size: 13px; }
-.launch-config-form input, .launch-config-form select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border-default, var(--border)); border-radius: 6px; color: inherit; background: var(--color-bg-input, var(--surface)); }
+.launch-config-form input, .launch-config-form select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border-default, var(--border)); border-radius: var(--radius-lg); color: inherit; background: var(--color-bg-input, var(--surface)); }
 .launch-config-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .launch-config-actions button { padding: 8px; }
 .launch-config-form [role="alert"] { color: var(--color-status-error, var(--red)); }

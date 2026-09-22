@@ -23,10 +23,11 @@ fn preference_files_are_isolated_between_temp_directories() {
 
 #[test]
 fn load_returns_default_when_file_missing() {
-    with_temp_dir(|_| {
+    with_temp_dir(|tmp| {
         let prefs = load().unwrap();
         assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
         assert_eq!(prefs.default_provider, None);
+        assert!(!tmp.join("preferences.json").exists());
     });
 }
 
@@ -38,11 +39,12 @@ fn failed_update_does_not_publish_candidate_to_cache() {
     std::fs::write(&app_data_file, "not a directory").unwrap();
     init_for_tests(app_data_file.clone());
 
-    assert!(load().is_err());
+    let loaded = load().unwrap();
+    assert_eq!(loaded.default_provider, None);
     let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
         .unwrap_err();
     assert!(error.contains("app data dir") || error.contains("temporary preferences"));
-    assert!(load().is_err());
+    assert_eq!(load().unwrap().default_provider, None);
 
     reset_for_tests();
     std::fs::remove_file(app_data_file).unwrap();
@@ -98,6 +100,20 @@ fn reviewer_provider_helper_strips_blank_strings() {
 fn malformed_json_falls_back_to_default() {
     with_temp_dir(|tmp| {
         std::fs::write(tmp.join("preferences.json"), "{not valid json").unwrap();
-        assert_eq!(load().unwrap(), AppPreferences::default());
+        let prefs = load().unwrap();
+        assert_eq!(prefs.default_provider, AppPreferences::default().default_provider);
+        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+    });
+}
+
+#[test]
+fn deleted_launch_configuration_is_not_accepted_as_reviewer_provider() {
+    with_temp_dir(|_| {
+        let error = crate::autopilot::compatibility::validate_reviewer_provider_id("launch/deleted")
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Launch Configuration no longer exists; select another configuration"
+        );
     });
 }

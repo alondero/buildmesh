@@ -244,6 +244,14 @@ pub fn run() {
                 Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
             }
 
+            // Persist launch-catalogue reconciliation and read-time preference
+            // migrations at the designated startup write boundary. Preference
+            // reads stay side-effect free, including on a read-only or fresh
+            // app-data directory.
+            if let Err(e) = preferences::update(|_| {}) {
+                tracing::warn!("preference startup reconciliation failed: {}", e);
+            }
+
             if let Err(error) = services::agent_node::migrate_launch_history() {
                 tracing::warn!("Launch history migration failed: {error}");
             }

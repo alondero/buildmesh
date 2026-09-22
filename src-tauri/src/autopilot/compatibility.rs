@@ -319,7 +319,7 @@ pub fn validate_reviewer_provider_id(value: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Ok(());
     }
-    let selected = crate::preferences::launch_configurations::selection_option(trimmed).unwrap_or_else(|_| trimmed.into());
+    let selected = crate::preferences::launch_configurations::selection_option(trimmed)?;
     let harness_id = SpawnOptionId::from(selected.as_str()).harness_id().trim().to_string();
     match reviewer_harness_reason(&harness_id) {
         None => Ok(()),

@@ -35,7 +35,10 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
     <p>{draft.generated && !draft.generated.user_owned ? 'Generated configuration. Saving an edit preserves your choices against catalogue updates.' : 'User-owned configuration'}</p>
     <fieldset disabled={busy}>
       <label>Name<input autoFocus required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
-      <label>Harness<select value={target?.harness_id ?? ''} onChange={(e) => selectTarget(targets.find((t) => t.harness_id === e.target.value)!.id)}>
+      <label>Harness<select value={target?.harness_id ?? ''} onChange={(e) => {
+        const match = targets.find((t) => t.harness_id === e.target.value);
+        if (match) selectTarget(match.id);
+      }}>
         {!target && <option value="">Select a harness</option>}
         {harnesses.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select></label>

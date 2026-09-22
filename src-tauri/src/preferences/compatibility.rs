@@ -384,7 +384,7 @@ fn provider_account_env(
 ///   the alias env vars (only the primary model is honoured).
 /// * **OpenAI surface** — delegate to the platform emitter (already
 ///   correct).
-fn cline_consumer_env(
+pub(crate) fn cline_consumer_env(
     surface: ApiSurface,
     base_url: Option<&str>,
     api_key: Option<&str>,

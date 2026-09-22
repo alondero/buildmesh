@@ -244,7 +244,20 @@ fn resolve_plan(
 
 /// Resolve an identity at legacy adapter entrypoints without teaching the parser about storage.
 pub fn selection_option(selection: &str) -> Result<String, String> {
-    let prefs = super::load()?;
+    let prefs = match super::load() {
+        Ok(prefs) => prefs,
+        Err(error) if error == "preferences module not initialized" => {
+            // Legacy bare ids remain usable by pure/test callers before Tauri
+            // startup wires the preference store. A Launch Configuration id,
+            // however, has no safe legacy interpretation and must stay a hard
+            // error so deleted configurations never silently fall through.
+            if selection.starts_with("launch/") {
+                return Err("Launch Configuration no longer exists; select another configuration".into());
+            }
+            return Ok(selection.into());
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(value) = prefs.spawn_configurations.iter().find(|c| c.id == selection) {
         return Ok(value.spawn_option_id.clone());
     }

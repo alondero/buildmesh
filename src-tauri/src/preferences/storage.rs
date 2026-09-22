@@ -139,7 +139,6 @@ pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
     if !path.exists() {
         let mut prefs = AppPreferences::default();
         super::launch_configurations::reconcile(&mut prefs);
-        write_to_disk(&prefs)?;
         return Ok(prefs);
     }
     let raw = std::fs::read_to_string(&path)
@@ -147,27 +146,23 @@ pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
     // Tolerate malformed/empty files — preferences are non-critical.
     let mut value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return Ok(AppPreferences::default()),
+        Err(_) => {
+            let mut prefs = AppPreferences::default();
+            super::launch_configurations::reconcile(&mut prefs);
+            return Ok(prefs);
+        }
     };
-    let changed = migrate_prefs_json(&mut value);
-    // Round-trip the migrated JSON before persisting so a partially-unknown
-    // payload (older field the Rust struct doesn't know about) doesn't get
-    // overwritten by `AppPreferences::default()`. Issue #xxxx: silent
-    // overwrite was a data-loss path.
-    let mut prefs: AppPreferences = match serde_json::from_value(value.clone()) {
+    migrate_prefs_json(&mut value);
+    let mut prefs: AppPreferences = match serde_json::from_value(value) {
         Ok(p) => p,
         Err(_) => {
-            tracing::warn!("preferences::read_from_disk post-migration deserialization failed; skipping persist");
-            return Ok(AppPreferences::default());
+            tracing::warn!("preferences::read_from_disk post-migration deserialization failed; using defaults");
+            let mut prefs = AppPreferences::default();
+            super::launch_configurations::reconcile(&mut prefs);
+            return Ok(prefs);
         }
     };
-    let before = serde_json::to_value(&prefs).map_err(|e| e.to_string())?;
     super::launch_configurations::reconcile(&mut prefs);
-    if changed || serde_json::to_value(&prefs).map_err(|e| e.to_string())? != before {
-        if let Err(e) = write_to_disk(&prefs) {
-            tracing::warn!("preferences::read_from_disk migration save failed: {}", e);
-        }
-    }
     Ok(prefs)
 }
 
