@@ -52,18 +52,22 @@
 //! untouched and workspace trust is not forced, so the issue #1705
 //! rejection of `--yolo` still stands.
 //!
-//! **Attention (issue #1709).** Muse exposes no interactive attention-hook
-//! registration: `muse --help` has no hook/event flag, there is no workspace
-//! or global hook config file, and the MSP lifecycle events (`turn/*`,
-//! `approval/*`, `userInput/*` in `muse schema generate-json-schema`) are
-//! served only on the separate `muse serve` stdio plane — the headless
-//! architecture Buildmesh's PTY spawn does not use.
-//!
-//! The interactive TUI does, however, append run boundaries to its durable
-//! session log (`~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`).
-//! Muse therefore supplies its turn signal through the passive watcher
+//! **Attention (issue #1709).** The interactive TUI exposes no hook/event flag,
+//! so Muse's turn signal comes from the passive watcher
 //! (`services::muse_watcher`), mirroring Command Code: `requires_attention_hook`
-//! stays `false` and `attention_capability` stays `None`.
+//! stays `false` and `attention_capability` stays `None`. The watcher consumes
+//! the durable session log's run boundaries
+//! (`~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`).
+//!
+//! Muse 1.3.0 *does* ship a claude-compatible plugin hook surface (a
+//! `.claude-plugin/plugin.json` bundle with `Stop`/`Notification`/… handlers; a
+//! live `Stop` posts the payload `http::routes::attention` already classifies
+//! as a clean turn completion). It is deliberately **not** provisioned:
+//! third-party hooks sit at `review_needed` until an explicit
+//! `muse plugins approve`, the install lands in the user's *global* plugin
+//! cache, and the node-local `--scope project` path is refused until the
+//! workspace is trusted (issue #1706). Wiring it is a separate follow-up — see
+//! `docs/research/muse-attention-signals.md`.
 //!
 //! **Launch mode is `SkipPermissions`.** With `--disable-approval` the harness
 //! never raises a tool-approval prompt — every observed `approval_disabled`

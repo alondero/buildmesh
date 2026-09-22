@@ -450,12 +450,18 @@ skipped silently), runs `command` + `args` with no shell interpretation, and
 Only `TurnCompleted` is advertised: the launch auto-approves
 (`"permission_mode": "auto"`), so no permission signal is claimed. Its
 `messages.jsonl` transcript is wired too (`TranscriptFormat::Mcode`); see
-`docs/learning/mcode-harness-capabilities.md`. Muse has no native hook
-either: `services::muse_watcher` tails the interactive TUI's durable
+`docs/learning/mcode-harness-capabilities.md`. Muse's interactive TUI exposes
+no hook/event flag, so its turn signal comes from `services::muse_watcher`,
+which tails the durable
 `~/.local/share/muse/sessions/…/session.jsonl` run boundaries (`runtime.session`
 records with `payload.kind == "run"` and `event.kind == "terminal"`) and
 publishes each as a Node Turn — a passive watcher like Command Code's, with
-`requires_attention_hook = false` and `attention_capability = None`. Because
+`requires_attention_hook = false` and `attention_capability = None`. (Muse 1.3.0
+does ship a claude-compatible plugin hook surface, but it is gated behind an
+explicit `muse plugins approve` into a global plugin cache, and the node-local
+`--scope project` install is refused until the workspace is trusted — issue
+#1706 — so it is deliberately not provisioned; see
+`docs/research/muse-attention-signals.md`.) Because
 Buildmesh launches `muse --disable-approval`, a `PermissionRequested` signal is
 impossible by construction and is not classified. Muse is additionally the only
 harness shipped with its own always-on OS sandbox: Buildmesh bakes
