@@ -314,6 +314,7 @@ pub(super) async fn prepare_context(
     // tracks "we adopted the warm entry as this node's worktree" — that's
     // what `forget_after_spawn` and the manual name adoption gate on.
     let mut pool_was_drained_by_this_spawn = false;
+    timer.checkpoint("before_warm_claim");
     if use_worktree {
         // The path the node resolves to WITHOUT a pool claim. If it's already
         // on disk this spawn is a resume / handover / re-spawn reusing an
@@ -376,6 +377,8 @@ pub(super) async fn prepare_context(
             }
         }
     }
+
+    timer.checkpoint("after_warm_claim");
 
     // The effective spawn_worktree_name + path.
     //
@@ -442,6 +445,7 @@ pub(super) async fn prepare_context(
         resolved.host_path,
         resolved.env_type
     );
+    timer.checkpoint("after_path_resolve");
 
     // Parse `node.provider` once at the prepare boundary (issue #1659
     // item 1). The launch phase consumes the typed value; no phase

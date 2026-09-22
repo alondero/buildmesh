@@ -163,6 +163,42 @@ import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeToolbar } from './ProbeToolbar';
 import { formatRelativeAge } from '../../lib/time';
 
+/**
+ * Self-ticking "Refreshed X ago" label (issue #1751). Owns its 1s
+ * interval so the parent tab never re-renders on the clock: only this
+ * span updates. `since` is fixed at the last successful load — a failed
+ * refresh leaves the previous timestamp in place, so the label keeps
+ * pointing at the last known-good moment. Cleared on unmount.
+ */
+export function RefreshedAgo({ since }: { since: Date }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  // Recomputed every render so the 1s tick above drives a re-render
+  // with a fresh `now`. `formatRelativeAge` is pure. The 1s cadence is
+  // the smallest grain displayed ("Ns ago"); coarser labels ("Xm ago")
+  // tick on minute boundaries for free.
+  const relative = formatRelativeAge(since, new Date(), { granularity: 'second' });
+  const absolute = since.toLocaleTimeString();
+  return (
+    <span
+      className="text-2xs text-text-muted/80 shrink-0"
+      data-testid="usage-last-refreshed"
+    >
+      <time
+        dateTime={since.toISOString()}
+        aria-label={`Last refreshed at ${absolute}`}
+        title={absolute}
+        className="cursor-default tabular-nums"
+      >
+        {`Refreshed ${relative}`}
+      </time>
+    </span>
+  );
+}
+
 export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
@@ -260,20 +296,9 @@ export function UsageTab() {
   // outdated numbers for up to 5 minutes (the `CACHE_TTL`).
   useOpencodeAccountInvalidation(() => { void loadMeters(true); });
 
-  // Tick once a second so the "Refreshed X ago" label updates without
-  // a re-fetch. Cheap (one no-op render), and only mounted while the
-  // tab is alive — the cleanup drops the interval when the tab
-  // unmounts. `now` is the only piece of state this drives; `formatRelativeAge`
-  // is pure, so we don't need to track `lastRefreshedAt` in a ref. The
-  // 1s cadence is the smallest grain we display ("Ns ago"); the
-  // higher-grain labels ("Xm ago") tick on minute boundaries for free
-  // because the render recomputes from the fresh `Date.now()`.
-  const [, setTicker] = useState(0);
-  useEffect(() => {
-    if (lastRefreshedAt === null) return;
-    const id = window.setInterval(() => setTicker((n) => n + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [lastRefreshedAt]);
+  // No tab-level ticker (issue #1751): the "Refreshed X ago" label
+  // ticks inside `RefreshedAgo`, so the tab itself never re-renders on
+  // the 1s cadence — the clock only re-renders the label span.
 
   // First-load placeholder. Only renders before the very first IPC
   // settles — after that, the body renders either the error banner or
@@ -328,18 +353,10 @@ export function UsageTab() {
     }
   };
 
-  // Staleness indicator values. Computed every render so the 1s tick
-  // effect can drive a re-render with a fresh `now`. Both are `null`
-  // until the first successful load completes — the header hides the
-  // indicator entirely in that window (the LoadingState placeholder
-  // is showing anyway, and a first-load rejection has no trustworthy
-  // timestamp to point at).
-  const refreshedRelative = lastRefreshedAt
-    ? formatRelativeAge(lastRefreshedAt, new Date(), { granularity: 'second' })
-    : null;
-  const refreshedAbsolute = lastRefreshedAt
-    ? lastRefreshedAt.toLocaleTimeString()
-    : null;
+  // The staleness indicator hides entirely until the first successful
+  // load completes (the LoadingState placeholder is showing anyway, and
+  // a first-load rejection has no trustworthy timestamp to point at).
+  // `RefreshedAgo` owns the ticking from there (issue #1751).
 
   // Warm-cache refresh rejection keeps the rows. When prior rows exist
   // AND the latest fetch rejected, keep the rows on screen — the
@@ -371,21 +388,7 @@ export function UsageTab() {
             {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
           </span>
         )}
-        {refreshedRelative !== null && (
-          <span
-            className="text-2xs text-text-muted/80 shrink-0"
-            data-testid="usage-last-refreshed"
-          >
-            <time
-              dateTime={lastRefreshedAt!.toISOString()}
-              aria-label={`Last refreshed at ${refreshedAbsolute}`}
-              title={refreshedAbsolute!}
-              className="cursor-default tabular-nums"
-            >
-              {`Refreshed ${refreshedRelative}`}
-            </time>
-          </span>
-        )}
+        {lastRefreshedAt !== null && <RefreshedAgo since={lastRefreshedAt} />}
       </ProbeToolbar>
 
       {/* Refresh-failure alert. Lives OUTSIDE the toolbar and OUTSIDE

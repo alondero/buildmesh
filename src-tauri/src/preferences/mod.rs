@@ -45,7 +45,7 @@ pub use model::{
 // ----- Re-exports: storage ----------------------------------------------
 
 pub use storage::{
-    app_data_dir, autopilot_pool_size, default_provider, init, load, naming_provider,
+    app_data_dir, autopilot_pool_size, default_provider, generation, init, load, naming_provider,
     reviewer_provider, save, update, worktree_directory,
 };
 #[cfg(test)]

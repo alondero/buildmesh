@@ -169,6 +169,7 @@ pub(super) async fn launch_process(
         app_default.as_ref(),
         mesh_override.as_ref(),
     );
+    timer.checkpoint("before_command_build");
     let cmd = build_spawn_command_prepared(
         &resolved,
         provider,
@@ -179,6 +180,7 @@ pub(super) async fn launch_process(
         prefill.as_deref(),
         sandbox,
     );
+    timer.checkpoint("after_command_build");
 
     // A resumed Command Code process can append its first turn immediately.
     // Give the adapter a pre-spawn seam to snapshot the old transcript and
@@ -197,6 +199,7 @@ pub(super) async fn launch_process(
         }
     };
 
+    timer.checkpoint("before_pty_spawn");
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,
         Box<dyn portable_pty::MasterPty + Send>,

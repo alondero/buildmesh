@@ -12,6 +12,7 @@ use super::model::AppPreferences;
 use super::migrations::migrate_prefs_json;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // Issue #1386: `APP_DATA_DIR` and `CACHE` are process-global in production
@@ -41,6 +42,24 @@ thread_local! {
 }
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Monotonic counter bumped on every successful preference write (issue #1752).
+/// Derived caches outside this module (e.g. the spawn launch-routing cache in
+/// `agent::launch_routing`) snapshot this value and treat a change as "my
+/// cached value may be stale — drop it". Both writers — [`save`] and
+/// [`update`] — bump it, and every mutation path in the tree funnels through
+/// those two, so no settings change can slip past without invalidating.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current preference generation. See [`GENERATION`].
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+/// Bump the generation after a durable write has landed.
+fn bump_generation() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
 
 pub fn init(app_data_dir: PathBuf) {
     set_app_data_dir(Some(app_data_dir));
@@ -208,6 +227,7 @@ pub fn load() -> Result<AppPreferences, String> {
 pub fn save(prefs: AppPreferences) -> Result<(), String> {
     write_to_disk(&prefs)?;
     set_cache(Some(prefs));
+    bump_generation();
     Ok(())
 }
 
@@ -239,6 +259,9 @@ pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreference
         *guard = Some(candidate.clone());
         Ok(candidate)
     });
+    if result.is_ok() {
+        bump_generation();
+    }
     result
 }
 
@@ -407,5 +430,40 @@ fn normalize_legacy_default_provider(bare: &str) -> Option<&'static str> {
         // `kimi` removed post-#918 (Kimi Code is a native harness, not a
         // Claude-compatible Proxied row). See the fn docstring.
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    /// Issue #1752: both writers must advance the generation, because the
+    /// launch-routing cache treats "generation changed" as its invalidation
+    /// signal. A `save` or `update` that forgot to bump would let a stale
+    /// routing (endpoint / model / credential) survive a settings change.
+    ///
+    /// Asserted as strict monotonicity rather than an exact delta — the
+    /// counter is process-global and other (parallel) tests may also write.
+    #[test]
+    fn both_writers_advance_the_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        init_for_tests(dir.path().to_path_buf());
+
+        let before_save = generation();
+        save(AppPreferences::default()).expect("save");
+        let after_save = generation();
+        assert!(
+            after_save > before_save,
+            "save must bump the generation ({before_save} -> {after_save})"
+        );
+
+        update(|prefs| prefs.default_provider = Some("terminal".into())).expect("update");
+        let after_update = generation();
+        assert!(
+            after_update > after_save,
+            "update must bump the generation ({after_save} -> {after_update})"
+        );
+
+        reset_for_tests();
     }
 }

@@ -460,6 +460,17 @@ pub fn directories_match(recorded: &str, spawn: &str) -> bool {
 
 fn normalize_directory(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
+    // Win32 verbatim prefix: `\\?\C:\dir` names the same directory as `C:\dir`.
+    // Some harnesses record the canonicalized form — Muse's headless `exec`
+    // writes `\\?\C:\…` as the session's `workspace_root` — so a raw compare
+    // would miss a directory the spawn path spells plainly. `\\?\UNC\srv\share`
+    // maps to the ordinary UNC form.
+    if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        };
+    }
     while normalized.len() > 1 && normalized.ends_with('/') {
         normalized.pop();
     }
@@ -946,6 +957,22 @@ pub fn active_node_branches(nodes: &[AgentNode]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Muse's headless `exec` records its workspace root in the Win32 verbatim
+    /// form (`\\?\C:\dir`) while Buildmesh spawns the plain form; both name the
+    /// same directory. Without tolerating the prefix, `muse_sessions`' workspace
+    /// lookup — and every other adapter's session discovery that shares this
+    /// matcher — silently loses such a node. (issue #1709 live smoke)
+    #[test]
+    fn directories_match_tolerates_windows_verbatim_prefix() {
+        assert!(directories_match(r"\\?\C:\Users\me\repo", r"C:\Users\me\repo"));
+        assert!(directories_match(r"C:\Users\me\repo", r"\\?\c:\users\ME\repo"));
+        assert!(directories_match(r"\\?\UNC\srv\share\repo", r"\\srv\share\repo"));
+        // Plain and POSIX forms are unaffected.
+        assert!(directories_match("/home/me/repo/", "/home/me/repo"));
+        // A different directory must still not match.
+        assert!(!directories_match(r"\\?\C:\Users\me\other", r"C:\Users\me\repo"));
+    }
 
     #[test]
     fn commandcode_projects_dir_resolves_base_without_slug() {
