@@ -217,39 +217,40 @@ pub fn resolve_autopilot_spawn_option(
 /// [`UnknownHarness`](AutopilotCompatibilityReason::UnknownHarness) with the
 /// raw id the user typed.
 ///
-/// Maps the canonical aliases:
-/// - `"claude"` → `"anthropic"` (the `HarnessProfile.id = "claude"` row points
-///   at the Anthropic executor; see `preferences::default_harness_profiles`).
+/// Catalog-driven, not a hand-written per-harness match (issue #1822): any id
+/// equal to a [`Provider::all`] adapter id resolves to itself, so a newly
+/// registered harness cannot be forgotten here and silently fail the
+/// Autopilot / reviewer gates as `UnknownHarness`. The match is kept only for
+/// legacy aliases that are *not* catalog ids:
+/// - `"claude"` / `"claude_code"` → `"anthropic"` (the
+///   `HarnessProfile.id = "claude"` row points at the Anthropic executor; see
+///   `preferences::default_harness_profiles`).
+/// - `"antigravity"` → `"agy"`.
 /// - `"minimax-code"` → `"mcode"` (legacy id, kept in
 ///   `Provider::from_db_str`).
-/// - `"antigravity"` → `"agy"`, `"claude_code"` → `"anthropic"`,
-///   `"cmd"` → `"commandcode"` (legacy ids the frontend
-///   `harnessIdForProvider` and stored provider rows still carry —
-///   issue #1816 review: every id the frontend judges must resolve
-///   here too, or the backend gate answers `UnknownHarness` where the
-///   UI claims eligibility).
+/// - `"deepseek-harness"` / `"deepseek"` → `"dsh"`.
+/// - `"command-code"` / `"cmdc"` / `"cmd"` → `"commandcode"` (legacy ids the
+///   frontend `harnessIdForProvider` and stored provider rows still carry —
+///   issue #1816 review: every id the frontend judges must resolve here too,
+///   or the backend gate answers `UnknownHarness` where the UI claims
+///   eligibility).
 ///
-/// Stable case-folded lookup — `"Claude Code"`, `"  claude  "`, and
-/// `"ANTHROPIC"` all resolve to the same adapter.
+/// Stable case-folded lookup — `"Claude"`, `"  CLAUDE  "`, and `"ANTHROPIC"`
+/// all resolve to the same adapter.
 pub fn resolve_harness_adapter_id(harness_id: &str) -> Option<&'static str> {
     let normalized = harness_id.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "claude" | "anthropic" | "claude_code" => Some("anthropic"),
-        "codex" => Some("codex"),
-        "cursor" => Some("cursor"),
-        "agy" | "antigravity" => Some("agy"),
-        "opencode" => Some("opencode"),
-        "grok" => Some("grok"),
-        "kimi" => Some("kimi"),
-        "mcode" | "minimax-code" => Some("mcode"),
-        "dsh" | "deepseek-harness" | "deepseek" => Some("dsh"),
-        "commandcode" | "command-code" | "cmdc" | "cmd" => Some("commandcode"),
-        "muse" => Some("muse"),
-        "freebuff" => Some("freebuff"),
-        "cline" => Some("cline"),
-        "terminal" => Some("terminal"),
-        _ => None,
-    }
+    let candidate = match normalized.as_str() {
+        "claude" | "claude_code" => "anthropic",
+        "antigravity" => "agy",
+        "minimax-code" => "mcode",
+        "deepseek-harness" | "deepseek" => "dsh",
+        "command-code" | "cmdc" | "cmd" => "commandcode",
+        other => other,
+    };
+    Provider::all()
+        .iter()
+        .find(|p| p.adapter().id() == candidate)
+        .map(|p| p.adapter().id())
 }
 
 /// Look up the [`HarnessCapabilities`] descriptor for a Spawn Option's
@@ -629,6 +630,60 @@ mod tests {
         assert_eq!(resolve_harness_adapter_id("foo"), None);
         assert_eq!(resolve_harness_adapter_id(""), None);
         assert_eq!(resolve_harness_adapter_id("   "), None);
+    }
+
+    /// Issue #1822 acceptance criterion: every id in the canonical
+    /// [`Provider::all`] set resolves to its own adapter id. This is the
+    /// direct pin on the resolver's class-of-bug — a new `Provider` variant
+    /// whose adapter is not covered here trips this test rather than
+    /// silently closing the Autopilot gate as `UnknownHarness`.
+    #[test]
+    fn resolve_harness_adapter_id_covers_provider_enum() {
+        for provider in Provider::all() {
+            let adapter = provider.adapter().id();
+            assert_eq!(
+                resolve_harness_adapter_id(adapter),
+                Some(adapter),
+                "Provider::all() adapter {adapter} must resolve to itself"
+            );
+            assert!(
+                lookup_capabilities(adapter).is_some(),
+                "Provider::all() adapter {adapter} must have a capability descriptor"
+            );
+        }
+    }
+
+    /// Issue #1822 acceptance criterion: enumerate the generated catalog
+    /// (`src/types/generated/HarnessCapabilitiesTable.json`) and assert every
+    /// harness id resolves. The generated file is the artifact the Inspector
+    /// and the frontend predicate read, so a future adapter without a
+    /// resolver arm fails here rather than disagreeing with the UI.
+    #[test]
+    fn resolve_harness_adapter_id_covers_generated_catalog() {
+        let catalog: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/types/generated/HarnessCapabilitiesTable.json"
+        ))
+        .expect("generated HarnessCapabilitiesTable.json must parse");
+        let ids = catalog
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .expect("catalog JSON must include ids in Provider::all() order");
+        assert!(
+            !ids.is_empty(),
+            "catalog ids must not be empty or the check is vacuous"
+        );
+        for id in ids {
+            let id = id.as_str().expect("catalog ids must be strings");
+            assert_eq!(
+                resolve_harness_adapter_id(id),
+                Some(id),
+                "catalog harness {id} must resolve to its own adapter id"
+            );
+            assert!(
+                lookup_capabilities(id).is_some(),
+                "catalog harness {id} must have a capability descriptor"
+            );
+        }
     }
 
     /// `lookup_capabilities` returns the same descriptor for a native id
@@ -1193,6 +1248,30 @@ mod tests {
         );
         assert!(result.reasons.is_empty());
         assert_eq!(result.resolved_harness_id.as_deref(), Some("mcode"));
+    }
+
+    /// Issue #1822: a Mesh defaulted to Cursor must clear the Autopilot gate
+    /// on harness capability grounds — Cursor advertises a native attention
+    /// hook (`requires_attention_hook: true`). Only the mesh-level
+    /// `WorktreeDisabled` conflict may block it, never `UnknownHarness`.
+    #[test]
+    fn compute_for_mesh_allows_cursor_default() {
+        let result = compute_for_mesh(None, Some("cursor"), None, true);
+        assert!(
+            result.allowed,
+            "Cursor default must be allowed on harness capability grounds; got reasons: {:?}",
+            result.reasons
+        );
+        assert_eq!(result.resolved_harness_id.as_deref(), Some("cursor"));
+        assert_eq!(result.resolved_spawn_option.as_deref(), Some("cursor"));
+
+        let blocked = compute_for_mesh(None, Some("cursor"), None, false);
+        assert!(!blocked.allowed);
+        assert_eq!(
+            blocked.reasons,
+            vec![AutopilotCompatibilityReason::WorktreeDisabled],
+            "worktrees off must be the only reason a Cursor mesh is blocked"
+        );
     }
 
     /// `compute_for_mesh` falls through to mesh default when explicit is
