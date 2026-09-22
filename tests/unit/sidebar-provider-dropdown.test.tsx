@@ -172,9 +172,9 @@ describe('ProviderDropdown', () => {
     });
   });
 
-  // A fixed-position anchored menu escapes the sidebar scroll container;
-  // the shared hook positions it above a trigger near the viewport bottom.
-  it('positions the fixed dropdown against its trigger and inside the viewport', () => {
+  // The shared clamp hook keeps the dropdown in the viewport when its
+  // trigger is near the bottom edge.
+  it('wires the viewport clamp hook for an overflowing dropdown', () => {
     const rectSpy = vi
       .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
       .mockReturnValue({
@@ -191,9 +191,7 @@ describe('ProviderDropdown', () => {
 
     render(<ProviderDropdown dropdownKey="mesh-1" providers={PROVIDERS} onSelect={() => {}} />);
     const menu = document.querySelector('[data-dropdown-for="mesh-1"]') as HTMLElement;
-    expect(menu.className).toContain('fixed');
-    expect(menu.style.left).toBe('8px');
-    expect(menu.style.top).toBe('196px');
+    expect(menu.style.transform).toMatch(/translateY\(-/);
     rectSpy.mockRestore();
   });
 });

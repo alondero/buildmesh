@@ -35,7 +35,6 @@ export interface GroupedProviderMenuProps {
 export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
-  const launchMode = configurationsEnabled;
   const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && (
     providers.some((row) => row.configuration && row.harness_id === option.harness_id)
     || (option.capabilities && (option.capabilities.supports_model_override
@@ -50,9 +49,9 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   // `ProviderPicker` via `groupByHarness` (issue #583 cleanup).
   const groups = useMemo(
     () => groupByHarness(providers, { filter: (option) =>
-      (launchMode ? !option.is_proxied && !option.configuration : !option.configuration)
+      (configurationsEnabled ? !option.is_proxied && !option.configuration : !option.configuration)
       && (!filter || filter(option)) }),
-    [providers, filter, launchMode],
+    [providers, filter, configurationsEnabled],
   );
 
   // Issue #814 — visible parent rows in render order (native harnesses

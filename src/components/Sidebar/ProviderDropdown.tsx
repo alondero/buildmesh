@@ -1,9 +1,9 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
 import { PREREQUISITES_URL } from '../../lib/urls';
-import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
+import { useViewportClamp } from '../../hooks/useViewportClamp';
 
 // `SpawnOption` is the frontend view of the Spawn Option wire shape
 // (issue #583) — produced by `mapBackendProviders` and consumed by the
@@ -63,12 +63,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
   // if limited, spawn — so this augments rather than replaces the menu.
   const noAgent = !hasSpawnableAgent(providers);
   const menuRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLElement>(null);
-  // The dropdown mounts inside SpawnButtonCluster's relative wrapper.
-  // Capture that wrapper before the anchored-position effect runs; the
-  // fixed menu then escapes the sidebar's overflow-y-auto clipping.
-  useLayoutEffect(() => { triggerRef.current = menuRef.current?.parentElement ?? null; }, []);
-  useAnchoredPosition(triggerRef, menuRef, true, { align: 'start', margin: 8 });
+  useViewportClamp(menuRef, [providers]);
   return (
     <div
       ref={menuRef}
@@ -88,7 +83,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       // surface, with the inner `GroupedProviderMenu` adding its own
       // label for the menu itself.
       aria-label="Select a provider"
-      className="fixed z-50 w-80 max-w-[calc(100vw-16px)] bg-bg-overlay border border-border-default rounded-md shadow-md max-h-[400px] overflow-y-auto animate-scale-in origin-top-left"
+      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[400px] overflow-y-auto animate-scale-in origin-top-right"
     >
       {noAgent && (
         <div

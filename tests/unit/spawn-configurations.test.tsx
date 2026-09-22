@@ -64,7 +64,9 @@ describe('Spawn configurations', () => {
     fireEvent.keyDown(cancel, { key: 'Tab' });
     expect(document.activeElement).toBe(screen.getByLabelText('Name'));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
+    expect(await screen.findByRole('menuitem', { name: 'Sol' })).toBeTruthy();
+    expect(screen.getByTestId('spawn-configurations')).toBeTruthy();
+    expect(api.saveSpawnConfiguration).toHaveBeenCalled();
     expect(api.saveSpawnConfiguration).toHaveBeenCalledWith({
       id: '', name: 'Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null,
     });
@@ -124,18 +126,17 @@ describe('Spawn configurations', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('delete failed'));
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(screen.queryByTestId('spawn-configurations')).toBeNull());
+    await screen.findByText('No saved configurations');
     expect(api.deleteSpawnConfiguration).toHaveBeenCalledWith('sol');
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
     const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, effort_control: { kind: 'none' as const } } };
-    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false }]);
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
-    expect(await screen.findByLabelText('Model')).toBeTruthy();
+    expect(screen.getByLabelText('Model')).toBeTruthy();
     expect(screen.queryByLabelText('Effort')).toBeNull();
     expect(screen.queryByLabelText('Extra arguments')).toBeNull();
   });

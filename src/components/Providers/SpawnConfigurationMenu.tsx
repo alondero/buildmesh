@@ -23,9 +23,13 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const [draft, setDraft] = useState<SpawnConfiguration | null>(option.configuration ?? null);
   const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
+  const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const unavailableById = new Map(configurationRows.map((row) => [row.id, row.unavailable_reason]));
+  const caps = option.capabilities;
+  const effort = caps?.effort_control;
+  const allowedEfforts = effort && effort.kind !== 'none' ? effort.allowed : [];
 
   useEffect(() => {
     onEditingChange(draft !== null);
@@ -43,12 +47,12 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   }, [option.id, option.harness_id, option.configuration]);
 
   useEffect(() => {
-    if (!draft) return;
+    if (!draft?.id && !option.configuration) return;
     let current = true;
     getLaunchTargets().then((values) => { if (current) { setTargets(values); setTargetError(null); } })
       .catch((e: unknown) => { if (current) setTargetError(String(e)); });
     return () => { current = false; };
-  }, [draft]);
+  }, [draft?.id, option.configuration]);
 
   useLayoutEffect(() => {
     // The top layer escapes animated/scrolling ancestors while the DOM stays
@@ -87,7 +91,28 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   }, [draft]);
 
   const close = () => { onClose(); anchor.focus({ preventScroll: true }); };
+  const save = async () => {
+    if (!draft || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await saveSpawnConfiguration(draft);
+      setConfigurations((previous) => {
+        const index = previous.findIndex((value) => value.id === saved.id);
+        if (index < 0) return [...previous, saved];
+        const next = [...previous];
+        next[index] = saved;
+        return next;
+      });
+      setDraft(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const menuClass = 'w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
+  const mutedMenuClass = 'w-full px-3 py-2 text-left text-sm text-text-muted';
   const menuEntries = [
     { id: 'defaults', kind: 'spawn' as const },
     ...configurations.flatMap((value) => [
@@ -146,22 +171,59 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         }
       }}
     >
-      {draft ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? close : () => setDraft(null)}
-        onSave={async (value) => { await saveSpawnConfiguration(value); onDismiss(); }}
-        onDelete={draft.id ? async () => { await deleteSpawnConfiguration(draft.id); onDismiss(); } : undefined} /> : (
+      {draft?.id ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? close : () => setDraft(null)}
+        onSave={async (value) => {
+          const saved = await saveSpawnConfiguration(value);
+          setConfigurations((previous) => previous.map((entry) => entry.id === saved.id ? saved : entry));
+          setDraft(null);
+        }}
+        onDelete={async () => {
+          await deleteSpawnConfiguration(draft.id);
+          setConfigurations((previous) => previous.filter((entry) => entry.id !== draft.id));
+          setDraft(null);
+        }} /> : draft ? (
+        <form className="space-y-3 p-3" aria-label="Edit spawn configuration" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+          <p className="text-sm font-medium text-text-primary">New configuration</p>
+          <p className="text-xs text-text-muted">{option.label}. Unset fields inherit current defaults.</p>
+          <fieldset disabled={busy} className="space-y-3">
+            <label className="block text-xs text-text-secondary">Name
+              <input autoFocus required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary" />
+            </label>
+            {caps?.supports_model_override && <label className="block text-xs text-text-secondary">Model
+              <input value={draft.model ?? ''} placeholder="Default" onChange={(e) => setDraft({ ...draft, model: e.target.value || null })} className="w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary" />
+            </label>}
+            {allowedEfforts.length > 0 && <label className="block text-xs text-text-secondary">Effort
+              <select aria-label="Effort" value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })} className="w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary">
+                <option value="">Default</option>
+                {allowedEfforts.map((value) => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </label>}
+            {caps?.supports_extra_args && <label className="block text-xs text-text-secondary">Extra arguments
+              <input value={draft.extra_args ?? ''} onChange={(e) => setDraft({ ...draft, extra_args: e.target.value || null })} className="w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary" />
+            </label>}
+            <div className="flex gap-3 text-sm text-text-primary">
+              <button type="submit" disabled={!draft.name.trim()}>Save</button>
+              <button type="button" onClick={() => setDraft(null)}>Cancel</button>
+            </div>
+          </fieldset>
+        </form>
+      ) : (
         <div role="menu" aria-label={`${option.label} configurations`}>
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">No saved configurations</p>}
-          {configurations.map((value) => <div key={value.id} role="presentation" className="flex">
-            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
-              aria-disabled={Boolean(unavailableById.get(value.id))} title={unavailableById.get(value.id) ?? undefined}
-              className={`w-full min-w-0 flex-1 break-words px-3 py-2 text-left text-sm focus:outline-none ${unavailableById.get(value.id) ? 'cursor-default text-text-muted' : 'text-text-primary hover:bg-bg-selection focus:bg-bg-selection'}`} onClick={(e) => { if (!unavailableById.get(value.id)) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
-              {value.name}{unavailableById.get(value.id) && <span className="block text-text-muted">{unavailableById.get(value.id)}</span>}
-            </button>
-            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
-          </div>)}
-          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : 'w-full px-3 py-2 text-left text-sm text-text-muted'} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
+          {configurations.map((value) => {
+            const unavailable = unavailableById.get(value.id);
+            return <div key={value.id} role="presentation" className="flex">
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
+                aria-disabled={Boolean(unavailable)} title={unavailable ?? undefined}
+                className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
+                {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
+              </button>
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
+            </div>;
+          })}
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
         </div>
       )}
       {(error || (draft && targetError)) && <p role="alert" className="p-3 text-xs text-status-error">{error ?? targetError}</p>}

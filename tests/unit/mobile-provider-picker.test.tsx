@@ -153,7 +153,7 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
       expect(call).toBeTruthy();
-      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "proxy-max", configuration_id: "proxy-max" });
+      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "claude:custom-account", configuration_id: "proxy-max" });
     });
   });
 
@@ -173,7 +173,7 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
       expect(call).toBeTruthy();
-      expect(JSON.parse(call![1].body)).toMatchObject({ provider: "launch/claude:kimi", configuration_id: "launch/claude:kimi" });
+      expect(JSON.parse(call![1].body)).toMatchObject({ provider: "claude:kimi", configuration_id: "launch/claude:kimi" });
     });
   });
 
@@ -182,6 +182,24 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     expect(screen.queryByTestId("provider-claude:kimi")).toBeNull();
     expect(screen.queryByTestId("provider-claude:custom-account")).toBeNull();
     expect(screen.queryByText("Claude Code configurations")).toBeNull();
+  });
+
+  it("never promotes a configuration row to a launchable harness parent", async () => {
+    const recipe = { id: "only-recipe", name: "Codex Sol", spawn_option_id: "codex", model: "gpt-5.6-sol", effort: null, extra_args: null };
+    const fetch = mockApi([provider({ id: recipe.id, label: recipe.name, harness_id: "codex", group_key: "codex", configuration: recipe })]);
+    render(<NodeList onOpenNode={noop} onOpenAgentNodes={noop} onOpenIssues={noop} onOffline={noop} onAuthFailed={noop} />);
+    await screen.findByTestId("node-list");
+    fireEvent.click(screen.getByTestId("new-node-1"));
+    await screen.findByTestId("provider-picker");
+    expect(screen.queryByTestId("provider-only-recipe")).toBeNull();
+    expect(screen.getByRole("heading", { name: "codex" })).toBeTruthy();
+    fireEvent.click(screen.getByText("codex configurations"));
+    fireEvent.click(await screen.findByRole("button", { name: "Codex Sol" }));
+    await waitFor(() => {
+      const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call![1].body)).toMatchObject({ provider: "codex", configuration_id: "only-recipe" });
+    });
   });
 
   it("renders the wire glyph for a native row whose harness has no brand", async () => {
