@@ -452,6 +452,59 @@ mod routing_cache_tests {
         preferences::reset_for_tests();
     }
 
+    #[test]
+    fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
+        let temp = tempfile::tempdir().unwrap();
+        preferences::init_for_tests(temp.path().to_path_buf());
+        let resolved = crate::env::ResolvedPath {
+            host_path: "C:/work".into(),
+            spawn_path: "C:/work".into(),
+            raw_path: "C:/work".into(),
+            env_type: crate::models::EnvType::Windows,
+        };
+        for (surface, source_harness, base_url) in [
+            (preferences::ApiSurface::Anthropic, "claude", "https://example.invalid/anthropic"),
+            (preferences::ApiSurface::OpenAI, "codex", "https://example.invalid/v1"),
+        ] {
+            let prefs = preferences::AppPreferences {
+                harness_profiles: vec![preferences::HarnessProfile {
+                    id: "cline".into(), name: "Cline".into(), harness: "cline".into(),
+                    runtime: None, wsl_distro: None, executable: None,
+                }],
+                provider_accounts: vec![preferences::ProviderAccount {
+                    id: "custom".into(), name: "Custom".into(), enabled: true,
+                    billing_mode: preferences::BillingMode::PayAsYouGo,
+                    claude_compatible: true, api_key: Some("test-key".into()),
+                }],
+                provider_pairings: vec![preferences::ProviderPairing {
+                    harness_id: source_harness.into(), provider_id: "custom".into(), surface,
+                    base_url: Some(base_url.into()),
+                    model_tiers: preferences::ModelTiers { default: Some("test-model".into()), ..Default::default() },
+                }],
+                spawn_configurations: vec![preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/cline:custom".into(), name: "Cline custom".into(),
+                    spawn_option_id: "cline:custom".into(), ..Default::default()
+                }],
+                ..Default::default()
+            };
+            preferences::save(prefs.clone()).unwrap();
+            let plan = preferences::launch_configurations::capture_legacy(
+                &prefs, "launch/cline:custom", &Default::default(),
+            ).unwrap();
+            assert_eq!(plan.route.as_ref().map(|route| route.surface), Some(surface));
+            let routing = prepare_snapshot(&plan, &resolved).unwrap();
+            let PreparedLaunchRouting::Environment(env) = routing else {
+                panic!("expected Cline environment routing");
+            };
+            let key_name = match surface {
+                preferences::ApiSurface::Anthropic => "ANTHROPIC_API_KEY",
+                preferences::ApiSurface::OpenAI => "OPENAI_API_KEY",
+            };
+            assert_eq!(env.iter().find(|(key, _)| key == key_name).map(|(_, value)| value.as_str()), Some("test-key"));
+        }
+        preferences::reset_for_tests();
+    }
+
     fn key(id: &str) -> RoutingCacheKey {
         (id.to_string(), "anthropic", "windows")
     }

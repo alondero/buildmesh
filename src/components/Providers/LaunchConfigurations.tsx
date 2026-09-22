@@ -33,7 +33,7 @@ export function LaunchConfigurations({ api, onDirtyChange, onChanged, refreshTok
   return <div className="launch-config-form">
     {loading && <p role="status">Loading Launch Configurations…</p>}
     {error && <p role="alert">{error} <button onClick={() => setRevision((v) => v + 1)}>Retry</button></p>}
-    {values.map((value) => <div key={value.id} className="mb-3">
+    {values.map((value) => <div key={value.id} className="launch-config-item">
       <p>{value.name} · {value.generated && !value.generated.user_owned ? 'Generated' : 'User-owned'}</p>
       <div className="launch-config-actions">
         <button onClick={() => setDraft(value)} aria-label={`Edit ${value.name}`}>Edit</button>

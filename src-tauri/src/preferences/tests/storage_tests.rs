@@ -99,10 +99,23 @@ fn reviewer_provider_helper_strips_blank_strings() {
 #[test]
 fn malformed_json_falls_back_to_default() {
     with_temp_dir(|tmp| {
-        std::fs::write(tmp.join("preferences.json"), "{not valid json").unwrap();
+        let original = "{not valid json";
+        std::fs::write(tmp.join("preferences.json"), original).unwrap();
         let prefs = load().unwrap();
         assert_eq!(prefs.default_provider, AppPreferences::default().default_provider);
         assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+        assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
+    });
+}
+
+#[test]
+fn type_invalid_preferences_are_not_overwritten_by_a_read() {
+    with_temp_dir(|tmp| {
+        let original = r#"{"spawn_configurations":"not-an-array"}"#;
+        std::fs::write(tmp.join("preferences.json"), original).unwrap();
+        let prefs = load().unwrap();
+        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+        assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
     });
 }
 

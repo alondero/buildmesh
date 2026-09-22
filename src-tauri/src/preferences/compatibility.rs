@@ -147,7 +147,7 @@ pub fn harness_default_for(prefs: &AppPreferences, profile_id: &str) -> Option<H
 /// duplicating the pairing per harness. Preference order follows
 /// [`fallback_surfaces`] (Anthropic first). Every other harness returns an
 /// empty fallback set, so its exact-match contract is unchanged.
-fn resolve_pairing(
+pub(crate) fn resolve_pairing(
     harness_id: &str,
     account: &ProviderAccount,
     stored: &[ProviderPairing],

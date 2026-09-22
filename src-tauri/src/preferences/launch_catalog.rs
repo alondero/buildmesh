@@ -54,7 +54,9 @@ pub fn get_launch_targets() -> Result<Vec<LaunchTarget>, String> {
         };
         let mut targets = vec![native.clone()];
         for route in prefs.provider_pairings.iter().filter(|p| p.harness_id == harness.id) {
-            if super::surface_for_executor(crate::models::Provider::from_db_str(&harness.harness)) != Some(route.surface) { continue; }
+            let executor = crate::models::Provider::from_db_str(&harness.harness);
+            if executor != crate::models::Provider::Cline
+                && super::surface_for_executor(executor) != Some(route.surface) { continue; }
             let entry = catalogue.iter().find(|p| p.id == route.provider_id);
             let models = entry.map(|p| p.models.iter().filter(|m| m.surface == route.surface).cloned()
                 .map(|mut m| { m.efforts = Some(allowed_efforts(&caps, Some(&m))); m }).collect()).unwrap_or_default();

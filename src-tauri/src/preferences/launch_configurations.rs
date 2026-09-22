@@ -197,9 +197,22 @@ fn resolve_plan(
         if require_available && account.api_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
             return Err(format!("Provider '{}' has no credential; add its key in Providers", account.name));
         }
+        let executor = Provider::from_db_str(&harness.harness);
         let mut route = prefs.provider_pairings.iter().find(|p| p.harness_id == harness.id && p.provider_id == provider_id)
-            .cloned().ok_or_else(|| "Provider Route is missing; restore it in Launch Configurations".to_string())?;
-        if super::surface_for_executor(Provider::from_db_str(&harness.harness)) != Some(route.surface) {
+            .cloned();
+        // Cline's native auth flow can consume an existing Claude- or
+        // Codex-attached pairing for the same account. Preserve that legacy
+        // surface fallback when resolving a Launch Configuration; otherwise
+        // the common resolver fails before launch_routing can emit Cline's
+        // consumer-specific environment.
+        if route.is_none() && executor == Provider::Cline {
+            route = prefs.provider_accounts.iter().find(|a| a.id == provider_id)
+                .and_then(|account| super::compatibility::resolve_pairing("cline", account, &prefs.provider_pairings));
+        }
+        let mut route = route.ok_or_else(|| "Provider Route is missing; restore it in Launch Configurations".to_string())?;
+        let supports_surface = executor == Provider::Cline
+            || super::surface_for_executor(executor) == Some(route.surface);
+        if !supports_surface {
             return Err("Provider Route uses an API surface this harness does not support".into());
         }
         if let Some(model) = config.model.as_ref() { route.model_tiers.default = Some(model.clone()); }
