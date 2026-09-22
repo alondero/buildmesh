@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
 import type { SpawnOption } from '../../src/lib/groups';
@@ -6,7 +6,7 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listSpawnConfigurations: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
+  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
 }));
 
 const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
@@ -29,9 +29,12 @@ const option: SpawnOption = {
 const saved: SpawnConfiguration = {
   id: 'sol', name: 'Sol Max', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: 'max', extra_args: null,
 };
+const savedRow = { ...option, id: saved.id, label: saved.name, configuration: saved };
+const claudeTarget = { ...target, id: 'claude', harness_id: 'claude', harness_name: 'Claude Code' };
 afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.listProviders).mockResolvedValue([option, savedRow]);
   vi.mocked(api.listSpawnConfigurations).mockResolvedValue([saved]);
   vi.mocked(api.getLaunchTargets).mockResolvedValue([target]);
 });
@@ -128,6 +131,80 @@ describe('Spawn configurations', () => {
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
     await screen.findByText('No saved configurations');
     expect(api.deleteSpawnConfiguration).toHaveBeenCalledWith('sol');
+  });
+
+  it('removes a saved recipe from its old submenu when its harness changes', async () => {
+    const moved = { ...saved, spawn_option_id: 'claude', harness_id: 'claude' };
+    const movedRow = { ...option, id: saved.id, label: saved.name, harness_id: 'claude', group_key: 'claude', configuration: moved };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([target, claudeTarget]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(moved);
+    vi.mocked(api.listProviders).mockResolvedValue([option, movedRow]);
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Claude Code' });
+    fireEvent.change(screen.getByLabelText('Harness'), { target: { value: 'claude' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
+    expect(api.listProviders).toHaveBeenCalled();
+    await screen.findByText('No saved configurations');
+    expect(screen.queryByRole('menuitem', { name: 'Sol Max' })).toBeNull();
+    expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({ spawn_option_id: 'claude' }));
+  });
+
+  it('refreshes recipe availability after an edit', async () => {
+    const unavailableRow = { ...savedRow, unavailable_reason: 'Harness is unavailable' };
+    const refreshedRow = { ...savedRow, unavailable_reason: undefined };
+    vi.mocked(api.listProviders).mockResolvedValue([option, refreshedRow]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(saved);
+    render(<GroupedProviderMenu providers={[option, unavailableRow]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    await screen.findByLabelText('Edit Sol Max');
+    const recipe = screen.getByText('Sol Max').closest('button[role="menuitem"]')!;
+    expect(recipe.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Codex' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await screen.findByLabelText('Edit Sol Max');
+    expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false');
+  });
+
+  it('reports launch-target load failures while editing a saved recipe', async () => {
+    vi.mocked(api.getLaunchTargets).mockRejectedValueOnce(new Error('targets unavailable'));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('targets unavailable');
+    expect(screen.getByLabelText('Name')).toBeTruthy();
+  });
+
+  it('ignores a launch-target response after its editor is cancelled and reopened', async () => {
+    let resolveFirst!: (value: typeof target[]) => void;
+    let resolveSecond!: (value: typeof target[]) => void;
+    vi.mocked(api.getLaunchTargets)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+
+    await act(async () => {
+      resolveSecond([target, claudeTarget]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveFirst([{ ...target, id: 'ghost', harness_id: 'ghost', harness_name: 'Ghost Harness' }]);
+      await Promise.resolve();
+    });
+
+    const harnesses = screen.getByLabelText('Harness') as HTMLSelectElement;
+    expect(Array.from(harnesses.options).map((entry) => entry.value)).toContain('claude');
+    expect(Array.from(harnesses.options).map((entry) => entry.value)).not.toContain('ghost');
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
