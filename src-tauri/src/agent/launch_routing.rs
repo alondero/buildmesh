@@ -273,6 +273,21 @@ fn resolve_routing(
     resolved: &ResolvedPath,
     executable_override: Option<PathBuf>,
 ) -> Result<PreparedLaunchRouting, String> {
+    // Cline can consume a stored pairing attached to Claude Code or Codex
+    // when no Cline-specific pairing exists. Resolve that surface fallback
+    // through the consumer-aware compatibility emitter before attempting the
+    // exact pairing lookup below; otherwise a legacy `cline:<account>` launch
+    // (and its snapshot resume) is rejected as "pairing no longer exists".
+    if provider == Provider::Cline && spawn_option_id.contains(':') {
+        preferences::preflight_resolve_provider_env(spawn_option_id)?;
+        let env = preferences::resolve_provider_env(spawn_option_id);
+        if env.is_empty() {
+            return Err(format!(
+                "selected proxied pairing '{spawn_option_id}' no longer exists"
+            ));
+        }
+        return Ok(PreparedLaunchRouting::Environment(env));
+    }
     let Some((pairing, account)) =
         preferences::resolve_stored_pairing_and_account(spawn_option_id)?
     else {
@@ -284,13 +299,52 @@ fn resolve_routing(
         return Ok(PreparedLaunchRouting::Native { executable: executable_override });
     };
 
+    preferences::preflight_resolve_provider_env(spawn_option_id)?;
+    if provider == Provider::Anthropic {
+        return Ok(PreparedLaunchRouting::Environment(preferences::resolve_provider_env(spawn_option_id)));
+    }
+    prepare_route(pairing, account, provider, resolved, None)
+}
+
+pub fn prepare_snapshot(
+    plan: &preferences::launch_configurations::ResolvedLaunchPlan,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
+    if resolved.env_type == crate::models::EnvType::WindowsInterop
+        && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none())
+    {
+        return Err("Windows harnesses require an interoperable WSL host with powershell.exe on PATH.".into());
+    }
+    if let Some(distro) = &plan.harness.wsl_distro {
+        if resolved.env_type == crate::models::EnvType::Wsl
+            && crate::env::get_default_wsl_distro().as_deref() != Some(distro.as_str())
+        {
+            return Err(format!("This saved launch belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh."));
+        }
+    }
+    let Some(route) = plan.route.clone() else {
+        return Ok(PreparedLaunchRouting::Native { executable: plan.harness.executable.clone() });
+    };
+    let account = preferences::provider_accounts().into_iter().find(|a| a.id == route.provider_id)
+        .ok_or_else(|| format!("Provider account '{}' is missing; restore its credential to resume", route.provider_id))?;
+    prepare_route(route, account, Provider::from_db_str(&plan.harness.harness), resolved, plan.verification.as_ref())
+}
+
+fn prepare_route(
+    pairing: preferences::ProviderPairing,
+    account: preferences::ProviderAccount,
+    provider: Provider,
+    resolved: &ResolvedPath,
+    verification: Option<&preferences::PairingVerification>,
+) -> Result<PreparedLaunchRouting, String> {
+    preferences::compatibility::preflight_pairing_env(Some(&pairing), &account.id)?;
     match provider {
         Provider::Codex => {
-            let verified = crate::services::provider_verification::verified_codex_pairing(
-                &pairing,
-                &account,
-                resolved.env_type,
-            )?;
+            let verified = if verification.is_some() {
+                crate::services::provider_verification::verified_codex_snapshot(&pairing, &account, resolved.env_type, verification)?
+            } else {
+                crate::services::provider_verification::verified_codex_pairing(&pairing, &account, resolved.env_type)?
+            };
             let profile_name = codex::stable_profile_name(&pairing.harness_id, &pairing.provider_id);
             codex::materialize_proxy_profile(
                 resolved.env_type,
@@ -302,7 +356,6 @@ fn resolve_routing(
             // Codex's verified install path wins over the profile's bare
             // `executable` — it carries the npm-shim location after
             // verification, which is what Codex's actual binary is.
-            let _ = executable_override;
             Ok(PreparedLaunchRouting::CodexProxy {
                 harness_id: pairing.harness_id,
                 provider_id: pairing.provider_id,
@@ -315,7 +368,7 @@ fn resolve_routing(
                 credential: verified.credential,
             })
         }
-        Provider::Anthropic => {
+        Provider::Anthropic | Provider::Cline => {
             if !account.enabled {
                 return Err(format!("provider '{}' is disabled", account.name));
             }
@@ -332,10 +385,22 @@ fn resolve_routing(
                     .reason
                     .unwrap_or_else(|| "incompatible capability contract".into()));
             }
-            preferences::preflight_resolve_provider_env(spawn_option_id)?;
-            Ok(PreparedLaunchRouting::Environment(
-                preferences::resolve_provider_env(spawn_option_id),
-            ))
+            let env = if provider == Provider::Cline {
+                preferences::compatibility::cline_consumer_env(
+                    pairing.surface,
+                    pairing.base_url.as_deref(),
+                    account.api_key.as_deref(),
+                    &pairing.model_tiers,
+                )
+            } else {
+                preferences::compatibility::surface_env(
+                    pairing.surface,
+                    pairing.base_url.as_deref(),
+                    account.api_key.as_deref(),
+                    &pairing.model_tiers,
+                )
+            };
+            Ok(PreparedLaunchRouting::Environment(env))
         }
         _ => Err("the selected harness does not support proxied providers".into()),
     }
@@ -344,6 +409,103 @@ fn resolve_routing(
 #[cfg(test)]
 mod routing_cache_tests {
     use super::*;
+
+    #[test]
+    fn cline_legacy_pairing_uses_cline_auth_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        preferences::init_for_tests(temp.path().to_path_buf());
+        preferences::save(preferences::AppPreferences {
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(),
+                name: "MiniMax".into(),
+                enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let resolved = crate::env::ResolvedPath {
+            host_path: "C:/work".into(),
+            spawn_path: "C:/work".into(),
+            raw_path: "C:/work".into(),
+            env_type: crate::models::EnvType::Windows,
+        };
+        let routing = resolve_routing("cline:minimax", Provider::Cline, &resolved, None).unwrap();
+        let PreparedLaunchRouting::Environment(env) = routing else {
+            panic!("expected Cline environment routing");
+        };
+        assert_eq!(env.iter().find(|(key, _)| key == "ANTHROPIC_API_KEY").map(|(_, value)| value.as_str()), Some("test-key"));
+        assert!(!env.iter().any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_empty()));
+        preferences::reset_for_tests();
+    }
+
+    #[test]
+    fn cline_launch_configuration_resolves_fallback_pairings_for_both_surfaces() {
+        let temp = tempfile::tempdir().unwrap();
+        preferences::init_for_tests(temp.path().to_path_buf());
+        let resolved = crate::env::ResolvedPath {
+            host_path: "C:/work".into(),
+            spawn_path: "C:/work".into(),
+            raw_path: "C:/work".into(),
+            env_type: crate::models::EnvType::Windows,
+        };
+        for (surface, source_harness, base_url) in [
+            (preferences::ApiSurface::Anthropic, "claude", "https://example.invalid/anthropic"),
+            (preferences::ApiSurface::OpenAI, "codex", "https://example.invalid/v1"),
+        ] {
+            let prefs = preferences::AppPreferences {
+                harness_profiles: vec![preferences::HarnessProfile {
+                    id: "cline".into(), name: "Cline".into(), harness: "cline".into(),
+                    runtime: None, wsl_distro: None, executable: None,
+                }],
+                provider_accounts: vec![preferences::ProviderAccount {
+                    id: "custom".into(), name: "Custom".into(), enabled: true,
+                    billing_mode: preferences::BillingMode::PayAsYouGo,
+                    claude_compatible: true, api_key: Some("test-key".into()),
+                }],
+                provider_pairings: vec![preferences::ProviderPairing {
+                    harness_id: source_harness.into(), provider_id: "custom".into(), surface,
+                    base_url: Some(base_url.into()),
+                    model_tiers: preferences::ModelTiers { default: Some("test-model".into()), ..Default::default() },
+                }],
+                spawn_configurations: vec![preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/cline:custom".into(), name: "Cline custom".into(),
+                    spawn_option_id: "cline:custom".into(), ..Default::default()
+                }],
+                ..Default::default()
+            };
+            preferences::save(prefs.clone()).unwrap();
+            let plan = preferences::launch_configurations::resolve(
+                &prefs, "launch/cline:custom", &Default::default(), &Default::default(),
+            ).unwrap();
+            assert_eq!(plan.route.as_ref().map(|route| route.surface), Some(surface));
+            let routing = prepare_snapshot(&plan, &resolved).unwrap();
+            let PreparedLaunchRouting::Environment(env) = routing else {
+                panic!("expected Cline environment routing");
+            };
+            let key_name = match surface {
+                preferences::ApiSurface::Anthropic => "ANTHROPIC_API_KEY",
+                preferences::ApiSurface::OpenAI => "OPENAI_API_KEY",
+            };
+            assert_eq!(env.iter().find(|(key, _)| key == key_name).map(|(_, value)| value.as_str()), Some("test-key"));
+            let resumed = preferences::launch_configurations::resolve_snapshot(&plan, &Default::default()).unwrap();
+            assert_eq!(resumed.route.as_ref().map(|route| route.surface), Some(surface));
+        }
+        preferences::reset_for_tests();
+    }
 
     fn key(id: &str) -> RoutingCacheKey {
         (id.to_string(), "anthropic", "windows")

@@ -35,13 +35,18 @@ use tauri::command;
 /// `provider_id`, `is_proxied = false`. `harness_id == profile.id` is the
 /// grouping key the frontend uses to bucket rows under their harness header
 /// (issue #575 / ADR-0016).
-pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
+pub(crate) fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
     if !profile_runtime_supported(profile, host) { return None; }
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     let target = profile_platform(profile, host);
     if !adapter.available_on().contains(&target) {
         return None;
     }
+    Some(profile_row(profile))
+}
+
+fn profile_row(profile: &crate::preferences::HarnessProfile) -> ProviderInfo {
+    let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     let ui = adapter.ui();
     // Backend-derived answer to "can this provider resume an archived
     // session in place?" — both flags must be true: supports_resume()
@@ -51,7 +56,7 @@ pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, ho
     // (e.g. "DeepSeek via Claude") shows up without the old hardcoded id
     // allow-list (#550 follow-up).
     let resumable = adapter.supports_resume() && adapter.produces_readable_transcript();
-    Some(ProviderInfo {
+    ProviderInfo {
         id: profile.id.clone(),
         label: profile.name.clone(),
         color: ui.color,
@@ -63,7 +68,9 @@ pub(super) fn provider_info_for(profile: &crate::preferences::HarnessProfile, ho
         group_key: profile.id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
         configurations: Vec::new(),
-    })
+        configuration: None,
+        unavailable_reason: None,
+    }
 }
 
 /// Compose the `ProviderInfo` (Spawn Option) row for one **Proxied Provider**
@@ -117,6 +124,8 @@ pub(super) fn provider_info_for_pairing(
         group_key: pairing.harness_id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
         configurations: Vec::new(),
+        configuration: None,
+        unavailable_reason: None,
     })
 }
 
@@ -268,7 +277,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let profiles = crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles());
     let profiles = crate::agent::detection::preferred_profiles(&profiles, Platform::current(),
         if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
-    let mut menu = compose_provider_menu(
+    let menu = compose_provider_menu(
         profiles,
         accounts,
         pairings,
@@ -276,17 +285,40 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         &crate::preferences::harness_order(),
         &crate::preferences::proxied_provider_order(),
     );
-    let configurations = crate::preferences::load()
-        .map(|p| p.spawn_configurations)
-        .unwrap_or_default();
-    for option in &mut menu {
-        option.configurations = configurations
-            .iter()
-            .filter(|c| c.spawn_option_id == option.id)
-            .cloned()
-            .collect();
+    let Ok(mut prefs) = crate::preferences::load() else { return menu; };
+    crate::preferences::launch_configurations::reconcile(&mut prefs);
+    configuration_menu(menu, &prefs)
+}
+
+fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::AppPreferences) -> Vec<ProviderInfo> {
+    let available = menu.iter().map(|row| row.id.clone()).collect::<std::collections::HashSet<_>>();
+    for configuration in &prefs.spawn_configurations {
+        let id = crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
+        let fallback = crate::preferences::HarnessProfile {
+            id: id.harness_id.clone(), name: id.harness_id.clone(),
+            harness: if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() },
+            runtime: None, wsl_distro: None, executable: None,
+        };
+        let profile = prefs.harness_profiles.iter().find(|p| p.id == id.harness_id()).unwrap_or(&fallback);
+        let mut row = menu.iter().find(|r| r.id == configuration.spawn_option_id).cloned()
+            .unwrap_or_else(|| profile_row(profile));
+        row.id = configuration.id.clone();
+        row.label = configuration.name.clone();
+        row.provider_id = id.provider_id.clone();
+        row.is_proxied = id.is_proxied();
+        row.configuration = Some(configuration.clone());
+        row.configurations.clear();
+        row.unavailable_reason = crate::preferences::launch_configurations::resolve(prefs, &configuration.id,
+            &Default::default(), &Default::default()).err();
+        if row.unavailable_reason.is_none() && !available.contains(&configuration.spawn_option_id) {
+            row.unavailable_reason = Some(if id.is_proxied() && available.contains(id.harness_id()) {
+                "Provider Route needs verification for this harness/runtime; open advanced routes".into()
+            } else { "Harness is unavailable; install and enable it".into() });
+        }
+        menu.push(row);
     }
-    menu
+    menu.retain(|row| row.configuration.is_some());
+    order_proxied_children(order_providers(menu, &prefs.harness_order), &prefs.proxied_provider_order)
 }
 
 /// Within each harness bucket, sort **Proxied Provider** children by the
@@ -472,6 +504,8 @@ mod tests {
             group_key: id.to_string(),
             capabilities: caps_all_false(id),
             configurations: Vec::new(),
+            configuration: None,
+            unavailable_reason: None,
         }
     }
 
@@ -748,6 +782,8 @@ mod tests {
             group_key: harness_id.to_string(),
             capabilities: caps_all_false(harness_id),
             configurations: Vec::new(),
+            configuration: None,
+            unavailable_reason: None,
         }
     }
 

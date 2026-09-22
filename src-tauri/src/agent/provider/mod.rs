@@ -360,6 +360,12 @@ pub struct ProviderInfo {
     /// Saved configurations offered under this Spawn Option on every client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configurations: Vec<crate::preferences::spawn_configurations::SpawnConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub configuration: Option<crate::preferences::spawn_configurations::SpawnConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unavailable_reason: Option<String>,
 }
 
 /// Behaviour an agent provider must declare.

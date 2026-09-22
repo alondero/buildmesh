@@ -2,6 +2,12 @@
 
 Status: accepted
 
+Launch Configuration amendment (#1857): provider endpoints, model choices, and
+model effort restrictions are also Rust-owned static metadata. The editor
+consumes generated wire types and backend-filtered launch targets. Effective
+effort is the intersection of model metadata and adapter capabilities; clients
+do not maintain an independent compatibility catalogue.
+
 Per-harness capability *values* (and Inspector/docs labels) are owned by the
 Rust adapters. `cargo test` emits a committed TypeScript/JSON snapshot under
 `src/types/generated/`. A hand-written TypeScript table that copies those

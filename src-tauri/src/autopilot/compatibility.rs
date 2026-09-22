@@ -202,7 +202,8 @@ pub fn resolve_autopilot_spawn_option(
         .or_else(|| non_empty(mesh_default_provider).map(str::to_string))
         .or_else(|| non_empty(app_default_provider).map(str::to_string))
         .unwrap_or_else(|| "claude".to_string());
-    let id = SpawnOptionId::from(spawn_option.as_str());
+    let selected = crate::preferences::launch_configurations::selection_option(&spawn_option).unwrap_or_else(|_| spawn_option.clone());
+    let id = SpawnOptionId::from(selected.as_str());
     let harness_id_string = id.harness_id().to_string();
     ResolvedAutopilotSpawnOption {
         spawn_option,
@@ -318,7 +319,8 @@ pub fn validate_reviewer_provider_id(value: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Ok(());
     }
-    let harness_id = SpawnOptionId::from(trimmed).harness_id().trim().to_string();
+    let selected = crate::preferences::launch_configurations::selection_option(trimmed)?;
+    let harness_id = SpawnOptionId::from(selected.as_str()).harness_id().trim().to_string();
     match reviewer_harness_reason(&harness_id) {
         None => Ok(()),
         Some(reason) => Err(reviewer_refusal_message(&reason)),

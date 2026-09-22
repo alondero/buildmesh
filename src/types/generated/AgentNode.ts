@@ -2,6 +2,7 @@
 import type { EnvType } from "./EnvType";
 import type { SessionStatus } from "./SessionStatus";
 import type { SignalHealth } from "./SignalHealth";
+import type { SpawnConfiguration } from "./SpawnConfiguration";
 
 /**
  * An agent node — isolated agent working directory.
@@ -48,7 +49,7 @@ branch: string, env: EnvType,
  * string is treated as "anthropic" by the resolver, so `Default` is a
  * behaviour-preserving stub.
  */
-provider: string, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, 
+provider: string, launch_configuration?: SpawnConfiguration, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, 
 /**
  * Whether the user has pinned this node for the Pinned Grid view
  * (wayfinder #982). Persisted so a pinned node survives app restarts

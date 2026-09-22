@@ -116,6 +116,34 @@ correct or safe by itself:
 - Use the Worktrees view to understand which branch and path belong to which
   node. Do not move a live worktree behind Buildmesh's back.
 
+## Launch Configurations
+
+Use **Settings → Launch Configurations** to name the recipes you launch. Choose
+a harness, native authentication or a provider, then a model, supported effort,
+and optional extra arguments. Known providers supply catalogue choices; generic
+providers retain manual model entry. **Advanced Provider Routes** owns endpoint
+and model-tier overrides; **Providers** continues to own credentials and billing.
+
+Adding or enabling a known provider creates compatible routes and generated
+configurations. Saving an edit makes a generated configuration user-owned;
+**Clone** creates an independent recipe. Deleted configurations are not recreated
+automatically. Native and proxied recipes share the harness-grouped spawn menu.
+Unavailable entries explain whether a harness, key, route, or verification needs
+attention. Codex proxy routes still require verification for their exact model
+and runtime before launch.
+
+Explicit launch overrides win over the selected recipe, followed by Mesh and
+application defaults. New nodes retain a secret-free snapshot: changing or
+deleting a recipe does not change existing or archived nodes. Resume reads the
+current credential for the saved account; restore a missing key in **Providers**.
+Changing credentials or the Codex installation can require route verification
+again. Regenerate with a different recipe deliberately replaces the snapshot.
+
+Mobile exposes the same choices and **Manage Launch Configurations** in the
+new-node picker. Background auto-naming requires a host-native Claude Code
+configuration; unsupported background selections report an error rather than
+using another provider. Usage remains attached to the account, not each recipe.
+
 ## Settings that matter
 
 Open **Settings** for app-wide defaults. A Mesh's **Project Settings** override
@@ -125,7 +153,7 @@ the app-wide value when both exist.
 |---|---|
 | General | Appearance, quit confirmation, global Autopilot capacity, and the default worktree directory |
 | Providers | Credentials, provider routing, accounts, and custom compatible endpoints |
-| Harnesses | Harness ordering and per-harness/proxied-provider defaults |
+| Launch Configurations | Named recipes, harness ordering, fallback defaults, and advanced provider routes |
 | Remote Access | LAN/VPN exposure, the Coordinator Read API, certificate management, and paired-device revocation |
 
 The **Sandbox agent processes** option is per Mesh and is off by default. It is

@@ -465,7 +465,7 @@ pub(super) fn spawn_step_agent(
         parent_agent_node_id.and_then(|parent_id| {
             db::get_agent_node_by_id(parent_id)
                 .ok()
-                .map(|parent| parent.provider)
+                .map(|parent| parent.launch_configuration.map_or(parent.provider, |c| c.id))
         })
     } else {
         None
@@ -491,8 +491,15 @@ pub(super) fn spawn_step_agent(
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
+    let inherited_configuration = parent_agent_node_id.and_then(|id| db::get_agent_node_by_id(id).ok())
+        .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)
+        .or_else(|| view.step(node_id).and_then(|s| s.agent_node_id)
+            .and_then(|id| db::get_agent_node_by_id(id).ok())
+            .and_then(|node| node.launch_configuration).filter(|c| c.id == provider));
+    let launch_harness = inherited_configuration.as_ref().and_then(|c| c.resolved.as_ref())
+        .map_or(provider.as_str(), |plan| plan.harness.harness.as_str());
     let prompt_delivery =
-        crate::agent::launch::initial_prompt_delivery(&provider, &resolved_prompt);
+        crate::agent::launch::initial_prompt_delivery(launch_harness, &resolved_prompt);
     let worktree_policy =
         if source_issue.is_some() || view.context.get("source.review_preset") == Some("1") {
             WorktreePolicy::ForceBranched
@@ -511,7 +518,7 @@ pub(super) fn spawn_step_agent(
     // Autopilot compatibility gate.
     if source_issue.is_some() {
         let verdict = crate::autopilot::compatibility::compute_for_mesh(
-            Some(provider.as_str()),
+            Some(launch_harness),
             mesh.default_provider.as_deref(),
             crate::preferences::default_provider().as_deref(),
             mesh.use_worktree,
@@ -554,7 +561,7 @@ pub(super) fn spawn_step_agent(
             let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
                 return Ok(());
             };
-            let new_node = crate::services::agent_node::create_pending_with_worktree_override(
+            let new_node = crate::services::agent_node::create_pending_with_worktree_override_configured(
                 mesh_id,
                 &old_node.path,
                 &old_node.branch,
@@ -562,6 +569,7 @@ pub(super) fn spawn_step_agent(
                 source_issue,
                 name.as_deref(),
                 use_worktree_override,
+                old_node.launch_configuration.as_ref().filter(|c| c.id == provider).or(inherited_configuration.as_ref()),
             )
             .map_err(|e| e.to_string())?;
 
@@ -617,7 +625,7 @@ pub(super) fn spawn_step_agent(
     let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
         return Ok(());
     };
-    let node = crate::services::agent_node::create_pending_with_worktree_override(
+    let node = crate::services::agent_node::create_pending_with_worktree_override_configured(
         mesh.id,
         &mesh.path,
         &branch,
@@ -626,6 +634,7 @@ pub(super) fn spawn_step_agent(
         source_issue,
         name.as_deref(),
         use_worktree_override,
+        inherited_configuration.as_ref(),
     )
     .map_err(|e| e.to_string())?;
 

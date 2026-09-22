@@ -165,12 +165,12 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
 
 /// The **Compatible API surface** an executor speaks — the pure half of
 /// [`harness_surface`] (no disk/globals), so the surface-matching logic is
-/// unit-testable. Only the two proxy-capable executors map to a surface; every
-/// other harness (Terminal, Antigravity, OpenCode) is native-only and returns
-/// `None`, so "Add proxied provider" is never offered for it.
+/// unit-testable. Cline consumes the Anthropic-compatible surface while
+/// keeping its own credential variable names; all other native-only harnesses
+/// return `None`, so "Add proxied provider" is never offered for them.
 pub fn surface_for_executor(provider: Provider) -> Option<ApiSurface> {
     match provider {
-        Provider::Anthropic => Some(ApiSurface::Anthropic),
+        Provider::Anthropic | Provider::Cline => Some(ApiSurface::Anthropic),
         Provider::Codex => Some(ApiSurface::OpenAI),
         _ => None,
     }

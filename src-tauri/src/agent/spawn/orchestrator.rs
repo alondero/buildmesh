@@ -169,7 +169,9 @@ pub(crate) async fn spawn_with_intent(
     {
         return Ok(SpawnOutcome::Skipped(node));
     }
-    let provider = crate::preferences::resolve_harness_provider(&node.provider);
+    let provider = node.launch_configuration.as_ref().and_then(|c| c.resolved.as_ref())
+        .map_or_else(|| crate::preferences::resolve_harness_provider(&node.provider),
+            |plan| crate::models::Provider::from_db_str(&plan.harness.harness));
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
 
@@ -253,6 +255,19 @@ pub(crate) async fn spawn_with_intent(
 
     if is_agent_already_running(&node_id) {
         return Ok(SpawnOutcome::AlreadyActive(node));
+    }
+
+    if let Some(plan) = node.launch_configuration.as_ref().and_then(|c| c.resolved.as_ref()) {
+        let plan = plan.clone();
+        let overrides = crate::preferences::launch_configurations::LaunchOverrides {
+                model: explicit.model.clone(), effort: explicit.effort.clone(), extra_args: explicit.extra_args.clone(),
+            };
+        // Explicit user overrides become the next saved launch; absent overrides
+        // preserve the snapshot without consulting today's defaults or routes.
+        crate::commands::run_blocking("resolve_launch_snapshot", move || {
+            let resolved = crate::preferences::launch_configurations::resolve_snapshot(&plan, &overrides)?;
+            crate::db::set_node_launch_snapshot(node_id, &crate::preferences::launch_configurations::snapshot(resolved))
+        }).await?;
     }
 
     if intent_replaces_conversation(&intent) {

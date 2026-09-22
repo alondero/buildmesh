@@ -4,7 +4,8 @@
 //! deserialization, to bring an older JSON payload up to the current
 //! schema in-place. The output is then round-tripped through the
 //! [`super::model::AppPreferences`] struct; on success the migrated
-//! payload is persisted by [`super::storage::read_from_disk`].
+//! payload is persisted by an explicit preference write (for example during
+//! application startup or a settings update), not by the read path itself.
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 

@@ -29,7 +29,9 @@ pub async fn list_json() -> String {
 pub struct CreateNodeRequest {
     #[ts(as = "i32")]
     pub mesh_id: i64,
-    pub provider: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_id: Option<String>,
     #[serde(default)]
@@ -55,7 +57,9 @@ pub async fn create(req: &ParsedRequest) -> Response {
     };
 
     let mesh_id = parsed.mesh_id;
-    let provider = parsed.provider;
+    let provider = if parsed.provider.as_deref().is_none_or(|p| p.trim().is_empty()) {
+        parsed.configuration_id.clone().unwrap_or_default()
+    } else { parsed.provider.unwrap() };
     let configuration_id = parsed.configuration_id.clone();
     let node = match crate::commands::run_blocking("http_create_node", move || {
         let result: Result<_, CreateNodeError> = (|| {

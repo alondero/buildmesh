@@ -120,7 +120,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                 if (editing.current) return;
                 const anchor = e.currentTarget.querySelector<HTMLElement>('[data-spawn-id]');
                 anchor?.focus({ preventScroll: true });
-                setSubmenu(anchor && configurable(option) ? { option, anchor, keyboard: false } : null);
+                setSubmenu(anchor && configurable(option) && !option.configuration ? { option, anchor, keyboard: false } : null);
               }}
             >
               <button type="button" role="menuitem"
@@ -129,7 +129,9 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                 aria-label={option.label}
                 aria-haspopup={configurable(option) ? 'menu' : undefined}
                 aria-expanded={configurable(option) ? submenu?.option.id === option.id : undefined}
-                onClick={(e) => { e.stopPropagation(); onSelect(option.id, e.altKey); }}
+                aria-disabled={Boolean(option.unavailable_reason)}
+                title={option.unavailable_reason ?? undefined}
+                onClick={(e) => { e.stopPropagation(); if (!option.unavailable_reason) onSelect(option.id, e.altKey); }}
                 onMouseEnter={(e) => { if (!editing.current) e.currentTarget.focus({ preventScroll: true }); }}
                 onFocus={() => syncCaretToFocus(option.id)}
                 onKeyDown={(e) => {
@@ -148,9 +150,9 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
                   flatItems[activeIndex]?.id === option.id ? 'bg-bg-selection text-text-primary' : option.is_proxied ? 'text-text-secondary' : 'text-text-primary'
                 }`}
               >
-                <ProviderIcon providerId={option.id} className="h-3.5 w-3.5 shrink-0" />
-                <span className="flex-1 truncate">{option.label}</span>
-                {!option.is_proxied && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
+                <ProviderIcon providerId={option.provider_id ?? option.harness_id} className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1"><span className="block truncate">{option.label}</span>{option.unavailable_reason && <span className="block whitespace-normal text-text-secondary">{option.unavailable_reason}</span>}</span>
+                {!option.configuration && !option.is_proxied && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
               </button>
               {configurable(option) && <button type="button" tabIndex={-1} aria-label={`${option.label} configurations`}
                 aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}

@@ -34,6 +34,8 @@ export type SpawnOption = Pick<
   /** Tailwind class (e.g. `bg-blue-500`) derived from `id`. */
   color: string;
   capabilities?: ProviderInfo['capabilities'];
+  configuration?: ProviderInfo['configuration'];
+  unavailable_reason?: ProviderInfo['unavailable_reason'];
 };
 
 /**
@@ -51,13 +53,15 @@ export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
   return backend.map((p) => ({
     id: p.id,
     capabilities: p.capabilities,
+    configuration: p.configuration,
+    unavailable_reason: p.unavailable_reason,
     label: p.label,
     icon: p.icon,
     harness_id: p.harness_id,
     provider_id: p.provider_id,
     is_proxied: p.is_proxied,
     group_key: p.group_key,
-    color: colorClassForProvider(p.id),
+    color: colorClassForProvider(p.provider_id ?? p.harness_id),
   }));
 }
 

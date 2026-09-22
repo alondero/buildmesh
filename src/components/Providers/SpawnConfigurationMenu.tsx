@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
-import { deleteSpawnConfiguration, listSpawnConfigurations, saveSpawnConfiguration } from '../../lib/tauri/provider';
+import { deleteSpawnConfiguration, getLaunchTargets, listSpawnConfigurations, saveSpawnConfiguration } from '../../lib/tauri/provider';
+import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
+import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 
 export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
@@ -16,7 +18,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
   const [configurations, setConfigurations] = useState<SpawnConfiguration[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState<SpawnConfiguration | null>(null);
+  const [draft, setDraft] = useState<SpawnConfiguration | null>(option.configuration ?? null);
+  const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
@@ -32,13 +35,18 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
 
   useEffect(() => {
     let current = true;
+    if (option.configuration) {
+      getLaunchTargets().then((values) => { if (current) { setTargets(values); setLoaded(true); } })
+        .catch((e: unknown) => { if (current) setError(String(e)); });
+      return () => { current = false; };
+    }
     listSpawnConfigurations().then((values) => {
       if (!current) return;
       setConfigurations(values.filter((v) => v.spawn_option_id === option.id));
       setLoaded(true);
     }).catch((e: unknown) => { if (current) setError(String(e)); });
     return () => { current = false; };
-  }, [option.id]);
+  }, [option.id, option.configuration]);
 
   useLayoutEffect(() => {
     // The top layer escapes animated/scrolling ancestors while the DOM stays
@@ -150,7 +158,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
         e.stopPropagation();
         if (e.key === 'Escape' || (!draft && e.key === 'ArrowLeft')) {
           e.preventDefault();
-          if (!busy) { if (draft) setDraft(null); else close(); }
+          if (!busy) { if (draft && !option.configuration) setDraft(null); else close(); }
         }
         if (draft) return;
         const items = Array.from(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
@@ -165,7 +173,9 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
         }
       }}
     >
-      {draft ? (
+      {draft && option.configuration ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={close}
+        onSave={async (value) => { await saveSpawnConfiguration(value); onDismiss(); }}
+        onDelete={async () => { await deleteSpawnConfiguration(draft.id); onDismiss(); }} /> : draft ? (
         <form className="space-y-3 p-3" aria-label="Edit spawn configuration" onSubmit={(e) => { e.preventDefault(); void save(); }}>
           <p className="text-sm font-medium text-text-primary">{draft.id ? 'Edit configuration' : 'New configuration'}</p>
           <p className="text-xs text-text-muted">{option.label}. Unset fields inherit current defaults.</p>

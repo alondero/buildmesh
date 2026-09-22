@@ -120,7 +120,8 @@ export function HarnessOrderList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const rows = providers.filter(p => !p.is_proxied && p.id !== 'terminal');
+  const rows = [...new Map(providers.filter(p => !p.is_proxied && p.harness_id !== 'terminal')
+    .map(p => [p.harness_id, { ...p, id: p.harness_id }])).values()];
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
 

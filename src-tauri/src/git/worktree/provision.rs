@@ -1152,6 +1152,7 @@ mod tests {
 
     fn empty_node(root: &Path, worktree_name: Option<&str>) -> AgentNode {
         AgentNode {
+            launch_configuration: None,
             id: 1,
             mesh_id: 1,
             name: worktree_name.unwrap_or("buildmesh-spawn").to_string(),

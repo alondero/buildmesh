@@ -283,6 +283,19 @@ describe('RegenerateProviderMenu (issue #1502)', () => {
 });
 
 describe('GridNodeHeader Regenerate toolbar (issue #1502)', () => {
+  it('keeps additional native configurations and blocks unavailable choices', () => {
+    const pick = vi.fn();
+    const rows = ['Current recipe', 'Second native', 'Unavailable'].map((label, index) => ({
+      ...makeSpawnOption(`launch/${index}`, label), harness_id: 'claude', group_key: 'claude',
+      unavailable_reason: index === 2 ? 'Harness missing' : undefined,
+    }));
+    render(<div role="menu"><RegenerateProviderMenu providers={rows} currentProviderId="launch/0" onPick={pick} /></div>);
+    fireEvent.click(screen.getByRole('menuitem', { name: /Second native/ }));
+    expect(pick).toHaveBeenCalledWith('launch/1', 'Second native');
+    pick.mockClear();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Unavailable/ }));
+    expect(pick).not.toHaveBeenCalled();
+  });
   it('offers Regenerate in the action menu at wide tier whose picker includes the current provider', async () => {
     mockProviders();
     setupState();

@@ -13,5 +13,6 @@ import { fireEvent, screen } from '@testing-library/react';
  * coordinator API, authorized devices).
  */
 export async function openSettingsPane(name: string | RegExp) {
+  if (name === 'Harnesses') name = 'Launch Configurations';
   fireEvent.click(await screen.findByRole('tab', { name }));
 }

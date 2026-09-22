@@ -35,6 +35,8 @@
   --amber-border: rgba(245, 158, 11, 0.25);
   --red-border: rgba(239, 68, 68, 0.25);
   --attention-ring: rgba(245, 158, 11, 0.4);
+  --spacing-3: 12px;
+  --radius-lg: 6px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }

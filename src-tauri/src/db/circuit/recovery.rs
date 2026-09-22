@@ -62,7 +62,7 @@ pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -
     }
     *provider = provider.clone().filter(|p| !p.trim().is_empty())
         .or_else(|| context.get("review.provider").filter(|p| !p.trim().is_empty()).map(str::to_string))
-        .or_else(|| Some(source.provider.clone()));
+        .or_else(|| Some(source.launch_configuration.as_ref().map_or_else(|| source.provider.clone(), |c| c.id.clone())));
     let mut graph = CircuitGraph::agent_review(None, None, rounds);
     graph.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind = reviewer;
     let feedback_id = if local { "feedback" } else { "follow_feedback" };

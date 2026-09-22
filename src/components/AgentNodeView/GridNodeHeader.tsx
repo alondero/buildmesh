@@ -284,7 +284,7 @@ interface KebabActionsProps {
   isPinned: boolean;
   onTogglePin: (e: React.MouseEvent) => void;
   onOpenInExplorer: (e: React.MouseEvent) => void;
-  node: Pick<AgentNode, 'provider'>;
+  node: Pick<AgentNode, 'provider' | 'launch_configuration'>;
   details: React.ReactNode;
   onDetails: () => void;
   onChanges: () => void;
@@ -503,7 +503,7 @@ function KebabActions({ isPinned, onTogglePin, onOpenInExplorer, node, providerL
               >
                 <RegenerateProviderMenu
                   providers={providerList}
-                  currentProviderId={node.provider}
+                  currentProviderId={node.launch_configuration?.id ?? node.provider}
                   onPick={handleRegenPick}
                   submenuTestId="grid-regenerate-submenu"
                 />

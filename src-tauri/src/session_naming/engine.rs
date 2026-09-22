@@ -213,7 +213,10 @@ pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64,
     // `summarize_and_rename_with`. The provider comes from
     // `AppPreferences.naming_provider` — NOT `node.provider`. The
     // default is "disabled"; the user explicitly opts in.
-    let backend_env = naming_backend_env(&user_naming_provider);
+    let backend_env = match naming_backend_env(&user_naming_provider) {
+        Ok(launch) => launch,
+        Err(error) => { tracing::warn!("session_naming: {error}"); return; }
+    };
 
     let app_for_task = app.clone();
     // Clone the Arc so the spawned future owns its own handle; the
@@ -541,14 +544,45 @@ where
 /// `AppPreferences.naming_provider`). See [`naming_backend_env_with`] for
 /// the routing contract; this is the thin caller-friendly version that
 /// resolves via [`crate::preferences::resolve_provider_env`].
-pub(crate) fn naming_backend_env(provider: &str) -> Vec<(String, String)> {
-    naming_backend_env_with(provider, crate::preferences::resolve_provider_env)
+pub(crate) struct NamingLaunch {
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+    pub executable: Option<std::path::PathBuf>,
+}
+
+pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String> {
+    let prefs = crate::preferences::load()?;
+    let plan = crate::preferences::launch_configurations::resolve(
+        &prefs, provider, &Default::default(), &Default::default())?;
+    if crate::models::Provider::from_db_str(&plan.harness.harness) != crate::models::Provider::Anthropic {
+        return Err("This background task requires a Claude Code Launch Configuration".into());
+    }
+    if plan.harness.runtime == Some(crate::models::EnvType::Wsl)
+        || plan.harness.runtime == Some(crate::models::EnvType::WindowsInterop)
+    {
+        return Err("Background naming requires a host-native Launch Configuration".into());
+    }
+    let env = if let Some(route) = &plan.route {
+        let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
+            .ok_or("Provider account is missing")?;
+        crate::preferences::compatibility::surface_env(route.surface, route.base_url.as_deref(), account.api_key.as_deref(), &route.model_tiers)
+    } else if plan.harness.harness == "anthropic" {
+        naming_backend_env_with("anthropic", |_| Vec::new())
+    } else {
+        naming_backend_env_with(provider, |_| Vec::new())
+    };
+    let adapter = crate::models::Provider::Anthropic.adapter();
+    let mut args = Vec::new();
+    if let Some(model) = &plan.model { args.extend(adapter.model_args(model)); }
+    if let Some(effort) = &plan.effort { args.extend(adapter.effort_args(effort)); }
+    if let Some(extra) = &plan.extra_args { args.extend(adapter.extra_args_args(extra).map_err(|e| e.to_string())?); }
+    Ok(NamingLaunch { env, args, executable: plan.harness.executable })
 }
 
 pub(super) async fn summarize_and_rename_with(
     node_id: i64,
     buffer: &str,
-    backend_env: Vec<(String, String)>,
+    backend_env: NamingLaunch,
 ) -> Result<String, String> {
     let ansi_stripped = ANSI_ESCAPE.replace_all(buffer, "").to_string();
     let clean_buffer = strip_claude_code_banner(&ansi_stripped);
@@ -577,7 +611,10 @@ pub(super) async fn summarize_and_rename_with(
     // `Command::new("claude")` would rely on the buildmesh process's
     // inherited `PATH` (Windows: captured at process start; stale if
     // Claude Code was installed after launch).
-    let claude_path = resolve_claude_binary()?;
+    let claude_path = match backend_env.executable.clone() {
+        Some(path) => path,
+        None => resolve_claude_binary()?,
+    };
     tracing::info!(
         "session_naming: resolved claude binary to {}",
         claude_path.display()
@@ -590,6 +627,7 @@ pub(super) async fn summarize_and_rename_with(
     // accumulates up to MAX_RENAME_ATTEMPTS times per node (gh688).
     cmd.kill_on_drop(true);
     cmd.args(["--print"]);
+    cmd.args(&backend_env.args);
 
     // Clear any inherited claude backend env (cwrap `unset` parity) so a value
     // exported in buildmesh's own environment can't override the resolved
@@ -603,7 +641,7 @@ pub(super) async fn summarize_and_rename_with(
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
         cmd.env_remove(k);
     }
-    for (k, v) in &backend_env {
+    for (k, v) in &backend_env.env {
         cmd.env(k, v);
     }
 

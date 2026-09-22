@@ -670,7 +670,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               >
                 <RegenerateProviderMenu
                   providers={providerList ?? []}
-                  currentProviderId={node.provider}
+                  currentProviderId={node.launch_configuration?.id ?? node.provider}
                   onPick={pickProvider}
                 />
               </div>

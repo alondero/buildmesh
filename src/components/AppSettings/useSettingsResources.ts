@@ -271,13 +271,12 @@ export function useSettingsResources(
             api.getProviderPairings(),
             helper(),
           ]);
-          const nativeHarnesses = providerList.filter(
-            (p) => !p.is_proxied && p.id !== 'terminal',
-          );
+          const nativeHarnesses = [...new Map(providerList.filter((p) => p.harness_id !== 'terminal')
+            .map((p) => [p.harness_id, p])).values()];
           const entries = await Promise.all(
             nativeHarnesses.map(async (h) => {
-              const list = await api.compatibleProvidersForHarness(h.id);
-              return [h.id, Array.isArray(list) ? list : []] as const;
+              const list = await api.compatibleProvidersForHarness(h.harness_id);
+              return [h.harness_id, Array.isArray(list) ? list : []] as const;
             }),
           );
           return {

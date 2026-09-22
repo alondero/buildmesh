@@ -365,6 +365,9 @@ pub struct AgentNode {
     /// string is treated as "anthropic" by the resolver, so `Default` is a
     /// behaviour-preserving stub.
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub launch_configuration: Option<crate::preferences::spawn_configurations::SpawnConfiguration>,
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)

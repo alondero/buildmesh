@@ -77,6 +77,14 @@ fn shm_sibling(db: &Path) -> PathBuf {
 /// Tests that exercise only pure logic (no DB) should not call this
 /// helper — every first call pays the `db::init` cost.
 pub fn ensure_db_for_tests() {
+    // Node creation now resolves a launch recipe from preferences. Keep this
+    // companion store thread-local, like preferences' own test cache.
+    thread_local! {
+        static PREFS_DIR: tempfile::TempDir = tempfile::tempdir().expect("test preferences directory");
+    }
+    if crate::preferences::app_data_dir().is_none() {
+        PREFS_DIR.with(|dir| crate::preferences::init_for_tests(dir.path().to_path_buf()));
+    }
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         if let Err(e) = crate::db::init(&scratch_path()) {

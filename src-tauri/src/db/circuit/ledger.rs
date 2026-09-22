@@ -412,19 +412,19 @@ fn create_node_circuit_run_with_recovery_locked(
             context.set("review.provider", provider);
         }
         context.set("source.review_preset", "1");
-        context.set("source.provider", &node.provider);
+        context.set("source.provider", node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()));
         context.set(
             "source.model",
-            review_config
+            node.launch_configuration.as_ref().map(|c| c.model.as_deref()).unwrap_or_else(|| review_config
                 .as_ref()
-                .and_then(|(model, _)| model.as_deref())
+                .and_then(|(model, _)| model.as_deref()))
                 .unwrap_or(""),
         );
         context.set(
             "source.effort",
-            review_config
+            node.launch_configuration.as_ref().map(|c| c.effort.as_deref()).unwrap_or_else(|| review_config
                 .as_ref()
-                .and_then(|(_, effort)| effort.as_deref())
+                .and_then(|(_, effort)| effort.as_deref()))
                 .unwrap_or(""),
         );
     }

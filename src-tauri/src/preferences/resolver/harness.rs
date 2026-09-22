@@ -52,6 +52,8 @@ pub fn harness_runtime(profile_id: &str) -> Option<crate::models::EnvType> {
 }
 
 pub fn resolved_harness_profile(profile_id: &str) -> Option<HarnessProfile> {
+    let selected = super::super::launch_configurations::selection_option(profile_id).unwrap_or_else(|_| profile_id.into());
+    let profile_id = selected.as_str();
     // Bind the typed value so its lifetime outlives the borrowed
     // `harness_id` slice — issue #1659 item 1 — the original
     // `parse_spawn_option_id` returned slices borrowing `profile_id`
@@ -220,7 +222,8 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// `autopilot::compatibility::resolve_autopilot_spawn_option` each parsed
 /// `new_provider` twice across the two calls).
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(profile_id))
+    let selected = super::super::launch_configurations::selection_option(profile_id).unwrap_or_else(|_| profile_id.into());
+    resolve_harness_provider_for(&crate::agent::provider::SpawnOptionId::from(selected.as_str()))
 }
 
 /// Typed entry point — accept an already-parsed [`SpawnOptionId`] and

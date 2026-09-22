@@ -244,6 +244,10 @@ pub fn run() {
                 Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
             }
 
+            if let Err(error) = services::agent_node::migrate_launch_history() {
+                tracing::warn!("Launch history migration failed: {error}");
+            }
+
             // Set up file-based logging with tracing.
             //
             // Size-bounded, NOT `rolling::never`: a long multi-node session at
@@ -482,6 +486,8 @@ pub fn run() {
             commands::preferences::set_harness_default,
             commands::preferences::clear_harness_default,
             preferences::spawn_configurations::list_spawn_configurations,
+            preferences::launch_catalog::get_provider_catalogue,
+            preferences::launch_catalog::get_launch_targets,
             preferences::spawn_configurations::save_spawn_configuration,
             preferences::spawn_configurations::delete_spawn_configuration,
             // Resolved harness view (issue #1656) — single IPC entry that
