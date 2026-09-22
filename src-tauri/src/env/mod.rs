@@ -267,21 +267,36 @@ mod tests {
     /// already pin. The capture poller reads its SQLite store under
     /// `<cline home>/data/db/sessions.db`, so the path the helper emits
     /// must land in a place that actually exists on a real install.
+    ///
+    /// Issue #1775 review: this one drives the live process environment, so it
+    /// must account for `CLINE_DIR` too — otherwise a developer who exports the
+    /// override (the very feature `cline_dir()` now resolves) sees a spurious
+    /// failure. The expectation is rebuilt from raw env vars, independently of
+    /// the resolver, so this still exercises the wrapper rather than restating
+    /// it.
     #[test]
     fn cline_dir_uses_the_current_environment_home() {
-        let expected = match current_env() {
-            Environment::Wsl => std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
-                .join(".cline"),
-            Environment::Windows => std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
-                    std::path::PathBuf::from(format!("C:\\Users\\{user}"))
-                })
-                .join(".cline"),
+        let override_dir = std::env::var("CLINE_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let expected = match override_dir {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => match current_env() {
+                Environment::Wsl => std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                    .join(".cline"),
+                Environment::Windows => std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let user =
+                            std::env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                        std::path::PathBuf::from(format!("C:\\Users\\{user}"))
+                    })
+                    .join(".cline"),
+            },
         };
         assert_eq!(cline_dir(), expected);
     }
@@ -320,6 +335,28 @@ mod tests {
             PathBuf::from("/opt/cline")
         );
 
+        // A padded / whitespace-wrapped value is trimmed, not rejected.
+        assert_eq!(
+            cline_dir_with_resolver(
+                Environment::Windows,
+                env(&[
+                    ("CLINE_DIR", "  D:/cline-custom\t"),
+                    ("USERPROFILE", "C:/Users/dev"),
+                ]),
+            ),
+            PathBuf::from("D:/cline-custom")
+        );
+
+        // The override needs no home at all — it short-circuits the fallback,
+        // so a machine with CLINE_DIR but no HOME/USERPROFILE still resolves.
+        for environment in [Environment::Windows, Environment::Wsl] {
+            assert_eq!(
+                cline_dir_with_resolver(environment, env(&[("CLINE_DIR", "D:/only-override")])),
+                PathBuf::from("D:/only-override"),
+                "the override must resolve with no home variable ({environment:?})"
+            );
+        }
+
         // Blank / whitespace-only collapses to unset, like CLINE_DATA_DIR.
         for blank in ["", "   ", "\t"] {
             assert_eq!(
@@ -356,13 +393,26 @@ mod tests {
     fn cline_db_path_for_env_appends_canonical_suffix() {
         use crate::models::EnvType;
         // Windows path: bare-home derivation, suffix must still apply.
-        let windows_home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
+        //
+        // Issue #1775 review: the wrapper reads the live process env, and
+        // `cline_dir()` now honours `CLINE_DIR` — so the expectation must account
+        // for it, or a developer who exports the override sees a spurious
+        // failure. Rebuilt from raw env vars, independently of the resolver.
+        let base = match std::env::var("CLINE_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"))
+                .join(".cline"),
+        };
         let path = cline_db_path_for_env(EnvType::Windows, "")
             .expect("windows home must resolve to a Cline DB path");
-        let expected = windows_home.join(".cline").join("data").join("db").join("sessions.db");
+        let expected = base.join("data").join("db").join("sessions.db");
         assert_eq!(path, expected, "windows DB path must end in data/db/sessions.db");
         assert!(path.ends_with("data/db/sessions.db") || path.ends_with("data\\db\\sessions.db"),
                 "DB path must carry the data/db/sessions.db suffix regardless of separator");
@@ -410,23 +460,20 @@ mod tests {
     fn cline_db_path_treats_empty_cline_data_dir_as_unset() {
         use crate::env::cline_db_path_with_resolver;
         use crate::models::EnvType;
-        let windows_home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
-        let expected = windows_home
+        // Inject the home as well: the resolver is hermetic (the native arm now
+        // reads the injected env, not the process env), so the expectation is
+        // built from the same injected values instead of the developer's machine.
+        let expected = std::path::PathBuf::from(r"C:\Users\dev")
             .join(".cline")
             .join("data")
             .join("db")
             .join("sessions.db");
         for empty_value in ["", " ", "\t", "  \t "] {
             let injected: std::ffi::OsString = empty_value.into();
-            let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
-                if key == "CLINE_DATA_DIR" {
-                    Some(injected.clone())
-                } else {
-                    None
-                }
+            let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| match key {
+                "CLINE_DATA_DIR" => Some(injected.clone()),
+                "USERPROFILE" => Some(r"C:\Users\dev".into()),
+                _ => None,
             })
             .expect("default path must resolve when override is empty");
             assert_eq!(
@@ -445,21 +492,16 @@ mod tests {
     fn cline_db_path_ignores_unrelated_env_vars() {
         use crate::env::cline_db_path_with_resolver;
         use crate::models::EnvType;
-        let windows_home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"));
-        let expected = windows_home
+        // Hermetic: inject the home, and assert the unrelated var is ignored.
+        let expected = std::path::PathBuf::from(r"C:\Users\dev")
             .join(".cline")
             .join("data")
             .join("db")
             .join("sessions.db");
-        let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| {
-            if key == "SOME_OTHER_VAR" {
-                Some("/totally/different/path".into())
-            } else {
-                None
-            }
+        let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| match key {
+            "SOME_OTHER_VAR" => Some("/totally/different/path".into()),
+            "USERPROFILE" => Some(r"C:\Users\dev".into()),
+            _ => None,
         })
         .expect("default path must resolve when CLINE_DATA_DIR is unset");
         assert_eq!(path, expected);

@@ -903,15 +903,18 @@ pub(crate) fn cline_db_path_with_resolver<
     spawn_path: &str,
     get: F,
 ) -> Option<PathBuf> {
-    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, get) {
+    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, &get) {
         return Some(override_dir.join("db").join("sessions.db"));
     }
     // Default derivation: cline home + data/db/sessions.db.
+    // The native arm goes through the same injectable `get` as the override above,
+    // so the whole helper is hermetic: a test that injects an environment must
+    // not pick up the process CLINE_DIR through cline_dir()'s live-env wrapper.
     let dir = match env_type {
         EnvType::WindowsInterop => super::windows_cli_home(".cline")?,
         EnvType::Windows => {
             let _ = spawn_path;
-            cline_dir()
+            cline_dir_with_resolver(current_env(), &get)
         }
         EnvType::Wsl => {
             let _ = spawn_path;
