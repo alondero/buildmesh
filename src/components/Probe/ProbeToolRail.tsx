@@ -304,14 +304,11 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
               aria-label={group.title}
               className={groupIndex === TOOL_DISCOVERY_GROUPS.length - 1 ? '' : 'mb-1.5'}
             >
-              <div className="flex items-baseline gap-2 mt-1 mb-1">
-                <span className="text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
-                  {group.title}
-                </span>
-                <span className="ml-auto text-right text-2xs text-text-muted">
-                  {group.scopeNote}
-                </span>
-              </div>
+              {/* Heading only — the palette's scope notes were clutter here
+                  too (ADR-0031, refined 2026-09-22). */}
+              <span className="block mt-1 mb-1 text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
+                {group.title}
+              </span>
               {/* Single column at narrow widths: a 2-column grid truncates
                   tile names to ~4 characters at the dock's 240px minimum. */}
               <div className={`grid gap-1 ${narrow ? 'grid-cols-1' : 'grid-cols-2'}`}>

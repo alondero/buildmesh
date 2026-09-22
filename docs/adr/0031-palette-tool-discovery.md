@@ -25,10 +25,13 @@ the scope pills of (B) folded in as per-group scope notes.
   results in place, with zero layout shift. A genuinely non-matching
   query still shows "No matching results".
 - **Groups are Code, GitHub, Automate, Remember, App-wide.** GitHub Issues
-  and Pull Requests share one group. Every group carries a scope note
-  ("Selected project …", "App-wide — ignores project selection"); the Code
-  group additionally names its exception (Agent Changes follows the focused
-  agent).
+  and Pull Requests share one group. Group headings stand alone: the
+  per-group scope notes ("Selected project …", "App-wide — ignores project
+  selection") were removed (refined 2026-09-22). Repeating the default
+  scope on four of five headings was clutter, the App-wide note duplicated
+  its own group name, and the one real exception — Agent Changes follows
+  the focused agent — reads more naturally on the tile itself ("Review what
+  the focused agent changed").
 - **One name per destination**, following the `Open <Header>` palette
   pattern: tiles show the inspector header title, search rows the `Open …`
   command, both resolved from the same `PROBE_DESTINATION_COMMANDS` +

@@ -26,8 +26,6 @@ export interface ToolDiscoveryGroup {
   id: string;
   /** User-facing group heading. */
   title: string;
-  /** Scope line beside the heading — answers "where does this act?" per group. */
-  scopeNote: string;
   tiles: readonly ToolDiscoveryTile[];
 }
 
@@ -67,35 +65,35 @@ function tile(tab: ProbeTab): ToolDiscoveryTile {
   };
 }
 
+/** No per-group scope notes by design (ADR-0031, refined 2026-09-22): the
+ *  default scope is the selected project, the App-wide heading names its own
+ *  exception, and the one real surprise (Agent Changes follows the focused
+ *  agent) lives in that tile's description. Repeating "Selected project" on
+ *  every heading read as clutter, not guidance. */
 export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] & _AssertDiscoveryExhaustive = [
   {
     id: 'code',
     title: 'Code',
-    scopeNote: 'Selected project · Agent Changes follows the focused agent',
     tiles: CODE_TABS.map(tile),
   },
   {
     id: 'github',
     title: 'GitHub',
-    scopeNote: 'Selected project',
     tiles: GITHUB_TABS.map(tile),
   },
   {
     id: 'automate',
     title: 'Automate',
-    scopeNote: 'Selected project',
     tiles: AUTOMATE_TABS.map(tile),
   },
   {
     id: 'remember',
     title: 'Remember',
-    scopeNote: 'Selected project',
     tiles: REMEMBER_TABS.map(tile),
   },
   {
     id: 'app',
     title: 'App-wide',
-    scopeNote: 'App-wide — ignores project selection',
     tiles: APP_TABS.map(tile),
   },
 ];
