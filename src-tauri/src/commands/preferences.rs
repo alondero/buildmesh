@@ -67,6 +67,9 @@ pub fn set_app_reviewer_provider(provider: Option<String>) -> Result<(), String>
 pub fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
     let mut prefs = preferences::load()?;
     prefs.naming_provider = provider.filter(|s| !s.is_empty());
+    if let Some(selection) = &prefs.naming_provider {
+        crate::session_naming::naming_backend_env(selection)?;
+    }
     preferences::save(prefs)
 }
 

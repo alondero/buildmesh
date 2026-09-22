@@ -48,12 +48,24 @@ The account and authentication source a harness-native **Usage Meter** represent
 _Avoid_: Provider identity (too broad), cache key (implementation detail).
 
 **Spawn Option**:
-A single launchable entry in the **Spawn Menu** — either an **Agent Harness** on its own (launched natively) or an Agent Harness paired with a **Proxied Provider**. The unit a user picks to start an **Agent Node**, and the identity recorded on the node.
+An entry in the **Spawn Menu** representing a **Launch Configuration**, including its availability and any reason it cannot currently launch.
 _Avoid_: Provider row, launch option, harness profile (the existing `HarnessProfile` struct is harness-only — don't reuse).
 
-**Spawn Configuration**:
-A named set of optional launch settings belonging to one **Spawn Option**, such as a model, effort level, or extra arguments supported by its **Agent Harness**. Unset settings inherit the normal defaults. Selecting a configuration copies its settings to the new **Agent Node**; later edits or deletion do not change existing nodes.
+**Launch Configuration**:
+A named startup recipe selecting one **Agent Harness**, an optional **Provider Route**, and supported model, effort, and extra-argument choices. An **Agent Node** retains its resolved recipe independently of subsequent edits or deletion.
 _Avoid_: Harness profile (identifies the harness itself), Model Provider (identifies credentials and billing).
+
+**Provider Route**:
+The technical connection between a **Provider Account** and an **Agent Harness**, owning the compatible API surface, endpoint, model translation, and verification. It references credentials without owning another copy.
+_Avoid_: Launch Configuration, provider credential.
+
+**Generated Launch Configuration**:
+A **Launch Configuration** supplied from the provider catalogue for a compatible harness. Editing it makes its choices user-owned; deleting it does not recreate it automatically.
+_Avoid_: Temporary configuration, inferred provider.
+
+**Resolved Launch Plan**:
+The effective harness, route, and launch settings for one **Agent Node**, with a reference to the credential source but no credential secrets.
+_Avoid_: Provider Account, live defaults.
 
 **Spawn Menu**:
 The single, backend-derived, **Agent Harness**-grouped, user-ordered list of **Spawn Options**. Every spawn surface renders this one menu as-is.

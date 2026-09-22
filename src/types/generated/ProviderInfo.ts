@@ -109,4 +109,4 @@ capabilities: HarnessCapabilities,
 /**
  * Saved configurations offered under this Spawn Option on every client.
  */
-configurations?: Array<SpawnConfiguration>, };
+configurations?: Array<SpawnConfiguration>, configuration?: SpawnConfiguration, unavailable_reason?: string, };

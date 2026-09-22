@@ -2,6 +2,11 @@
 
 Status: accepted
 
+Launch Configuration amendment (#1857): execution, credentials, and routing
+remain separate, but the selectable identity is a named Launch Configuration.
+Nodes snapshot a resolved harness and route without secrets rather than
+re-reading mutable launch preferences on resume.
+
 ## Context
 
 Today, Buildmesh mixes the concept of the execution harness (e.g. standard `claude` / Claude Code, Codex, Antigravity, OpenCode, Terminal) with the model service provider (e.g. Anthropic, OpenAI, MiniMax, Kimi, Google).

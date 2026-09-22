@@ -1325,14 +1325,14 @@ mod tests {
             "t".to_string(),
             "feat/a".to_string(),
             "".to_string(),
-            Some("minimax".to_string()), // explicit
+            Some("codex".to_string()), // explicit native selection
             None,
             None,
         )
         .map(|(draft, _intent)| draft)
         .expect("explicit provider must be accepted");
         assert_eq!(
-            draft.node.provider, "minimax",
+            draft.node.provider, "codex",
             "explicit caller value must override mesh/app defaults"
         );
         // Cleanup so the next sub-case can use a fresh mesh with the

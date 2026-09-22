@@ -9,8 +9,90 @@ use crate::models::*;
 
 use super::{read_conn, write_conn, SqlResult};
 
+/// Preferences are prepared by the caller before acquiring the database writer.
+pub fn migrate_launch_selections(mappings: &std::collections::HashMap<String, String>) -> SqlResult<()> {
+    let mut db = write_conn();
+    migrate_launch_selections_inner(&mut db, mappings)
+}
+
+fn migrate_launch_selections_inner(db: &mut Connection, mappings: &std::collections::HashMap<String, String>) -> SqlResult<()> {
+    let tx = db.transaction()?;
+    for (old, new) in mappings {
+        tx.execute("UPDATE meshes SET default_provider = ?2 WHERE default_provider = ?1", params![old, new])?;
+        tx.execute("UPDATE meshes SET autopilot_provider = ?2 WHERE autopilot_provider = ?1", params![old, new])?;
+    }
+    for (select, update) in [
+        ("SELECT id, graph_json FROM autopilot_circuits", "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1"),
+        ("SELECT id, context_json FROM autopilot_circuit_runs", "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1"),
+    ] {
+        let rows = tx.prepare(select)?.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        for (id, raw) in rows {
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue; };
+            if migrate_launch_json(&mut value, mappings) {
+                tx.execute(update, params![id, value.to_string()])?;
+            }
+        }
+    }
+    tx.commit()
+}
+
+fn migrate_launch_json(value: &mut serde_json::Value, mappings: &std::collections::HashMap<String, String>) -> bool {
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(fields) => for (key, value) in fields {
+            if key == "provider" || key.ends_with(".provider") {
+                if let Some(next) = value.as_str().and_then(|old| mappings.get(old)) {
+                    *value = serde_json::Value::String(next.clone());
+                    changed = true;
+                }
+            } else { changed |= migrate_launch_json(value, mappings); }
+        },
+        serde_json::Value::Array(values) => for value in values { changed |= migrate_launch_json(value, mappings); },
+        _ => (),
+    }
+    changed
+}
+
+#[cfg(test)]
+mod launch_migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_preserves_authored_ids_json_and_history_and_is_repeatable() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute("INSERT INTO meshes(name,path,default_provider,autopilot_provider) VALUES ('Launch test','/launch-test','claude:minimax','personal')", []).unwrap();
+        db.execute("INSERT INTO autopilot_circuits(mesh_id,name,graph_json) VALUES (1,'Review',?1)",
+            [r#"{"nodes":[{"provider":"claude:minimax","prompt":"claude:minimax"},{"provider":"personal"}]}"#]).unwrap();
+        db.execute("INSERT INTO autopilot_circuits(mesh_id,name,graph_json) VALUES (1,'Malformed','{invalid')", []).unwrap();
+        db.execute("INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,context_json) VALUES (1,1,?1)",
+            [r#"{"source.provider":"claude:minimax","review.provider":"personal","prompt":"claude:minimax"}"#]).unwrap();
+        let history = r#"{"id":"historical","name":"Saved recipe","spawn_option_id":"claude:minimax","model":"old-model","effort":null,"extra_args":null}"#;
+        db.execute("INSERT INTO agent_nodes(mesh_id,name,path,provider,spawn_configuration) VALUES (1,'Historical','/launch-test','claude:minimax',?1)", [history]).unwrap();
+        let mappings = std::collections::HashMap::from([("claude:minimax".into(), "launch/claude:minimax".into())]);
+        for _ in 0..2 { migrate_launch_selections_inner(&mut db, &mappings).unwrap(); }
+        let selection: (String, String) = db.query_row("SELECT default_provider,autopilot_provider FROM meshes", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(selection, ("launch/claude:minimax".into(), "personal".into()));
+        let raw: String = db.query_row("SELECT graph_json FROM autopilot_circuits WHERE name='Review'", [], |r| r.get(0)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["nodes"][0]["provider"], "launch/claude:minimax");
+        assert_eq!(value["nodes"][0]["prompt"], "claude:minimax");
+        assert_eq!(value["nodes"][1]["provider"], "personal");
+        let raw: String = db.query_row("SELECT graph_json FROM autopilot_circuits WHERE name='Malformed'", [], |r| r.get(0)).unwrap();
+        assert_eq!(raw, "{invalid");
+        let raw: String = db.query_row("SELECT context_json FROM autopilot_circuit_runs", [], |r| r.get(0)).unwrap();
+        let context: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(context["source.provider"], "launch/claude:minimax");
+        assert_eq!(context["review.provider"], "personal");
+        assert_eq!(context["prompt"], "claude:minimax");
+        let node: (String, String) = db.query_row("SELECT provider,spawn_configuration FROM agent_nodes", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(node, ("claude:minimax".into(), history.into()));
+    }
+}
+
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path, spawn_configuration";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -24,6 +106,9 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // an opaque String; resolution to a concrete executor happens at the
         // spawn seam via `preferences::resolve_harness_provider`.
         provider: row.get::<_, String>(6)?,
+        launch_configuration: row.get::<_, Option<String>>(21)?.map(|raw| serde_json::from_str(&raw)
+            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(21, rusqlite::types::Type::Text, Box::new(error))))
+            .transpose()?,
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
@@ -123,13 +208,13 @@ pub fn list_coordinator_node_rows_inner(
         // added is_pinned at 13, v35 added signal_health at 19, v37 added
         // worktree_path at 20 — see AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(21)?;
+        let mesh_name: String = row.get(22)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(22)?;
+        let status_changed_at: Option<String> = row.get(23)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -445,6 +530,7 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
 /// and avoids the need for an `AND provider <> ?1` guard that could
 /// silently drop a real rewrite if the comparison string ever drifted
 /// from the column's storage form.
+#[cfg(test)]
 pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     let runtime = match crate::preferences::harness_runtime(provider) {
         Some(runtime) => runtime,
@@ -459,6 +545,15 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
         "UPDATE agent_nodes SET provider = ?1, env = ?3, spawn_configuration = NULL WHERE id = ?2",
         params![provider, id, runtime],
     )?;
+    Ok(())
+}
+
+pub fn replace_node_launch(id: i64, value: &crate::preferences::spawn_configurations::SpawnConfiguration, runtime: EnvType) -> Result<(), String> {
+    let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    let db = write_conn();
+    let changed = db.execute("UPDATE agent_nodes SET provider = ?1, env = ?2, spawn_configuration = ?3 WHERE id = ?4",
+        params![value.spawn_option_id, runtime.to_string(), json, id]).map_err(|e| e.to_string())?;
+    if changed == 0 { return Err("Agent Node no longer exists".into()); }
     Ok(())
 }
 
@@ -1161,6 +1256,21 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
 }
 
 /// Read the immutable launch snapshot separately from the node wire projection.
+pub fn set_node_launch_snapshot(node_id: i64, value: &crate::preferences::spawn_configurations::SpawnConfiguration) -> Result<(), String> {
+    let raw = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    let db = write_conn();
+    db.execute("UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2 AND provider = ?3",
+        params![raw, node_id, value.spawn_option_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn legacy_launch_nodes() -> SqlResult<Vec<AgentNode>> {
+    let db = read_conn();
+    let mut stmt = db.prepare(&format!("SELECT {AGENT_NODE_COLUMNS} FROM agent_nodes WHERE spawn_configuration IS NULL OR (json_valid(spawn_configuration) AND json_type(spawn_configuration, '$.resolved') IS NULL)"))?;
+    let nodes = stmt.query_map([], map_agent_node_row)?.collect();
+    nodes
+}
+
 pub fn node_spawn_configuration(
     node_id: i64,
     provider: &str,

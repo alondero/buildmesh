@@ -509,6 +509,9 @@ pub(super) async fn provision_workspace(
     let routing_harness_id = node.provider.clone();
     let routing_resolved = resolved.clone();
     let routing = match crate::commands::run_blocking("prepare_provider_routing", move || {
+        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
+            return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
+        }
         crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
     })
     .await

@@ -346,7 +346,7 @@ pub fn matching_verification(
     install: &codex::CodexInstall,
 ) -> Option<PairingVerification> {
     let expected = signature_for(pairing, account, install);
-    let mut record = preferences::load()
+    let record = preferences::load()
         .ok()?
         .pairing_verifications
         .into_iter()
@@ -355,11 +355,20 @@ pub fn matching_verification(
                 && record.provider_id == pairing.provider_id
                 && record.runtime == install.runtime_identity
         })?;
+    Some(check_verification(record, pairing, install, &expected))
+}
+
+fn check_verification(
+    mut record: PairingVerification,
+    pairing: &ProviderPairing,
+    install: &codex::CodexInstall,
+    expected: &str,
+) -> PairingVerification {
     // A record whose capability snapshot already failed (e.g. verified against
     // a since-retired model alias) carries its own truthful status and reason —
     // never re-label it as a signature mismatch.
     if !record.capability_result.compatible {
-        return Some(record);
+        return record;
     }
     if record.pairing_signature != expected {
         let descriptor = preferences::endpoint_model_descriptor(pairing);
@@ -380,7 +389,7 @@ pub fn matching_verification(
             "the provider credential changed; verify the pairing again".into()
         });
     }
-    Some(record)
+    record
 }
 
 pub struct VerifiedCodexPairing {
@@ -418,6 +427,25 @@ fn verified_codex_pairing_with_install(
     account: &ProviderAccount,
     install: &codex::CodexInstall,
 ) -> Result<VerifiedCodexPairing, String> {
+    verified_with_record(pairing, account, install, None)
+}
+
+pub fn verified_codex_snapshot(
+    pairing: &ProviderPairing,
+    account: &ProviderAccount,
+    env_type: EnvType,
+    record: Option<&PairingVerification>,
+) -> Result<VerifiedCodexPairing, String> {
+    let install = codex::discover_supported_install(env_type)?;
+    verified_with_record(pairing, account, &install, record)
+}
+
+fn verified_with_record(
+    pairing: &ProviderPairing,
+    account: &ProviderAccount,
+    install: &codex::CodexInstall,
+    snapshot: Option<&PairingVerification>,
+) -> Result<VerifiedCodexPairing, String> {
     if !account.enabled {
         return Err(format!("provider '{}' is disabled", account.name));
     }
@@ -439,7 +467,10 @@ fn verified_codex_pairing_with_install(
                 .unwrap_or_else(|| "incompatible capability contract".into())
         ));
     }
-    let verification = matching_verification(pairing, account, install).ok_or_else(|| {
+    let live = matching_verification(pairing, account, install);
+    let verification = live.as_ref().filter(|r| r.status == PairingVerificationStatus::Verified).cloned()
+        .or_else(|| snapshot.cloned().map(|r| check_verification(r, pairing, install, &signature_for(pairing, account, install))))
+        .or(live).ok_or_else(|| {
         format!(
             "pairing '{}' is unverified for {}; use Verify pairing in Settings",
             account.name,

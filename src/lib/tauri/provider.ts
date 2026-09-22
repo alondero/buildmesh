@@ -362,6 +362,7 @@ export const getResolvedHarnessView = (
   >('get_resolved_harness_view', { harnessId, meshId });
 
 export const listSpawnConfigurations = () => _invoke<SpawnConfiguration[]>('list_spawn_configurations');
+export const getLaunchTargets = () => _invoke<import('../../types/generated/LaunchTarget').LaunchTarget[]>('get_launch_targets');
 export const saveSpawnConfiguration = async (value: SpawnConfiguration): Promise<SpawnConfiguration> => {
   try {
     return await _invoke<SpawnConfiguration>('save_spawn_configuration', { value });

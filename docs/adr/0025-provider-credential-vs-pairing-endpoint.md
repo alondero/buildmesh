@@ -2,7 +2,13 @@
 
 Status: accepted (amends ADR-0016)
 
-Providers hold credentials and billing only; harness pairings hold endpoint URL and model tiers. Keyed first-class providers start absent until added; saving a key never auto-attaches a pairing.
+Providers hold credentials and billing only; Provider Routes (stored pairings)
+hold endpoint URL and model tiers. Launch Configuration amendment (#1857)
+supersedes the manual-only attachment rule below: adding/enabling a known
+provider reconciles compatible routes and generated recipes idempotently.
+Configuration edits detach generated defaults; tombstones prevent recreation
+after deletion. Advanced route editing remains available. The original decision
+below records the previous attachment workflow.
 
 ## Context
 

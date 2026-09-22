@@ -138,6 +138,8 @@ pub(super) async fn launch_process(
     // `SpawnOptionId` (parsed once at the entry seam, issue #1659 item 1)
     // so native and Proxied rows hit the same map key.
     let harness_id_for_default = spawn_option_id.harness_id();
+    let frozen = crate::db::node_spawn_configuration(session_id, &spawn_option_id.to_string())?
+        .is_some_and(|c| c.resolved.is_some());
     let mesh_override = crate::db::get_mesh_harness_overrides(node_mesh_id)
         .ok()
         .flatten()
@@ -166,8 +168,8 @@ pub(super) async fn launch_process(
         // migration copied any non-empty legacy values into the
         // `claude` override entry of the new map (issue #1151 acceptance
         // criteria 6). On a healthy v33+ DB this slot is always `None`.
-        app_default.as_ref(),
-        mesh_override.as_ref(),
+        app_default.as_ref().filter(|_| !frozen),
+        mesh_override.as_ref().filter(|_| !frozen),
     );
     timer.checkpoint("before_command_build");
     let cmd = build_spawn_command_prepared(

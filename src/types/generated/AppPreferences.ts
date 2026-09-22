@@ -137,7 +137,7 @@ autopilot_pool_size: number | null,
  * loads as an empty `HashMap` (issue #1148 acceptance criteria 1) via
  * `#[serde(default)]`.
  */
-harness_defaults: { [key in string]: HarnessConfigValue }, spawn_configurations: Array<SpawnConfiguration>, 
+harness_defaults: { [key in string]: HarnessConfigValue }, spawn_configurations: Array<SpawnConfiguration>, deleted_launch_configurations: Array<string>, 
 /**
  * Buildmesh-wide default Worktree Node directory (issue #1519).
  * Optional raw user input — relative values resolve from the Mesh root,

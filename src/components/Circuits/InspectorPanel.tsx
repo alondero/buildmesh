@@ -32,7 +32,9 @@
  *      serialises into a circuit the new harness can't honour.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { listProviders } from '../../lib/tauri/provider';
+import type { ProviderInfo } from '../../types/generated/ProviderInfo';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import type { CircuitNode } from '../../types/generated/CircuitNode';
 import type { CircuitNodeKind } from '../../types/generated/CircuitNodeKind';
@@ -771,7 +773,16 @@ function SpawnAgentNodeFields({
   isReviewerSpawn: boolean;
 }) {
   const harnessId = harnessIdFromProvider(kind.provider);
-  const caps = getCapabilitiesFor(harnessId);
+  const [configurations, setConfigurations] = useState<ProviderInfo[] | null>(null);
+  useEffect(() => {
+    let active = true;
+    void listProviders().then((rows) => {
+      if (active && Array.isArray(rows)) setConfigurations(rows);
+    }).catch(() => { /* Preserve the legacy editor when the backend is offline. */ });
+    return () => { active = false; };
+  }, []);
+  const selected = configurations?.find((row) => row.id === kind.provider);
+  const caps = selected?.capabilities ?? getCapabilitiesFor(harnessId);
 
   return (
     <>
@@ -803,7 +814,7 @@ function SpawnAgentNodeFields({
         }
       >
         <select
-          value={harnessId ?? ''}
+          value={configurations ? (kind.provider ?? '') : (harnessId ?? kind.provider ?? '')}
           aria-label="Provider"
           data-testid="inspector-provider-select"
           onChange={(e) => {
@@ -827,7 +838,7 @@ function SpawnAgentNodeFields({
             const next: Partial<typeof kind> =
               v === ''
                 ? { provider: null }
-                : { provider: providerStringFromHarnessId(v as InspectorHarnessId) };
+                : { provider: configurations ? v : providerStringFromHarnessId(v as InspectorHarnessId) };
             onChange({
               ...kind,
               ...next,
@@ -843,7 +854,14 @@ function SpawnAgentNodeFields({
               ? 'Default (Reviewer provider/source agent)'
               : 'Default (mesh autopilot)'}
           </option>
-          {HARNESS_OPTIONS.map((opt) => (
+          {configurations && kind.provider && !selected && (
+            <option value={kind.provider}>{kind.provider} (saved selection)</option>
+          )}
+          {configurations ? configurations.map((row) => (
+            <option key={row.id} value={row.id} disabled={!!row.unavailable_reason}>
+              {row.label}{row.unavailable_reason ? ` — ${row.unavailable_reason}` : ''}
+            </option>
+          )) : HARNESS_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
             </option>

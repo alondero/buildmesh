@@ -152,7 +152,7 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// v43 adds the durable node lifecycle lease table. Cleanup intent and
 /// transient spawn/cleanup ownership no longer live in historical run JSON.
 /// v44 adds the nullable saved spawn-configuration snapshot to agent nodes.
-pub(crate) const SCHEMA_VERSION: u32 = 44;
+pub(crate) const SCHEMA_VERSION: u32 = 45;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.

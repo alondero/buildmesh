@@ -258,7 +258,8 @@ pub struct PairingVerification {
 /// surface** — the surface→URL(+default model map) the attach flow reads so a
 /// pairing only has to *name* the surface (ADR-0016 §4). Not persisted; returned
 /// by [`super::first_class_surfaces`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "SurfaceEndpoint.ts")]
 pub struct SurfaceEndpoint {
     pub surface: ApiSurface,
     pub base_url: String,
@@ -467,6 +468,8 @@ pub struct AppPreferences {
     pub harness_defaults: HashMap<String, HarnessConfigValue>,
     #[serde(default)]
     pub spawn_configurations: Vec<super::spawn_configurations::SpawnConfiguration>,
+    #[serde(default)]
+    pub deleted_launch_configurations: Vec<String>,
     /// Buildmesh-wide default Worktree Node directory (issue #1519).
     /// Optional raw user input — relative values resolve from the Mesh root,
     /// absolute values must be in the same host environment (native/Windows

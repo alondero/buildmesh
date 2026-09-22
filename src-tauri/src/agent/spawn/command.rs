@@ -102,7 +102,7 @@ pub fn build_spawn_command_prepared(
             "--profile".into(),
             profile_name.clone(),
             "--model".into(),
-            descriptor.model_id.clone(),
+            config.model.clone().unwrap_or_else(|| descriptor.model_id.clone()),
         ]);
     }
 

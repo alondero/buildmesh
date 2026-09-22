@@ -419,7 +419,7 @@ pub(crate) fn quiet_turn_prompt(output: &str) -> String {
 ///
 /// Returns `None` on every failure path (spawn, timeout, exit status,
 /// unparseable) — the caller treats that as `WORKING`.
-pub fn classify(node_id: i64, backend_env: &[(String, String)]) -> Option<Classification> {
+pub(crate) fn classify(node_id: i64, backend_env: &crate::session_naming::NamingLaunch) -> Option<Classification> {
     let tail = cleaned_tail(node_id);
     if tail.trim().len() < 40 {
         // Nothing meaningful to classify yet (e.g. the first turn right
@@ -429,12 +429,6 @@ pub fn classify(node_id: i64, backend_env: &[(String, String)]) -> Option<Classi
     let prompt = classify_prompt(&tail);
 
     classify_with_prompt(node_id, backend_env, &prompt)
-}
-
-/// Review completion alone is not approval. Unclear reports and backend
-/// failures need attention rather than silently authorizing more work.
-pub fn classify_review(node_id: i64, backend_env: &[(String, String)]) -> Option<Classification> {
-    classify_with_prompt(node_id, backend_env, &review_prompt(&cleaned_turn_tail(node_id)))
 }
 
 /// Deterministic verdict fallback for a cleanly-yielded reviewer turn
@@ -568,14 +562,15 @@ pub(crate) fn review_prompt(output: &str) -> String {
     )
 }
 
-pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &[(String, String)], prompt: &str) -> Option<Classification> {
+pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &crate::session_naming::NamingLaunch, prompt: &str) -> Option<Classification> {
 
-    let mut cmd = crate::process_util::command_no_window("claude");
+    let mut cmd = crate::process_util::command_no_window(backend_env.executable.as_deref().unwrap_or(std::path::Path::new("claude")));
     cmd.arg("--print");
+    cmd.args(&backend_env.args);
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
         cmd.env_remove(k);
     }
-    for (k, v) in backend_env {
+    for (k, v) in &backend_env.env {
         cmd.env(k, v);
     }
     let output = match run_classifier_command(cmd, prompt, std::time::Duration::from_secs(30)) {

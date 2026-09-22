@@ -284,13 +284,52 @@ fn resolve_routing(
         return Ok(PreparedLaunchRouting::Native { executable: executable_override });
     };
 
+    preferences::preflight_resolve_provider_env(spawn_option_id)?;
+    if provider == Provider::Anthropic {
+        return Ok(PreparedLaunchRouting::Environment(preferences::resolve_provider_env(spawn_option_id)));
+    }
+    prepare_route(pairing, account, provider, resolved, None)
+}
+
+pub fn prepare_snapshot(
+    plan: &preferences::launch_configurations::ResolvedLaunchPlan,
+    resolved: &ResolvedPath,
+) -> Result<PreparedLaunchRouting, String> {
+    if resolved.env_type == crate::models::EnvType::WindowsInterop
+        && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none())
+    {
+        return Err("Windows harnesses require an interoperable WSL host with powershell.exe on PATH.".into());
+    }
+    if let Some(distro) = &plan.harness.wsl_distro {
+        if resolved.env_type == crate::models::EnvType::Wsl
+            && crate::env::get_default_wsl_distro().as_deref() != Some(distro.as_str())
+        {
+            return Err(format!("This saved launch belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh."));
+        }
+    }
+    let Some(route) = plan.route.clone() else {
+        return Ok(PreparedLaunchRouting::Native { executable: plan.harness.executable.clone() });
+    };
+    let account = preferences::provider_accounts().into_iter().find(|a| a.id == route.provider_id)
+        .ok_or_else(|| format!("Provider account '{}' is missing; restore its credential to resume", route.provider_id))?;
+    prepare_route(route, account, Provider::from_db_str(&plan.harness.harness), resolved, plan.verification.as_ref())
+}
+
+fn prepare_route(
+    pairing: preferences::ProviderPairing,
+    account: preferences::ProviderAccount,
+    provider: Provider,
+    resolved: &ResolvedPath,
+    verification: Option<&preferences::PairingVerification>,
+) -> Result<PreparedLaunchRouting, String> {
+    preferences::compatibility::preflight_pairing_env(Some(&pairing), &account.id)?;
     match provider {
         Provider::Codex => {
-            let verified = crate::services::provider_verification::verified_codex_pairing(
-                &pairing,
-                &account,
-                resolved.env_type,
-            )?;
+            let verified = if verification.is_some() {
+                crate::services::provider_verification::verified_codex_snapshot(&pairing, &account, resolved.env_type, verification)?
+            } else {
+                crate::services::provider_verification::verified_codex_pairing(&pairing, &account, resolved.env_type)?
+            };
             let profile_name = codex::stable_profile_name(&pairing.harness_id, &pairing.provider_id);
             codex::materialize_proxy_profile(
                 resolved.env_type,
@@ -302,7 +341,6 @@ fn resolve_routing(
             // Codex's verified install path wins over the profile's bare
             // `executable` — it carries the npm-shim location after
             // verification, which is what Codex's actual binary is.
-            let _ = executable_override;
             Ok(PreparedLaunchRouting::CodexProxy {
                 harness_id: pairing.harness_id,
                 provider_id: pairing.provider_id,
@@ -332,9 +370,9 @@ fn resolve_routing(
                     .reason
                     .unwrap_or_else(|| "incompatible capability contract".into()));
             }
-            preferences::preflight_resolve_provider_env(spawn_option_id)?;
             Ok(PreparedLaunchRouting::Environment(
-                preferences::resolve_provider_env(spawn_option_id),
+                preferences::compatibility::surface_env(pairing.surface, pairing.base_url.as_deref(),
+                    account.api_key.as_deref(), &pairing.model_tiers),
             ))
         }
         _ => Err("the selected harness does not support proxied providers".into()),

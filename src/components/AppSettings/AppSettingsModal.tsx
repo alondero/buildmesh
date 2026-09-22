@@ -6,6 +6,8 @@ import { HarnessOrderList } from './HarnessOrderList';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
+import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
+import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration } from '../../lib/tauri/provider';
 import { UpdateAboutSection } from './UpdateAboutSection';
 import * as api from '../../lib/tauri';
 import type {
@@ -32,6 +34,7 @@ interface AppSettingsModalProps {
 }
 
 const NO_OVERRIDE = '__no_override__';
+const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration };
 
 async function getHostPairingVerifications(): Promise<PairingVerification[]> {
   const runtimes: api.EnvType[] = isWindows ? ['windows', 'wsl'] : ['windows'];
@@ -49,7 +52,7 @@ async function getHostPairingVerifications(): Promise<PairingVerification[]> {
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
-  { id: 'harnesses', label: 'Harnesses' },
+  { id: 'harnesses', label: 'Launch Configurations' },
   { id: 'remote', label: 'Remote Access' },
 ] as const;
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
@@ -853,6 +856,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       return next;
     });
   }, []);
+  const launchDirtyChange = useCallback((dirty: boolean) => siteDirtyChange('harness-launch-configurations', dirty), [siteDirtyChange]);
 
   // Which panes hold unsaved edits — drives the amber dot on the nav rail so
   // a dirty pane stays discoverable after the user tabs away from it.
@@ -1177,10 +1181,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // against a stale closure still rolls back to the latest committed state.
   const handleReorderHarnesses = async (order: string[]) => {
     const previous = providersRef.current;
-    const byId = new Map(previous.map(p => [p.id, p]));
     const reordered = [
-      ...(order.map(id => byId.get(id)).filter(Boolean) as ProviderInfo[]),
-      ...previous.filter(p => !order.includes(p.id)),
+      ...order.flatMap(id => previous.filter(p => p.harness_id === id)),
+      ...previous.filter(p => !order.includes(p.harness_id)),
     ];
     setProviders(reordered);
     setError(null);
@@ -1884,10 +1887,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <section
           role="tabpanel"
-          aria-label="Harnesses"
+          aria-label="Launch Configurations"
           hidden={activeTab !== 'harnesses'}
           className="space-y-2"
         >
+        <SettingsSection title="Launch Configurations"><LaunchConfigurations api={launchConfigurationApi} onDirtyChange={launchDirtyChange} refreshToken={providers} /></SettingsSection>
         {/* Issue #1534 — the Agent Harness defaults section below is
             preferences-backed, so a failed preferences load must be visible
             here rather than silently disabling the per-harness inputs. */}
@@ -1898,7 +1902,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             onRetry={() => retryResource('preferences')}
           />
         )}
-        {providers.filter(p => p.id !== 'terminal').length >= 2 && (
+        {providers.filter(p => p.harness_id !== 'terminal').length >= 2 && (
           <SettingsSection title="Spawn menu order">
             <p className="pb-2 text-sm text-text-muted">
               Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
@@ -1908,7 +1912,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         )}
 
         <SettingsSection
-          title="Harnesses & proxied providers"
+          title="Advanced Provider Routes"
           description={
             <>
               Proxy a model provider through a harness over a compatible API surface
@@ -1949,9 +1953,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           ) : (
             <HarnessConfigList
               harnesses={
-                providers
-                  .filter((p) => !p.is_proxied && p.id !== 'terminal')
-                  .map((p) => ({ id: p.id, label: p.label })) as ProxyHarness[]
+                [...new Map(providers.filter((p) => p.harness_id !== 'terminal')
+                  .map((p) => [p.harness_id, { id: p.harness_id, label: p.harness_id }])).values()] as ProxyHarness[]
               }
               compatibleByHarness={compatibleByHarness}
               pairings={pairings}
@@ -2099,9 +2102,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             >
               <option value="">Disabled (auto-naming off)</option>
               {providers
-                .filter((p) => p.id !== 'terminal')
+                .filter((p) => p.harness_id !== 'terminal')
                 .map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
+                  <option key={p.id} value={p.id} disabled={Boolean(p.unavailable_reason)}>{p.label}{p.unavailable_reason ? ` — ${p.unavailable_reason}` : ''}</option>
                 ))}
             </select>
           </SettingsRow>

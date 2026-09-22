@@ -5,15 +5,28 @@ use tauri::Emitter;
 use super::{AppPreferences, HarnessConfigValue};
 
 /// Named, sparse launch overrides belonging to one Spawn Option.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[ts(export, export_to = "SpawnConfiguration.ts")]
 pub struct SpawnConfiguration {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub spawn_option_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub harness_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider_route_id: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub extra_args: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub generated: Option<super::launch_configurations::GeneratedLaunch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolved: Option<super::launch_configurations::ResolvedLaunchPlan>,
 }
 
 #[derive(Debug)]
@@ -31,6 +44,7 @@ impl std::fmt::Display for SpawnConfigurationError {
 }
 
 pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
+    super::launch_configurations::normalize_identity(&mut value)?;
     value.name = value.name.trim().to_string();
     if value.name.is_empty() {
         return Err("Configuration name is required".into());
@@ -82,7 +96,7 @@ pub fn validate_for_option(
     option: &str,
     value: SpawnConfiguration,
 ) -> Result<SpawnConfiguration, String> {
-    if value.spawn_option_id != option {
+    if value.spawn_option_id != option && value.id != option {
         return Err("Configuration belongs to a different Spawn Option".into());
     }
     validate(value)
@@ -110,9 +124,18 @@ pub fn save_spawn_configuration(
     app: tauri::AppHandle,
     value: SpawnConfiguration,
 ) -> Result<SpawnConfiguration, String> {
-    let mut value = validate(value).map_err(|e| e.to_string())?;
+    let value = save_value(value)?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(value)
+}
+
+pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
+    let mut value = validate(value)?;
     normalize_id(&mut value);
-    super::update(|prefs| {
+    value.resolved = None;
+    super::storage::try_update(|prefs| {
+        value.generated = prefs.spawn_configurations.iter().find(|c| c.id == value.id)
+            .and_then(|c| c.generated.clone()).map(|mut g| { g.user_owned = true; g });
         if let Some(existing) = prefs
             .spawn_configurations
             .iter_mut()
@@ -122,22 +145,33 @@ pub fn save_spawn_configuration(
         } else {
             prefs.spawn_configurations.push(value.clone());
         }
+        super::launch_configurations::resolve_for_edit(prefs, &value.id)?;
+        Ok(())
     })?;
-    let _ = app.emit("provider-list-changed", ());
     Ok(value)
 }
 
 fn normalize_id(value: &mut SpawnConfiguration) {
     value.id = value.id.trim().to_string();
     if value.id.is_empty() {
-        value.id = uuid::Uuid::new_v4().to_string();
+        value.id = format!("launch/{}", uuid::Uuid::new_v4());
     }
 }
 
 #[tauri::command]
 pub fn delete_spawn_configuration(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    super::update(|prefs| prefs.spawn_configurations.retain(|c| c.id != id))?;
+    delete_value(&id)?;
     let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
+pub fn delete_value(id: &str) -> Result<(), String> {
+    super::update(|prefs| {
+        prefs.spawn_configurations.retain(|c| c.id != id);
+        if !prefs.deleted_launch_configurations.iter().any(|deleted| deleted == id) {
+            prefs.deleted_launch_configurations.push(id.into());
+        }
+    })?;
     Ok(())
 }
 
@@ -153,6 +187,7 @@ mod tests {
             model: Some(" gpt-5.6-sol ".into()),
             effort: None,
             extra_args: None,
+            ..Default::default()
         }
     }
 
@@ -204,7 +239,7 @@ mod tests {
         value.id = "   ".into();
         normalize_id(&mut value);
         assert!(!value.id.is_empty());
-        assert!(value.id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        assert!(uuid::Uuid::parse_str(value.id.strip_prefix("launch/").unwrap()).is_ok());
 
         value.id = " sol ".into();
         normalize_id(&mut value);

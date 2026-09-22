@@ -1,6 +1,8 @@
 # PRD: Per-Harness Default Configurations & Per-Mesh Overrides (Ship Parity)
 
 Status: shipped (issue [#1210](https://github.com/alondero/buildmesh/issues/1210))
+The narrow configuration model is superseded by [Launch Configurations (#1857)](https://github.com/alondero/buildmesh/issues/1857).
+Per-harness application and Mesh settings remain fallback layers beneath a selected recipe.
 Spec wayfinder map: [#1142](https://github.com/alondero/buildmesh/issues/1142)
 Spec ticket: [#1148](https://github.com/alondero/buildmesh/issues/1148)
 

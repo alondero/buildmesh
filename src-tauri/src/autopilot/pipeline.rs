@@ -719,7 +719,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     .and_then(|m| m.autopilot_provider.as_deref())
                     .unwrap_or("anthropic"),
             );
-            let classification = evaluator::classify(node_id, &backend_env);
+            let classification = backend_env.ok().and_then(|launch| evaluator::classify(node_id, &launch));
             match decide_implementing(classification) {
                 TurnAction::InjectFinish => {
                     let prompt =
@@ -1213,6 +1213,7 @@ mod tests {
 
     fn wrapup_test_node() -> crate::models::AgentNode {
         crate::models::AgentNode {
+            launch_configuration: None,
             id: 1,
             mesh_id: 1,
             name: "gh1-missing".to_string(),

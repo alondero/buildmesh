@@ -132,6 +132,14 @@ export async function listProviders(): Promise<Provider[]> {
   return (await apiFetch("/api/providers")).json();
 }
 
+export const launchConfigurationApi = {
+  list: async (): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration[]> => (await apiFetch('/api/launch-configurations')).json(),
+  targets: async (): Promise<import('../types/generated/LaunchTarget').LaunchTarget[]> => (await apiFetch('/api/launch-targets')).json(),
+  save: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration> =>
+    (await apiFetch('/api/launch-configurations/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })).json(),
+  remove: async (id: string): Promise<void> => { await apiFetch('/api/launch-configurations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); },
+};
+
 export async function createNode(req: CreateNodeRequest): Promise<AgentNode> {
   const resp = await apiFetch("/api/nodes/create", {
     method: "POST",

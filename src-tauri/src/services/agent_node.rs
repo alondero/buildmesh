@@ -2,6 +2,32 @@
 
 use crate::agent::provider::SpawnOptionId;
 use crate::db;
+
+/// Upgrade legacy history outside DB locks; the existing JSON column keeps the operation additive.
+pub fn migrate_launch_history() -> Result<(), String> {
+    let prefs = crate::preferences::load()?;
+    let mappings = prefs.spawn_configurations.iter().filter(|c| c.generated.is_some())
+        .filter(|c| !prefs.spawn_configurations.iter().any(|other| other.id == c.spawn_option_id))
+        .map(|c| (c.spawn_option_id.clone(), c.id.clone())).collect();
+    db::migrate_launch_selections(&mappings).map_err(|e| e.to_string())?;
+    let nodes = db::legacy_launch_nodes().map_err(|e| e.to_string())?;
+    for node in nodes {
+        let mut snapshot_prefs = prefs.clone();
+        let selection = if let Some(configuration) = node.launch_configuration.as_ref() {
+            snapshot_prefs.spawn_configurations.retain(|c| c.id != configuration.id);
+            snapshot_prefs.spawn_configurations.push(configuration.clone());
+            configuration.id.as_str()
+        } else { node.provider.as_str() };
+        let harness = crate::agent::provider::SpawnOptionId::from(node.provider.as_str()).harness_id;
+        let mesh = db::get_mesh_harness_overrides(node.mesh_id).map_err(|e| e.to_string())?
+            .and_then(|values| values.get(&harness).cloned()).unwrap_or_default();
+        match crate::preferences::launch_configurations::capture_legacy(&snapshot_prefs, selection, &mesh) {
+            Ok(plan) => db::set_node_launch_snapshot(node.id, &crate::preferences::launch_configurations::snapshot(plan))?,
+            Err(error) => tracing::warn!(node_id = node.id, "Legacy launch snapshot unavailable: {error}"),
+        }
+    }
+    Ok(())
+}
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
 use crate::models::{AgentNode, PendingWorktreeRemoval, SessionStatus};
@@ -162,17 +188,30 @@ pub fn create_with_source_pr_fork_configured(
     head_repo_clone_url: Option<&str>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let configuration = configuration
-        .cloned()
-        .map(|value| {
-            crate::preferences::spawn_configurations::validate_for_option(
-                provider.unwrap_or("anthropic"),
-                value,
-            )
-        })
-        .transpose()
-        .map_err(AgentNodeError::InvalidConfiguration)?;
     let mesh = db::get_mesh_by_id(mesh_id)?;
+    let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
+    let selection = crate::preferences::resolve_default_provider(
+        provider.map(str::to_string), mesh.default_provider.clone(), prefs.default_provider.clone());
+    if let Some(value) = configuration {
+        if value.spawn_option_id != selection && value.id != selection {
+            return Err(AgentNodeError::InvalidConfiguration("Configuration belongs to a different launch selection".into()));
+        }
+        prefs.spawn_configurations.retain(|c| c.id != value.id);
+        prefs.spawn_configurations.push(value.clone());
+    }
+    let selected = configuration.map_or(selection.as_str(), |c| c.id.as_str());
+    let option = prefs.spawn_configurations.iter().find(|c| c.id == selected)
+        .map_or(selected, |c| c.spawn_option_id.as_str());
+    let harness_id = crate::agent::provider::SpawnOptionId::from(option).harness_id;
+    let mesh_values = db::get_mesh_harness_overrides(mesh_id).map_err(AgentNodeError::Db)?
+        .and_then(|values| values.get(&harness_id).cloned()).unwrap_or_default();
+    let plan = if let Some(plan) = configuration.and_then(|c| c.resolved.clone()) { plan } else {
+        crate::preferences::launch_configurations::resolve(&prefs, selected,
+            &Default::default(), &mesh_values).map_err(AgentNodeError::InvalidConfiguration)?
+    };
+    let runtime = plan.harness.runtime;
+    let provider_id = plan.spawn_option_id.clone();
+    let configuration = Some(crate::preferences::launch_configurations::snapshot(plan));
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 
     // Caller may supply a pre-derived name (e.g. `slugify_issue_title` for the
@@ -208,12 +247,11 @@ pub fn create_with_source_pr_fork_configured(
     let worktree_path_owned: Option<String> = worktree_db_name
         .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
     let resolved = env::resolve_agent_path_in_dir(path, &effective_dir, worktree_db_name);
-    let env_type = resolved.env_type;
+    let env_type = runtime.unwrap_or(resolved.env_type);
     // Store the harness/profile id verbatim (issue #535) — no premature parse
     // to the legacy `Provider` enum, which would flatten an unknown profile id
     // to Anthropic. Resolution happens at the spawn seam. An absent provider
     // defaults to "anthropic", matching the prior `Provider::Anthropic` default.
-    let provider_id = provider.unwrap_or("anthropic");
 
     let node = db::create_agent_node_configured(
         mesh_id,
@@ -221,7 +259,7 @@ pub fn create_with_source_pr_fork_configured(
         path,
         branch,
         env_type,
-        provider_id,
+        &provider_id,
         worktree_db_name,
         source_issue,
         source_pr,
@@ -441,14 +479,10 @@ pub fn create_pending(
 /// circuit ledger remains the owner of orchestration state while the shared
 /// Agent Node row still records the branch-backed environment it needs.
 #[allow(clippy::too_many_arguments)]
-pub fn create_pending_with_worktree_override(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-    use_worktree_override: Option<bool>,
+pub fn create_pending_with_worktree_override_configured(
+    mesh_id: i64, path: &str, branch: &str, provider: Option<&str>, source_issue: Option<i64>,
+    name_override: Option<&str>, use_worktree_override: Option<bool>,
+    configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_pending_with_source_pr_fork_and_worktree(
         mesh_id,
@@ -462,7 +496,7 @@ pub fn create_pending_with_worktree_override(
         None,
         None,
         use_worktree_override,
-        None,
+        configuration,
     )
 }
 
@@ -951,9 +985,19 @@ pub fn regenerate_apply_blocking(
     old_provider: &str,
     new_provider: &str,
 ) -> Result<bool, AgentNodeError> {
-    db::set_agent_node_provider(node_id, new_provider)?;
     let node = db::get_agent_node_by_id(node_id)?;
-    Ok(decide_resume(old_provider, new_provider, node.cli_session_id.as_deref()).is_some())
+    let prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
+    let option = prefs.spawn_configurations.iter().find(|c| c.id == new_provider)
+        .map_or(new_provider, |c| c.spawn_option_id.as_str());
+    let harness_id = SpawnOptionId::from(option).harness_id;
+    let mesh = db::get_mesh_harness_overrides(node.mesh_id)?
+        .and_then(|values| values.get(&harness_id).cloned()).unwrap_or_default();
+    let plan = crate::preferences::launch_configurations::resolve(&prefs, new_provider, &Default::default(), &mesh)
+        .map_err(AgentNodeError::InvalidConfiguration)?;
+    let resume = decide_resume(old_provider, &plan.spawn_option_id, node.cli_session_id.as_deref()).is_some();
+    let runtime = plan.harness.runtime.unwrap_or_else(|| crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type);
+    db::replace_node_launch(node_id, &crate::preferences::launch_configurations::snapshot(plan), runtime).map_err(AgentNodeError::Backend)?;
+    Ok(resume)
 }
 
 /// Sync helper for step 8 of [`regenerate`]: reload the node row
@@ -1235,13 +1279,17 @@ mod tests {
         let mut configuration = SpawnConfiguration {
             id: "sol".into(), name: "Sol Max".into(), spawn_option_id: "codex".into(),
             model: Some("gpt-5.6-sol".into()), effort: None, extra_args: Some("--search".into()),
+            ..Default::default()
         };
         for pending in [false, true] {
             let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
                 None, None, Some(false), pending, Some(&configuration)).unwrap();
             assert_eq!(node.provider, "codex");
             assert_eq!(node.status, if pending { SessionStatus::Pending } else { SessionStatus::Idle });
-            assert_eq!(db::node_spawn_configuration(node.id, "codex").unwrap(), Some(configuration.clone()));
+            let saved = db::node_spawn_configuration(node.id, "codex").unwrap().unwrap();
+            assert_eq!(saved.id, configuration.id);
+            assert_eq!(saved.model, configuration.model);
+            assert_eq!(saved.resolved.unwrap().harness.harness, "codex");
         }
         let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
             None, None, Some(false), false, Some(&configuration)).unwrap();
@@ -1252,7 +1300,7 @@ mod tests {
         db::set_agent_node_provider(node.id, "codex").unwrap();
         assert!(db::node_spawn_configuration(node.id, "codex").unwrap().is_none());
         let defaults = create_blocking(mesh_id, Some("codex"), Some("main"), None, None, Some(false), false).unwrap();
-        assert!(db::node_spawn_configuration(defaults.id, "codex").unwrap().is_none());
+        assert_eq!(db::node_spawn_configuration(defaults.id, "codex").unwrap().unwrap().id, "launch/codex");
         assert!(db::node_spawn_configuration(i64::MAX, "codex").unwrap().is_none());
     }
 
@@ -2034,6 +2082,12 @@ mod tests {
 
     #[test]
     fn regenerate_apply_blocking_writes_provider_and_decides_resume() {
+        let prefs_dir = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(prefs_dir.path().into());
+        crate::preferences::save(serde_json::from_value(serde_json::json!({
+            "provider_accounts": [{"id":"minimax","name":"MiniMax","enabled":true,"billing_mode":"pay_as_you_go","api_key":"test-key"}],
+            "provider_pairings": [{"harness_id":"claude","provider_id":"minimax","surface":"anthropic","base_url":"https://api.minimax.io/anthropic","model_tiers":{"default":"MiniMax-M3[1m]"}}]
+        })).unwrap()).unwrap();
         // Same-harness provider swap with a captured cli_session_id:
         // apply_blocking must write the new provider AND report
         // `resume = true` (because `decide_resume` continues the
@@ -2043,7 +2097,7 @@ mod tests {
             mesh_id,
             "/tmp/buildmesh_regen_apply",
             "main",
-            Some("claude:anthropic"),
+            Some("claude"),
             None,
             None,
             None,
@@ -2054,7 +2108,7 @@ mod tests {
         db::update_cli_session_id(node.id, "sess-abc")
             .expect("set cli_session_id");
 
-        let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "claude:minimax")
+        let resume = regenerate_apply_blocking(node.id, "claude", "launch/claude:minimax")
             .expect("apply should succeed");
         assert!(resume, "same-harness swap with a session id must resume");
 
@@ -2072,6 +2126,8 @@ mod tests {
 
     #[test]
     fn regenerate_apply_blocking_starts_fresh_on_cross_harness() {
+        let prefs_dir = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(prefs_dir.path().into());
         // Claude → Codex: the captured Claude session id is not a valid
         // Codex id, so the apply step must report `resume = false`.
         let mesh_id = fresh_mesh();
@@ -2079,7 +2135,7 @@ mod tests {
             mesh_id,
             "/tmp/buildmesh_regen_apply_cross",
             "main",
-            Some("claude:anthropic"),
+            Some("claude"),
             None,
             None,
             None,

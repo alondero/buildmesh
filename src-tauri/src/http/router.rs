@@ -239,6 +239,10 @@ enum Handler {
     SpaShell,
     ApiNodes,
     ApiProviders,
+    LaunchConfigurations,
+    LaunchTargets,
+    LaunchConfigurationSave,
+    LaunchConfigurationDelete,
     ApiMeshes,
 }
 
@@ -260,6 +264,12 @@ impl Route {
 /// prefix/catch-all routes (`/admin/devices*` before `/admin/*`, `/api/meshes/…`
 /// before `GET /api/*`, assets before the SPA fallback).
 const ROUTES: &[Route] = &[
+    Route { method: "GET", m: RouteMatch::Exact("/api/launch-configurations"), scope: RouteScope::Admin, body: BodyPolicy::None, handler: Handler::LaunchConfigurations },
+    Route { method: "GET", m: RouteMatch::Exact("/api/launch-targets"), scope: RouteScope::Admin, body: BodyPolicy::None, handler: Handler::LaunchTargets },
+    Route { method: "POST", m: RouteMatch::Exact("/api/launch-configurations/save"), scope: RouteScope::Admin, body: BodyPolicy::Cap(64 * 1024), handler: Handler::LaunchConfigurationSave },
+    Route { method: "POST", m: RouteMatch::Exact("/api/launch-configurations/delete"), scope: RouteScope::Admin, body: BodyPolicy::Cap(8 * 1024), handler: Handler::LaunchConfigurationDelete },
+    Route { method: "GET", m: RouteMatch::Exact("/launch-configurations"), scope: RouteScope::CoordinatorRead, body: BodyPolicy::None, handler: Handler::ApiProviders },
+    Route { method: "POST", m: RouteMatch::Exact("/nodes/create"), scope: RouteScope::CoordinatorWrite, body: BodyPolicy::Cap(64 * 1024), handler: Handler::NodesCreate },
     Route {
         method: "GET",
         m: RouteMatch::Exact("/admin/devices"),
@@ -710,6 +720,10 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::SpaShell => Http(assets::spa_shell(req)),
         Handler::ApiNodes => Http(routes::nodes::list(req).await),
         Handler::ApiProviders => Http(routes::providers::list(req).await),
+        Handler::LaunchConfigurations => Http(routes::launch_configurations::list(req).await),
+        Handler::LaunchTargets => Http(routes::launch_configurations::targets(req).await),
+        Handler::LaunchConfigurationSave => Http(routes::launch_configurations::save(req).await),
+        Handler::LaunchConfigurationDelete => Http(routes::launch_configurations::delete(req).await),
         Handler::ApiMeshes => Http(routes::meshes::list(req).await),
     }
 }
@@ -975,6 +989,12 @@ mod tests {
             .collect();
         let actual = table.join("\n");
         let expected = "\
+GET /api/launch-configurations -> Admin
+GET /api/launch-targets -> Admin
+POST /api/launch-configurations/save -> Admin
+POST /api/launch-configurations/delete -> Admin
+GET /launch-configurations -> CoordinatorRead
+POST /nodes/create -> CoordinatorWrite
 GET /admin/devices -> Admin
 POST /admin/devices/{id}/revoke -> Admin
 GET /nodes -> CoordinatorRead

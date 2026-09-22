@@ -1674,7 +1674,7 @@ fn classify_step_turn(
             .ok()
             .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
             .unwrap_or_else(|| "claude".to_string());
-        let backend_env = crate::session_naming::naming_backend_env(&backend_provider);
+        let backend_env = crate::session_naming::naming_backend_env(&backend_provider).ok()?;
         evaluator::classify_with_prompt(agent_node_id, &backend_env, prompt)
     };
     // A `verdict` gate consumes its report as the reviewer's verdict, so a
@@ -2725,7 +2725,8 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
                     .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
                     .unwrap_or_else(|| "claude".into());
-                evaluator::classify_with_prompt(agent_node_id, &crate::session_naming::naming_backend_env(&provider), prompt)
+                let launch = crate::session_naming::naming_backend_env(&provider).ok()?;
+                evaluator::classify_with_prompt(agent_node_id, &launch, prompt)
             }, || {
                 // Classification can take 30s. A hook, user input, or resumed
                 // output during that interval invalidates the quiet observation.

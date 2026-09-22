@@ -22,6 +22,9 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
+import { getCapabilitiesFor } from '../../src/components/Circuits/harnessCapabilities';
+const { listConfigurations } = vi.hoisted(() => ({ listConfigurations: vi.fn().mockRejectedValue(new Error('offline')) }));
+vi.mock('../../src/lib/tauri/provider', () => ({ listProviders: listConfigurations }));
 
 class ResizeObserverMock {
   observe() {}
@@ -152,6 +155,19 @@ describe('InspectorPanel — OpenPr policy', () => {
 });
 
 describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', () => {
+  it('round-trips live configuration IDs and shows unavailable choices', async () => {
+    listConfigurations.mockResolvedValueOnce([
+      { id: 'launch/fast', label: 'Fast review', capabilities: getCapabilitiesFor('anthropic') },
+      { id: 'launch/missing', label: 'Missing route', unavailable_reason: 'Route unavailable' },
+    ]);
+    const onChange = vi.fn();
+    renderNode(spawnNode({ provider: 'launch/removed' }), onChange);
+    await screen.findByRole('option', { name: 'Fast review' });
+    expect((screen.getByLabelText('Provider') as HTMLSelectElement).value).toBe('launch/removed');
+    expect((screen.getByRole('option', { name: 'Missing route — Route unavailable' }) as HTMLOptionElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'launch/fast' } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ provider: 'launch/fast', model: null, effort: null, extra_args: null }));
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });

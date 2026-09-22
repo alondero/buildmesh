@@ -2,6 +2,11 @@
 
 Status: accepted (refines ADR-0014)
 
+Launch Configuration amendment (#1857): grouped children are now named native
+and proxied configurations. Unavailable dependencies remain visible with reasons.
+Legacy composite IDs are compatibility inputs, not the canonical selection ID;
+desktop, mobile, and HTTP consume the same backend menu projection.
+
 ## Context
 
 ADR-0014 separated **Agent Harness** (executor) from **Model Provider** (credentials/endpoint) and specified that "the UI launch dropdown renders user-configured profiles" — i.e. a **flat list of harness×provider profiles** ("MiniMax via Claude Code" as a row), with a configured provider auto-paired to the Claude Code harness *only* (#537).

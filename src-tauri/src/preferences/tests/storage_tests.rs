@@ -15,7 +15,7 @@ fn preference_files_are_isolated_between_temp_directories() {
     });
 
     let second_dir = with_temp_dir(|_| {
-        assert_eq!(load().unwrap(), AppPreferences::default());
+        assert_eq!(load().unwrap().spawn_configurations[0].id, "launch/terminal");
     });
 
     assert_ne!(first_dir, second_dir);
@@ -25,7 +25,7 @@ fn preference_files_are_isolated_between_temp_directories() {
 fn load_returns_default_when_file_missing() {
     with_temp_dir(|_| {
         let prefs = load().unwrap();
-        assert_eq!(prefs, AppPreferences::default());
+        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
         assert_eq!(prefs.default_provider, None);
     });
 }
@@ -38,11 +38,11 @@ fn failed_update_does_not_publish_candidate_to_cache() {
     std::fs::write(&app_data_file, "not a directory").unwrap();
     init_for_tests(app_data_file.clone());
 
-    assert_eq!(load().unwrap().default_provider, None);
+    assert!(load().is_err());
     let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
         .unwrap_err();
     assert!(error.contains("app data dir") || error.contains("temporary preferences"));
-    assert_eq!(load().unwrap().default_provider, None);
+    assert!(load().is_err());
 
     reset_for_tests();
     std::fs::remove_file(app_data_file).unwrap();
@@ -55,6 +55,7 @@ fn save_then_load_round_trip() {
         prefs.default_provider = Some("claude".to_string());
         prefs.harness_order = vec!["claude".to_string(), "codex".to_string()];
         save(prefs.clone()).unwrap();
+        super::super::launch_configurations::reconcile(&mut prefs);
         assert_eq!(load().unwrap(), prefs);
     });
 }

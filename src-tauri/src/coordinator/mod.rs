@@ -76,7 +76,8 @@ mod tests {
                 head_repo_clone_url TEXT,
                 source_pr_pinned_sha TEXT,
                 signal_health TEXT,
-                worktree_path TEXT
+                worktree_path TEXT,
+                spawn_configuration TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (mesh_id, name, path, provider, status, position)
@@ -297,6 +298,7 @@ mod tests {
             ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT;
             ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT;
             ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
+            ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             -- Inserted omitting status_changed_at → stored NULL.
             INSERT INTO agent_nodes (mesh_id, name, path, status, position)

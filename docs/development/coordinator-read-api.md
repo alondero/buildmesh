@@ -10,6 +10,25 @@
 
 ## What this is
 
+### Launch Configuration selection
+
+`GET /launch-configurations` requires coordinator-read scope and returns the
+same ordered configuration menu as desktop/mobile, including unavailable
+reasons. `POST /nodes/create` requires coordinator-write scope and accepts
+`{"mesh_id": 1, "configuration_id": "launch/claude"}`. Discover IDs from the
+menu rather than constructing them. Legacy `provider` requests remain accepted;
+when both fields are supplied they must identify the same launch selection.
+The returned Agent Node includes a secret-free `launch_configuration` snapshot.
+Missing recipes, credentials, or incompatible routes return a client error
+rather than switching providers.
+
+Admin/mobile routes additionally expose `GET /api/launch-configurations`,
+`GET /api/launch-targets`, `POST /api/launch-configurations/save` (a generated
+`SpawnConfiguration` payload), and `POST /api/launch-configurations/delete`
+(`{"id":"launch/example"}`). An empty ID on save creates a user-authored
+recipe. These management routes require admin scope; coordinator tokens do
+not gain credential or recipe-editing access.
+
 Buildmesh exposes a small, read-only HTTP surface through which an external
 **Coordinator** can scan every [Agent Node](../../CONTEXT.md) across every Mesh
 and drill into any one. The surface is **deliberately agent-agnostic** — Hermes

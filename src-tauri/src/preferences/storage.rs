@@ -137,7 +137,10 @@ fn preferences_path() -> Result<PathBuf, String> {
 pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
     let path = preferences_path()?;
     if !path.exists() {
-        return Ok(AppPreferences::default());
+        let mut prefs = AppPreferences::default();
+        super::launch_configurations::reconcile(&mut prefs);
+        write_to_disk(&prefs)?;
+        return Ok(prefs);
     }
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read preferences.json: {}", e))?;
@@ -151,14 +154,16 @@ pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
     // payload (older field the Rust struct doesn't know about) doesn't get
     // overwritten by `AppPreferences::default()`. Issue #xxxx: silent
     // overwrite was a data-loss path.
-    let prefs: AppPreferences = match serde_json::from_value(value.clone()) {
+    let mut prefs: AppPreferences = match serde_json::from_value(value.clone()) {
         Ok(p) => p,
         Err(_) => {
             tracing::warn!("preferences::read_from_disk post-migration deserialization failed; skipping persist");
             return Ok(AppPreferences::default());
         }
     };
-    if changed {
+    let before = serde_json::to_value(&prefs).map_err(|e| e.to_string())?;
+    super::launch_configurations::reconcile(&mut prefs);
+    if changed || serde_json::to_value(&prefs).map_err(|e| e.to_string())? != before {
         if let Err(e) = write_to_disk(&prefs) {
             tracing::warn!("preferences::read_from_disk migration save failed: {}", e);
         }
@@ -224,7 +229,8 @@ pub fn load() -> Result<AppPreferences, String> {
 }
 
 /// Persist preferences to disk and refresh the cache.
-pub fn save(prefs: AppPreferences) -> Result<(), String> {
+pub fn save(mut prefs: AppPreferences) -> Result<(), String> {
+    super::launch_configurations::reconcile(&mut prefs);
     write_to_disk(&prefs)?;
     set_cache(Some(prefs));
     bump_generation();
@@ -241,6 +247,10 @@ pub fn save(prefs: AppPreferences) -> Result<(), String> {
 /// docstring promises; releasing it between mutator and write would let two
 /// concurrent updaters both win the in-memory race against the on-disk one.
 pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreferences, String> {
+    try_update(|prefs| { mutator(prefs); Ok(()) })
+}
+
+pub(crate) fn try_update(mutator: impl FnOnce(&mut AppPreferences) -> Result<(), String>) -> Result<AppPreferences, String> {
     let result: Result<AppPreferences, String> = with_cache_mut(|guard| {
         if guard.is_none() {
             *guard = Some(read_from_disk()?);
@@ -249,7 +259,8 @@ pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreference
             .as_ref()
             .expect("preferences cache was initialized")
             .clone();
-        mutator(&mut candidate);
+        mutator(&mut candidate)?;
+        super::launch_configurations::reconcile(&mut candidate);
         // Publish the new cached value only after the durable atomic
         // replacement succeeds — the disk I/O is serialised by the
         // outer-mutex hold AND by `WRITE_LOCK` inside `write_to_disk`. A

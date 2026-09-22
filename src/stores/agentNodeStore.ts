@@ -101,6 +101,7 @@ const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
   source_pr_pinned_sha: true,
   signal_health: true,
   worktree_path: true,
+  launch_configuration: true,
 };
 const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
   AGENT_NODE_RECONCILE_SCHEMA,
@@ -108,6 +109,10 @@ const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
 
 function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
   for (const k of AGENT_NODE_RECONCILE_FIELDS) {
+    if (k === 'launch_configuration') {
+      if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
+      continue;
+    }
     if (a[k] !== b[k]) return false;
   }
   return true;

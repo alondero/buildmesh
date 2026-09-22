@@ -23,6 +23,7 @@ fn suspended_recovery_schema() -> rusqlite::Connection {
         ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT;
         ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT DEFAULT 'healthy';
         ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
         ALTER TABLE agent_nodes ADD COLUMN session_started_at INTEGER;
         UPDATE agent_nodes SET status = 'suspended';
         INSERT INTO agent_nodes (id, mesh_id, name, path, status, cli_session_id)

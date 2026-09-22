@@ -1,0 +1,15 @@
+.launch-config-form { min-width: 0; padding: 12px; color: var(--color-text-primary, var(--text)); }
+.launch-config-form p { font-size: 12px; margin: 0 0 12px; }
+.launch-config-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
+.launch-config-form label { display: grid; gap: 4px; font-size: 13px; }
+.launch-config-form input, .launch-config-form select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border-default, var(--border)); border-radius: 6px; color: inherit; background: var(--color-bg-input, var(--surface)); }
+.launch-config-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.launch-config-actions button { padding: 8px; }
+.launch-config-form [role="alert"] { color: var(--color-status-error, var(--red)); }
+.launch-delete-dialog { padding: 20px; max-width: 24rem; background: var(--color-bg-overlay, var(--surface)); color: var(--color-text-primary, var(--text)); }
+.launch-delete-dialog button { min-height: 44px; min-width: 44px; padding: 8px; }
+div:has(> .launch-delete-dialog) { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; background: var(--color-bg-overlay, var(--surface)); }
+@media (max-width: 600px) {
+  .launch-config-form input, .launch-config-form select { min-height: 44px; font-size: 16px; box-sizing: border-box; }
+  .launch-config-form button { min-height: 44px; min-width: 44px; }
+}

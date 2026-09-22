@@ -94,6 +94,7 @@ export function RegenerateProviderMenu({
             data-is-current="true"
             data-testid={`${submenuTestId}-current`}
             onClick={() => onPick(current.id, current.label)}
+            disabled={Boolean(current.unavailable_reason)}
             // Pointer entry joins the keyboard's single caret: focus the
             // row under the cursor (preventScroll so focusing inside the
             // scrollable sidebar list never jumps it); the focus handler
@@ -103,7 +104,7 @@ export function RegenerateProviderMenu({
             title="Regenerate in place on the current provider (kick-start a wonky harness)"
             className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${caretClass(current.id)}`}
           >
-            <ProviderIcon providerId={current.id} className="h-3.5 w-3.5 shrink-0" />
+            <ProviderIcon providerId={current.provider_id ?? current.harness_id} className="h-3.5 w-3.5 shrink-0" />
             <span className="flex-1 truncate">{`Current (${current.label})`}</span>
             <span className="text-2xs uppercase tracking-wider text-text-secondary">current</span>
           </button>
@@ -123,7 +124,7 @@ export function RegenerateProviderMenu({
           // `is_proxied: true`). `find` is intentional, not a drop —
           // see `GroupedProviderMenu`'s identical shape.
           const native = options.find((o) => !o.is_proxied);
-          const proxied = options.filter((o) => o.is_proxied);
+          const proxied = options.filter((o) => o.id !== native?.id);
           return (
             <div
               key={groupKey}
@@ -138,13 +139,15 @@ export function RegenerateProviderMenu({
                   data-spawn-id={native.id}
                   data-spawn-harness={native.harness_id}
                   onClick={() => onPick(native.id, native.label)}
+                  disabled={Boolean(native.unavailable_reason)}
+                  title={native.unavailable_reason ?? undefined}
                   onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
                   onFocus={() => setCaretId(native.id)}
                   className={`w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium focus:outline-none flex items-center gap-2 ${caretClass(native.id)}`}
                 >
-                  <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
+                  <ProviderIcon providerId={native.provider_id ?? native.harness_id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{native.label}</span>
-                  <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>
+                  {!native.configuration && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
                 </button>
               )}
               {proxied.map((child) => (
@@ -155,12 +158,14 @@ export function RegenerateProviderMenu({
                   data-spawn-id={child.id}
                   data-spawn-harness={child.harness_id}
                   onClick={() => onPick(child.id, child.label)}
+                  disabled={Boolean(child.unavailable_reason)}
+                  title={child.unavailable_reason ?? undefined}
                   onMouseEnter={(e) => e.currentTarget.focus({ preventScroll: true })}
                   onFocus={() => setCaretId(child.id)}
                   className={`w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary focus:outline-none flex items-center gap-2 ${caretClass(child.id)}`}
                 >
-                  <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
-                  <span className="flex-1 truncate">{child.label}</span>
+                  <ProviderIcon providerId={child.provider_id ?? child.harness_id} className="h-3.5 w-3.5 shrink-0" />
+                  <span className="flex-1">{child.label}{child.unavailable_reason && <small className="block">{child.unavailable_reason}</small>}</span>
                 </button>
               ))}
             </div>

@@ -302,7 +302,7 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
 /// routes through a non-empty `base_url` but has no primary model pinned.
 /// Split out from the disk-reading wrapper so the rule is testable without
 /// touching the global preferences cache.
-fn preflight_pairing_env(
+pub(crate) fn preflight_pairing_env(
     pairing: Option<&ProviderPairing>,
     account_id: &str,
 ) -> Result<(), String> {
@@ -432,7 +432,7 @@ fn cline_anthropic_env(
 /// Emit the spawn env for a pairing's **Compatible API surface** (issue #576).
 /// Dispatches to the per-surface emitter so the surface enum is the single fork
 /// between the `claude` and `codex` backend-selection conventions.
-fn surface_env(
+pub(crate) fn surface_env(
     surface: ApiSurface,
     base_url: Option<&str>,
     api_key: Option<&str>,

@@ -22,6 +22,8 @@ import {
 // per pixel (review feedback #1). No need to import the numeric
 // `PULL_REFRESH_THRESHOLD_PX` from the hook in this file.
 import { groupByHarness } from "../../lib/groups";
+import { LaunchConfigurations } from '../../components/Providers/LaunchConfigurations';
+import { launchConfigurationApi } from '../api';
 import { getStatusConfig } from "../../lib/status";
 
 type Props = {
@@ -512,6 +514,7 @@ export default function NodeList({
       {pickerMeshId !== null && (
         <ProviderPicker
           providers={providers}
+          onChanged={() => { void listProviders().then(setProviders).catch((e: unknown) => setError(String(e))); }}
           onPick={(p, configurationId) => handleCreate(pickerMeshId, p.id, configurationId)}
           onCancel={() => setPickerMeshId(null)}
         />
@@ -691,8 +694,8 @@ function AttentionCard({
   // Same live-provider lookup contract as `NodeRow` (issue #328): the label
   // and chip colour come from the fetched `listProviders()` payload, with a
   // deterministic raw-id fallback before it resolves.
-  const providerMeta = providers?.find((p) => p.id === node.provider);
-  const providerLabel = providerMeta?.label ?? node.provider;
+  const providerMeta = providers?.find((p) => p.id === (node.launch_configuration?.id ?? node.provider));
+  const providerLabel = node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
   // BOTH chips disable when an action was taken (or is in flight) on this
   // card — see the state machine comment above. `sent` (enum) gives us the
   // strict superset that the previous boolean `sent` couldn't: the
@@ -823,8 +826,8 @@ export function NodeRow({
   //     row's left edge still has consistent rhythm.
   // `providerMeta` carries color + icon for the chip and the same `.label`
   // drives the row subtitle — keeps the badge and the label in lockstep.
-  const providerMeta = providers?.find((p) => p.id === node.provider);
-  const providerLabel = providerMeta?.label ?? node.provider;
+  const providerMeta = providers?.find((p) => p.id === (node.launch_configuration?.id ?? node.provider));
+  const providerLabel = node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
   return (
     <button
       onClick={onClick}
@@ -905,13 +908,16 @@ export function NodeRow({
 
 function ProviderPicker({
   providers,
+  onChanged,
   onPick,
   onCancel,
 }: {
   providers: Provider[];
+  onChanged: () => void;
   onPick: (p: Provider, configurationId?: string) => void;
   onCancel: () => void;
 }) {
+  const [managing, setManaging] = useState(false);
   // Issue #575 / ADR-0016 — group the Spawn Options by `harness_id`
   // (== `group_key` on the wire). The backend already orders rows by
   // `(is_terminal, rank_of(harness_id))` so the order is preserved
@@ -946,6 +952,9 @@ function ProviderPicker({
       >
         New Agent Node
       </h3>
+      <button className="card" onClick={() => setManaging((value) => !value)}>{managing ? 'Back to launch choices' : 'Manage Launch Configurations'}</button>
+      {managing && <LaunchConfigurations api={launchConfigurationApi} onChanged={onChanged} />}
+      {!managing && <>
       {groups.map(([harnessId, group]) => {
         const native = group[0];
         const children = group.slice(1);
@@ -954,6 +963,7 @@ function ProviderPicker({
             <button
               type="button"
               onClick={() => onPick(native)}
+              disabled={Boolean(native.unavailable_reason)}
               data-testid={`provider-${native.id}`}
               className="card"
               style={{ background: "var(--surface-2)" }}
@@ -965,7 +975,7 @@ function ProviderPicker({
                 // Here the row IS the live `listProviders()` record, so
                 // `native.icon` is the value `NodeRow` has to look up — and
                 // it keeps the chip's glyph on the same source as its colour.
-                providerId={native.id}
+                providerId={native.provider_id ?? native.harness_id}
                 withBackground
                 backgroundColor={native.color}
                 fallbackGlyph={native.icon}
@@ -973,8 +983,7 @@ function ProviderPicker({
                 title={native.label}
                 className="h-4 w-4"
               />
-              <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}</span>
-              <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
+              <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}{native.unavailable_reason && <small style={{ display: 'block' }}>{native.unavailable_reason}</small>}</span>
             </button>
             {configurationsFor(native)}
             {children.map((child) => (
@@ -982,6 +991,7 @@ function ProviderPicker({
               <button
                 type="button"
                 onClick={() => onPick(child)}
+                disabled={Boolean(child.unavailable_reason)}
                 data-testid={`provider-${child.id}`}
                 className="card"
                 style={{ background: "var(--surface-2)", marginLeft: 18 }}
@@ -991,7 +1001,7 @@ function ProviderPicker({
                   // a custom Claude-compatible Proxied account's slug has no
                   // brand mark, so without this the 28px chip shows a bare
                   // dot where the row's wire letter belongs.
-                  providerId={child.id}
+                  providerId={child.provider_id ?? child.harness_id}
                   withBackground
                   chipSize={28}
                   backgroundColor={child.color}
@@ -1000,14 +1010,14 @@ function ProviderPicker({
                   title={child.label}
                   className="h-3.5 w-3.5"
                 />
-                <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}</span>
+                <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}{child.unavailable_reason && <small style={{ display: 'block' }}>{child.unavailable_reason}</small>}</span>
               </button>
               {configurationsFor(child)}
               </div>
             ))}
           </div>
         );
-      })}
+      })}</>}
     </Sheet>
   );
 }

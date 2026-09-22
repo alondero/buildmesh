@@ -6,11 +6,12 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
+  className?: string;
 }
 
-export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfirm, onCancel }: ConfirmDialogProps) {
+export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfirm, onCancel, className }: ConfirmDialogProps) {
   return (
-    <Modal onClose={onCancel} labelledBy="confirm-dialog-title" maxWidth="max-w-sm">
+    <Modal onClose={onCancel} labelledBy="confirm-dialog-title" maxWidth="max-w-sm" className={className}>
       <h2 id="confirm-dialog-title" className="text-sm font-semibold text-text-primary mb-2">{title}</h2>
       <p className="text-xs text-text-muted mb-5">{message}</p>
       <div className="flex justify-end gap-2">
