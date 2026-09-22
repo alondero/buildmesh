@@ -104,7 +104,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
-| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0 |
+| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706) |
 | Cline | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; attention and reader not shipped |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
@@ -295,6 +295,6 @@ column here.
 - [Harness attention reliability audit](harness-attention-reliability.md) — per-harness hook evidence and remaining gaps
 - [User guide: harnesses and capabilities](../user-guide.md#harnesses-and-capabilities)
 - [Troubleshooting](../troubleshooting.md)
-- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md)
+- Per-harness deep dives: [Antigravity](agy-harness-capabilities.md), [Grok Code](grok-harness-capabilities.md), [MiniMax Code](mcode-harness-capabilities.md), [OpenCode](opencode-harness-capabilities.md), [Cline](cline-harness-capabilities.md), [Meta Muse](muse-harness-capabilities.md)
 - [Domain vocabulary](../../CONTEXT.md) — Agent Harness vs Model Provider
 - [AI context](../knowledge-primer.md)
