@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
-import { activityMemberIds, activityRootId, groupActivityNodes, indexAgentNodes } from '../../src/lib/nodeActivities';
+import { activityMemberIds, activityRootId, groupActivityNodes, handoverTargets, indexAgentNodes } from '../../src/lib/nodeActivities';
 import { deriveVisibleNodes } from '../../src/components/AgentNodeView/gridFilterSort';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { jumpToNextAwaitingNode } from '../../src/lib/awaitingInputShortcuts';
@@ -217,6 +217,23 @@ describe('node activities', () => {
     expect(activityRootId(2, indexAgentNodes([node(1, { mesh_id: 9 }), nodes[1]]), ownerships)).toBe(2);
     expect(activityRootId(2, indexAgentNodes([node(1, { status: 'archived' }), nodes[1]]), ownerships)).toBe(2);
     expect(groupActivityNodes(nodes, indexAgentNodes(nodes), { 1: ownership(1, 2), 2: ownership(2, 1) }).map(n => n.id)).toEqual([1, 2, 3]);
+  });
+
+  it('offers handover targets with the nodes sharing this activity first', () => {
+    // One picker per Mesh: the source itself, another Mesh's agent, and an
+    // archived row are never candidates.
+    const index = indexAgentNodes([...nodes, node(5, { mesh_id: 2 }), node(6, { status: 'archived' })]);
+    expect(handoverTargets(1, index, ownerships)).toEqual({ sameActivity: [nodes[1]], others: [nodes[2]] });
+    // The reviewer reaches its implementer the same way, and an unknown source
+    // degrades to an empty picker rather than throwing.
+    expect(handoverTargets(2, index, ownerships, []).sameActivity.map(n => n.id)).toEqual([1]);
+    expect(handoverTargets(99, index, ownerships)).toEqual({ sameActivity: [], others: [] });
+    // A hand-made group (not ownership lineage) is one activity too, and both
+    // halves come back in the grid's (position, id) order.
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    const grouped = handoverTargets(1, index, ownerships, useNodeActivityStore.getState().groups);
+    expect(grouped.sameActivity.map(n => n.id)).toEqual([2, 3]);
+    expect(grouped.others).toEqual([]);
   });
 
   it('shows actual activity independently of the selected tab and directs controls/focus to the reviewer', () => {

@@ -401,6 +401,15 @@ export const sendToAgent = (sessionId: number, input: string) =>
 export const writeToAgent = (sessionId: number, data: string) =>
   _invoke('write_to_agent', { sessionId, data });
 
+/**
+ * Hand `text` over to an existing agent (`handover_to_agent`). Not a
+ * `writeToAgent` convenience wrapper: the backend owns staging the text as one
+ * bracketed paste and submitting it with a decoupled Enter, so a multi-line
+ * handover cannot submit at every newline (issue #874).
+ */
+export const handoverToAgent = (targetNodeId: number, text: string) =>
+  _invoke('handover_to_agent', { targetNodeId, text });
+
 // Diff
 export const diffFiles = (oldPath: string, newPath: string) =>
   _invoke<DiffResult>('diff_files', { oldPath, newPath });

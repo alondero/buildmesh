@@ -546,6 +546,9 @@ pub fn run() {
             agent::process::debug_list_agents,
             agent::process::send_to_agent,
             agent::process::write_to_agent,
+            // "Handover to node" — stage the selection in an existing node's
+            // PTY and submit it (context menu, sibling of spawn_handover_agent).
+            agent::process::handover_to_agent,
             // Binary PTY output Channel (issue #1385). Complements the
             // `agent-output` event fallback; see `agent::output`.
             agent::output::subscribe_agent_output,

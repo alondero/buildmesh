@@ -87,6 +87,27 @@ the layout: agents retain their own processes, worktrees, and close actions.
 If the group's title node is archived or deleted, surviving members remain
 accessible. Grouping does not combine nodes from different Meshes.
 
+## Hand work over to another node
+
+Select text in an agent's terminal and right-click it to hand that selection on
+from the context menu:
+
+- **Handover to new Node** spawns another agent on the Mesh, pre-filled with the
+  selection as its first turn.
+- **Handover to node** sends the selection to an agent you already have. The text
+  is staged as a single paste and then submitted, exactly as if you had pasted it
+  and pressed Enter — so a multi-line review report arrives as one prompt instead
+  of one prompt per line.
+
+The agents this one already shares tabs with are offered first — the pair you
+grouped, or a review agent spawned from this node — which keeps an
+implementer/reviewer pair one click apart, and every row shows the target's
+status. A handover needs a selection in the source terminal, and the target must
+have a live agent process; without one the action reports the failure instead of
+dispatching. If the harness does not take the submit, the text is left staged in
+that node's input box, so you can press Enter (or edit it) yourself rather than
+losing the handover.
+
 ## Harnesses and capabilities
 
 The Spawn Menu lists detected harnesses. Each harness's configurations submenu
