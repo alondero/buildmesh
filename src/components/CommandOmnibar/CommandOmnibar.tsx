@@ -506,21 +506,12 @@ function ToolGroups({
             aria-labelledby={headingId}
             data-testid={`command-omnibar-tool-group-${group.id}`}
           >
-            <div
-              className={`flex items-baseline gap-2 mb-1 ${groupIndex === 0 ? '' : 'mt-2'}`}
+            <span
+              id={headingId}
+              className={`block mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-text-secondary ${groupIndex === 0 ? '' : 'mt-2'}`}
             >
-              <span
-                id={headingId}
-                className="text-2xs font-semibold uppercase tracking-[0.08em] text-text-secondary"
-              >
-                {group.title}
-              </span>
-              {/* Scope rides on the heading row so all 11 tiles fit without
-                  scrolling on common window heights. */}
-              <span className="ml-auto text-right text-2xs text-text-muted">
-                {group.scopeNote}
-              </span>
-            </div>
+              {group.title}
+            </span>
             <div className="grid grid-cols-2 gap-1.5">
               {group.tiles.map((tile) => {
                 const Icon = PROBE_TAB_ICONS[tile.tab];

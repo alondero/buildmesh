@@ -23,7 +23,7 @@
  * ArrowDown, or ArrowUp open the menu (focusing the first/last tile
  * respectively), and it closes on Escape, focusout, or mousedown outside.
  * The menu reuses the palette's tool-discovery groups (ADR-0031) — the same
- * tiles, labels, and scope notes, so "tool grid" means one thing across the
+ * tiles, labels, and descriptions, so "tool grid" means one thing across the
  * omnibar and the inspector. The glyph is deliberately `layout-grid`, not
  * "+": the action browses existing tools, it doesn't create one.
  *
@@ -304,14 +304,9 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
               aria-label={group.title}
               className={groupIndex === TOOL_DISCOVERY_GROUPS.length - 1 ? '' : 'mb-1.5'}
             >
-              <div className="flex items-baseline gap-2 mt-1 mb-1">
-                <span className="text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
-                  {group.title}
-                </span>
-                <span className="ml-auto text-right text-2xs text-text-muted">
-                  {group.scopeNote}
-                </span>
-              </div>
+              <span className="block mt-1 mb-1 text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
+                {group.title}
+              </span>
               {/* Single column at narrow widths: a 2-column grid truncates
                   tile names to ~4 characters at the dock's 240px minimum. */}
               <div className={`grid gap-1 ${narrow ? 'grid-cols-1' : 'grid-cols-2'}`}>

@@ -13,6 +13,7 @@ import {
   type ProbeWorkingSet,
 } from '../../src/lib/probeWorkingSet';
 import { PROBE_PANEL_STORAGE_KEY } from '../../src/components/Probe/useProbeResize';
+import { TOOL_DISCOVERY_GROUPS } from '../../src/components/CommandOmnibar/toolDiscovery';
 
 /**
  * ADR-0032 — the Probe tool rail: a working-set tab strip (capped) inside
@@ -234,6 +235,25 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(screen.getByTestId('probe-tool-menu-files').getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('Code')).toBeTruthy();
     expect(screen.getByText('App-wide')).toBeTruthy();
+  });
+
+  it('shares bare group headings and the Agent Changes copy with the palette', () => {
+    openPanel('files');
+
+    fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
+
+    // ADR-0031 scope-note refinement (2026-09-22): the menu shares tiles,
+    // labels, and descriptions with the palette — each group renders its bare
+    // heading plus its tiles, and the Agent Changes tile carries the focus
+    // exception the headings dropped.
+    expect(screen.getByTestId('probe-tool-menu').textContent).toBe(
+      TOOL_DISCOVERY_GROUPS.map(
+        (group) => group.title + group.tiles.map((t) => t.title + t.description).join(''),
+      ).join(''),
+    );
+    expect(screen.getByTestId('probe-tool-menu-review').textContent).toContain(
+      'Review what the focused agent changed',
+    );
   });
 
   it('selecting a cold destination from the menu switches to it and appends it to the working set', () => {

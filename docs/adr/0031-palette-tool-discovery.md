@@ -8,6 +8,11 @@ remains the primary navigation surface, and the lens contract from
 [ADR-0029](0029-probe-context-lenses.md) still governs data ownership — it
 just stays out of the navigation language.
 
+Scope-note amendment (2026-09-22): the per-group scope notes decided below
+were removed from both tool surfaces — group headings are now the bare group
+names. See *Refinement history* under Consequences; the Decision text is kept
+as originally accepted.
+
 ## Context
 
 Removing the Probe rail left first open showing "No matching results" until
@@ -62,3 +67,13 @@ the scope pills of (B) folded in as per-group scope notes.
 - Group headings are navigation aids, not task destinations: they are not
   part of the one-name rule and must not leak lens jargon (Host/Mesh/Agent)
   into user copy.
+- **Refinement history:** The original decision (2026-09-03) gave every group
+  a scope note, with the Code group naming its exception. **Removed
+  2026-09-22:** a note restating the default scope on four of five headings
+  read as clutter rather than guidance, the App-wide note duplicated its own
+  group name, and the one real exception — Agent Changes follows the focused
+  agent — lives in that tile's description ("Review what the focused agent
+  changed"). The grouping, tile copy, and keyboard contract above are
+  unchanged; the scope sentence is now a title-only heading. The shared
+  surface note in [ADR-0032](0032-probe-working-set-tabs.md) was amended with
+  it.

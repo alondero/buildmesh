@@ -163,7 +163,7 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
   'probe-review': {
     id: 'probe-review',
     label: 'Open Agent Changes',
-    subtitle: 'Review what your agent changed',
+    subtitle: 'Review what the focused agent changed',
     icon: 'review',
     keywords: ['changes', 'diff', 'review'],
   },

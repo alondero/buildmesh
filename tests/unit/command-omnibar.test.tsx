@@ -867,6 +867,33 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     expect(github.textContent).toMatch(/Pull Requests/);
   });
 
+  it('renders each tool group as a bare heading plus its tiles, with no scope notes', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    // ADR-0031 scope-note refinement (2026-09-22): a group renders exactly its
+    // heading then its tiles — re-adding any annotation (scope note, aside)
+    // makes this fail instead of only being noticed by eye.
+    for (const group of TOOL_DISCOVERY_GROUPS) {
+      const container = screen.getByTestId(`command-omnibar-tool-group-${group.id}`);
+      const heading = container.querySelector(
+        `#command-omnibar-tool-group-heading-${group.id}`,
+      );
+      expect(heading?.textContent).toBe(group.title);
+      expect(container.textContent).toBe(
+        group.title + group.tiles.map((t) => t.title + t.description).join(''),
+      );
+    }
+  });
+
+  it('describes Agent Changes as following the focused agent', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    // The headings dropped the one scope exception, so the tile carries it.
+    expect(screen.getByTestId('command-omnibar-tool-review').textContent).toContain(
+      'Review what the focused agent changed',
+    );
+  });
+
   it('typing hides the groups and searches instead', () => {
     render(<CommandOmnibar />);
     openOmnibar('files');
