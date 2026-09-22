@@ -7,6 +7,10 @@ Accepted for the Probe navigation model (2026-09-06). Extends
 navigation, on-demand inspector); does not supersede it. Builds on the tool
 discovery vocabulary of [ADR-0031](0031-palette-tool-discovery.md).
 
+Scope-note amendment (2026-09-22): ADR-0031's groups are heading-only now, so
+the ⊞ menu shares tiles, labels, and descriptions with the palette's start
+screen — the per-group scope notes it also shared were removed there.
+
 ## Context
 
 ADR-0030 left the open inspector with no in-panel switcher: destinations are
@@ -63,8 +67,8 @@ and a deliberate echo of the tool grid it opens.
   today", and an unpersisted list needs no migration when destinations
   merge (issues #1457–#1460).
 - **The ⊞ affordance opens the full destination list** as a menu of
-  ADR-0031's tool-discovery groups — same tiles, labels, descriptions, and
-  scope notes as the palette's start screen, so "tool grid" means one thing
+  ADR-0031's tool-discovery groups — same tiles, labels, and descriptions as
+  the palette's start screen, so "tool grid" means one thing
   across the omnibar and the inspector. Selecting a tile switches
   destination and appends it to the working set. It follows the WAI-ARIA
   menu-button contract: click, ArrowDown (first item), or ArrowUp (last

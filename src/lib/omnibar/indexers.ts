@@ -161,9 +161,6 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
     keywords: ['project', 'explorer', 'file tree'],
   },
   'probe-review': {
-    // The subtitle carries the one scope exception directly (ADR-0031,
-    // refined 2026-09-22): this destination follows the focused agent, not
-    // the selected project — so the group headings don't have to say it.
     id: 'probe-review',
     label: 'Open Agent Changes',
     subtitle: 'Review what the focused agent changed',

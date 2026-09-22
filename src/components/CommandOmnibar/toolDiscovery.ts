@@ -65,11 +65,10 @@ function tile(tab: ProbeTab): ToolDiscoveryTile {
   };
 }
 
-/** No per-group scope notes by design (ADR-0031, refined 2026-09-22): the
- *  default scope is the selected project, the App-wide heading names its own
- *  exception, and the one real surprise (Agent Changes follows the focused
- *  agent) lives in that tile's description. Repeating "Selected project" on
- *  every heading read as clutter, not guidance. */
+/** Group headings are deliberately bare (ADR-0031 refinement, 2026-09-22):
+ *  the per-group scope notes were clutter — the default scope (selected
+ *  project) needs no restating, "App-wide" is named by its own heading, and
+ *  the Agent Changes focus exception lives in that tile's description. */
 export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] & _AssertDiscoveryExhaustive = [
   {
     id: 'code',

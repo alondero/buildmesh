@@ -8,6 +8,11 @@ remains the primary navigation surface, and the lens contract from
 [ADR-0029](0029-probe-context-lenses.md) still governs data ownership — it
 just stays out of the navigation language.
 
+Scope-note amendment (2026-09-22): the per-group scope notes decided below
+were removed from both tool surfaces — group headings are now the bare group
+names. See *Refinement history* under Consequences; the Decision text is kept
+as originally accepted.
+
 ## Context
 
 Removing the Probe rail left first open showing "No matching results" until
@@ -25,13 +30,10 @@ the scope pills of (B) folded in as per-group scope notes.
   results in place, with zero layout shift. A genuinely non-matching
   query still shows "No matching results".
 - **Groups are Code, GitHub, Automate, Remember, App-wide.** GitHub Issues
-  and Pull Requests share one group. Group headings stand alone: the
-  per-group scope notes ("Selected project …", "App-wide — ignores project
-  selection") were removed (refined 2026-09-22). Repeating the default
-  scope on four of five headings was clutter, the App-wide note duplicated
-  its own group name, and the one real exception — Agent Changes follows
-  the focused agent — reads more naturally on the tile itself ("Review what
-  the focused agent changed").
+  and Pull Requests share one group. Every group carries a scope note
+  ("Selected project …", "App-wide — ignores project selection"); the Code
+  group additionally names its exception (Agent Changes follows the focused
+  agent).
 - **One name per destination**, following the `Open <Header>` palette
   pattern: tiles show the inspector header title, search rows the `Open …`
   command, both resolved from the same `PROBE_DESTINATION_COMMANDS` +
@@ -65,3 +67,13 @@ the scope pills of (B) folded in as per-group scope notes.
 - Group headings are navigation aids, not task destinations: they are not
   part of the one-name rule and must not leak lens jargon (Host/Mesh/Agent)
   into user copy.
+- **Refinement history:** The original decision (2026-09-03) gave every group
+  a scope note, with the Code group naming its exception. **Removed
+  2026-09-22:** a note restating the default scope on four of five headings
+  read as clutter rather than guidance, the App-wide note duplicated its own
+  group name, and the one real exception — Agent Changes follows the focused
+  agent — lives in that tile's description ("Review what the focused agent
+  changed"). The grouping, tile copy, and keyboard contract above are
+  unchanged; the scope sentence is now a title-only heading. The shared
+  surface note in [ADR-0032](0032-probe-working-set-tabs.md) was amended with
+  it.

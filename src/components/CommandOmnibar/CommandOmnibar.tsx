@@ -506,8 +506,6 @@ function ToolGroups({
             aria-labelledby={headingId}
             data-testid={`command-omnibar-tool-group-${group.id}`}
           >
-            {/* Group heading stands alone — scope notes were removed as
-                clutter (ADR-0031, refined 2026-09-22). */}
             <span
               id={headingId}
               className={`block mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-text-secondary ${groupIndex === 0 ? '' : 'mt-2'}`}
