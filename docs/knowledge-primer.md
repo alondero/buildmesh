@@ -13,7 +13,7 @@
 - `tests/e2e/` — Playwright: webServer boots Vite on 1420; `verify-smoke` uses mock IPC, while chromium specs have additional real-runtime requirements. See `docs/agents/engineering.md` before launching.
 - `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/SKILL.md`
 - `docs/adr/` — Architecture Decision Records
-- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md` — the consolidated harness × capability grid, `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `mcode-harness-capabilities.md`, `opencode-harness-capabilities.md`)
+- `docs/learning/` — Enduring technical deep dives, harness capability reviews, and integration contracts (e.g. `harness-capabilities-matrix.md` — the consolidated harness × capability grid, `agy-harness-capabilities.md`, `grok-harness-capabilities.md`, `mcode-harness-capabilities.md`, `opencode-harness-capabilities.md`, `muse-harness-capabilities.md`)
 
 ## Key Conventions
 
