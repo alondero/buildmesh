@@ -488,8 +488,8 @@ mod routing_cache_tests {
                 ..Default::default()
             };
             preferences::save(prefs.clone()).unwrap();
-            let plan = preferences::launch_configurations::capture_legacy(
-                &prefs, "launch/cline:custom", &Default::default(),
+            let plan = preferences::launch_configurations::resolve(
+                &prefs, "launch/cline:custom", &Default::default(), &Default::default(),
             ).unwrap();
             assert_eq!(plan.route.as_ref().map(|route| route.surface), Some(surface));
             let routing = prepare_snapshot(&plan, &resolved).unwrap();
@@ -501,6 +501,8 @@ mod routing_cache_tests {
                 preferences::ApiSurface::OpenAI => "OPENAI_API_KEY",
             };
             assert_eq!(env.iter().find(|(key, _)| key == key_name).map(|(_, value)| value.as_str()), Some("test-key"));
+            let resumed = preferences::launch_configurations::resolve_snapshot(&plan, &Default::default()).unwrap();
+            assert_eq!(resumed.route.as_ref().map(|route| route.surface), Some(surface));
         }
         preferences::reset_for_tests();
     }

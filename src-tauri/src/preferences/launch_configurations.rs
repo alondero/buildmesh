@@ -215,6 +215,7 @@ fn resolve_plan(
         if !supports_surface {
             return Err("Provider Route uses an API surface this harness does not support".into());
         }
+        let stored_default = route.model_tiers.default.clone();
         if let Some(model) = config.model.as_ref() { route.model_tiers.default = Some(model.clone()); }
         else { config.model = route.model_tiers.default.clone(); }
         let catalogue = super::launch_catalog::provider_catalogue();
@@ -223,8 +224,7 @@ fn resolve_plan(
         if let Some(entry) = entry {
             if !entry.manual_model && model.is_none() {
                 // Advanced route models remain an escape hatch for newly published endpoints.
-                let stored = prefs.provider_pairings.iter().find(|p| p.harness_id == harness.id && p.provider_id == provider_id).unwrap();
-                if config.model != stored.model_tiers.default {
+                if config.model != stored_default {
                     return Err("Model is not in this provider's catalogue; configure a custom model on the advanced route".into());
                 }
             }
@@ -244,7 +244,11 @@ fn resolve_plan(
             && Some(v.endpoint.as_str()) == route.base_url.as_deref()
             && Some(v.model_id.as_str()) == route.model_tiers.default.as_deref()
             && v.status == super::PairingVerificationStatus::Verified).cloned());
-    if require_available && route.as_ref().is_some_and(|r| r.surface == super::ApiSurface::OpenAI) && verification.is_none() {
+    if require_available
+        && Provider::from_db_str(&harness.harness) != Provider::Cline
+        && route.as_ref().is_some_and(|r| r.surface == super::ApiSurface::OpenAI)
+        && verification.is_none()
+    {
         return Err("Provider Route is unverified or stale for this model; verify it in advanced routes".into());
     }
     Ok(ResolvedLaunchPlan {
