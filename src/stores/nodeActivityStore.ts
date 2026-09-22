@@ -63,10 +63,24 @@ export const useNodeActivityStore = create<{
     const { nodesById, circuitOwnerships } = useAgentNodeStore.getState();
     const root = activityRootId(nodeId, nodesById, circuitOwnerships);
     set(s => {
-      const groups = resolveNodeGroups(s.groups, nodesById, circuitOwnerships).map(ids => ids.filter(id => id !== root))
+      const currentGroups = resolveNodeGroups(s.groups, nodesById, circuitOwnerships);
+      const groups = currentGroups.map(ids => ids.filter(id => id !== root))
         .filter(ids => ids.length > 1);
+      const selections = { ...s.selections };
+      // A grouped selection is keyed by the card representative. Removing a
+      // member makes that selection's node standalone; repair the old card
+      // key before activateNode records the new standalone key below.
+      for (const [key, selection] of Object.entries(s.selections)) {
+        if (selection.nodeId !== root || Number(key) === root) continue;
+        const keyNode = nodesById[Number(key)];
+        if (keyNode && keyNode.status !== 'archived') {
+          selections[Number(key)] = { nodeId: Number(key), utility: false };
+        } else {
+          delete selections[Number(key)];
+        }
+      }
       saveGroups(groups);
-      return { groups };
+      return { groups, selections };
     });
     get().activateNode(nodeId);
   },
@@ -109,8 +123,16 @@ export const useNodeActivityStore = create<{
     const utilities = Object.fromEntries(
       Object.entries(s.utilities).filter(([nodeId]) => validNodeIds.has(Number(nodeId))),
     );
+    const groups = validNodeIds.size === 0
+      ? s.groups
+      : s.groups.map(ids => ids.filter(id => validNodeIds.has(id))).filter(ids => ids.length > 1);
+    const groupsChanged = groups.length !== s.groups.length
+      || groups.some((ids, index) => ids.length !== s.groups[index]?.length
+        || ids.some((id, memberIndex) => id !== s.groups[index]?.[memberIndex]));
+    if (groupsChanged) saveGroups(groups);
     if (Object.keys(selections).length === Object.keys(s.selections).length
-      && Object.keys(utilities).length === Object.keys(s.utilities).length) return s;
-    return { selections, utilities };
+      && Object.keys(utilities).length === Object.keys(s.utilities).length
+      && !groupsChanged) return s;
+    return { selections, utilities, groups };
   }),
 }));

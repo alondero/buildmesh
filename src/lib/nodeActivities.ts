@@ -65,10 +65,14 @@ export function groupActivityNodes(visible: readonly AgentNode[], nodesById: Nod
     seen.add(rootId);
     return [nodesById[rootId] ?? node];
   });
-  // Existing callers can supply their own order. Manual groups must follow
-  // the representative's position, rather than an earlier hidden member.
-  return resolved.length === 0 ? cards
-    : cards.sort((a, b) => a.mesh_id - b.mesh_id || a.position - b.position || a.id - b.id);
+  // Existing callers supply the canonical custom order. Manual groups use the
+  // representative's persisted position, rather than an earlier hidden member.
+  return orderActivityCards(cards, resolved);
+}
+
+function orderActivityCards(cards: AgentNode[], groups: readonly (readonly number[])[]): AgentNode[] {
+  if (groups.length === 0) return cards;
+  return [...cards].sort((a, b) => a.mesh_id - b.mesh_id || a.position - b.position || a.id - b.id);
 }
 
 /** Build card membership once per view update, rather than scanning every

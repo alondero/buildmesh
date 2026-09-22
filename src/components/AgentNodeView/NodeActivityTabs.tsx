@@ -57,7 +57,9 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
-  const fullLabel = (tab: typeof tabs[number]) => `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
+  const fullLabel = (tab: typeof tabs[number]) => tab.label === tab.member.name
+    ? `${tab.label} · ${tab.member.status.replace(/_/g, ' ')}`
+    : `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
   const statusGlyph = (status: string) => status === 'awaiting_input' ? '!' : status === 'error' ? '×'
     : status === 'completed' || status === 'ready' ? '✓' : status === 'suspended' ? 'Ⅱ' : '●';
 
@@ -156,7 +158,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               : 'text-text-secondary'
           }`}>
           <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
-          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.member.name}</span></span>
+          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
           {!tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
         </button>)}
       </div>, document.body)}

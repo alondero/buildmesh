@@ -58,6 +58,7 @@ function card() {
 }
 
 beforeEach(() => {
+  localStorage.removeItem('buildmesh.node-groups');
   useAgentNodeStore.setState({ nodeIds: nodes.map(n => n.id), nodesById: Object.fromEntries(nodes.map(n => [n.id, n])),
     circuitOwnerships: ownerships, activeNodeId: 1, closingNodeIds: new Set(), semanticTurns: {} });
   useNodeActivityStore.setState({ selections: {}, utilities: {}, groups: [] });
@@ -101,6 +102,27 @@ describe('node activities', () => {
     expect(useNodeActivityStore.getState().utilities[2]).toBe('run');
     expect(activityMemberIds(nodes, ownerships, useNodeActivityStore.getState().groups)).toEqual({ 1: [1, 2], 3: [3] });
     expect(disposeUtility).not.toHaveBeenCalled();
+  });
+
+  it('repairs the old card selection when ungrouping a selected source', () => {
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 1, utility: false });
+    state.ungroupNode(1);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 3, utility: false });
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 1, utility: false });
+  });
+
+  it('prunes deleted IDs from groups and localStorage while preserving empty bootstrap state', () => {
+    useNodeActivityStore.setState({ groups: [[3, 1, 99], [2, 4]] });
+    localStorage.setItem('buildmesh.node-groups', JSON.stringify([[3, 1, 99], [2, 4]]));
+    useNodeActivityStore.getState().prune(new Set([1, 3]));
+    expect(useNodeActivityStore.getState().groups).toEqual([[3, 1]]);
+    expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
+    useNodeActivityStore.setState({ groups: [[3, 1]] });
+    localStorage.setItem('buildmesh.node-groups', JSON.stringify([[3, 1]]));
+    useNodeActivityStore.getState().prune(new Set());
+    expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
   });
 
   it('keeps surviving members accessible after the group representative disappears', () => {
@@ -147,6 +169,15 @@ describe('node activities', () => {
     await userEvent.keyboard('{Enter}');
     expect(useNodeActivityStore.getState().groups).toEqual([]);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+  });
+
+  it('does not repeat grouped agent names in the All sessions menu', async () => {
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    render(<NodeCard nodeId={3} memberIds={[3, 1, 2]} isActive onActivate={useNodeActivityStore.getState().activateNode} />);
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
+    const item = screen.getByRole('menuitem', { name: /^Agent 1/ });
+    expect(item.textContent).not.toMatch(/Agent 1.*Agent 1/);
+    expect(item.textContent).toContain('main');
   });
 
   it('coordinates entity focus and activity selection at the UI store boundary', () => {
@@ -303,7 +334,10 @@ describe('node activities', () => {
     await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
     const reviewer = screen.getByRole('menuitem', { name: /Review.*Reviewer/ });
     reviewer.focus();
-    fireEvent.click(reviewer, { detail: 0 });
+    act(() => {
+      reviewer.focus();
+      fireEvent.click(reviewer, { detail: 0 });
+    });
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(focusAgentTerminal).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Review.*Reviewer/ }));
