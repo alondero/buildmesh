@@ -1414,9 +1414,52 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     }
   });
 
+  it('clears the per-card ticker on unmount and never polls the ledger on a timer (issue #1751)', async () => {
+    // The 1s clock lives in the run card (`LiveRunDuration`), not the
+    // tab: a minute idle must not refetch the ledger, and unmounting
+    // must leave zero timers behind.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-01T12:00:10Z'));
+      const RUN_LIVE: CircuitRunDetail = {
+        run: {
+          ...RUN_DONE.run,
+          id: 31,
+          state: 'running',
+          created_at: '2026-09-01 12:00:00',
+          updated_at: '2026-09-01 12:00:00',
+        },
+        steps: [step({ node_id: 'implementer', status: 'running' })],
+      };
+      mockBackend({ runs: [RUN_LIVE] });
+      useUIStore.getState().openProbeTab('circuits');
+      const { unmount } = render(<ProbePanel />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId('run-card-31')).toBeTruthy();
+      const probes = () =>
+        vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'list_circuit_probe').length;
+      expect(probes()).toBe(1);
+
+      // A minute idle: the label ticks on, the ledger is not refetched.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(probes()).toBe(1);
+      expect(screen.getByTestId('run-card-31').textContent).toContain('1m');
+
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not tick when every visible run is terminal', async () => {
-    // The interval is gated on there being a live run, so a tab showing
-    // finished work re-renders never.
+    // Terminal runs render a static reading fixed by `updated_at` with no
+    // interval at all (issue #1751), so a tab showing finished work ticks
+    // never.
     vi.useFakeTimers();
     try {
       mockBackend({ runs: [RUN_DONE] });

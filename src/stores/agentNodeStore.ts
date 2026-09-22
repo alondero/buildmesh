@@ -335,6 +335,16 @@ interface AgentNodeState {
   getActiveMeshId: () => number | null;
 
   fetchAgentNodes: () => Promise<void>;
+  /// Conditional full refresh for event handlers (issue #1751). Skips
+  /// the `fetchAgentNodes` fan-out when the last successful snapshot is
+  /// still fresh AND every scoped id is already in the map — the event
+  /// then carries nothing the store doesn't have (e.g. a duplicate
+  /// `node-created` for a row an earlier fetch already picked up).
+  /// Fetches otherwise. The scope only ever *skips* a redundant fetch;
+  /// handlers must apply the event's own state transition (patch/cancel)
+  /// unconditionally first, so a skipped fetch can never leave newer
+  /// event state unapplied (issue #1073 pattern).
+  refreshIfStale: (nodeIds?: number[]) => Promise<void>;
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) => Promise<AgentNode>;
   /// Sidebar "click + or pick provider" entrypoint — creates a node on the
   /// mesh, sets it active, and selects the mesh. The three steps live behind
@@ -448,6 +458,14 @@ export function useAllAgentNodes(): AgentNode[] {
   );
 }
 
+/// Freshness window for `refreshIfStale` (issue #1751). A skip only
+/// ever collapses a redundant back-to-back fetch (an event burst lands
+/// within milliseconds of the snapshot it follows); handlers still
+/// apply the event's own transition unconditionally first, so skipping
+/// the fan-out can never leave newer event state unapplied. A fetch
+/// failure does not refresh the stamp, so the next event retries.
+export const REFRESH_IF_STALE_MS = 10_000;
+
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // Monotonic revision of the ownership ledger. Every newer authoritative
   // write bumps it: a `circuit-run-updated` patch, or a full `fetchAgentNodes`
@@ -458,6 +476,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // the newer event (spec `autopilot-node-indicators.md` step 7: "an older
   // response cannot overwrite newer event state").
   let circuitOwnershipsRevision = 0;
+  // Wall-clock ms of the last successful `fetchAgentNodes` snapshot.
+  // `refreshIfStale` reads it; only a success stamps it (a rejection
+  // keeps the previous stamp so the next event retries). `0` until the
+  // first success, so the first scoped check always fetches.
+  let lastFetchedAtMs = 0;
   // Issue #1054 — shared `OptimisticSurface` for the three sites
   // (`renameAgentNode`, `setNodePinned`, `toggleNodePinned`) that
   // route through `withOptimistic`. Built once per `create()` call so
@@ -570,6 +593,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         loading: false,
         ...(schedulesChanged && { schedules: keptSchedules }),
       });
+      // Success stamps the freshness clock `refreshIfStale` reads. A
+      // rejection below skips the stamp so the next event retries rather
+      // than treating a failed snapshot as fresh.
+      lastFetchedAtMs = Date.now();
     } catch (e) {
       set({ error: formatError(e), loading: false });
     }
@@ -601,6 +628,23 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     }
   });
 
+  // Conditional full refresh for event handlers (issue #1751). Skips
+  // the `fetchAgentNodes` fan-out when the last successful snapshot is
+  // still within `REFRESH_IF_STALE_MS` AND every scoped id is already
+  // in the map — a duplicate `node-created` for a known row, or an
+  // event burst on the heels of a snapshot. An unknown scoped id (a
+  // genuinely new row) or an expired stamp always fetches. Delegates to
+  // the coalesced `fetchAgentNodes`, so concurrent callers still share
+  // one trailing refresh; the shallow reconciliation there keeps
+  // per-node identity for unchanged rows (issue #1748 constraint).
+  const refreshIfStale = async (nodeIds?: number[]): Promise<void> => {
+    const fresh = Date.now() - lastFetchedAtMs < REFRESH_IF_STALE_MS;
+    if (fresh && (!nodeIds || nodeIds.every((id) => get().nodesById[id] !== undefined))) {
+      return;
+    }
+    await fetchAgentNodes();
+  };
+
   return {
   nodesById: {},
   nodeIds: [],
@@ -630,6 +674,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   },
 
   fetchAgentNodes,
+  refreshIfStale,
 
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // One-liners that the listeners dispatch through; also exposed on the
@@ -687,6 +732,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         // lifetime of the webview).
         await attachAgentNodeListeners({
           fetchAgentNodes: get().fetchAgentNodes,
+          refreshIfStale: get().refreshIfStale,
+          cancelSchedule: get().cancelSchedule,
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,

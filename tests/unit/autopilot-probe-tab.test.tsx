@@ -12,9 +12,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
+import { LOOP_STATUS_FALLBACK_MS } from '../../src/hooks/useLoopStatusInvalidation';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -1009,5 +1011,72 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     await waitFor(() => {
       expect(screen.queryByTestId('autopilot-compatibility-banner')).toBeNull();
     });
+  });
+
+  // Issue #1751 — event-driven loop-status invalidation.
+  const loopStatusCalls = () =>
+    vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_loop_status').length;
+
+  function loopingBackend() {
+    mockBackend(
+      meshRow({
+        autopilot_mode: 'looping',
+        autopilot_enabled: false,
+        loop_initial_prompt: 'ship the next issue',
+      })
+    );
+  }
+
+  it('refreshes loop status on lifecycle events without waiting for the fallback tick', async () => {
+    loopingBackend();
+    openProbeDestination('autopilot');
+    await waitFor(() => {
+      expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+    });
+    // One mount fetch; no timer has been advanced.
+    expect(loopStatusCalls()).toBe(1);
+
+    // The backend spawned an iteration — the badge refetches within one
+    // frame of the event instead of waiting for the next poll tick.
+    emit('autopilot-submitted', { node_id: 11, issue: 42 });
+    await waitFor(() => expect(loopStatusCalls()).toBe(2));
+  });
+
+  it('falls back to a slow poll with no 5s storm, and clears it on unmount', async () => {
+    // Scope fakes to the interval clock + Date so RTL's findBy polling
+    // (real setTimeout) still resolves — same pattern as usage-tab.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-09-01T12:00:00Z'));
+      loopingBackend();
+      useUIStore.getState().openProbeTab('autopilot');
+      const { unmount } = render(<ProbePanel />);
+      await waitFor(() => {
+        expect(screen.getByTestId('loop-status-badge').getAttribute('data-status')).toBe('stopped');
+      });
+      expect(loopStatusCalls()).toBe(1);
+
+      // Idle 20s: the old 5s poll would have fired four fetches by now.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(loopStatusCalls()).toBe(1);
+
+      // The stale-while-revalidate fallback still refreshes at 45s when
+      // events stop arriving, so a dropped event never strands the UI.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LOOP_STATUS_FALLBACK_MS - 20_000);
+      });
+      expect(loopStatusCalls()).toBe(2);
+
+      // Unmount drops the interval: no orphaned polls after the tab closes.
+      unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(loopStatusCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -68,6 +68,13 @@ export interface AgentNodeActionSurface {
    *  canonical implementation; tests that want to assert the dispatch
  *   alone can pass a spy. */
   fetchAgentNodes: () => Promise<void>;
+  /** Conditional full refresh (issue #1751): skips the fan-out when the
+   *  last snapshot is fresh and every scoped id is already known. */
+  refreshIfStale: (nodeIds: number[]) => Promise<void>;
+  /** Drop a pending scheduled input for one node (used by
+   *  `autopilot-node-closed`, mirroring the archive sweep inside
+   *  `fetchAgentNodes`). */
+  cancelSchedule: (nodeId: number) => void;
   /** Switch the active node synchronously (used by `node-activated`,
    *  the HTTP E2E test signal). */
   setActiveNode: (id: number | null) => void;
@@ -216,10 +223,13 @@ export async function attachAgentNodeListeners(
   // creating the `pending` node, so the sidebar picks up the new node
   // before stage-2 finishes) and the HTTP-based E2E test server.
   // A refetch is race-free because the row is already committed by
-  // the time the event fires.
+  // the time the event fires. Scoped through `refreshIfStale` (issue
+  // #1751): a genuinely new row always fetches, while a duplicate event
+  // for an already-known row on the heels of a snapshot skips the
+  // full-table fan-out.
   unlistens.push(
-    await listen<NodeCreatedPayload>('node-created', async () => {
-      await surface.fetchAgentNodes();
+    await listen<NodeCreatedPayload>('node-created', async (event) => {
+      await surface.refreshIfStale([event.payload.id]);
     }),
   );
 
@@ -283,15 +293,20 @@ export async function attachAgentNodeListeners(
     }),
   );
 
-  // Merged-PR auto-close: the backend archived the node (NOT deleted);
-  // refetch so the card leaves the grid. We deliberately do NOT
-  // dispose the terminal — archive keeps the row, branch, and
-  // scrollback alive for the Archive tab, and the terminal-persistence
-  // rule says only a node-delete may dispose. `TerminalManager` is a
-  // singleton; the instance survives the refetch.
+  // Merged-PR auto-close: the backend archived the node (NOT deleted).
+  // The archive transition applies unconditionally first — patch the row
+  // and drop its pending scheduled input — so the card leaves the grid
+  // even when the trailing `refreshIfStale` skips its fan-out (issue
+  // #1751; the scope only ever skips a redundant fetch, never the event
+  // state itself). We deliberately do NOT dispose the terminal — archive
+  // keeps the row, branch, and scrollback alive for the Archive tab, and
+  // the terminal-persistence rule says only a node-delete may dispose.
+  // `TerminalManager` is a singleton; the instance survives the refetch.
   unlistens.push(
-    await listen<AutopilotNodeClosedPayload>('autopilot-node-closed', async () => {
-      await surface.fetchAgentNodes();
+    await listen<AutopilotNodeClosedPayload>('autopilot-node-closed', async (event) => {
+      surface.patchAgentNode(event.payload.node_id, { status: 'archived' });
+      surface.cancelSchedule(event.payload.node_id);
+      await surface.refreshIfStale([event.payload.node_id]);
     }),
   );
 

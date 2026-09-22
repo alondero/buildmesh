@@ -4,6 +4,7 @@ import { emit } from '@tauri-apps/api/event';
 import { createElement } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import {
+  REFRESH_IF_STALE_MS,
   setWorktreeCloseActionResolverForTests,
   useAgentNodeStore,
   type AgentNode,
@@ -334,6 +335,82 @@ describe('useAgentNodeStore', () => {
 
       expect(useAgentNodeStore.getState().nodesById[8]?.name).toBe('new');
       expect(useAgentNodeStore.getState().error).toBeNull();
+    });
+  });
+
+  describe('refreshIfStale (issue #1751)', () => {
+    function mockSingleNode(node: AgentNode) {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.resolve([]);
+      });
+    }
+
+    it('skips the fan-out when the snapshot is fresh and every scoped id is known', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      await useAgentNodeStore.getState().refreshIfStale([7]);
+
+      // Duplicate-event path: the row is already in the map on the heels
+      // of a snapshot, so no full-table refetch fires.
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('fetches for an unknown scoped id even when the snapshot is fresh', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      // Genuinely new row: the event carries an id the map has never
+      // seen, so the conditional refresh degrades to a full fetch.
+      await useAgentNodeStore.getState().refreshIfStale([7, 99]);
+
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('fetches again once the freshness window expires', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      mockInvoke.mockClear();
+
+      // Unscoped + fresh still skips.
+      await useAgentNodeStore.getState().refreshIfStale();
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
+
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(Date.now() + REFRESH_IF_STALE_MS + 1000);
+        await useAgentNodeStore.getState().refreshIfStale([7]);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    it('a failed fetch does not stamp freshness, so the next event retries', async () => {
+      const node = makeNode({ id: 7 });
+      mockSingleNode(node);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+
+      // A transient failure preserves the previous stamp instead of
+      // treating the failed snapshot as fresh...
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_agent_nodes') return Promise.reject(new Error('db locked'));
+        return Promise.resolve([]);
+      });
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      expect(useAgentNodeStore.getState().error).not.toBeNull();
+
+      // ...so a scoped check against the last good snapshot still skips.
+      mockSingleNode(node);
+      mockInvoke.mockClear();
+      await useAgentNodeStore.getState().refreshIfStale([7]);
+      expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
     });
   });
 

@@ -512,17 +512,15 @@ export function CircuitsProbeTab() {
     }
   }, []);
 
-  /**
-   * Clock the duration labels measure a live run against.
-   *
-   * This has to tick on its own. Baselining it on fetch was wrong: a run's
-   * `updated_at` only moves on a *state transition*, so a step that churns
-   * for ten minutes emits no `circuit-run-updated` and the elapsed time
-   * would sit frozen at whatever it read when the tab last loaded — which
-   * is worse than showing nothing, because a stalled run would look fresh.
-   * `UsageTab` sets the precedent for a 1s tick on a relative-time label.
-   */
-  const [now, setNow] = useState(() => new Date());
+  // Duration labels tick inside each run card (`LiveRunDuration` in
+  // `CircuitRunCard.tsx`), not here (issue #1751). Baselining the clock
+  // on fetch was wrong: a run's `updated_at` only moves on a *state
+  // transition*, so a step that churns for ten minutes emits no
+  // `circuit-run-updated` and the elapsed time would sit frozen at
+  // whatever it read when the tab last loaded — which is worse than
+  // showing nothing, because a stalled run would look fresh. The clock
+  // therefore still ticks on its own, but scoped to the label span so
+  // the tab itself never re-renders on the 1s cadence.
   // New-Circuit row: name + trigger shape, then straight into the editor.
   const [newName, setNewName] = useState('');
   const [blueprint, setBlueprint] = useState<CircuitBlueprintKind>('walking_skeleton');
@@ -620,18 +618,10 @@ export function CircuitsProbeTab() {
     setQueueVisibleCount((prev) => (queue.length <= prev ? Math.max(queue.length, QUEUE_PAGE_SIZE) : prev));
   }, [queue.length]);
 
-  // Advance the duration clock while any visible run is still open. Gated
-  // on `hasLiveRun` so a tab showing only finished runs — whose durations
-  // are fixed by their own `updated_at` — re-renders never.
-  const hasLiveRun = useMemo(
-    () => allRuns.some(({ run }) => !isTerminalRunState(run.state)),
-    [allRuns]
-  );
-  useEffect(() => {
-    if (!hasLiveRun) return;
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, [hasLiveRun]);
+  // No tab-level duration ticker (issue #1751): each live run card
+  // owns its 1s clock via `LiveRunDuration`, and finished runs render a
+  // static reading fixed by their own `updated_at` with no interval at
+  // all. Live updates still ride the `circuit-run-updated` event above.
 
   const runAction = async (fn: () => Promise<unknown>, options: { reloadOnError?: boolean } = {}) => {
     if (!mountedRef.current) return;
@@ -1092,7 +1082,6 @@ export function CircuitsProbeTab() {
                           capacity={capacity}
                           expanded={runExpandOverrides[detail.run.id] ?? defaultExpanded}
                           onToggleExpanded={() => toggleRunExpanded(detail.run.id, defaultExpanded)}
-                          now={now}
                           busy={busy}
                           onPause={() => runAction(() => pauseCircuitRun(detail.run.id))}
                           onResume={() => runAction(() => resumeCircuitRun(detail.run.id))}

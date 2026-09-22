@@ -68,6 +68,10 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import {
+  useLoopStatusInvalidation,
+  LOOP_STATUS_FALLBACK_MS,
+} from '../../hooks/useLoopStatusInvalidation';
 import { groupByHarness } from '../../lib/groups';
 import {
   getAutopilotCompatibility,
@@ -674,17 +678,32 @@ export function AutopilotProbeTab() {
     }
   }, []);
 
-  // Poll the loop status while the Looping section is showing. The poller's
-  // own cadence is ~2 min, so a light 5s refetch is enough to move the badge
-  // from Idle → Active loop iteration N shortly after a spawn without hammering
-  // the DB. Cleared on mesh-switch / mode-flip / unmount.
+  // Event-driven loop-status refresh (issue #1751). The backend emits
+  // no dedicated `loop-status-changed` event, so the badge refreshes on
+  // the lifecycle transitions that move the loop ledger (spawns,
+  // submissions, finishing/PR/failed/closed) via
+  // `useLoopStatusInvalidation` — the badge flips Idle → Active within
+  // one frame of the event instead of waiting for the next poll tick.
+  // Stable wrapper so the ten listeners aren't re-attached every render
+  // (same contract as `useProviderListInvalidation`).
+  const refreshLoopStatusSoon = useCallback(() => {
+    void refreshLoopStatus();
+  }, [refreshLoopStatus]);
+  useLoopStatusInvalidation(refreshLoopStatusSoon);
+
+  // Stale-while-revalidate fallback while the Looping section is
+  // showing: a dropped Tauri event never strands the badge for longer
+  // than `LOOP_STATUS_FALLBACK_MS`. The fallback funnels through the
+  // same mesh-switch-guarded `refreshLoopStatus` as the event path, so
+  // it can never overwrite newer event-driven state (issue #1073
+  // pattern). Cleared on mesh-switch / mode-flip / unmount.
   useEffect(() => {
     if (loading || form.mode !== 'looping' || activeMeshId === null) {
       setLoopStatus(null);
       return;
     }
     void refreshLoopStatus();
-    const id = setInterval(() => void refreshLoopStatus(), 5000);
+    const id = setInterval(() => void refreshLoopStatus(), LOOP_STATUS_FALLBACK_MS);
     return () => clearInterval(id);
   }, [loading, form.mode, activeMeshId, refreshLoopStatus]);
 
