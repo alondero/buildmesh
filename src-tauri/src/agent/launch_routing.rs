@@ -1,5 +1,6 @@
 //! Prepared provider routing resolved before command construction (issue #1098).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::agent::provider::adapters::codex;
@@ -7,6 +8,102 @@ use crate::agent::provider::LaunchRuntime;
 use crate::env::ResolvedPath;
 use crate::models::Provider;
 use crate::preferences;
+
+/// Everything the resolution reads: the spawn option, the harness executor it
+/// resolves to, and the runtime it resolved for. Neither `EnvType` nor
+/// `Provider` derives `Hash`, so the non-string halves are `&'static str` tags
+/// (`Provider` via its adapter id).
+type RoutingCacheKey = (String, &'static str, &'static str);
+
+fn routing_env_tag(env_type: crate::models::EnvType) -> &'static str {
+    match env_type {
+        crate::models::EnvType::Windows => "windows",
+        crate::models::EnvType::Wsl => "wsl",
+        crate::models::EnvType::WindowsInterop => "windows-interop",
+    }
+}
+
+fn routing_cache_key(
+    spawn_option_id: &str,
+    provider: Provider,
+    env_type: crate::models::EnvType,
+) -> RoutingCacheKey {
+    (
+        spawn_option_id.to_string(),
+        provider.adapter().id(),
+        routing_env_tag(env_type),
+    )
+}
+
+/// Memo for [`prepare`]'s value-only results, invalidated by the preferences
+/// generation (issue #1752). Keyed by `(spawn option, harness, runtime)` — the
+/// `(provider, mesh env fingerprint)` triple the resolution actually depends on.
+///
+/// Generation handling is deliberately strict about *direction*. The map-level
+/// `generation` only ever moves **forward**: a caller that sampled an older
+/// generation must neither evict the newer entries nor be able to publish its
+/// result. `get` therefore clears only on a strictly newer generation, and
+/// `put` drops any insertion whose generation is not the map's current one.
+/// That closes the race where a slow spawn samples generation `G`, a settings
+/// write publishes + bumps to `G+1`, and the slow spawn then inserts an entry
+/// computed from `G`'s preferences — the entry is dead on arrival rather than
+/// becoming serveable state. The per-entry generation check is kept as the
+/// read-side twin, so a rotation can never be served from a stale entry.
+#[derive(Default)]
+struct RoutingCache {
+    generation: u64,
+    entries: HashMap<RoutingCacheKey, (u64, PreparedLaunchRouting)>,
+}
+
+impl RoutingCache {
+    fn get(&mut self, key: &RoutingCacheKey, generation: u64) -> Option<PreparedLaunchRouting> {
+        if generation > self.generation {
+            self.entries.clear();
+            self.generation = generation;
+        }
+        match self.entries.get(key) {
+            Some((entry_generation, routing)) if *entry_generation == generation => {
+                Some(routing.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn put(&mut self, key: RoutingCacheKey, generation: u64, routing: PreparedLaunchRouting) {
+        // A stale generation means the map has already moved past this entry's
+        // inputs — drop it instead of inserting dead state.
+        if generation != self.generation {
+            return;
+        }
+        self.entries.insert(key, (generation, routing));
+    }
+}
+
+// Global in production (one preferences source per process); per-test-thread in
+// tests, mirroring `preferences::storage` — a shared static would let one
+// test's routing leak into another's, since tests use thread-local prefs.
+#[cfg(not(test))]
+static ROUTING_CACHE: once_cell::sync::Lazy<std::sync::Mutex<RoutingCache>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(RoutingCache::default()));
+
+#[cfg(test)]
+thread_local! {
+    static ROUTING_CACHE: std::cell::RefCell<RoutingCache> =
+        std::cell::RefCell::new(RoutingCache::default());
+}
+
+fn with_routing_cache<R>(f: impl FnOnce(&mut RoutingCache) -> R) -> R {
+    #[cfg(not(test))]
+    let result = {
+        let mut guard = ROUTING_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    };
+    #[cfg(test)]
+    let result = ROUTING_CACHE.with(|cell| f(&mut cell.borrow_mut()));
+    result
+}
 
 #[derive(Clone, PartialEq, Eq)]
 // `CodexProxy` is intentionally the largest variant (~600 bytes — carries the
@@ -121,9 +218,25 @@ pub fn prepare(
     provider: Provider,
     resolved: &ResolvedPath,
 ) -> Result<PreparedLaunchRouting, String> {
+    // This guard reads only the runtime + process-static host probes, so it
+    // stays ahead of the cache (no preferences involved).
     if resolved.env_type == crate::models::EnvType::WindowsInterop && (!crate::env::is_wsl_host() || crate::env::windows_home().is_none()) {
         return Err("Windows harnesses require an interoperable WSL host with powershell.exe on PATH.".into());
     }
+
+    // Cache lookup FIRST (issue #1752). `resolved_harness_profile` below walks
+    // the detected profile set on every spawn; resolving it before consulting
+    // the cache would defeat the memo entirely.
+    let generation = preferences::generation();
+    let cache_key = routing_cache_key(spawn_option_id, provider, resolved.env_type);
+    if let Some(cached) = with_routing_cache(|cache| cache.get(&cache_key, generation)) {
+        return Ok(cached);
+    }
+
+    // Miss. The WSL-distro guard reads only preferences (covered by the
+    // generation) plus the process-static default distro, so skipping it on a
+    // hit cannot mask a settings change — any change already bumped the
+    // generation and forced this path.
     let profile_for_distro = preferences::resolved_harness_profile(spawn_option_id);
     if let Some(distro) = profile_for_distro.as_ref().and_then(|profile| profile.wsl_distro.clone()) {
         if resolved.env_type == crate::models::EnvType::Wsl
@@ -139,6 +252,27 @@ pub fn prepare(
         .as_ref()
         .and_then(|profile| profile.executable.clone());
 
+    let routing = resolve_routing(spawn_option_id, provider, resolved, executable_override)?;
+    // Only the value-only variants are memoised. `CodexProxy` carries a live
+    // credential + verification and rewrites a profile file on every call; an
+    // `Err` must be re-derived so its guard sees the current settings.
+    if matches!(
+        routing,
+        PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment(_)
+    ) {
+        with_routing_cache(|cache| cache.put(cache_key, generation, routing.clone()));
+    }
+    Ok(routing)
+}
+
+/// The uncached body of [`prepare`] — resolved pairing → routing. Split out so
+/// [`prepare`] owns the memo while this keeps the resolution exact.
+fn resolve_routing(
+    spawn_option_id: &str,
+    provider: Provider,
+    resolved: &ResolvedPath,
+    executable_override: Option<PathBuf>,
+) -> Result<PreparedLaunchRouting, String> {
     let Some((pairing, account)) =
         preferences::resolve_stored_pairing_and_account(spawn_option_id)?
     else {
@@ -204,5 +338,107 @@ pub fn prepare(
             ))
         }
         _ => Err("the selected harness does not support proxied providers".into()),
+    }
+}
+
+#[cfg(test)]
+mod routing_cache_tests {
+    use super::*;
+
+    fn key(id: &str) -> RoutingCacheKey {
+        (id.to_string(), "anthropic", "windows")
+    }
+
+    fn native(path: &str) -> PreparedLaunchRouting {
+        PreparedLaunchRouting::Native {
+            executable: Some(PathBuf::from(path)),
+        }
+    }
+
+    /// Store `routing` at `generation`, going through `get` first exactly as
+    /// `prepare` does — `put` only accepts the map's current generation, so a
+    /// bare `put` would be dropped.
+    fn seed(cache: &mut RoutingCache, key: RoutingCacheKey, generation: u64, routing: PreparedLaunchRouting) {
+        assert!(cache.get(&key, generation).is_none(), "seed expects a cold key");
+        cache.put(key, generation, routing);
+    }
+
+    /// A hit returns the stored value; a repeated read at the same generation
+    /// keeps hitting (the memo's whole point).
+    #[test]
+    fn get_returns_the_value_stored_at_the_current_generation() {
+        let mut cache = RoutingCache::default();
+        assert!(cache.get(&key("claude"), 7).is_none(), "cold cache misses");
+        cache.put(key("claude"), 7, native("/usr/bin/claude"));
+        match cache.get(&key("claude"), 7) {
+            Some(PreparedLaunchRouting::Native { executable }) => {
+                assert_eq!(executable.as_deref(), Some(std::path::Path::new("/usr/bin/claude")));
+            }
+            other => panic!("expected the memoised Native routing, got {other:?}"),
+        }
+    }
+
+    /// A generation bump invalidates the map — the settings-change path.
+    #[test]
+    fn a_generation_bump_invalidates_every_entry() {
+        let mut cache = RoutingCache::default();
+        seed(&mut cache, key("claude"), 7, native("/usr/bin/claude"));
+        assert!(
+            cache.get(&key("claude"), 8).is_none(),
+            "a bumped generation must drop entries computed before it"
+        );
+    }
+
+    /// The write-side race guard: a slow spawn that sampled generation 7 must
+    /// not be able to publish its result once the map has moved to 8. Without
+    /// this `put` a rotated endpoint/key could become serveable state.
+    #[test]
+    fn put_drops_an_entry_computed_before_a_bump() {
+        let mut cache = RoutingCache::default();
+        // The map was already advanced to generation 8 by another caller...
+        assert!(cache.get(&key("claude"), 8).is_none());
+        // ...then a slow spawn tries to insert its generation-7 result.
+        cache.put(key("claude"), 7, native("/usr/bin/claude"));
+        assert!(
+            cache.get(&key("claude"), 8).is_none(),
+            "a put stamped with a stale generation must be dropped, not stored"
+        );
+    }
+
+    /// A caller holding an older generation must not evict the newer entries.
+    #[test]
+    fn a_stale_reader_does_not_evict_newer_entries() {
+        let mut cache = RoutingCache::default();
+        seed(&mut cache, key("claude"), 8, native("/usr/bin/claude"));
+        // A slow reader that sampled generation 7 must miss, not clear the map.
+        assert!(cache.get(&key("claude"), 7).is_none());
+        assert!(
+            cache.get(&key("claude"), 8).is_some(),
+            "the generation-8 entry must survive a generation-7 reader"
+        );
+    }
+
+    /// Different runtimes are different fingerprints — a WSL resolution must
+    /// not satisfy a Windows lookup of the same spawn option.
+    #[test]
+    fn the_runtime_is_part_of_the_fingerprint() {
+        let mut cache = RoutingCache::default();
+        seed(&mut cache, ("claude".to_string(), "anthropic", "wsl"), 1, native("/home/u/bin/claude"));
+        assert!(
+            cache.get(&("claude".to_string(), "anthropic", "windows"), 1).is_none(),
+            "a Windows lookup must not reuse the WSL entry"
+        );
+    }
+
+    /// The harness executor is part of the fingerprint — the same spawn option
+    /// string resolved under a different executor must not reuse the entry.
+    #[test]
+    fn the_provider_is_part_of_the_fingerprint() {
+        let mut cache = RoutingCache::default();
+        seed(&mut cache, ("claude".to_string(), "anthropic", "windows"), 1, native("/usr/bin/claude"));
+        assert!(
+            cache.get(&("claude".to_string(), "codex", "windows"), 1).is_none(),
+            "a different harness must not reuse the entry"
+        );
     }
 }

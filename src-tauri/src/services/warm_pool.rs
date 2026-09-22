@@ -51,8 +51,8 @@
 //! successful claim so the pool is back at target by the next spawn. Runs on a
 //! dedicated thread (it shells out to `git`) and behind the fill lock.
 //!
-//! `prewarm_one` — does the actual on-disk work for one mesh. Idempotent:
-//! if a row already points at the directory, the call is a no-op. The
+//! `warm_one_body` — does the actual on-disk work for one entry. Idempotent:
+//! if a row already points at the directory, the call re-rolls the slug. The
 //! PR-style `git fetch` step is intentionally omitted for the v21 tracer
 //! — the spawn path's existing `git::sync::fetch_origin` keeps things fresh
 //! just before a claim lands.
@@ -594,89 +594,27 @@ fn run_rebuild_pass(app: &tauri::AppHandle, all: bool, meshes_wanted: &[i64]) {
     }
 }
 
-/// What one call to [`prewarm_one`] did. Replaces the old `Result<bool, _>`
-/// triple-overload that smushed "at target" and "transient count error"
-/// into the same `Ok(false)` (issue #634): a transient
-/// `count_available_warm_for_mesh` failure used to silently abort the
-/// fill for that pass, because the caller couldn't tell it apart from
-/// "we're done, stop the loop". Splitting into three variants lets the
-/// caller take three distinct actions: continue the fill loop
-/// (`Warmed`), break with no log noise (`AtTarget`), or break with a
-/// WARN that explains why we stopped early (`CountFailed`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PrewarmOutcome {
-    /// A new row + worktree were created. Continue the fill loop.
-    Warmed,
-    /// The mesh was already at target (or pool disabled). Stop the loop.
-    AtTarget,
-    /// A transient DB error in `count_available_warm_for_mesh` left us
-    /// unable to tell where the pool stands. Stop the loop (don't spin
-    /// on a broken DB) and surface the reason so the operator can see
-    /// why this pass aborted.
-    CountFailed(String),
-}
-
-/// Decide whether `prewarm_one` should early-exit before doing any work.
-/// Extracted so the two early-exit branches (`AtTarget` and
-/// `CountFailed`) are unit-testable as a pure function — the `Warmed`
-/// case requires actual filesystem + git work and is covered by the
-/// integration test in `tests/warm_pool_maintenance.rs`.
-///
-/// Returns `Some(outcome)` to early-exit (callers should `return` it
-/// directly), or `None` when the call should proceed to cut a worktree.
-/// Borrows `count_result` so the caller can unwrap the `Ok` arm without
-/// paying for a clone.
-fn prewarm_early_exit(target: i64, count_result: &Result<i64, String>) -> Option<PrewarmOutcome> {
-    // Per-mesh target (issue #611). `0` is a hard no-op — the mesh has
-    // opted out of the pool via the Worktrees Probe toggle. We still
-    // want reconcile_on_startup and refill_after_claim to call us (so
-    // the `filling`/`available` bookkeeping is consistent if the user
-    // toggles back on), but the cheap early return avoids any
-    // slug-generation + git-worktree-cut work for disabled meshes.
-    if target <= 0 {
-        return Some(PrewarmOutcome::AtTarget);
-    }
-    match count_result {
-        Err(e) => Some(PrewarmOutcome::CountFailed(e.clone())),
-        Ok(available) if *available >= target => Some(PrewarmOutcome::AtTarget),
-        Ok(_) => None, // proceed to warm
-    }
-}
-
-/// Cut a fresh warm worktree for `mesh` and insert a `warming → available`
+/// Cut one fresh warm worktree for `mesh`, inserting a `filling → available`
 /// row pair around it. Idempotent: if a row already points at the computed
-/// path, the call is a no-op (so the startup reconcile is safe to re-run).
+/// path, the call re-rolls the slug.
 ///
-/// Returns [`PrewarmOutcome::Warmed`] when a new entry was warmed,
-/// [`PrewarmOutcome::AtTarget`] when the mesh was already at target (or
-/// the pool is disabled for this mesh), or
-/// [`PrewarmOutcome::CountFailed`] with the DB error string when the
-/// pre-flight `count_available_warm_for_mesh` query failed (issue #634).
-/// Errors from `create_git_worktree` itself propagate as the outer
-/// `Err(String)` so the worker can log + skip + try the next mesh on the
-/// next reconcile pass.
+/// Count-free by design (issue #1752): the per-mesh target / disabled-pool /
+/// transient-count early-exits live in [`fill_mesh_to_target_with`], which
+/// samples the available count **once** rather than re-querying it per entry.
+/// The body therefore takes nothing it does not use — no running-count
+/// parameter just to enrich a log line.
+///
+/// Errors from `create_git_worktree` (after slug retries) propagate as
+/// `Err(String)` so the fill loop logs, stops, and lets the next pass retry.
 ///
 /// Emits `pool-count-changed` after a successful fill (count +1) so a
 /// long-running multi-row fill surfaces each row becoming available
 /// immediately, instead of all-at-once at end-of-pass.
-pub fn prewarm_one(
-    app: &tauri::AppHandle,
-    mesh: &db::WarmPoolMeshRow,
-) -> Result<PrewarmOutcome, String> {
-    // Per-mesh target (issue #611). `0` is a hard no-op — the mesh has
-    // opted out of the pool via the Worktrees Probe toggle. We still
-    // want reconcile_on_startup and refill_after_claim to call us (so
-    // the `filling`/`available` bookkeeping is consistent if the user
-    // toggles back on), but the cheap early return avoids any
-    // slug-generation + git-worktree-cut work for disabled meshes.
-    let target = mesh.pre_spawn_pool_size;
-    let count_result = db::count_available_warm_for_mesh(mesh.id)
-        .map_err(|e| format!("count_available_warm_for_mesh failed for mesh {}: {}", mesh.id, e));
-    let available = match prewarm_early_exit(target, &count_result) {
-        Some(outcome) => return Ok(outcome),
-        None => count_result.expect("prewarm_early_exit returned None implies Ok(_); see its doc"),
-    };
-
+///
+/// The `git worktree add` cadence stays strictly serial: every caller runs
+/// behind the pool fill lock (issue #613 AC4), so two adds never target one
+/// repo concurrently. Only the redundant counting was batched.
+fn warm_one_body(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> Result<(), String> {
     // Pick a fresh slug. Slug collisions are vanishingly rare (~3.9B combos
     // in the seed pool; #608 follow-up adds the `preassigned_name` UNIQUE
     // guard for the per-mesh case), but if the directory already exists on
@@ -738,16 +676,16 @@ pub fn prewarm_one(
                     );
                 }
                 tracing::info!(
-                    "warm_pool: prewarmed {} for mesh {} ({} available)",
+                    "warm_pool: prewarmed {} for mesh {} (target {})",
                     slug,
                     mesh.id,
-                    available + 1,
+                    mesh.pre_spawn_pool_size,
                 );
                 // Surface the new row immediately — a long multi-row fill
                 // gets to show "1/N ready" → "2/N ready" mid-tick instead
                 // of all-at-once at end-of-pass.
                 emit_pool_changed(app, mesh.id);
-                return Ok(PrewarmOutcome::Warmed);
+                return Ok(());
             }
             Err(e) => {
                 // Roll back the filling row so the reconcile doesn't have
@@ -780,7 +718,7 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
 
 /// Build the `git rev-parse HEAD` command used by `read_warm_head_sha`.
 /// Uses `command_no_window` so the child doesn't flash a console window on
-/// Windows — `prewarm_one` calls this on the post-spawn thread, and an
+/// Windows — `warm_one_body` calls this on the post-spawn thread, and an
 /// un-flagged `git.exe` would briefly steal foreground focus from buildmesh's
 /// WebView2, disrupting the user's terminal view (issue #665).
 fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
@@ -793,9 +731,9 @@ fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
-/// target (issue #613). `prewarm_one` warms exactly ONE entry per call, so a
-/// pool of target N starting from empty needs N calls — this loops it until
-/// the mesh reports "at target" (`Ok(false)`) or a `git worktree add` fails.
+/// target (issue #613). Delegates the fill loop to [`fill_mesh_to_target`],
+/// which cuts one entry at a time from a once-sampled available count
+/// (issue #1752) until the mesh reaches target or a `git worktree add` fails.
 ///
 /// Looks the mesh up by id (vs. `fill_mesh_to_target`'s in-hand row) so a
 /// single-mesh caller like `update_mesh_pool_size` doesn't need to first
@@ -803,7 +741,7 @@ fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
 /// mesh is not worktree-enabled — the caller already wrote the column, so
 /// the drain/fill aren't applicable.
 ///
-/// All state changes inside (`drain_excess_warm_entries`, `prewarm_one`)
+/// All state changes inside (`drain_excess_warm_entries`, `warm_one_body`)
 /// emit `pool-count-changed` themselves; no end-of-pass emit here.
 ///
 /// Returns `true` iff the mesh's pool state actually changed (rows drained
@@ -832,32 +770,40 @@ pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) -> bool {
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
-/// target (issue #613). `prewarm_one` warms exactly ONE entry per call, so a
-/// pool of target N starting from empty needs N calls — this loops it until
-/// the mesh reports "at target" (`Ok(false)`) or a `git worktree add` fails.
+/// target (issue #613). Each entry is cut one at a time; the loop runs until
+/// the running `available` count reaches `target` or a `git worktree add`
+/// fails.
 ///
-/// The loop is bounded by `target` iterations as a belt-and-braces guard: each
-/// successful `prewarm_one` raises the `available` count by one, so the
-/// `available >= target` early-return inside `prewarm_one` is the real
-/// terminator and the bound can never actually be hit unless a row vanishes
-/// underneath us mid-loop (in which case stopping after `target` tries and
-/// letting the next pass retry is exactly the right behaviour).
+/// The loop is bounded by the deficit rather than by `target`: `available`
+/// starts at the once-sampled count and rises by one per successful cut, so a
+/// mesh already partway to target only pays for the missing entries.
 ///
 /// The "single sequential `git worktree add`" cadence the issue calls for
 /// falls out naturally: this runs the cuts one after another on the calling
 /// thread, and every caller is already serialized behind the fill lock.
 ///
-/// `drain` and `prewarm` are passed as closures so the orchestration can be
-/// unit-tested without `tauri::AppHandle` (which is hard to mock) — the
-/// production caller passes the real `drain_excess_warm_entries` /
-/// `prewarm_one` (which close over `app`); tests pass stubs that drive
-/// the drain + warm loop with controlled responses. See the
-/// `fill_mesh_to_target_*` tests at the bottom of this module
-/// (issue #634).
+/// `count`, `drain` and `warm_one` are passed as closures so the orchestration
+/// can be unit-tested without `tauri::AppHandle` (which is hard to mock) — the
+/// production caller passes the real `count_available_warm_for_mesh` /
+/// `drain_excess_warm_entries` / `warm_one_body` (which close over `app`);
+/// tests pass stubs that drive the drain + warm loop with controlled
+/// responses. `count` is `FnOnce` because it is sampled exactly once, which is
+/// the point of issue #1752. See the `fill_mesh_to_target_*` tests at the
+/// bottom of this module (issue #634).
+///
+/// Trade-off of the single sample: the running total only knows about the cuts
+/// this call makes, so a concurrent `try_claim` that drains an `available` row
+/// mid-pass leaves this call a little short (it aims at the count it saw, not
+/// the shrinking true count). That is bounded by the number of concurrent
+/// claims and self-heals on the next pass (the idle worker re-checks within a
+/// tick, and every claim schedules its own refill). The alternative — re-counting
+/// per entry — was the redundant work #1752 removes for the common case where
+/// nothing else touches the pool during a fill.
 fn fill_mesh_to_target_with(
     mesh: &db::WarmPoolMeshRow,
+    count: impl FnOnce() -> Result<i64, String>,
     drain: impl FnOnce(&db::WarmPoolMeshRow) -> Result<usize, String>,
-    prewarm: impl Fn(&db::WarmPoolMeshRow) -> Result<PrewarmOutcome, String>,
+    warm_one: impl Fn(&db::WarmPoolMeshRow) -> Result<(), String>,
 ) -> usize {
     let mut changes = 0usize;
     match drain(mesh) {
@@ -872,26 +818,36 @@ fn fill_mesh_to_target_with(
         }
     }
     let target = mesh.pre_spawn_pool_size.max(0);
-    for _ in 0..target {
-        match prewarm(mesh) {
-            Ok(PrewarmOutcome::Warmed) => {
+    if target <= 0 {
+        // Pool disabled for this mesh — the drain above was the only useful
+        // work, and we skip the count entirely (issue #1752).
+        return changes;
+    }
+    // Issue #1752: one count per fill, not one per entry. A target-N fill used
+    // to issue N `count_available_warm_for_mesh` queries (one per warm call).
+    // We sample once and track the running total locally; the count still runs
+    // AFTER the drain so a downsize is reflected.
+    let mut available = match count() {
+        Ok(n) => n,
+        Err(reason) => {
+            // Issue #634: a transient DB error used to be silently absorbed as
+            // `Ok(false)`, aborting the fill with no log signal. Log WARN and
+            // stop — the next idle tick or post-spawn path retries. The drain
+            // already ran, so its changes are still reported.
+            tracing::warn!(
+                "warm_pool: fill aborted for mesh {} ({}): {}",
+                mesh.id,
+                mesh.path,
+                reason
+            );
+            return changes;
+        }
+    };
+    while available < target {
+        match warm_one(mesh) {
+            Ok(()) => {
+                available += 1;
                 changes += 1;
-                continue;
-            }
-            Ok(PrewarmOutcome::AtTarget) => break,
-            Ok(PrewarmOutcome::CountFailed(reason)) => {
-                // Issue #634: a transient DB error in
-                // `count_available_warm_for_mesh` used to be silently
-                // absorbed as `Ok(false)`, aborting the fill with no log
-                // signal. Now we log WARN and break — the next idle tick
-                // or post-spawn path will retry the count.
-                tracing::warn!(
-                    "warm_pool: fill aborted for mesh {} ({}): {}",
-                    mesh.id,
-                    mesh.path,
-                    reason
-                );
-                break;
             }
             Err(e) => {
                 tracing::warn!(
@@ -927,8 +883,18 @@ fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> us
     }
     fill_mesh_to_target_with(
         mesh,
+        // Sampled once per fill (issue #1752) — read after the drain so a
+        // downsize is reflected.
+        || {
+            db::count_available_warm_for_mesh(mesh.id).map_err(|e| {
+                format!(
+                    "count_available_warm_for_mesh failed for mesh {}: {}",
+                    mesh.id, e
+                )
+            })
+        },
         |m| drain_excess_warm_entries(app, m),
-        |m| prewarm_one(app, m),
+        |m| warm_one_body(app, m),
     )
 }
 
@@ -945,7 +911,7 @@ fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) -> us
 /// error.
 ///
 /// `app` is passed through so the inner `drain_excess_warm_entries` /
-/// `prewarm_one` emits can reach the frontend. No end-of-pass emit here —
+/// `warm_one_body` emits can reach the frontend. No end-of-pass emit here —
 /// the inner calls already fire one per real state change, and a blanket
 /// end-of-pass emit would wake the listener every idle tick (every ~2s)
 /// even when nothing changed.
@@ -1009,7 +975,7 @@ pub fn reconcile_on_startup(app: tauri::AppHandle) {
     match db::list_warm_worktrees_to_reconcile(WARM_FILL_STALE_AFTER_MINUTES) {
         Ok(entries) => reconcile_warm_entries(
             entries,
-            // Pool entries are detached (`prewarm_one` cuts them with mode
+            // Pool entries are detached (`warm_one_body` cuts them with mode
             // `detached`), so they own no branch — use the branch-preserving
             // remover. The branch-deleting variant would be a latent footgun
             // if a future `refreshing` worker ever checked out a real branch.
@@ -1141,7 +1107,7 @@ fn with_warm_mesh(mesh_id: i64, what: &str, f: impl FnOnce(&db::WarmPoolMeshRow)
 /// refresh and refill from racing each other for the lock (issue #613 review).
 ///
 /// `app` is passed through so the inner `drain_excess_warm_entries` /
-/// `prewarm_one` emits can reach the frontend. The `try_claim` call that
+/// `warm_one_body` emits can reach the frontend. The `try_claim` call that
 /// precedes this in the spawn path has ALREADY emitted `pool-count-changed`
 /// (count -1 on the claim); the refill emits here cover the +N to restore
 /// to target. Together they tell the badge exactly what changed.
@@ -1921,102 +1887,21 @@ mod tests {
         );
     }
 
-    // ---- prewarm_early_exit (issue #634) ----
+    // ---- fill_mesh_to_target_with (orchestration, issues #634 / #1752) ----
     //
-    // The pure decision helper that `prewarm_one` consults before doing
-    // any work. Pinning all three early-exit branches in a table-driven
-    // test catches the silent-collapse bug at the type level: a future
-    // refactor that mapped `count_result = Err(_)` back to `AtTarget`
-    // would break `prewarm_early_exit_logs_count_failures_loudly` and
-    // surface immediately, instead of silently aborting fills in
-    // production.
-
-    /// target == 0 (mesh has opted out of the pool) is a no-op — return
-    /// `AtTarget` regardless of count.
-    #[test]
-    fn prewarm_early_exit_returns_at_target_when_pool_disabled() {
-        assert_eq!(
-            prewarm_early_exit(0, &Ok(5)),
-            Some(PrewarmOutcome::AtTarget),
-            "target=0 must early-exit as AtTarget even if the count says otherwise"
-        );
-        assert_eq!(
-            prewarm_early_exit(0, &Err("db down".into())),
-            Some(PrewarmOutcome::AtTarget),
-            "target=0 must early-exit as AtTarget even if the count failed (no fill work needed anyway)"
-        );
-    }
-
-    /// count == target ⇒ already at target. Caller breaks the fill loop.
-    /// Boundary: the `>=` (not `>`) means a mesh at target with one extra
-    /// filling row also returns AtTarget — that's intentional, because
-    /// `count_available_warm_for_mesh` excludes `filling` rows and the
-    /// the fill loop is gated on `available >= target`, so the next tick
-    /// can still see a fresh `available` row come in.
-    #[test]
-    fn prewarm_early_exit_returns_at_target_when_count_meets_target() {
-        assert_eq!(
-            prewarm_early_exit(2, &Ok(2)),
-            Some(PrewarmOutcome::AtTarget),
-            "count == target must early-exit (boundary case for >=)"
-        );
-        assert_eq!(
-            prewarm_early_exit(2, &Ok(5)),
-            Some(PrewarmOutcome::AtTarget),
-            "count > target must early-exit (the common 'over target' case after a stale row)"
-        );
-    }
-
-    /// count < target AND count succeeded ⇒ proceed to warm. Returns
-    /// `None` (no early exit).
-    #[test]
-    fn prewarm_early_exit_returns_none_when_count_below_target() {
-        assert_eq!(
-            prewarm_early_exit(3, &Ok(1)),
-            None,
-            "1/3 available must proceed to warm (returns None to signal 'keep going')"
-        );
-        assert_eq!(
-            prewarm_early_exit(3, &Ok(2)),
-            None,
-            "2/3 available must proceed to warm"
-        );
-    }
-
-    /// Load-bearing regression for the issue #634 bug: a transient DB
-    /// error in `count_available_warm_for_mesh` used to collapse to
-    /// `Ok(false)` which the caller mistook for "at target" and silently
-    /// aborted the fill. After the fix, it must surface as
-    /// `CountFailed(reason)` so `fill_mesh_to_target` can log + stop.
-    #[test]
-    fn prewarm_early_exit_logs_count_failures_loudly() {
-        assert_eq!(
-            prewarm_early_exit(2, &Err("database is locked".into())),
-            Some(PrewarmOutcome::CountFailed("database is locked".into())),
-            "a transient DB error must surface as CountFailed, not AtTarget — the issue #634 bug"
-        );
-    }
-
-    /// `CountFailed` variant carries the reason through unchanged so the
-    /// WARN log line the caller emits includes the original error. Pin
-    /// the contract that the reason is preserved verbatim.
-    #[test]
-    fn prewarm_early_exit_count_failed_preserves_reason_string() {
-        let detailed = "count_available_warm_for_mesh failed for mesh 42: SQLITE_BUSY";
-        assert_eq!(
-            prewarm_early_exit(2, &Err(detailed.into())),
-            Some(PrewarmOutcome::CountFailed(detailed.into())),
-            "the reason string must flow through unchanged so the operator can see the original DB error"
-        );
-    }
-
-    // ---- fill_mesh_to_target_with (orchestration, issue #634) ----
+    // The `count` / `drain` / `warm_one` closures are injected so the test can
+    // drive the drain-then-fill-to-target contract without `tauri::AppHandle`
+    // (which is hard to mock) or real git worktree creation (which is slow +
+    // requires a real repo). The production `fill_mesh_to_target` wraps this
+    // with the real `count_available_warm_for_mesh` +
+    // `drain_excess_warm_entries` + `warm_one_body`.
     //
-    // The `drain` / `prewarm` closures are injected so the test can drive the
-    // drain-then-fill-to-target contract without `tauri::AppHandle` (which is
-    // hard to mock) or real git worktree creation (which is slow + requires a
-    // real repo). The production `fill_mesh_to_target` wraps this with the
-    // real `drain_excess_warm_entries` + `prewarm_one`.
+    // The per-mesh early-exits that used to live in a `prewarm_early_exit`
+    // helper (target == 0 ⇒ no work, count >= target ⇒ at target, count
+    // failure ⇒ stop loudly) are now the three branches of this orchestration,
+    // pinned by `fill_mesh_to_target_with_zero_target_runs_only_drain`,
+    // `..._returns_zero_when_at_target`, and
+    // `..._count_failure_aborts_before_warming`.
 
     fn mesh_row(id: i64, target: i64) -> db::WarmPoolMeshRow {
         db::WarmPoolMeshRow {
@@ -2028,140 +1913,159 @@ mod tests {
         }
     }
 
-    /// Happy path: drain runs once, then `prewarm` returns `Warmed` exactly
-    /// `target` times. The `for _ in 0..target` loop bounds the calls at
-    /// `target` even if every response is `Warmed` (the inner
-    /// `prewarm_early_exit`'s "at target" check is the real terminator
-    /// once the in-DB count catches up to `target`; this `target`
-    /// outer bound is belt-and-braces).
+    /// Happy path: drain runs once, then `warm_one` is called once per missing
+    /// entry. The `available < target` bound stops it after exactly `target`
+    /// calls for a mesh starting empty.
     #[test]
     fn fill_mesh_to_target_with_warms_exactly_target_times() {
         let mesh = mesh_row(1, 3);
-        let prewarm_calls: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
-        let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::AtTarget), // never reached — `for _ in 0..3` bounds the loop
-        ]);
+        let warm_calls = std::cell::RefCell::new(0);
         let drain_calls = std::cell::RefCell::new(0);
 
-        fill_mesh_to_target_with(
+        let changes = fill_mesh_to_target_with(
             &mesh,
+            || Ok(0),
             |_| {
                 *drain_calls.borrow_mut() += 1;
                 Ok(0)
             },
             |_m| {
-                let mut responses = responses.borrow_mut();
-                let next = responses.remove(0);
-                let len = prewarm_calls.borrow().len();
-                prewarm_calls.borrow_mut().push(len as i64);
-                next
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
             },
         );
 
         assert_eq!(*drain_calls.borrow(), 1, "drain must run exactly once");
         assert_eq!(
-            prewarm_calls.borrow().len(),
+            *warm_calls.borrow(),
             3,
-            "prewarm must run exactly `target` (3) times when every response is Warmed"
+            "one cut per missing entry — a target-3 mesh starting empty needs 3"
         );
-        // Sanity: the leftover AtTarget response confirms we DIDN'T over-call.
-        assert_eq!(
-            responses.borrow().len(),
-            1,
-            "the AtTarget response was never consumed (the `for _ in 0..target` bound held)"
-        );
+        assert_eq!(changes, 3, "3 cuts = 3 changes");
     }
 
-    /// Pin the issue #634 contract: `CountFailed` from `prewarm` aborts the
-    /// fill loop (does NOT silently continue to exhaust `target` iterations
-    /// with stale state). A transient DB error used to be collapsed to
-    /// `Ok(false)` (AtTarget) — now it must surface as a real "stop" signal.
+    /// Issue #1752: the count is sampled **once** and a failure aborts the fill
+    /// before cutting anything — a broken count is no basis for warming. The
+    /// drain already ran, so its changes are still reported.
     #[test]
-    fn fill_mesh_to_target_with_count_failed_aborts_loop() {
+    fn fill_mesh_to_target_with_count_failure_aborts_before_warming() {
         let mesh = mesh_row(2, 5);
-        let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::CountFailed("transient db error".into())),
-            Ok(PrewarmOutcome::Warmed), // must NOT be reached
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::Warmed),
-        ]);
-        let prewarm_call_count = std::cell::RefCell::new(0);
+        let count_calls = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
 
-        fill_mesh_to_target_with(
+        let changes = fill_mesh_to_target_with(
             &mesh,
-            |_| Ok(0),
+            || {
+                *count_calls.borrow_mut() += 1;
+                Err("database is locked".into())
+            },
+            |_| Ok(2), // drain removed 2 excess rows
             |_m| {
-                *prewarm_call_count.borrow_mut() += 1;
-                responses.borrow_mut().remove(0)
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
             },
         );
 
-        assert_eq!(
-            *prewarm_call_count.borrow(),
-            2,
-            "loop must stop on CountFailed, NOT exhaust `target` iterations (issue #634)"
-        );
+        assert_eq!(*count_calls.borrow(), 1, "the count is sampled exactly once");
+        assert_eq!(*warm_calls.borrow(), 0, "a failed count must not cut a worktree");
+        assert_eq!(changes, 2, "the drain's changes must still be reported");
     }
 
-    /// `prewarm_one`'s `Err` (a `git worktree add` failure after slug
-    /// retries) also breaks the loop. Distinct from `CountFailed` (a DB
-    /// query failure before any warm attempt).
+    /// `warm_one_body`'s `Err` (a `git worktree add` failure after slug
+    /// retries) also breaks the loop. Distinct from a count failure (which
+    /// aborts before any warm attempt).
     #[test]
     fn fill_mesh_to_target_with_prewarm_err_aborts_loop() {
         let mesh = mesh_row(3, 5);
         let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(PrewarmOutcome::Warmed),
+            Ok(()),
             Err("git worktree add: locked".into()),
-            Ok(PrewarmOutcome::Warmed), // must NOT be reached
+            Ok(()), // must NOT be reached
         ]);
-        let prewarm_call_count = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
 
         fill_mesh_to_target_with(
             &mesh,
+            || Ok(0),
             |_| Ok(0),
             |_m| {
-                *prewarm_call_count.borrow_mut() += 1;
+                *warm_calls.borrow_mut() += 1;
                 responses.borrow_mut().remove(0)
             },
         );
 
         assert_eq!(
-            *prewarm_call_count.borrow(),
+            *warm_calls.borrow(),
             2,
             "loop must stop on a git worktree add failure"
         );
     }
 
-    /// `target == 0` ⇒ loop body never executes. Drain still runs once.
-    /// This is the common case for a worktree-disabled mesh.
+    /// `target == 0` ⇒ drain runs once and then the fill returns immediately,
+    /// **without even sampling the count** (issue #1752: a disabled pool has
+    /// nothing to warm, so the query would be pure overhead). This is the
+    /// common case for a worktree-disabled mesh.
     #[test]
     fn fill_mesh_to_target_with_zero_target_runs_only_drain() {
         let mesh = mesh_row(4, 0);
         let drain_calls = std::cell::RefCell::new(0);
-        let prewarm_call_count = std::cell::RefCell::new(0);
+        let count_calls = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
 
-        fill_mesh_to_target_with(
+        let changes = fill_mesh_to_target_with(
             &mesh,
+            || {
+                *count_calls.borrow_mut() += 1;
+                Ok(0)
+            },
             |_| {
                 *drain_calls.borrow_mut() += 1;
                 Ok(0)
             },
             |_m| {
-                *prewarm_call_count.borrow_mut() += 1;
-                Ok(PrewarmOutcome::AtTarget)
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
             },
         );
 
         assert_eq!(*drain_calls.borrow(), 1);
         assert_eq!(
-            *prewarm_call_count.borrow(),
+            *count_calls.borrow(),
             0,
-            "a zero-target mesh must NOT call prewarm (drain is the only useful work)"
+            "a disabled pool must not query the available count"
         );
+        assert_eq!(
+            *warm_calls.borrow(),
+            0,
+            "a zero-target mesh must NOT warm (drain is the only useful work)"
+        );
+        assert_eq!(changes, 0);
+    }
+
+    /// Issue #1752: a mesh already partway to target only pays for the deficit.
+    /// The once-sampled count seeds `available`, so a target-3 mesh with one
+    /// entry already available cuts exactly two more.
+    #[test]
+    fn fill_mesh_to_target_with_warms_only_the_deficit() {
+        let mesh = mesh_row(10, 3);
+        let warm_calls = std::cell::RefCell::new(0);
+
+        let changes = fill_mesh_to_target_with(
+            &mesh,
+            || Ok(1),
+            |_| Ok(0),
+            |_m| {
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            *warm_calls.borrow(),
+            2,
+            "only the two missing entries are cut; the sample count seeds the running total"
+        );
+        assert_eq!(changes, 2);
     }
 
     /// Drain failure is logged at WARN and the loop PROCEEDS to warm (we
@@ -2171,21 +2075,23 @@ mod tests {
     #[test]
     fn fill_mesh_to_target_with_drain_failure_still_attempts_fill() {
         let mesh = mesh_row(5, 2);
-        let prewarm_call_count = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
 
         fill_mesh_to_target_with(
             &mesh,
+            || Ok(0),
             |_| Err("drain DB error".into()),
             |_m| {
-                *prewarm_call_count.borrow_mut() += 1;
-                Ok(PrewarmOutcome::AtTarget)
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
             },
         );
 
         assert_eq!(
-            *prewarm_call_count.borrow(),
-            1,
-            "a drain failure must NOT abort the fill — we still attempt to warm (drain err is logged + swallowed)"
+            *warm_calls.borrow(),
+            2,
+            "a drain failure must NOT abort the fill — it still warms all the way to \
+             target (drain err is logged + swallowed)"
         );
     }
 
@@ -2199,21 +2105,16 @@ mod tests {
     // instead — that always returned true for any worktree-enabled mesh,
     // so the TICK_SLOW backoff never triggered in production.
 
-    /// 3 Warmed responses + 1 drain that returned 0 → total changes = 3.
+    /// 3 Warmed cuts + a drain that returned 0 → total changes = 3.
     #[test]
     fn fill_mesh_to_target_with_returns_count_of_warmed_entries() {
         let mesh = mesh_row(6, 3);
-        let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::AtTarget),
-        ]);
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || Ok(0),
             |_| Ok(0),
-            |_m| responses.borrow_mut().remove(0),
+            |_m| Ok(()),
         );
         assert_eq!(changes, 3, "3 Warmed responses = 3 changes");
     }
@@ -2224,46 +2125,53 @@ mod tests {
     #[test]
     fn fill_mesh_to_target_with_aggregates_drain_and_warm_changes() {
         let mesh = mesh_row(7, 1);
-        let responses: std::cell::RefCell<Vec<_>> = std::cell::RefCell::new(vec![
-            Ok(PrewarmOutcome::Warmed),
-            Ok(PrewarmOutcome::AtTarget),
-        ]);
-
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || Ok(0),
             |_| Ok(2), // drain removed 2 excess rows
-            |_m| responses.borrow_mut().remove(0),
+            |_m| Ok(()),
         );
         assert_eq!(changes, 3, "2 drain + 1 warm = 3 changes total");
     }
 
     /// Already-at-target mesh returns 0 — the honest "no work was
     /// needed" signal the idle worker uses to count a no-op pass toward
-    /// its TICK_SLOW backoff.
+    /// its TICK_SLOW backoff. The once-sampled count (2, equal to target)
+    /// means the loop body never runs at all.
     #[test]
     fn fill_mesh_to_target_with_returns_zero_when_at_target() {
         let mesh = mesh_row(8, 2);
-        let prewarm_call_count = std::cell::RefCell::new(0);
+        let warm_calls = std::cell::RefCell::new(0);
 
         let changes = fill_mesh_to_target_with(
             &mesh,
+            || Ok(2),
             |_| Ok(0),
             |_m| {
-                *prewarm_call_count.borrow_mut() += 1;
-                Ok(PrewarmOutcome::AtTarget)
+                *warm_calls.borrow_mut() += 1;
+                Ok(())
             },
         );
 
         assert_eq!(changes, 0, "at-target mesh must report 0 changes");
-        assert_eq!(*prewarm_call_count.borrow(), 1);
+        assert_eq!(
+            *warm_calls.borrow(),
+            0,
+            "a mesh already at target must not cut anything"
+        );
     }
 
-    /// Disabled mesh (target = 0) returns 0 because the loop body never
+    /// Disabled mesh (target = 0) returns 0 because the fill body never
     /// executes; drain still ran once but reports 0 changes.
     #[test]
     fn fill_mesh_to_target_with_returns_zero_when_target_is_zero() {
         let mesh = mesh_row(9, 0);
-        let changes = fill_mesh_to_target_with(&mesh, |_| Ok(0), |_| Ok(PrewarmOutcome::Warmed));
+        let changes = fill_mesh_to_target_with(
+            &mesh,
+            || Ok(0),
+            |_| Ok(0),
+            |_m| Ok(()),
+        );
         assert_eq!(changes, 0);
     }
 
@@ -2331,7 +2239,7 @@ mod tests {
     }
 
     /// Cut a real git worktree via the production `create_git_worktree`
-    /// helper, mirroring `prewarm_one`'s body. Returns the on-disk path.
+    /// helper, mirroring `warm_one_body`'s body. Returns the on-disk path.
     fn cut_real_warm_worktree(
         conn: &rusqlite::Connection,
         mesh_id: i64,
@@ -2453,7 +2361,7 @@ mod tests {
 
         // Fill phase — bump target to 2 and run the fill loop, which
         // pins the issue #634 contract: when count < target, we cut
-        // exactly ONE worktree per iteration (mirrors `prewarm_one`).
+        // exactly ONE worktree per iteration (mirrors `warm_one_body`).
         conn.execute(
             "UPDATE meshes SET pre_spawn_pool_size = 2 WHERE id = ?1",
             rusqlite::params![mesh_id],
@@ -2483,7 +2391,7 @@ mod tests {
         }
 
         // At-target no-op: running the fill loop again must not create
-        // anything new (PrewarmOutcome::AtTarget early-exit).
+        // anything new (the `available >= target` early-exit).
         let mut new_paths_2 = 0;
         for _ in 0..target {
             let count = db::count_available_warm_for_mesh_inner(&conn, mesh_id).unwrap();
