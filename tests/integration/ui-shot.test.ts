@@ -66,6 +66,22 @@ async function serveHtml(html) {
 }
 
 describe('ui-shot mock mode', () => {
+  it('groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-groups-'));
+    try {
+      const port = await freePort();
+      const result = await runUiShot([
+        '--out', join(folder, 'groups.png'), '--mock', '--serve',
+        '--mock-url', `http://127.0.0.1:${port}`,
+        '--fixtures', resolve(repoRoot, 'tests/integration/ui-shot-node-groups.fixtures.mjs'),
+        '--steps', resolve(repoRoot, 'tests/integration/ui-shot-node-groups.steps.mjs'),
+      ]);
+      expect(result.code, result.stderr).toBe(0);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  }, 90000);
+
   it('serves the fixture UI, drives a circuit, and writes a screenshot', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-'));
     try {

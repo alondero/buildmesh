@@ -3,6 +3,7 @@ import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwner
 
 export type NodeOwnerships = Record<number, CircuitAgentOwnership>;
 export type NodeIndex = Readonly<Record<number, AgentNode | undefined>>;
+export type NodeGroups = readonly (readonly number[])[];
 
 export function indexAgentNodes(nodes: readonly AgentNode[]): Record<number, AgentNode> {
   const index: Record<number, AgentNode> = {};
@@ -11,7 +12,35 @@ export function indexAgentNodes(nodes: readonly AgentNode[]): Record<number, Age
 }
 
 /** Presentation only: missing/archived parents and invalid links leave an agent accessible. */
-export function activityRootId(nodeId: number, nodesById: NodeIndex, ownerships: NodeOwnerships): number {
+export function activityRootId(nodeId: number, nodesById: NodeIndex, ownerships: NodeOwnerships, groups: NodeGroups = []): number {
+  const rootId = circuitRootId(nodeId, nodesById, ownerships);
+  return resolveNodeGroups(groups, nodesById, ownerships).find(ids => ids.includes(rootId))?.[0] ?? rootId;
+}
+
+/** Ownership can arrive after persisted view state. Resolve sources and merge
+ * overlapping groups without changing their insertion order. */
+export function resolveNodeGroups(groups: NodeGroups, nodesById: NodeIndex, ownerships: NodeOwnerships): number[][] {
+  let resolved: number[][] = [];
+  for (const group of groups) {
+    const byMesh = new Map<number, number[]>();
+    for (const id of group) {
+      const root = nodesById[circuitRootId(id, nodesById, ownerships)];
+      if (!root || root.status === 'archived') continue;
+      const ids = byMesh.get(root.mesh_id) ?? [];
+      if (!ids.includes(root.id)) ids.push(root.id);
+      byMesh.set(root.mesh_id, ids);
+    }
+    for (const ids of byMesh.values()) {
+      const overlaps = resolved.filter(existing => existing.some(id => ids.includes(id)));
+      const merged = [...new Set([...overlaps.flat(), ...ids])];
+      resolved = resolved.filter(existing => !overlaps.includes(existing));
+      resolved.push(merged);
+    }
+  }
+  return resolved.filter(ids => ids.length > 1);
+}
+
+function circuitRootId(nodeId: number, nodesById: NodeIndex, ownerships: NodeOwnerships): number {
   const seen = new Set<number>();
   let current = nodesById[nodeId];
   while (current) {
@@ -26,25 +55,42 @@ export function activityRootId(nodeId: number, nodesById: NodeIndex, ownerships:
 }
 
 /** Scope/filter individual agents first, then collapse matches to their containing card. */
-export function groupActivityNodes(visible: readonly AgentNode[], nodesById: NodeIndex, ownerships: NodeOwnerships): AgentNode[] {
+export function groupActivityNodes(visible: readonly AgentNode[], nodesById: NodeIndex, ownerships: NodeOwnerships, groups: NodeGroups = []): AgentNode[] {
   const seen = new Set<number>();
-  return visible.flatMap(node => {
-    const rootId = activityRootId(node.id, nodesById, ownerships);
+  const resolved = resolveNodeGroups(groups, nodesById, ownerships);
+  const cards = visible.flatMap(node => {
+    const source = circuitRootId(node.id, nodesById, ownerships);
+    const rootId = resolved.find(ids => ids.includes(source))?.[0] ?? source;
     if (seen.has(rootId)) return [];
     seen.add(rootId);
     return [nodesById[rootId] ?? node];
   });
+  // Existing callers can supply their own order. Manual groups must follow
+  // the representative's position, rather than an earlier hidden member.
+  return resolved.length === 0 ? cards
+    : cards.sort((a, b) => a.mesh_id - b.mesh_id || a.position - b.position || a.id - b.id);
 }
 
 /** Build card membership once per view update, rather than scanning every
  * node from every card selector. */
-export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeOwnerships): Record<number, number[]> {
+export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeOwnerships, manualGroups: NodeGroups = []): Record<number, number[]> {
   const index = indexAgentNodes(nodes);
   const groups: Record<number, number[]> = {};
+  const resolved = resolveNodeGroups(manualGroups, index, ownerships);
   for (const node of nodes) {
     if (node.status === 'archived') continue;
-    const rootId = activityRootId(node.id, index, ownerships);
+    const source = circuitRootId(node.id, index, ownerships);
+    const rootId = resolved.find(ids => ids.includes(source))?.[0] ?? source;
     (groups[rootId] ??= []).push(node.id);
+  }
+  for (const [root, ids] of Object.entries(groups)) {
+    const order = resolved.find(group => group.includes(Number(root)));
+    if (order) ids.sort((a, b) => {
+      const aSource = circuitRootId(a, index, ownerships);
+      const bSource = circuitRootId(b, index, ownerships);
+      return order.indexOf(aSource) - order.indexOf(bSource)
+        || Number(b === bSource) - Number(a === aSource) || a - b;
+    });
   }
   return groups;
 }
@@ -52,9 +98,10 @@ export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeO
 export type ActivityStatusTone = 'warning' | 'error' | 'active' | 'idle';
 export type ActivityStatus = { label: string; tone: ActivityStatusTone };
 
-export function activityStatus(root: AgentNode, members: readonly AgentNode[]): ActivityStatus {
+export function activityStatus(root: AgentNode, members: readonly AgentNode[], grouped = false): ActivityStatus {
   if (members.some(n => n.status === 'error' || n.status === 'lost')) return { label: 'Needs attention', tone: 'error' };
   if (members.some(n => n.status === 'awaiting_input')) return { label: 'Needs input', tone: 'warning' };
+  if (grouped && members.some(n => n.status === 'running')) return { label: 'Running', tone: 'active' };
   const implementing = root.status === 'running';
   const reviewing = members.some(n => n.id !== root.id && n.status === 'running');
   if (implementing && reviewing) return { label: 'Implementing + reviewing', tone: 'active' };

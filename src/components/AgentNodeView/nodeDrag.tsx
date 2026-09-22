@@ -5,6 +5,7 @@ import { ProviderIcon } from '../Providers/ProviderIcon';
 /// What dropping right now would do, relative to a specific target node.
 /// `null` = no valid target under the pointer (e.g. cross-mesh, or off-grid).
 export type DropIntent =
+  | { kind: 'group'; targetNodeId: number }
   | { kind: 'swap'; targetNodeId: number }
   | { kind: 'insert-before'; targetNodeId: number }
   | { kind: 'insert-after'; targetNodeId: number }
@@ -16,9 +17,8 @@ export type DropIntent =
 export const DropIntentContext = createContext<DropIntent>(null);
 export const useDropIntent = () => useContext(DropIntentContext);
 
-/// Decide insert-vs-swap from where the pointer sits across the target node:
-/// the outer thirds mean "insert on that side" (drop between nodes), the middle
-/// means "swap bodies". Cross-mesh hovers and self-swaps return null so the UI
+/// The title and upper centre group; the lower centre swaps. Side edges below
+/// the title retain insertion. Cross-mesh hovers and self-swaps return null so the UI
 /// shows no cue and the drop is ignored. Pure + side-effect-free so it can be
 /// unit-tested without a DOM or dnd-kit.
 export function computeDropIntent(params: {
@@ -27,16 +27,27 @@ export function computeDropIntent(params: {
   overRectLeft: number;
   overRectWidth: number;
   pointerX: number;
+  overRectTop?: number;
+  overRectHeight?: number;
+  pointerY?: number;
   draggedId: number;
   draggedMeshId: number;
 }): DropIntent {
   const { overNodeId, overMeshId, overRectLeft, overRectWidth, pointerX, draggedId, draggedMeshId } = params;
   if (overNodeId == null || overMeshId == null) return null;
   if (overMeshId !== draggedMeshId) return null; // same-mesh reordering only
+  const pointerOffsetY = params.pointerY !== undefined && params.overRectTop !== undefined
+    ? params.pointerY - params.overRectTop : undefined;
+  if (overNodeId !== draggedId && pointerOffsetY !== undefined && pointerOffsetY < 40) {
+    return { kind: 'group', targetNodeId: overNodeId };
+  }
   const ratio = overRectWidth > 0 ? (pointerX - overRectLeft) / overRectWidth : 0.5;
   if (ratio < 0.3) return { kind: 'insert-before', targetNodeId: overNodeId };
   if (ratio > 0.7) return { kind: 'insert-after', targetNodeId: overNodeId };
   if (overNodeId === draggedId) return null; // a node can't swap with itself
+  if (pointerOffsetY !== undefined && params.overRectHeight && pointerOffsetY < params.overRectHeight / 2) {
+    return { kind: 'group', targetNodeId: overNodeId };
+  }
   return { kind: 'swap', targetNodeId: overNodeId };
 }
 
@@ -47,12 +58,15 @@ export function NodeDropCue({ nodeId }: { nodeId: number }) {
   const intent = useDropIntent();
   if (!intent || intent.targetNodeId !== nodeId) return null;
 
-  if (intent.kind === 'swap') {
+  if (intent.kind === 'swap' || intent.kind === 'group') {
     return (
-      <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-sm ring-2 ring-inset ring-accent-cyan bg-accent-cyan/10">
-        <span className="px-2.5 py-1 rounded-full bg-accent-cyan text-bg-base text-xs font-semibold font-sans shadow-lg select-none">
-          ⇄ Swap
-        </span>
+      <div className="pointer-events-none absolute inset-0 z-20 flex flex-col select-none">
+        {(['group', 'swap'] as const).map(kind => <div key={kind}
+          className={`flex flex-1 items-center justify-center ${intent.kind === kind ? 'ring-2 ring-inset ring-accent-cyan bg-accent-cyan/10' : 'bg-bg-card/60'}`}>
+          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold font-sans ${intent.kind === kind ? 'bg-accent-cyan text-bg-base' : 'bg-bg-card text-text-secondary'}`}>
+            {kind === 'group' ? 'Group as tabs' : '⇄ Swap'}
+          </span>
+        </div>)}
       </div>
     );
   }

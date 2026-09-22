@@ -383,8 +383,9 @@ function App() {
       // same narrowed set the grid renders (the other scopes ignore them).
       const ownerships = useAgentNodeStore.getState().circuitOwnerships;
       const nodeIndex = indexAgentNodes(agentNodes);
-      const visibleNodes = groupActivityNodes(scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls()), nodeIndex, ownerships);
-      const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships), direction);
+      const groups = useNodeActivityStore.getState().groups;
+      const visibleNodes = groupActivityNodes(scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls()), nodeIndex, ownerships, groups);
+      const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships, groups), direction);
       if (targetId !== null) {
         useNodeActivityStore.getState().activateNode(targetId);
       }

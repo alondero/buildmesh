@@ -63,6 +63,26 @@ The first successful loop is: **install → configure → spawn → inspect → 
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
 
+## Group nodes into tabs
+
+In a grid with **Custom** ordering, drag a node by its title onto another node
+in the same Mesh. Drop on the title or upper centre to **Group as tabs**; drop
+in the lower centre to **Swap** positions. The highlighted half previews the
+action. Side edges below the title still insert before or after the target.
+Dragging is disabled in Pinned and Single views and with other sort orders.
+
+A group shares one viewport, with named tabs for its agents. Review and
+Build/Run/Terminal tabs stay with their owning agent. Dragging a grouped card
+moves the whole group, and dropping it onto another group combines their tabs.
+Use **Move selected node out of group** beside the tab strip to separate the
+selected agent and its review/utility tabs again. Tab arrow keys, Home/End, and
+the All sessions menu work in groups too.
+
+Groups survive app restarts in this desktop profile. Grouping only changes
+the layout: agents retain their own processes, worktrees, and close actions.
+If the group's title node is archived or deleted, surviving members remain
+accessible. Grouping does not combine nodes from different Meshes.
+
 ## Harnesses and capabilities
 
 The Spawn Menu lists detected harnesses and any compatible proxied providers.

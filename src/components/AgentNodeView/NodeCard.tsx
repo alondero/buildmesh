@@ -2,7 +2,7 @@ import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { activityStatus } from '../../lib/nodeActivities';
+import { activityRootId, activityStatus, indexAgentNodes } from '../../lib/nodeActivities';
 import { resolveAutopilotOutcome } from '../../lib/autopilotNodePresentation';
 import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
 import { AgentTerminal } from '../Terminal/Terminal';
@@ -64,6 +64,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     [stableMemberIds, utilityModes],
   );
   const closeUtility = useNodeActivityStore(s => s.closeUtility);
+  const ungroupNode = useNodeActivityStore(s => s.ungroupNode);
   const activeMember = members.find(n => n.id === activeNodeId);
   // The entity store is the primary navigation source. Activity selection is
   // a detail of that entity and only supplies the fallback used before an
@@ -123,6 +124,9 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   const setRefs = (el: HTMLDivElement | null) => { setDragRef(el); setDropRef(el); };
 
   if (!node || !root) return null;
+  const memberIndex = indexAgentNodes(members);
+  const grouped = new Set(members.map(member => activityRootId(member.id,
+    memberIndex, outcomeSources.circuitOwnerships))).size > 1;
   const hasTabs = members.length > 1 || members.some(n => utilities.get(n.id));
   const choose = (id: number, utility = false, focusTerminal = true) => {
     setKeyboardSelection(focusTerminal ? null : { nodeId: id, utility });
@@ -133,7 +137,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
     onActivate(id, utility);
     if (focusTerminal) setFocusRequest(request => request + 1);
   };
-  const status = activityStatus(root, members);
+  const status = activityStatus(root, members, grouped);
   const revealAttention = () => {
     if (!attentionOutcome) return;
     const ids = attentionOutcome.nodeIds;
@@ -177,6 +181,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   return (
     <div
       ref={setRefs}
+      data-node-card-id={nodeId}
       onClick={() => {
         if (cardActive) return;
         const current = useNodeActivityStore.getState().selections[nodeId];
@@ -201,7 +206,8 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
       />
       {hasTabs && (
         <NodeActivityTabs rootId={nodeId} members={members} utilities={utilities}
-          selectedId={selectedId} showingUtility={showingUtility} onSelect={choose} onClose={closeTab} />
+          selectedId={selectedId} showingUtility={showingUtility} onSelect={choose} onClose={closeTab}
+          grouped={grouped} onUngroup={ungroupNode} />
       )}
       {!showingUtility && node.status === 'awaiting_input' && semanticTurn && (
         <SemanticTurnBanner

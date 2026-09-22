@@ -1,5 +1,19 @@
 # Node activities
 
+Manual groups compose activity cards from the same Mesh without writing circuit
+ownership. `nodeActivityStore.groups` stores ordered lists of source node IDs
+under `buildmesh.node-groups` in local storage; selection and utility state remain
+ephemeral. The shared activity-root resolver applies circuit parentage first,
+then manual grouping, for grid visibility, Single mode, navigation, and member
+selection. An absent or archived group representative falls back to the first
+live member. Filters and pins still match individual agents before collapsing.
+
+Dragging a card onto the title or upper centre groups the whole card; the lower
+centre swaps roots and the side edges below the title insert. Manual groups show
+agent names instead of Implementation/Review role labels. Ungrouping separates
+the selected source and its circuit reviewers, retaining their utility tabs.
+This view operation never changes process ownership or disposes terminals.
+
 The desktop node card groups a source agent and its circuit reviewers into activity tabs. The header keeps the source task name stable while tabs identify the selected session. Implementation and Review labels replace repeated full agent names; multiple reviewers receive distinct numbered labels, with full names in tooltips and the All sessions menu. A single agent without a utility does not allocate a tab strip. The header status describes live agent activity independently of which terminal the user is reading. Its attention count reveals sessions needing input or reporting errors, including sessions outside the visible tab strip. Normal activity is available through the status indicator; detailed metadata and occasional commands live in the session actions menu and Probe.
 
 The existing circuit ledger supplies the relationship through `CircuitAgentOwnership.parent_node_id`. Node-started reviews use the run's borrowed source. The issue-driven review blueprint uses its implementer step. Arbitrary agents sharing a mesh, issue, PR, name, or circuit run are not enough evidence to group them. Custom circuits do not yet expose an authorable activity relationship.

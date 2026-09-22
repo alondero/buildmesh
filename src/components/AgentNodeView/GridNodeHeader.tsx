@@ -173,7 +173,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     <div {...dragHandleProps} ref={headerRef} data-testid="grid-node-header" data-node-id={node.id}
       onDoubleClick={handleToggleSolo}
       title={`Double-click or press ${toggleShortcutHint} to ${isSingleMode ? 'restore grid' : 'maximize'}`}
-      className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'touch-none cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}14` }}>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span role="status" aria-label={activity?.label ?? getStatusConfig(node.status).label}
