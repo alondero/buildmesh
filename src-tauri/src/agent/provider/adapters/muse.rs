@@ -79,11 +79,14 @@
 //! round-trip), idempotent, and refuses a malformed user file instead of
 //! overwriting it, mirroring the mcode / Cursor provisioning precedent.
 //!
-//! Buildmesh only ever *adds* a `trusted` decision. An entry Muse already
-//! carries with a different decision is a choice the user made in Muse, and
-//! flipping it on every spawn would silently open a consent gate Buildmesh was
-//! never granted — so that case is reported as a provisioning failure and the
-//! entry is left exactly as written.
+//! Buildmesh only ever *adds* a `trusted` decision. Muse's decision type is
+//! `ProjectTrustDecision { trusted, untrusted }`, and a workspace Muse has
+//! merely *seen* is absent from the map rather than recorded as `untrusted` —
+//! verified on 1.3.0, where an untrusted `muse exec` wrote no entry at all
+//! while reporting `project-skills-untrusted`. So a present `untrusted` row is
+//! a decision someone made, and flipping it on every spawn would silently open
+//! a consent gate Buildmesh was never granted: that case is reported as a
+//! provisioning failure and the entry is left exactly as written.
 //!
 //! Only the **PTY spawn path** takes this step. The MSP `muse serve` plane
 //! (#1681) has no in-repo launcher — only its telemetry slice landed under
@@ -139,16 +142,26 @@ pub static MUSE: MuseAdapter = MuseAdapter;
 const MUSE_CONFIG_DIR: &str = ".config/muse";
 
 /// The config root Muse itself would read for a **native** launch, from the two
-/// variables that decide it: `$XDG_CONFIG_HOME/muse` when that variable is set
-/// to a non-empty value, else `<home>/.config/muse`. Split out so the
-/// precedence is unit-testable without touching the process env (the
+/// variables that decide it: `$XDG_CONFIG_HOME/muse` when that variable holds
+/// an absolute path, else `<home>/.config/muse`. Split out so the precedence is
+/// unit-testable without touching the process env (the
 /// `env::environment::muse_auth_path_from_vars` shape).
+///
+/// A *relative* `$XDG_CONFIG_HOME` is ignored because the XDG spec says to —
+/// and because Muse ignores it too, verified live: pointing the variable at a
+/// scratch directory makes the installed Windows binary read the workspace as
+/// untrusted (its store moved with the variable). Letting a relative value
+/// through would resolve the store against the spawn cwd, which is the same
+/// silent mismatch this function exists to remove.
 fn muse_config_root_from_vars(
     home: Option<std::ffi::OsString>,
     xdg_config_home: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
-    if let Some(root) = xdg_config_home.filter(|root| !root.is_empty()) {
-        return Some(PathBuf::from(root).join("muse"));
+    if let Some(root) = xdg_config_home
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        return Some(root.join("muse"));
     }
     home.map(PathBuf::from).map(|home| home.join(MUSE_CONFIG_DIR))
 }
@@ -359,11 +372,13 @@ fn resolve_config_dir(resolved: &ResolvedPath) -> Option<PathBuf> {
 /// precedent). Any *other* fields Muse may carry inside this workspace's entry
 /// survive the decision update.
 ///
-/// A decision Muse already carries that is **not** `trusted` is also an `Err`,
-/// and the entry is left exactly as written. Buildmesh only ever adds a
-/// decision; overwriting a user's explicit denial on every spawn would open a
-/// consent gate nobody granted it. (Muse's own `--trust-workspace` trusts for a
-/// single run only, and does not write.)
+/// Any decision Muse already carries that is **not** `trusted` is also an
+/// `Err`, and the entry is left exactly as written — as is a `decision` that
+/// isn't even a string. Buildmesh only ever adds a decision: `untrusted` is a
+/// value someone recorded (see the module docs for why it is a decision rather
+/// than a "seen" marker), and overwriting one on every spawn would open a
+/// consent gate nobody granted it. Muse's own `--trust-workspace` trusts for a
+/// single run only, and does not write.
 ///
 /// A write re-serialises the whole document through serde_json's sorted map,
 /// so top-level key order can differ from Muse's own field order (Muse writes
@@ -420,29 +435,35 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
             .as_object_mut()
             .expect("projects verified object above");
         match projects.get_mut(&key) {
-            Some(serde_json::Value::Object(record)) => {
-                match record.get("decision").and_then(|decision| decision.as_str()) {
-                    Some(MUSE_TRUST_DECISION) => {}
-                    // A decision the user made in Muse. Buildmesh never
-                    // overwrites it: flipping a denial to trusted on every
-                    // spawn would open a consent gate it was never granted.
-                    Some(other) => {
-                        return Err(format!(
-                            "muse records workspace {key:?} as {other:?}, not \
-                             {MUSE_TRUST_DECISION:?}; refusing to overwrite an explicit \
-                             decision. Trust the workspace in Muse (or remove its entry) \
-                             to let this node load the workspace's skills and rules"
-                        ));
-                    }
-                    None => {
-                        record.insert(
-                            "decision".to_string(),
-                            serde_json::json!(MUSE_TRUST_DECISION),
-                        );
-                        changed = true;
-                    }
+            Some(serde_json::Value::Object(record)) => match record.get("decision") {
+                // Already what we would write — leave the bytes alone.
+                Some(serde_json::Value::String(decision)) if decision == MUSE_TRUST_DECISION => {}
+                // A decision Muse recorded that Buildmesh did not make. The
+                // store's serde surface on 1.3.0 is `ProjectTrustDecision`
+                // { trusted, untrusted }, and a workspace Muse has merely seen
+                // is **absent** from the map rather than recorded (verified: an
+                // untrusted `muse exec` writes no entry at all). So a present
+                // non-`trusted` value is a real decision, and reversing it on
+                // every spawn would open a consent gate Buildmesh was never
+                // granted. A non-string value is the same refusal — this is no
+                // more ours to rewrite than a denial is.
+                Some(decision) => {
+                    return Err(format!(
+                        "muse records workspace {key:?} as {decision}, not \
+                         {MUSE_TRUST_DECISION:?}; refusing to overwrite an explicit trust \
+                         decision. Trust the workspace in Muse (or remove its entry) to let \
+                         this node load the workspace's skills and rules"
+                    ));
                 }
-            }
+                // No decision recorded yet: fill it in, keeping siblings.
+                None => {
+                    record.insert(
+                        "decision".to_string(),
+                        serde_json::json!(MUSE_TRUST_DECISION),
+                    );
+                    changed = true;
+                }
+            },
             Some(other) => {
                 return Err(format!(
                     "muse trust.json entry for {key:?} must be a JSON object; got {}",
@@ -1284,26 +1305,40 @@ mod tests {
         assert_eq!(workspace_for(&resolved(EnvType::Windows)), host_form);
     }
 
-    /// Muse reads `$XDG_CONFIG_HOME/muse` when that variable is set to a
-    /// non-empty value, and `<home>/.config/muse` otherwise. Writing to the
-    /// default while a user has the override set would leave the store
-    /// unread — the exact silent failure #1706 exists to remove.
+    /// Muse reads `$XDG_CONFIG_HOME/muse` when that variable holds an absolute
+    /// path, and `<home>/.config/muse` otherwise. Writing to the default while a
+    /// user has the override set would leave the store unread — the exact
+    /// silent failure #1706 exists to remove. A *relative* value is ignored
+    /// (the XDG spec, and Muse's own behaviour).
     #[test]
     fn muse_config_root_honours_the_xdg_override() {
-        let home = Some(std::ffi::OsString::from("/home/u"));
+        // Absolute for whichever host runs the test: `is_absolute` is
+        // platform-specific, and a POSIX-style `/opt/config` is *not* absolute
+        // on Windows.
+        let (home, xdg) = if cfg!(windows) {
+            ("C:\\Users\\u", "D:\\xdg")
+        } else {
+            ("/home/u", "/opt/config")
+        };
+        let user_home = Some(std::ffi::OsString::from(home));
+        let default_root = PathBuf::from(home).join(MUSE_CONFIG_DIR);
+
         assert_eq!(
-            muse_config_root_from_vars(home.clone(), Some("/opt/config".into())),
-            Some(PathBuf::from("/opt/config/muse"))
+            muse_config_root_from_vars(user_home.clone(), Some(xdg.into())),
+            Some(PathBuf::from(xdg).join("muse"))
         );
         assert_eq!(
-            muse_config_root_from_vars(home.clone(), None),
-            Some(PathBuf::from("/home/u/.config/muse"))
+            muse_config_root_from_vars(user_home.clone(), None),
+            Some(default_root.clone())
         );
-        // An empty override is "not set", never the cwd.
-        assert_eq!(
-            muse_config_root_from_vars(home, Some("".into())),
-            Some(PathBuf::from("/home/u/.config/muse"))
-        );
+        // Empty and relative values are both "not set", never the cwd.
+        for unset in ["", "relative/config", "../up"] {
+            assert_eq!(
+                muse_config_root_from_vars(user_home.clone(), Some(unset.into())),
+                Some(default_root.clone()),
+                "XDG_CONFIG_HOME={unset:?} must be ignored"
+            );
+        }
         assert_eq!(muse_config_root_from_vars(None, None), None);
     }
 
@@ -1471,23 +1506,26 @@ mod tests {
         );
     }
 
-    /// A decision the user made in Muse is theirs. Flipping a stored `denied`
-    /// to `trusted` on every spawn would open a consent gate Buildmesh was
-    /// never granted, so the entry is refused and left exactly as written.
+    /// A decision Muse recorded is not Buildmesh's to reverse. `untrusted` is
+    /// the only other value `ProjectTrustDecision` has, and Muse does not write
+    /// it for a workspace it has merely seen (such a workspace is absent), so
+    /// this row is a real decision — flipping it on every spawn would open a
+    /// consent gate Buildmesh was never granted.
     #[test]
-    fn provision_refuses_to_override_a_users_decision() {
+    fn provision_refuses_to_override_an_untrusted_decision() {
         let home = tempfile::tempdir().unwrap();
         let (_dir, workspace) = existing_workspace();
         let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
-        let seeded =
-            format!(r#"{{ "projects": {{ {key}: {{ "decision": "denied", "note": "keep" }} }} }}"#);
+        let seeded = format!(
+            r#"{{ "projects": {{ {key}: {{ "decision": "untrusted", "note": "keep" }} }} }}"#
+        );
         std::fs::write(trust_path(home.path()), &seeded).unwrap();
 
         let result = provision_trust_at(Some(home.path()), &workspace);
 
-        let message = result.expect_err("an explicit denial must not be overwritten");
+        let message = result.expect_err("a recorded untrusted decision must not be overwritten");
         assert!(
-            message.contains("denied"),
+            message.contains("untrusted"),
             "the failure must name the decision it found: {message}"
         );
         assert_eq!(
@@ -1495,6 +1533,31 @@ mod tests {
             seeded,
             "the entry must be left byte-identical"
         );
+    }
+
+    /// A `decision` that isn't even a string is the same class of "shape we do
+    /// not own" as a malformed file — refused, not quietly rewritten.
+    #[test]
+    fn provision_refuses_a_non_string_decision() {
+        let (_dir, workspace) = existing_workspace();
+        let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
+        for decision in ["123", "null", "true", "{}"] {
+            let home = tempfile::tempdir().unwrap();
+            let seeded =
+                format!(r#"{{ "projects": {{ {key}: {{ "decision": {decision} }} }} }}"#);
+            std::fs::write(trust_path(home.path()), &seeded).unwrap();
+
+            let result = provision_trust_at(Some(home.path()), &workspace);
+            assert!(
+                result.is_err(),
+                "decision {decision} must be refused; got {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(trust_path(home.path())).unwrap(),
+                seeded,
+                "decision {decision} must not be rewritten"
+            );
+        }
     }
 
     /// An entry with no `decision` at all is not a decision Muse recorded —

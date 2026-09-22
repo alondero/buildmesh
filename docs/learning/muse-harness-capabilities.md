@@ -130,10 +130,11 @@ root of the runtime that will execute the child. The merge is:
   an existing entry keeps any fields Muse carried beside `decision`;
 - **idempotent** — an entry already reading `{"decision":"trusted"}` writes
   nothing (no mtime bump, no re-serialization);
-- **never overriding** — a decision Muse already carries that is not `trusted`
-  (a denial the user made in Muse) is reported as a failure and left exactly as
-  written. Buildmesh only ever *adds* a decision; flipping a denial on every
-  spawn would open a consent gate it was never granted;
+- **never overriding** — a `decision` Muse already carries that is not
+  `trusted` (a value such as `untrusted`), or that isn't even a string, is
+  reported as a failure and left exactly as written. See
+  [Decision vocabulary](#decision-vocabulary) for why that is a real decision
+  and not a "seen" marker;
 - **fail-closed** — a malformed file, a non-object `projects`, or a non-object
   entry for the workspace is refused with `Err` and left byte-identical, so the
   spawn path logs a warning and emits a `provider-error` naming the cause
@@ -153,6 +154,26 @@ is unaffected.
 A write re-serializes the whole document through serde_json's sorted map, so
 top-level key order can differ from Muse's own field order; values are
 untouched, and Muse rewrites the file in its own order on its next write.
+
+### Decision vocabulary
+
+Two facts decide how Buildmesh treats an existing entry, and both are evidence,
+not inference:
+
+1. **There are exactly two decision values.** The binary's serde surface
+   carries `ProjectTrustDecision { trusted, untrusted }` alongside
+   `ProjectTrustStore { schema_version, projects }` — the store's own type.
+2. **Absence, not `untrusted`, is the "not decided" state.** A workspace Muse
+   has merely seen or run in is **missing** from the map: an untrusted
+   `muse exec` in a fresh workspace wrote no entry at all, printed
+   `project-skills-untrusted`, and left the store unchanged. Every observed
+   store is likewise a set of `trusted` rows with nothing in between.
+
+Together those mean a present `untrusted` row is a decision someone made, so
+Buildmesh refuses to flip it and reports a provisioning failure instead. The
+cost is deliberate: a workspace marked untrusted runs without its skills and
+rules — visibly, with a named error, rather than by silently reversing a
+consent decision.
 
 ### Known limits
 
@@ -177,7 +198,11 @@ untouched, and Muse rewrites the file in its own order on its next write.
 | Store location and JSON shape | Read from the real stores Muse wrote on this machine, native Windows and the WSL guest |
 | A persisted entry loads project skills | Live `muse skills list --workspace <dir> --source project --json` against the installed 1.3.0 (table above) |
 | `trust_key` reproduces Muse's own keys | `live_trust_key_reproduces_the_installed_stores_keys` — byte-exact against the real store's entries |
-| Key shape, merge, refusal, idempotency | Hermetic unit tests in `adapters::muse` (47 pass) |
+| Decision vocabulary is `{trusted, untrusted}` | `ProjectTrustDecision` / `ProjectTrustStore` type names and variant strings present in the installed binary |
+| Absence is the "not decided" state | Live: an untrusted `muse exec` in a fresh workspace wrote no entry (`projects` count unchanged) while printing `project-skills-untrusted` |
+| The native Windows binary honours `XDG_CONFIG_HOME` | Live A/B: `muse skills list` reports a workspace as trusted from the real store, and reports `project-skills-untrusted` for the same workspace once `XDG_CONFIG_HOME` points at an empty directory — its store moved with the variable |
+| Key shape, merge, refusal, idempotency, relative-XDG rejection | Hermetic unit tests in `adapters::muse` (48 pass) |
+| The POSIX (WSL guest / macOS) side of the XDG override | **Not verified.** The Windows arm was exercised; the POSIX arm follows the same code path and the XDG spec but no live POSIX A/B was run |
 | macOS | **Not verified.** No macOS host was exercised; the macOS claims here are inferences from `canonicalize` semantics and the XDG convention |
 
 ## Attention: still watched, not hooked
