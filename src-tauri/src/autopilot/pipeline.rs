@@ -359,10 +359,13 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 
 /// Write a (possibly multi-line) prompt into the node's PTY stdin, then
 /// submit it from a background watcher: wait for the paste to echo and the
-/// redraw to settle, send Enter as its own write, and verify output follows
-/// (retrying Enter a bounded number of times). `Ok` means "staged and
-/// submission scheduled" — a submit that never takes marks the node for
-/// human attention instead of stalling silently.
+/// redraw to settle, send Enter as its own write, and — when the node's output
+/// is tracked — verify output follows, retrying Enter a bounded number of
+/// times. `Ok` means "staged and submission scheduled"; a verified submit that
+/// never takes marks the node for human attention instead of stalling silently.
+/// A node with no evaluator clock gets one Enter and no verification (see
+/// [`settle_after_paste`] and [`press_enter_until_output_guarded`]) — the
+/// stages that exist to *observe* the submit are skipped rather than faked.
 ///
 /// Deliberately NOT routed through `coordinator::drive::AgentDriver`
 /// (whose "no parallel write path" rule targets *Coordinator/scheduler*
@@ -399,29 +402,7 @@ pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHan
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
 fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
-    // Phase 1: wait for the paste to echo back (the TUI redrawing its input
-    // box with the staged text). Providers that render no echo fall through
-    // at the deadline.
-    let wrote_at = Instant::now();
-    while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
-        if output_seen_within(
-            evaluator::millis_since_last_output(node_id),
-            wrote_at.elapsed().as_millis(),
-        ) {
-            break;
-        }
-        std::thread::sleep(SUBMIT_POLL);
-    }
-    // Phase 2: wait for the redraw to go quiet — Enter must land at an idle
-    // input box, not inside the paste-processing burst.
-    let settle_deadline = Instant::now() + PASTE_SETTLE_DEADLINE;
-    while Instant::now() < settle_deadline {
-        match evaluator::millis_since_last_output(node_id) {
-            Some(quiet) if quiet < PASTE_SETTLE_QUIET_MS => std::thread::sleep(SUBMIT_POLL),
-            _ => break, // quiet (or no output tracked at all) — settled
-        }
-    }
-    // Phase 3: submit and verify.
+    settle_after_paste(node_id);
     match press_enter_until_output_guarded(node_id, guard) {
         Ok(Some(attempt)) => tracing::info!(
             "autopilot inject({}): staged prompt submitted (Enter attempt {})",
@@ -443,10 +424,27 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
     }
 }
 
-fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
+/// Wait for the staged paste to land at an idle input box.
+///
+/// A node registered with the evaluator has an output clock, and the wait is
+/// signal-driven off it: the paste's echo first (so a provider that renders no
+/// echo falls through at the deadline), then a quiet redraw. A node with **no**
+/// clock — an ordinary node a human spawned, which the evaluator never buffers
+/// ([`evaluator::millis_since_last_output`] is `None` for it) — has nothing to
+/// read, so it waits [`PASTE_SETTLE_QUIET_MS`] unconditionally: the same window
+/// the observable path waits to see, which keeps the decoupled Enter out of the
+/// paste burst (#874) without pretending to a signal that does not exist.
+fn settle_after_paste(node_id: i64) {
     let wrote_at = Instant::now();
+    if evaluator::millis_since_last_output(node_id).is_none() {
+        std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
+        return;
+    }
     while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
-        if output_seen_within(evaluator::millis_since_last_output(node_id), wrote_at.elapsed().as_millis()) {
+        if output_seen_within(
+            evaluator::millis_since_last_output(node_id),
+            wrote_at.elapsed().as_millis(),
+        ) {
             break;
         }
         std::thread::sleep(SUBMIT_POLL);
@@ -455,9 +453,13 @@ fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Op
     while Instant::now() < settle_deadline {
         match evaluator::millis_since_last_output(node_id) {
             Some(quiet) if quiet < PASTE_SETTLE_QUIET_MS => std::thread::sleep(SUBMIT_POLL),
-            _ => break,
+            _ => break, // quiet (or no output tracked at all) — settled
         }
     }
+}
+
+fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
+    settle_after_paste(node_id);
     press_enter_until_output_guarded(node_id, guard)
 }
 
@@ -470,12 +472,23 @@ pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
 }
 
 fn press_enter_until_output_guarded(node_id: i64, mut guard: Option<String>) -> Result<Option<u32>, String> {
+    // An Enter can only be *acknowledged* against an output clock. A node with
+    // no clock (an ordinary, hand-spawned node — see `settle_after_paste`) gets
+    // exactly one Enter instead of the retry ladder: a retry would type extra
+    // carriage returns into an agent that is already working on the prompt, and
+    // reporting "never submitted" would mark a node the user just handed work
+    // to as needing attention, for a submission this path has no way to observe
+    // either way.
+    let verifiable = evaluator::millis_since_last_output(node_id).is_some();
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
         if let Some(expected) = guard.as_deref() {
             let Some(next) = crate::agent::process::PROCESS_REGISTRY.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
             guard = Some(next);
         } else {
             crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
+        }
+        if !verifiable {
+            return Ok(Some(attempt));
         }
         let sent_at = Instant::now();
         while Instant::now() < sent_at + ENTER_ACK_WINDOW {

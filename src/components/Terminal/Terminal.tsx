@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import '@xterm/xterm/css/xterm.css';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { useUIStore } from '../../stores/uiStore';
+import { handoverTargets, type HandoverTargets } from '../../lib/nodeActivities';
+import { getStatusConfig } from '../../lib/status';
 import * as api from '../../lib/tauri';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS, ignoreBracketedPasteForHarness } from './terminalConfig';
 import { resolveZoomKeyAction } from './terminalKeyAction';
@@ -108,7 +111,15 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const isDragging = useUIStore(state => state.dragTargetNodeId === nodeId);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  // The handover target list is read imperatively when the menu opens (see
+  // `handleContextMenu`) rather than through a subscription — subscribing this
+  // pane to `nodesById` would re-render every terminal on every unrelated node
+  // fetch and defeat the per-node selector below (issue #1384).
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    targets: HandoverTargets;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [atBottom, setAtBottom] = useState(true);
@@ -140,7 +151,16 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY });
+    // Snapshot the handover candidates at open time. A node spawned while the
+    // menu is up is simply not offered — the menu is transient and any
+    // interaction outside it dismisses it. See the state comment above for why
+    // this is an imperative read instead of a store subscription.
+    const { nodesById, circuitOwnerships } = useAgentNodeStore.getState();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      targets: handoverTargets(nodeId, nodesById, circuitOwnerships, useNodeActivityStore.getState().groups),
+    });
   };
 
   const handleCopy = () => {
@@ -199,6 +219,18 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
       console.error('[AgentTerminal] handover failed:', e);
     }
     setContextMenu(null);
+  };
+
+  // Hand this terminal's selection to an *existing* node. The paste-and-submit
+  // itself is backend work (bracketed paste + decoupled Enter, issue #874) —
+  // the target's xterm may not even be mounted (its card can be showing another
+  // activity tab), so there is no local terminal to `paste()` into.
+  const handleHandoverTo = (targetNodeId: number) => {
+    const inst = terminalManager.getInstance(nodeId);
+    const selection = inst?.term.getSelection() ?? '';
+    setContextMenu(null);
+    if (!selection.trim()) return;
+    void useAgentNodeStore.getState().handoverToNode(targetNodeId, selection);
   };
 
   // Dismiss context menu — issue #814 converged on the shared
@@ -460,6 +492,8 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
     })();
   }, [node?.mesh_id]);
 
+  const handoverPicker = contextMenu?.targets ?? null;
+
   return (
     <div
       ref={containerRef}
@@ -567,6 +601,38 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
               </button>
             </>
           )}
+          {handoverPicker && (handoverPicker.linked.length > 0 || handoverPicker.others.length > 0) && (
+            <>
+              <div className="border-t border-border-default my-0.5" />
+              {/* Flat rows, not a flyout submenu: the target set is one Mesh's
+                  agents, and keeping every item in this menu a plain sibling
+                  button means the rows stay reachable with Tab/Enter — this
+                  menu has no roving-tabindex or submenu keyboard contract. */}
+              <div role="presentation" className="px-3 pt-1 pb-0.5 text-2xs uppercase tracking-wider text-text-muted">
+                Handover to node
+              </div>
+              {handoverPicker.linked.map(target => (
+                <HandoverTargetItem
+                  key={target.id}
+                  node={target}
+                  disabled={!instRef.current?.term.hasSelection()}
+                  title="Shares this node's tabs"
+                  onPick={handleHandoverTo}
+                />
+              ))}
+              {handoverPicker.linked.length > 0 && handoverPicker.others.length > 0 && (
+                <div className="border-t border-border-default my-0.5" />
+              )}
+              {handoverPicker.others.map(target => (
+                <HandoverTargetItem
+                  key={target.id}
+                  node={target}
+                  disabled={!instRef.current?.term.hasSelection()}
+                  onPick={handleHandoverTo}
+                />
+              ))}
+            </>
+          )}
           <div className="border-t border-border-default my-0.5" />
           <button
             onClick={handleClear}
@@ -578,5 +644,34 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
         document.body,
       )}
     </div>
+  );
+}
+
+/**
+ * One "Handover to node" row: the target agent's name with its status, so the
+ * user can see which candidate is sitting at a prompt before handing work to it.
+ * The status is load-bearing metadata, so it takes `text-secondary` rather than
+ * the menu's usual decorative `text-muted` shortcut hints (DESIGN.md §Text).
+ * The width cap is what makes `truncate` bite — the menu itself is only floored
+ * by `min-w`, so without it a long node name would stretch the whole menu.
+ */
+function HandoverTargetItem({ node, disabled, title, onPick }: {
+  node: AgentNode;
+  disabled: boolean;
+  title?: string;
+  onPick: (targetNodeId: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-handover-target={node.id}
+      onClick={() => onPick(node.id)}
+      disabled={disabled}
+      title={title}
+      className="flex w-full max-w-[260px] items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
+    >
+      <span className="min-w-0 flex-1 truncate">{node.name}</span>
+      <span className="shrink-0 text-text-secondary">{getStatusConfig(node.status).label}</span>
+    </button>
   );
 }

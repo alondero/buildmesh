@@ -1734,6 +1734,35 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
     write_to_agent(app, session_id, format!("{}\n", input)).await
 }
 
+/// Hand the text selected in one node's terminal over to another **running**
+/// node: stage it in the target's PTY input box and submit it. The
+/// existing-node sibling of `commands::agent::spawn_handover_agent`, and the
+/// backing command for the terminal context menu's "Handover to node" rows.
+///
+/// Delegates to [`crate::autopilot::pipeline::write_prompt_to_pty`] instead of
+/// writing the bytes here, because the submit is the hard part: a multi-line
+/// buffer has to arrive as ONE bracketed paste and the Enter has to land as its
+/// own write at an idle input box, or an ink TUI swallows the keystroke into
+/// the paste and the prompt sits staged forever (issue #874). That primitive
+/// also settles before the Enter when the target's output is *not* observable —
+/// the ordinary case here, since the agent a human hands work to is one the
+/// user spawned rather than one the evaluator buffers.
+#[command]
+pub async fn handover_to_agent(
+    app: AppHandle,
+    target_node_id: i64,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Nothing to hand over — select text in the source terminal first".to_string());
+    }
+    // The registry — not the DB status — is the liveness gate
+    // (`write_prompt_to_pty` rejects a target with no live process before
+    // writing): a node still reading `pending`/`spawning` can already accept
+    // input, and an archived row could not.
+    crate::autopilot::pipeline::write_prompt_to_pty(target_node_id, &text, &app)
+}
+
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
     // Offload to the blocking pool: `kill_session` shells out to

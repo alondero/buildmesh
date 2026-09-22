@@ -418,6 +418,11 @@ interface AgentNodeState {
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
+  /// Hand `text` over to an existing agent node's PTY as a submitted prompt
+  /// (the terminal context menu's "Handover to node" action). The backend owns
+  /// the bracketed-paste staging and the decoupled Enter — see
+  /// [`api.handoverToAgent`].
+  handoverToNode: (nodeId: number, text: string) => Promise<void>;
   clearAttention: (nodeId: number) => Promise<void>;
   // Issue #1054 — typed dispatch surface for `agentNodeListeners.ts`.
   // The listener module never reaches into `set`/`get` directly; it
@@ -1192,6 +1197,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   writeToAgent: async (nodeId, data) => {
     try {
       await api.writeToAgent(nodeId, data);
+    } catch (e) {
+      set({ error: formatError(e) });
+    }
+  },
+
+  handoverToNode: async (nodeId, text) => {
+    try {
+      await api.handoverToAgent(nodeId, text);
     } catch (e) {
       set({ error: formatError(e) });
     }
