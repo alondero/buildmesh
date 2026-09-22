@@ -918,26 +918,23 @@ function ProviderPicker({
   onCancel: () => void;
 }) {
   const [managing, setManaging] = useState(false);
-  // Issue #575 / ADR-0016 — group the Spawn Options by `harness_id`
-  // (== `group_key` on the wire). The backend already orders rows by
-  // `(is_terminal, rank_of(harness_id))` so the order is preserved
-  // here. The first row in each bucket is the native harness header
-  // (clickable = native launch); subsequent rows are Proxied children
-  // rendered indented. Mobile is read-only (no reorder), so this is
-  // the same shape the desktop sidebar/probes render, just sized for
-  // a touch sheet. The bucketing is shared with the desktop
-  // `GroupedProviderMenu` and `MeshPropertiesTab` via `groupByHarness`
-  // (issue #583 cleanup).
+  // The spawn picker shows harness parents and their saved launch recipes.
+  // Direct provider routes remain in the backend list for route selectors,
+  // but do not become flat spawn choices even after all recipes are deleted.
   const groups = groupByHarness(providers);
 
-  const configurationsFor = (provider: Provider) => (provider.configurations?.length ? (
+  const configurationsFor = (provider: Provider, group: Provider[]) => {
+    const recipes = group.filter((row) => row.configuration).map((row) => ({ row, configuration: row.configuration! }));
+    return recipes.length ? (
     <details style={{ marginLeft: 18, marginBottom: 8 }}>
       <summary style={{ padding: 10, color: "var(--text-dim)", fontSize: 13 }}>{provider.label} configurations</summary>
-      {provider.configurations.map((configuration) => (
-        <button type="button" className="card" key={configuration.id} onClick={() => onPick(provider, configuration.id)}>{configuration.name}</button>
+      {recipes.map(({ row, configuration }) => (
+        <button type="button" className="card" key={configuration.id} disabled={Boolean(row.unavailable_reason)}
+          onClick={() => onPick(row, configuration.id)}>{configuration.name}{row.unavailable_reason && <small style={{ display: 'block' }}>{row.unavailable_reason}</small>}</button>
       ))}
     </details>
-  ) : null);
+    ) : null;
+  };
 
   return (
     <Sheet onClose={onCancel} testId="provider-picker">
@@ -956,8 +953,7 @@ function ProviderPicker({
       {managing && <LaunchConfigurations api={launchConfigurationApi} onChanged={onChanged} />}
       {!managing && <>
       {groups.map(([harnessId, group]) => {
-        const native = group[0];
-        const children = group.slice(1);
+        const native = group.find((row) => !row.is_proxied && !row.configuration) ?? group[0];
         return (
           <div key={harnessId} data-testid={`spawn-group-${harnessId}`} style={{ marginBottom: 8 }}>
             <button
@@ -985,36 +981,7 @@ function ProviderPicker({
               />
               <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}{native.unavailable_reason && <small style={{ display: 'block' }}>{native.unavailable_reason}</small>}</span>
             </button>
-            {configurationsFor(native)}
-            {children.map((child) => (
-              <div key={child.id}>
-              <button
-                type="button"
-                onClick={() => onPick(child)}
-                disabled={Boolean(child.unavailable_reason)}
-                data-testid={`provider-${child.id}`}
-                className="card"
-                style={{ background: "var(--surface-2)", marginLeft: 18 }}
-              >
-                <ProviderIcon
-                  // Same fallback as the header row above (issue #1086) —
-                  // a custom Claude-compatible Proxied account's slug has no
-                  // brand mark, so without this the 28px chip shows a bare
-                  // dot where the row's wire letter belongs.
-                  providerId={child.provider_id ?? child.harness_id}
-                  withBackground
-                  chipSize={28}
-                  backgroundColor={child.color}
-                  fallbackGlyph={child.icon}
-                  chipTestId={`picker-avatar-${child.id}`}
-                  title={child.label}
-                  className="h-3.5 w-3.5"
-                />
-                <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}{child.unavailable_reason && <small style={{ display: 'block' }}>{child.unavailable_reason}</small>}</span>
-              </button>
-              {configurationsFor(child)}
-              </div>
-            ))}
+            {configurationsFor(native, group)}
           </div>
         );
       })}</>}

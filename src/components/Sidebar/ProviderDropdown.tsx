@@ -1,9 +1,9 @@
-import { useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
 import { PREREQUISITES_URL } from '../../lib/urls';
-import { useViewportClamp } from '../../hooks/useViewportClamp';
+import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 
 // `SpawnOption` is the frontend view of the Spawn Option wire shape
 // (issue #583) — produced by `mapBackendProviders` and consumed by the
@@ -49,12 +49,11 @@ interface ProviderDropdownProps {
 
 export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, menuId, configurationsEnabled }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
-  // Spawn Menu. The single backend-derived list (issue #538 retired the
-  // legacy enum-backed rows) is now grouped by `group_key` (== `harness_id`):
-  // each harness's native row lands as a clickable header, every Proxied
-  // child renders indented below it. Terminal is pinned last by the
-  // backend's `order_providers` sort, so the visual order is identical
-  // to the stored harness order.
+  // Spawn Menu. The backend-derived list is grouped by `group_key`
+  // (== `harness_id`): each native harness is a clickable parent, and
+  // its saved recipes are in a submenu. Direct Provider Route rows stay
+  // in the backend list for selectors but are not flat spawn choices.
+  // Terminal is pinned last by the backend's `order_providers` sort.
   //
   // Issue #822 — first-run onboarding. On a fresh machine with no agent CLI
   // detected and no keyed provider, the backend emits only the Terminal
@@ -64,23 +63,12 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
   // if limited, spawn — so this augments rather than replaces the menu.
   const noAgent = !hasSpawnableAgent(providers);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  // Issue #837 — viewport clamping is now the shared `useViewportClamp`
-  // hook (mirrors `BuildRunDropdown.tsx`). The menu sits `absolute
-  // right-0 top-full mt-1` so it can overflow the bottom edge of the
-  // sidebar when the trigger lives near the bottom of a long mesh list.
-  // The hook reads the rendered height BEFORE the browser paints (via
-  // `useLayoutEffect` internally) and applies `translateY(-shift)` to
-  // pull the menu up if it would overflow — keeping the existing
-  // `top-full mt-1` anchor intact so the close animation doesn't have
-  // to re-layout a repositioned popover.
-  //
-  // `deps: [providers]` — `ProviderDropdown` has no `isOpen` boolean
-  // (it's rendered only while its parent dropdown is open, so the
-  // parent owns the open lifecycle). The provider list is the right
-  // gate: re-measure when the rendered content changes (e.g. an
-  // archived-resume filter that drops proxied children).
-  useViewportClamp(menuRef, [providers]);
+  const triggerRef = useRef<HTMLElement>(null);
+  // The dropdown mounts inside SpawnButtonCluster's relative wrapper.
+  // Capture that wrapper before the anchored-position effect runs; the
+  // fixed menu then escapes the sidebar's overflow-y-auto clipping.
+  useLayoutEffect(() => { triggerRef.current = menuRef.current?.parentElement ?? null; }, []);
+  useAnchoredPosition(triggerRef, menuRef, true, { align: 'start', margin: 8 });
   return (
     <div
       ref={menuRef}
@@ -100,7 +88,7 @@ export function ProviderDropdown({ dropdownKey, providers, onSelect, onClose, me
       // surface, with the inner `GroupedProviderMenu` adding its own
       // label for the menu itself.
       aria-label="Select a provider"
-      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[400px] overflow-y-auto animate-scale-in origin-top-right"
+      className="fixed z-50 w-80 max-w-[calc(100vw-16px)] bg-bg-overlay border border-border-default rounded-md shadow-md max-h-[400px] overflow-y-auto animate-scale-in origin-top-left"
     >
       {noAgent && (
         <div

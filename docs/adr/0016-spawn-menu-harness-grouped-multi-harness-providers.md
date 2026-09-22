@@ -21,6 +21,10 @@ The domain terms this introduces (Proxied/Native Provider, Compatible API surfac
 
 ## Decision
 
+The flat spawn-row presentation in decisions 1–2 below is historical. The
+Launch Configuration amendment at the end of this section supersedes its
+presentation rules; the pairing and Spawn Option identity rules still apply.
+
 1. **Spawn Menu shape — harness-grouped, always-expanded flat list.** Each **Agent Harness** is *one clickable row* that launches the harness natively (Claude Code→Anthropic, Codex→OpenAI, OpenCode→its own login, Terminal→a shell). Its **Proxied Providers** appear as always-visible indented child rows; each row is a one-click **Spawn Option**. No nested/hover submenus (so the header is a pure launch action, never dual-action) and no click-to-collapse. `Terminal` is pinned last.
 
 2. **One backend-derived Spawn Menu, rendered as-is everywhere.** Sidebar, Issues probe, PRs probe, archived-resume, and mobile all render the same ordered, grouped menu; none re-orders or re-derives it. Mobile is a read-only reflection (no mobile reorder/config).
@@ -43,6 +47,23 @@ The domain terms this introduces (Proxied/Native Provider, Compatible API surfac
 ## Spawn Configuration amendment
 
 Spawn Options remain an always-expanded, harness-grouped list. Each parent row still launches with defaults. Named Spawn Configurations are offered in a hover submenu with a separate disclosure button and keyboard access; touch clients expose the saved choices through a disclosure. This refines the original no-submenu decision without nesting or hiding provider pairings. Configuration editing is desktop-owned, and selecting a configuration snapshots its sparse values on the new node.
+
+**Launch Configuration presentation update (2026-09):** Spawn surfaces now show
+native harness rows only. Their submenus contain saved Launch Configurations,
+including configurations targeting Proxied Provider Routes such as MiniMax or
+Kimi through Claude Code. Route rows remain in the backend catalogue for direct
+provider selection and archived-resume flows, but are not flat spawn choices.
+This remains true when the user deletes every configuration. The parent row
+continues to launch with defaults, and mobile groups saved configurations under
+the same harness parent. This supersedes the flat-child and "without hiding
+provider pairings" presentation rules above, without changing Spawn Option IDs
+or route resolution.
+
+This trades the former one-click proxied launch for a second submenu action;
+the benefit is a stable harness-level menu where named, model-specific routes
+are discoverable without competing with their parent harness. The flat list
+was superseded because saved configurations otherwise appeared alongside raw
+routes, leaving Codex recipes without an obvious harness submenu.
 
 ## Consequences
 

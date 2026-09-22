@@ -6,8 +6,11 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listSpawnConfigurations: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
+  listSpawnConfigurations: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
 }));
+
+const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
+  models: [], efforts: ['low', 'high', 'max'], manual_model: true, supports_model: true, supports_extra_args: true };
 
 const option: SpawnOption = {
   id: 'codex', label: 'Codex', harness_id: 'codex', provider_id: null,
@@ -30,6 +33,7 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.listSpawnConfigurations).mockResolvedValue([saved]);
+  vi.mocked(api.getLaunchTargets).mockResolvedValue([target]);
 });
 
 describe('Spawn configurations', () => {
@@ -53,14 +57,14 @@ describe('Spawn configurations', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Sol' } });
     fireEvent.keyDown(screen.getByLabelText('Name'), { key: 'Tab' });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-sol' } });
+    fireEvent.change(await screen.findByLabelText('Model'), { target: { value: 'gpt-5.6-sol' } });
     expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'low', 'high', 'max']);
     const cancel = screen.getByRole('button', { name: 'Cancel' });
     fireEvent.focus(cancel);
     fireEvent.keyDown(cancel, { key: 'Tab' });
     expect(document.activeElement).toBe(screen.getByLabelText('Name'));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await screen.findByRole('menuitem', { name: 'Sol' });
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
     expect(api.saveSpawnConfiguration).toHaveBeenCalledWith({
       id: '', name: 'Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null,
     });
@@ -110,40 +114,44 @@ describe('Spawn configurations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('disk full');
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Renamed');
     vi.mocked(api.deleteSpawnConfiguration).mockRejectedValueOnce(new Error('delete failed')).mockResolvedValueOnce();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('delete failed'));
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
-    await screen.findByText('No saved configurations');
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(screen.queryByTestId('spawn-configurations')).toBeNull());
     expect(api.deleteSpawnConfiguration).toHaveBeenCalledWith('sol');
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
     const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, effort_control: { kind: 'none' as const } } };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false }]);
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
-    expect(screen.getByLabelText('Model')).toBeTruthy();
+    expect(await screen.findByLabelText('Model')).toBeTruthy();
     expect(screen.queryByLabelText('Effort')).toBeNull();
     expect(screen.queryByLabelText('Extra arguments')).toBeNull();
   });
 
-  it('ignores an old response after switching Spawn Options and returns keyboard focus to the parent', async () => {
+  it('ignores an old response after switching harnesses and returns keyboard focus to the parent', async () => {
     let resolveOld!: (value: SpawnConfiguration[]) => void;
     vi.mocked(api.listSpawnConfigurations).mockReturnValueOnce(new Promise((r) => { resolveOld = r; })).mockResolvedValueOnce([]);
-    const second = { ...option, id: 'codex:openrouter', label: 'OpenRouter', provider_id: 'openrouter', is_proxied: true };
+    const second = { ...option, id: 'claude', harness_id: 'claude', group_key: 'claude', label: 'Claude Code' };
     render(<GroupedProviderMenu providers={[option, second]} onSelect={vi.fn()} />);
     fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Codex', exact: true }), { key: 'ArrowRight' });
-    const parent = screen.getByRole('menuitem', { name: 'OpenRouter' });
+    const parent = screen.getByRole('menuitem', { name: 'Claude Code' });
     fireEvent.mouseEnter(parent);
     await screen.findByText('No saved configurations');
     resolveOld([saved]);
     expect(screen.queryByText('Sol Max')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Claude Code configurations', exact: true }));
     fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Spawn with defaults' }), { key: 'ArrowLeft' });
     expect(document.activeElement).toBe(parent);
     expect(screen.queryByTestId('spawn-configurations')).toBeNull();

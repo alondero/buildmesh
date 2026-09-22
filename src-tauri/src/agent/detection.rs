@@ -345,6 +345,12 @@ pub(crate) fn canonical_harness(id: &str) -> Option<&'static str> {
     DETECTABLE.iter().find(|tool| tool.id == id || tool.harness == id).map(|tool| tool.harness)
 }
 
+pub(crate) fn canonical_wsl_harness(id: &str) -> Option<&'static str> {
+    id.split_once("-wsl-").map(|(base, _)| base)
+        .or_else(|| id.strip_suffix("-wsl"))
+        .and_then(canonical_harness)
+}
+
 fn is_automatic_profile(p: &HarnessProfile) -> bool {
     DETECTABLE.iter().any(|tool| p.harness == tool.harness && (p.id == tool.id || p.id == format!("{}-windows", tool.id) || p.id.starts_with(&format!("{}-wsl-", tool.id))))
 }
@@ -416,6 +422,14 @@ pub(crate) fn preferred_profiles(
         distro,
         CURRENT_EXECUTABLES.get().map(Vec::as_slice),
     )
+}
+
+/// WSL is a menu fallback for harnesses without native Windows support, not
+/// another launch choice for harnesses that can run on Windows.
+pub(crate) fn visible_in_spawn_menu(profile: &HarnessProfile, host: crate::agent::provider::Platform) -> bool {
+    !(host == crate::agent::provider::Platform::Windows
+        && profile.runtime == Some(crate::models::EnvType::Wsl)
+        && crate::models::Provider::from_db_str(&profile.harness).adapter().available_on().contains(&host))
 }
 
 fn preferred_profiles_with_executables(
@@ -638,6 +652,18 @@ mod tests {
         assert_eq!(menu.len(), 2);
         assert_eq!(menu.iter().find(|p| p.harness == "mcode").unwrap().runtime, Some(EnvType::Wsl));
         assert!(menu.iter().any(|p| p.id == "custom"));
+    }
+
+    #[test]
+    fn preferred_profiles_keeps_wsl_installation_for_existing_runtime_resolution() {
+        use crate::agent::provider::Platform;
+        use crate::models::EnvType;
+        let profiles = vec![crate::preferences::HarnessProfile {
+            id: "codex-wsl-test".into(), name: "Codex (WSL: Test)".into(), harness: "codex".into(),
+            runtime: Some(EnvType::Wsl), wsl_distro: Some("Test".into()), executable: None,
+        }];
+        let menu = super::preferred_profiles_with_executables(&profiles, Platform::Windows, Some("Test"), Some(&[]));
+        assert_eq!(menu[0].runtime, Some(EnvType::Wsl));
     }
 
     #[test]

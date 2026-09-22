@@ -133,13 +133,16 @@ queries `GET /api/oauth/usage` directly — never by spawning the Claude CLI.
 Consumer plans keep five-hour and seven-day windows; Enterprise prefers the
 `spend` object and falls back to `extra_usage`.
 
-**The Spawn Menu is where harness↔provider pairings live.** The Spawn Menu
-shows one Spawn Option per **stored** `(harness, provider)` pairing as the
+**The Spawn Menu is where harness↔provider pairings live.** Its backend list
+contains one Spawn Option per **stored** `(harness, provider)` pairing as the
 composite id `<harness>:<provider>` (e.g. `claude:kimi`). Pairings are *not*
 rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
 `AppPreferences::provider_pairings` and `effective_pairings` returns stored
 rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
 URL + model tiers live on the pairing (Harnesses page), not the account.
+The desktop spawn picker renders harness parents and puts their generated and
+saved Launch Configurations in each harness submenu. The backend also retains
+the pairing rows for selectors that still choose a provider route directly.
 
 **The registries are independent.** The brand string may coincide across
 namespaces, but each registry is the single source of its own kind:
@@ -276,7 +279,7 @@ The Omnibar claims `CommandOrControl+K` / `CommandOrControl+P` on macOS, and `Co
 ### WSL Path Mapping
 Linux paths from WSL agents must map to Windows UNC paths (`\\wsl$\...`) before backend file operations. Use `env::to_host_path` in `src-tauri/src/env/host_path.rs` (the `HostPath` sub-module). The CLAUDE.md hard rule is **structurally** enforced: `HostPath` is the *only* module in the tree that builds `\\wsl$\` or `/mnt/` strings; no other module should. Never pass Linux paths to Windows-side APIs.
 
-Harness installation and mesh filesystem are independent. `EnvType::Windows` retains its legacy host-native meaning on Linux; `WindowsInterop` explicitly selects a Windows process from a Linux WSL host. Startup executable observations filter automatic menu profiles without deleting saved identities, and native-first selection emits one installation per harness. Windows npm shim directories are excluded from Linux-native discovery. Detected `HarnessProfile.runtime` overrides are persisted in `AgentNode.env` at creation/provider change, before acquiring the database writer. `node_working_path` uses that durable runtime to derive the process path while retaining host/raw filesystem paths; it must not load preferences under callers' database connections. Discovery probes the default WSL distribution, records its identity in profiles, and caches `wslpath` drive mounts. Guest launches use the cached distribution explicitly with `wsl.exe --exec` and a login-shell PATH; `--` alone reintroduces default-shell interpolation and corrupts literal prompts. Guest configuration/session homes come from the guest login, not the Windows username.
+Harness installation and mesh filesystem are independent. `EnvType::Windows` retains its legacy host-native meaning on Linux; `WindowsInterop` explicitly selects a Windows process from a Linux WSL host. Startup executable observations filter automatic menu profiles without deleting saved identities, and the spawn menu emits one installation per harness. On Windows, WSL profiles and their saved Launch Configurations are shown only when the backing harness lacks Windows support; saved identities remain available for existing sessions. Windows npm shim directories are excluded from Linux-native discovery. Detected `HarnessProfile.runtime` overrides are persisted in `AgentNode.env` at creation/provider change, before acquiring the database writer. `node_working_path` uses that durable runtime to derive the process path while retaining host/raw filesystem paths; it must not load preferences under callers' database connections. Discovery probes the default WSL distribution, records its identity in profiles, and caches `wslpath` drive mounts. Guest launches use the cached distribution explicitly with `wsl.exe --exec` and a login-shell PATH; `--` alone reintroduces default-shell interpolation and corrupts literal prompts. Guest configuration/session homes come from the guest login, not the Windows username.
 
 Cross-runtime linked worktrees retain a host administrative backpointer and a relative forward `.git` link. They are locked against guest pruning because older Git treats foreign absolute backpointers as missing, and does not safely support relative backpointers without newer repository extensions. Buildmesh owns removal and already explicitly prunes locked entries. Prepare this metadata on the blocking pool. Windows process sandboxing cannot contain WSL agents; reject that combination. Shell hooks for a Windows host use Windows curl from WSL to reach host loopback even under NAT; Linux-hosted Windows callbacks explicitly invoke curl in the owning WSL distribution, avoiding collisions with Windows Buildmesh on localhost. Native Linux callbacks retain native curl. Grok's native HTTP callbacks require mirrored WSL networking.
 

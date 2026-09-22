@@ -1,10 +1,10 @@
 /**
  * GroupedProviderMenu — harness-grouped Spawn Menu (issue #575 / ADR-0016).
  *
- * The single backend-derived `listProviders()` list is rendered as a
- * harness-grouped, always-expanded flat list: each `group_key` (==
- * `harness_id`) bucket gets a clickable harness header and a flat list
- * of Proxied children underneath. No hover submenus, no click-to-collapse.
+ * These legacy grouping assertions run with configurations disabled, as in
+ * the archived-resume picker: each `group_key` bucket keeps its native row
+ * and direct Proxied Provider Routes. Spawn-mode submenu behavior is covered
+ * in launch-configuration-spawn-menu.test.tsx.
  *
  * These tests pin the render shape, the click handler wiring, and the
  * issue #814 WAI-ARIA menu contract (`role="menu"` / `role="menuitem"`,
@@ -15,7 +15,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
+import { GroupedProviderMenu as Menu } from '../../src/components/Providers/GroupedProviderMenu';
+import type { ComponentProps } from 'react';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
 const native = (harnessId: string, id?: string): ProviderInfo => ({
@@ -41,6 +42,12 @@ const proxied = (harnessId: string, providerId: string): ProviderInfo => ({
   is_proxied: true,
   group_key: harnessId,
 });
+
+// These legacy row/keyboard assertions exercise the resume picker, which
+// deliberately still exposes direct Provider Routes. Spawn-mode hiding is
+// covered by launch-configuration-spawn-menu.test.tsx.
+const GroupedProviderMenu = (props: ComponentProps<typeof Menu>) =>
+  <Menu configurationsEnabled={false} {...props} />;
 
 afterEach(() => cleanup());
 

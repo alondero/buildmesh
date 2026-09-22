@@ -35,23 +35,28 @@ export interface GroupedProviderMenuProps {
 export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
-  const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && option.capabilities && (
-    option.capabilities.supports_model_override || option.capabilities.supports_effort_override || option.capabilities.supports_extra_args
+  const launchMode = configurationsEnabled;
+  const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && (
+    providers.some((row) => row.configuration && row.harness_id === option.harness_id)
+    || (option.capabilities && (option.capabilities.supports_model_override
+      || option.capabilities.supports_effort_override || option.capabilities.supports_extra_args))
   ));
-  // Group by `group_key`, preserving the backend's harness order and the
-  // stable within-bucket order (native row first, then children in their
-  // listed order). The filter is applied per-row BEFORE bucketing so a
-  // filter-out row is dropped — and if it was the harness header, the
-  // bucket collapses to just children (a valid grouped render).
+  // Launch configurations live in the submenu even when the user has
+  // deleted every recipe. Route rows remain available to direct provider
+  // selectors; resume pickers keep them but omit configuration rows.
+  // Group by `group_key`, preserving the backend's harness order. The filter
+  // is applied per-row before bucketing so a filtered header can collapse.
   // The bucketing is shared with `MeshPropertiesTab` and the mobile
   // `ProviderPicker` via `groupByHarness` (issue #583 cleanup).
   const groups = useMemo(
-    () => groupByHarness(providers, { filter }),
-    [providers, filter],
+    () => groupByHarness(providers, { filter: (option) =>
+      (launchMode ? !option.is_proxied && !option.configuration : !option.configuration)
+      && (!filter || filter(option)) }),
+    [providers, filter, launchMode],
   );
 
-  // Issue #814 — flat list across every menuitem in render order
-  // (native headers + proxied children). The roving tabindex + the
+  // Issue #814 — visible parent rows in render order (native harnesses
+  // for spawn, native and proxied routes for resume). The roving tabindex + the
   // keyboard-nav handler walk this list; we precompute it once per
   // render rather than re-querying the DOM on every keydown.
   const flatItems = useMemo(() => {
@@ -167,7 +172,9 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
           ))}
         </div>
       ))}
-      {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu} onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
+      {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
+        configurationRows={providers.filter((row) => row.configuration && row.harness_id === submenu.option.harness_id)}
+        onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
     </div>
   );
 }

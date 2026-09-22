@@ -1,11 +1,10 @@
 /**
  * Mobile spawn picker (`ProviderPicker` in src/mobile/screens/NodeList.tsx).
  *
- * Issue #1086 — the picker rows must feed the live `listProviders()` `icon`
- * letter into `ProviderIcon` as `fallbackGlyph`, the same way `NodeRow` does
- * since #1082 (issue #948). A custom Proxied account (`claude:<slug>`) has no
- * entry in the brand registry, so without the fallback its picker chip renders
- * `ProviderIcon`'s bare dot instead of the wire glyph the user configured.
+ * Spawn choices are harness parents, with saved Launch Configurations inside
+ * touch disclosures. Raw Provider Routes stay out of the spawn picker even
+ * when the last saved configuration is deleted. Native harness avatar glyphs
+ * still come from the live `listProviders()` row.
  *
  * The picker is module-private, so these mount `NodeList` and open the sheet
  * through the mesh's "new node" button — the same route the #815 picker test
@@ -48,7 +47,7 @@ function provider(over: Partial<Provider> & Pick<Provider, "id">): Provider {
   };
 }
 
-// One harness bucket: the native header row plus three Proxied children.
+// One harness bucket: the native header row plus three backend Provider Routes.
 //   * `claude`                — registered brand (alias of `anthropic`).
 //   * `claude:kimi`           — registered brand behind the composite id.
 //   * `claude:custom-account` — no brand; wire glyph `"Z"`.
@@ -58,8 +57,8 @@ function provider(over: Partial<Provider> & Pick<Provider, "id">): Provider {
 //                               profiles are user-named (ADR-0016), so the
 //                               header row hits the same registry miss the
 //                               Proxied children do.
-// The glyph letters are deliberately not the providers' real ones so an
-// assertion cannot be satisfied by anything else on the row.
+// The route rows must not appear as flat spawn actions; their data remains
+// available to configuration selectors elsewhere.
 const PROVIDERS: Provider[] = [
   provider({ id: "claude", label: "Claude Code", icon: "A" }),
   provider({
@@ -130,7 +129,7 @@ async function openPicker(): Promise<void> {
   });
   // The listProviders() fetch is async: until it lands the picker renders
   // the hardcoded fallback list, which carries none of these rows.
-  await screen.findByTestId("provider-claude:custom-account");
+  await screen.findByTestId("provider-homegrown");
 }
 
 describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
@@ -144,31 +143,45 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the selected saved configuration while retaining its Spawn Option", async () => {
-    const fetch = mockApi(PROVIDERS.map((p) => p.id === "claude:custom-account" ? {
-      ...p,
-      configurations: [{ id: "proxy-max", name: "Proxy Max", spawn_option_id: p.id, model: "some-model", effort: "max", extra_args: null }],
-    } : p));
+  it("sends the selected saved configuration from its harness submenu", async () => {
+    const recipe = { id: "proxy-max", name: "Proxy Max", spawn_option_id: "claude:custom-account", model: "some-model", effort: "max", extra_args: null };
+    const fetch = mockApi([...PROVIDERS, provider({ id: recipe.id, label: recipe.name, provider_id: "custom-account", is_proxied: true, configuration: recipe })]);
     await openPicker();
-    fireEvent.click(screen.getByText("My Proxy configurations"));
+    expect(screen.queryByTestId("provider-claude:custom-account")).toBeNull();
+    fireEvent.click(screen.getByText("Claude Code configurations"));
     fireEvent.click(screen.getByRole("button", { name: "Proxy Max" }));
     await waitFor(() => {
       const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
       expect(call).toBeTruthy();
-      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "claude:custom-account", configuration_id: "proxy-max" });
+      expect(JSON.parse(call![1].body)).toEqual({ rows: 24, cols: 80, mesh_id: 1, provider: "proxy-max", configuration_id: "proxy-max" });
     });
   });
 
-  it("renders the wire glyph in a custom Proxied child's 28px chip", async () => {
-    await openPicker();
+  it("groups generated launch configurations under the harness on mobile", async () => {
+    const recipe = { id: "launch/claude:kimi", name: "Kimi via Claude", spawn_option_id: "claude:kimi", model: null, effort: null, extra_args: null };
+    const fetch = mockApi([
+      PROVIDERS[0], PROVIDERS[1],
+      provider({ id: recipe.id, label: recipe.name, provider_id: "kimi", is_proxied: true, configuration: recipe }),
+    ]);
+    render(<NodeList onOpenNode={noop} onOpenAgentNodes={noop} onOpenIssues={noop} onOffline={noop} onAuthFailed={noop} />);
+    await screen.findByTestId("node-list");
+    fireEvent.click(screen.getByTestId("new-node-1"));
+    await screen.findByTestId("provider-claude");
+    expect(screen.queryByTestId("provider-claude:kimi")).toBeNull();
+    fireEvent.click(screen.getByText("Claude Code configurations"));
+    fireEvent.click(screen.getByRole("button", { name: "Kimi via Claude" }));
+    await waitFor(() => {
+      const call = fetch.mock.calls.find(([url]) => String(url).includes("/api/nodes/create"));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call![1].body)).toMatchObject({ provider: "launch/claude:kimi", configuration_id: "launch/claude:kimi" });
+    });
+  });
 
-    const chip = screen.getByTestId("picker-avatar-claude:custom-account");
-    // The indented child chip is the 28px one (the native header is 34px).
-    expect(chip.style.width).toBe("28px");
-    // `custom-account` has no brand registration, so nothing renders a mark…
-    expect(chip.querySelector("img, svg")).toBeNull();
-    // …and the live wire glyph is what fills the chip, over the live colour.
-    expect(chip.textContent).toBe("Z");
+  it("keeps direct routes out of the picker when no recipes remain", async () => {
+    await openPicker();
+    expect(screen.queryByTestId("provider-claude:kimi")).toBeNull();
+    expect(screen.queryByTestId("provider-claude:custom-account")).toBeNull();
+    expect(screen.queryByText("Claude Code configurations")).toBeNull();
   });
 
   it("renders the wire glyph for a native row whose harness has no brand", async () => {
@@ -180,7 +193,7 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     expect(chip.textContent).toBe("H");
   });
 
-  it("keeps a resolved brand mark ahead of the fallback glyph", async () => {
+  it("keeps a resolved brand mark ahead of the native fallback glyph", async () => {
     await openPicker();
 
     // `ProviderIcon` renders exactly one inner node: a brand mark
@@ -193,20 +206,5 @@ describe("mobile ProviderPicker fallback glyphs (issue #1086)", () => {
     expect(nativeChip.querySelector("img, svg")).toBeTruthy();
     expect(nativeChip.querySelector("span")).toBeNull();
 
-    // Proxied child: `brandFor` reads the segment after the `:`, so
-    // `claude:kimi` resolves the Kimi mark and the glyph must stay hidden.
-    const childChip = screen.getByTestId("picker-avatar-claude:kimi");
-    expect(childChip.querySelector("img, svg")).toBeTruthy();
-    expect(childChip.querySelector("span")).toBeNull();
-  });
-
-  it("keeps the dot fallback when the wire glyph is empty", async () => {
-    await openPicker();
-
-    const chip = screen.getByTestId("picker-avatar-claude:blank-glyph");
-    expect(chip.querySelector("img, svg")).toBeNull();
-    expect(chip.textContent).toBe("");
-    // ProviderIcon's neutral dot, not an empty glyph span.
-    expect(chip.querySelector("span.rounded-full")).toBeTruthy();
   });
 });
