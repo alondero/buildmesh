@@ -141,8 +141,7 @@ export const HARNESS_CATALOG = {
     "cline": {
       "attention_capability": {
         "events": [
-          "turn_completed",
-          "session_exited"
+          "turn_completed"
         ],
         "kind": "hook",
         "launch_mode": "skip_permissions",

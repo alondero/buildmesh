@@ -105,7 +105,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0 |
-| Cline | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion and session exit |
+| Cline | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
 Nine harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
@@ -129,7 +129,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
 | MiniMax Code | Skip permissions | Turn completed | 0.4.12 | — |
-| Cline | Skip permissions | Turn completed, session exited | 3.0.62 | — |
+| Cline | Skip permissions | Turn completed | 3.0.62 | — |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by

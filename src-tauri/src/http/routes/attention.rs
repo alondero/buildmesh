@@ -385,10 +385,6 @@ enum Decision {
     /// Capture any structured session id, then stop. SessionStart (and similar
     /// boot events) must not look like a turn completion.
     Ignore,
-    /// The harness reported its session/process shutting down (Cline's
-    /// `SessionShutdown` hook, issue #1775) — write `Idle` and emit
-    /// `SessionExited`, the same transition a clean PTY EOF produces.
-    SessionExited,
 }
 
 fn accept_hook(
@@ -839,10 +835,6 @@ fn classify(
                 decision: Decision::Ignore,
                 detail,
             },
-            HookDecision::SessionExited => Classified {
-                decision: Decision::SessionExited,
-                detail,
-            },
         };
     }
     if event == Some("sessionstart") {
@@ -1245,22 +1237,6 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     tracing::debug!(
                         "attention webhook for node {}: lifecycle-neutral hook, session capture only",
                         session_id
-                    );
-                }
-                Decision::SessionExited => {
-                    // Cline's `SessionShutdown` hook (issue #1775). Funnels
-                    // through the same clean-exit transition as PTY EOF, so the
-                    // node lands in `Idle` and emits `SessionExited` from one
-                    // place (idempotent if both fire).
-                    tracing::info!(
-                        "attention webhook for node {}: harness reported session shutdown — \
-                         node lands in Idle",
-                        session_id
-                    );
-                    let _ = crate::agent::session_lifecycle::on_pty_eof_with_detail(
-                        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-                        session_id,
-                        &detail,
                     );
                 }
             }
@@ -3412,21 +3388,25 @@ mod tests {
         assert_eq!(classified.detail.provider_event.as_deref(), Some("agent_end"));
     }
 
-    /// `SessionShutdown` → `session_shutdown` surfaces `SessionExited`.
+    /// Cline's `session_shutdown` is the **abort** dispatch, not an exit: it
+    /// fires on a user interrupt while the session is still live. It must stay
+    /// lifecycle-neutral so the node is never written `Idle` (the #1853
+    /// blocking finding — a clean exit is still observed via PTY EOF).
     #[test]
-    fn cline_session_shutdown_maps_to_session_exited() {
+    fn cline_session_shutdown_is_lifecycle_neutral() {
         let body = serde_json::json!({
             "hookName": "session_shutdown",
             "taskId": "session_1790003303940_9ouga",
-            "reason": "user-exit"
+            "reason": "user-cancel"
         })
         .to_string()
         .into_bytes();
         let classified = classify(&body, "cline", |_| Some(0));
-        assert_eq!(classified.decision, Decision::SessionExited);
+        assert_eq!(classified.decision, Decision::Ignore);
         assert_eq!(
-            classified.detail.provider_event.as_deref(),
-            Some("session_shutdown")
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok,
+            "a claimed-but-neutral Cline event must not degrade the health"
         );
     }
 

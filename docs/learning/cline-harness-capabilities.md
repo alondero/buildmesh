@@ -31,9 +31,10 @@ Cline is an interactive terminal agent that Buildmesh drives as a **Native
 Provider**: Cline owns its own credentials (`cline auth`) and Buildmesh never
 writes Cline's configuration. Buildmesh spawns `cline -i`, resumes with
 `cline -i --id <id>`, and can forward a model, a reasoning effort, and a
-prefill prompt. Attention is wired through Cline's file hooks (`TaskComplete`
-→ turn completion, `SessionShutdown` → session exit); transcript reading is
-**not** wired yet (issue #1776).
+prefill prompt. Attention is wired through Cline's `TaskComplete` file hook,
+which reports a **completed turn** as `turn_completed` (node → Ready);
+transcript reading is **not** wired yet (issue #1776). Cline's file hooks expose
+no clean-exit or failure signal, so those are not claimed.
 
 ## What Buildmesh wants from a harness
 
@@ -105,7 +106,7 @@ Cline's CLI resolves **file hooks** — executable files named exactly after an
 event — additively from four fixed directories:
 
 1. `~/Documents/Cline/Hooks`
-2. `~/.cline/hooks` (`CLINE_DIR` overrides `~/.cline`)
+2. `~/.cline/hooks` (`resolveClineDir()` honours `CLINE_DIR` — read by the code, though it is not listed in the CLI's env table)
 3. `<workspace>/.clinerules/hooks`
 4. `<workspace>/.cline/hooks`
 
@@ -115,28 +116,44 @@ insensitive, with one of the extensions
 stripped) must equal the event name, so a file cannot be namespaced.
 `--hooks-dir` / `CLINE_HOOKS_DIR` remain **inert** in 3.0.62.
 
-Buildmesh provisions only the user-global root (`~/.cline/hooks`) with the two
-events it can honestly normalise:
+Buildmesh provisions only the user-global root (`~/.cline/hooks`) with the one
+event its file-hook layer can deliver on a clean run:
 
-| File | `hookName` on stdin | Normalised kind |
-|---|---|---|
-| `TaskComplete.{sh,ps1}` | `agent_end` | `turn_completed` (node → Ready) |
-| `SessionShutdown.{sh,ps1}` | `session_shutdown` | `session_exited` (node → Idle) |
+| File | `hookName` on stdin | Normalised kind | Fires when |
+|---|---|---|---|
+| `TaskComplete.{sh,ps1}` | `agent_end` | `turn_completed` (node → Ready) | `afterRun` with `status === "completed"` |
+
+**Nothing else is claimed.** In Cline's file-hook layer
+(`sdk/packages/core/src/hooks/hook-file-hooks.ts`) the only
+`session_shutdown` dispatch is `runSessionShutdown`, reached from `afterRun`
+only when `result.status === "aborted" || isAbortReason(result.error?.message)`
+— i.e. on a user **abort/interrupt of a still-live session**, never on
+teardown. So Cline's file hooks expose no clean-exit signal (a node's exit is
+still observed through PTY EOF, as before) and no failure signal Buildmesh
+provisions; `SessionShutdown`, `TaskError`, and the permission/question
+surfaces are deliberately left unprovisioned and unadvertised. A stray
+`session_shutdown` POST is classified lifecycle-neutral rather than as an exit.
 
 Windows gets `.ps1` (`powershell -File`); macOS/Linux get `.sh` (`bash`). Both
 extensions run without an exec bit. The script POSTs its stdin JSON to
 `http://127.0.0.1:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID`
 (the literal IPv4 loopback, so the callback never goes through DNS or the
-machine proxy), expanding the port and node id from the environment Cline hands
-the hook (`env: process.env`, no `env_clear`), so one node-agnostic file set
-serves every node and no node id is ever baked in. The write is additive and
-idempotent; a non-Buildmesh file at our exact path fails provisioning (surfaced
-as `SignalHealth::Unavailable`) rather than being overwritten.
+machine proxy — the PowerShell path disables the default proxy and the POSIX
+path passes `--noproxy '*'`), expanding the port and node id from the
+environment Cline hands the hook (`env: process.env`, no `env_clear`), so one
+node-agnostic file set serves every node and no node id is ever baked in.
+
+The write is additive and idempotent; a non-Buildmesh file at our exact path
+fails provisioning (surfaced as `SignalHealth::Unavailable`) rather than being
+overwritten. The POSIX script requires `curl` on `PATH`; on a host without it
+the callback is a silent no-op (the spawn still succeeds and only the attention
+signal is lost) — the same dependency the other harness hooks carry.
 
 Cline auto-approves tools by default and Buildmesh passes no approval flag, so
 **no permission or question signal exists** — `permission_requested`,
 `question_requested`, `background_running`, and `process_idle` are deliberately
-not advertised. Hooks are disabled in `--yolo` mode; the recipe never passes it.
+not advertised. Buildmesh's recipe is `cline -i` (the interactive TUI) and never
+passes `--yolo`, so the file-hook layer is active.
 
 ## Native Provider boundary and the env-var seam
 
@@ -318,6 +335,15 @@ shape the Codex and AGY adapters use for cross-env capture.
 ## Sources
 
 - `cline --help` / `cline --version` (3.0.62)
+- Installed 3.0.62 hook typings: `@cline/core/dist/hooks/hook-file-config.d.ts`,
+  `@cline/shared/dist/hooks/events.d.ts`
+- Upstream hook implementation (the revision whose `hook-file-config.ts` the
+  event-name table is taken from): `sdk/packages/core/src/hooks/hook-file-config.ts`,
+  `sdk/packages/core/src/hooks/hook-file-hooks.ts` (the `afterRun` /
+  `runSessionShutdown` dispatch that makes `session_shutdown` abort-only), and
+  `sdk/packages/shared/src/storage/paths.ts` (`resolveHooksConfigSearchPaths`,
+  `resolveClineDir`)
 - Buildmesh `agent::provider::adapters::cline` adapter and its unit tests
+- Buildmesh `services::transcript_reader::adapters::cline` hook classifier
 - Buildmesh `agent::detection` (install resolver order) and
   `preferences::compatibility` (`resolve_pairing` surface fallback)

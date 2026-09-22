@@ -135,10 +135,6 @@ pub(crate) enum HookDecision {
     /// the freshly minted `ses_…` id) — publish the Node Turn
     /// without attention marking.
     Ignore,
-    /// The harness reported its session/process shutting down — surface
-    /// `LifecycleKind::SessionExited` (writes `Idle`). Cline's
-    /// `SessionShutdown` hook (`session_shutdown`) is the only source today.
-    SessionExited,
 }
 
 static CLAUDE_CODE_ADAPTER: ClaudeCodeAdapter = ClaudeCodeAdapter;

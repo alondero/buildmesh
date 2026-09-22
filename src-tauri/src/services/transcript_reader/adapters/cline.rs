@@ -7,12 +7,15 @@
 //! `hookName` is the serialized event name (e.g. `agent_end`), not the file
 //! name (`TaskComplete`).
 //!
-//! Buildmesh provisions only the two events it can honestly normalise
-//! ([`crate::agent::provider::adapters::cline`]): `TaskComplete` →
-//! `agent_end` (a clean turn completion) and `SessionShutdown` →
-//! `session_shutdown` (the session process going away). Cline has no
-//! permission/prompt primitive under its default auto-approve launch, so
-//! nothing else is claimed.
+//! Buildmesh provisions exactly one of them
+//! ([`crate::agent::provider::adapters::cline`]): `TaskComplete` → `agent_end`,
+//! a clean turn completion. Cline's file-hook layer has no clean-exit dispatch
+//! (`SessionShutdown`/`session_shutdown` is reachable only from the abort
+//! branch of `afterRun`, so it fires on a user interrupt — never on teardown —
+//! and a still-live session must not be reported as exited), no
+//! permission/question primitive under the default auto-approve launch, and no
+//! failure signal Buildmesh consumes. Every other recognised Cline event is
+//! therefore classified lifecycle-neutral.
 //!
 //! Cline has no Buildmesh transcript reader yet (issue #1776), so `locate`
 //! returns `None` and the file-based `parse` path is unreachable — this
@@ -33,6 +36,10 @@ pub(crate) struct ClineAdapter;
 /// one of these are claimed so the attention route's generic "unknown event →
 /// degraded attention mark" arm can never fire for a Cline body; anything
 /// outside this set is left unclaimed for another adapter.
+///
+/// `pre_compact` is deliberately absent: `HOOK_CONFIG_FILE_EVENT_MAP` maps the
+/// `PreCompact` file to `undefined`, so the file-hook layer never serialises
+/// that event.
 const CLINE_HOOK_EVENTS: &[&str] = &[
     "agent_start",
     "agent_resume",
@@ -42,7 +49,6 @@ const CLINE_HOOK_EVENTS: &[&str] = &[
     "tool_call",
     "tool_result",
     "prompt_submit",
-    "pre_compact",
     "session_shutdown",
 ];
 
@@ -72,12 +78,15 @@ impl TranscriptAdapter for ClineAdapter {
 
     /// Normalise a Cline file-hook payload from its `hookName`.
     ///
-    /// - `agent_end` — a completed turn (`afterRun` fires only when
-    ///   `status === "completed"`) → [`HookDecision::Ready`].
-    /// - `session_shutdown` → [`HookDecision::SessionExited`].
-    /// - every other recognised Cline event is lifecycle-neutral
-    ///   ([`HookDecision::Ignore`]) because Buildmesh provisions no hook for it;
-    ///   claiming it keeps the route's degraded-fallback from firing.
+    /// - `agent_end` — a completed turn (`afterRun` only calls `runTurnEnd`
+    ///   when `result.status === "completed"`) → [`HookDecision::Ready`].
+    /// - every other recognised event is lifecycle-neutral
+    ///   ([`HookDecision::Ignore`]): Buildmesh provisions no hook for it, and
+    ///   classifying it as anything else would mislabel the lifecycle. In
+    ///   particular `session_shutdown` is the **abort** dispatch — it fires
+    ///   when the user interrupts a *live* session, so it is explicitly not a
+    ///   session-exit signal (claiming it here also stops a stale hook file
+    ///   from a previous build falling through to the route's degraded arm).
     fn classify_hook(&self, body: &[u8], provider: &str) -> Option<HookClassification> {
         if provider != "cline" {
             return None;
@@ -95,10 +104,6 @@ impl TranscriptAdapter for ClineAdapter {
             "agent_end" => Some(HookClassification {
                 decision: HookDecision::Ready,
                 kind: Some(LifecycleKind::TurnCompleted),
-            }),
-            "session_shutdown" => Some(HookClassification {
-                decision: HookDecision::SessionExited,
-                kind: Some(LifecycleKind::SessionExited),
             }),
             _ => Some(HookClassification {
                 decision: HookDecision::Ignore,
@@ -120,12 +125,16 @@ mod tests {
         assert_eq!(classified.kind, Some(LifecycleKind::TurnCompleted));
     }
 
+    /// `session_shutdown` is the abort dispatch, not an exit: it fires when the
+    /// user interrupts a still-live session. It must stay lifecycle-neutral —
+    /// mapping it to `SessionExited` would write `Idle` on a live node (the
+    /// blocked #1853 finding).
     #[test]
-    fn session_shutdown_maps_to_session_exited() {
-        let body = br#"{"hookName":"session_shutdown","taskId":"session_1790003303940_9ouga","reason":"user-exit"}"#;
+    fn session_shutdown_is_lifecycle_neutral_not_an_exit() {
+        let body = br#"{"hookName":"session_shutdown","taskId":"session_1790003303940_9ouga","reason":"user-cancel"}"#;
         let classified = ClineAdapter.classify_hook(body, "cline").expect("claimed");
-        assert_eq!(classified.decision, HookDecision::SessionExited);
-        assert_eq!(classified.kind, Some(LifecycleKind::SessionExited));
+        assert_eq!(classified.decision, HookDecision::Ignore);
+        assert_eq!(classified.kind, None);
     }
 
     /// A Cline event Buildmesh does not provision must be claimed as
@@ -141,7 +150,6 @@ mod tests {
             "agent_resume",
             "agent_error",
             "agent_abort",
-            "pre_compact",
         ] {
             let body = format!(r#"{{"hookName":"{event}","taskId":"session_1_abcde"}}"#);
             let classified = ClineAdapter
@@ -154,6 +162,15 @@ mod tests {
             );
             assert_eq!(classified.kind, None);
         }
+    }
+
+    /// `PreCompact` maps to `undefined` in Cline's file-hook table, so the
+    /// event is never serialised and must not be claimed.
+    #[test]
+    fn pre_compact_is_not_a_claimable_event() {
+        assert!(ClineAdapter
+            .classify_hook(br#"{"hookName":"pre_compact"}"#, "cline")
+            .is_none());
     }
 
     #[test]

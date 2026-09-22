@@ -47,16 +47,23 @@
 //! **Attention** (issue #1775): Cline's CLI resolves *file hooks* — executable
 //! files named exactly after an event — from four fixed directories
 //! (`~/Documents/Cline/Hooks`, `~/.cline/hooks`, `<ws>/.clinerules/hooks`,
-//! `<ws>/.cline/hooks`). Buildmesh provisions `<cline home>/hooks/<Event>.<ext>`
-//! for the two events it can honestly normalise: `TaskComplete` → `agent_end`
-//! (a completed turn) and `SessionShutdown` → `session_shutdown`. Each file
-//! POSTs its stdin payload to the local attention route, expanding
-//! `$BUILDMESH_PORT` / `$BUILDMESH_SESSION_ID` at hook-run time (Cline runs file
-//! hooks with the inherited `process.env`, so one node-agnostic file set serves
-//! every node and never bakes a node id). `--hooks-dir` / `CLINE_HOOKS_DIR` are
-//! inert in 3.0.62, so the fixed paths are the only lever. Cline has no
-//! permission/question/background primitive under its default auto-approve
-//! launch, so those kinds stay unadvertised.
+//! `<ws>/.cline/hooks`). Buildmesh provisions `<cline home>/hooks/TaskComplete.<ext>`,
+//! which maps to Cline's `agent_end` — a completed turn. The file POSTs its
+//! stdin payload to the local attention route, expanding `$BUILDMESH_PORT` /
+//! `$BUILDMESH_SESSION_ID` at hook-run time (Cline runs file hooks with the
+//! inherited `process.env`, so one node-agnostic file set serves every node and
+//! never bakes a node id). `--hooks-dir` / `CLINE_HOOKS_DIR` are inert in
+//! 3.0.62, so the fixed paths are the only lever.
+//!
+//! The advertised set is deliberately just `turn_completed`. Cline's file-hook
+//! layer has **no clean-exit dispatch**: `SessionShutdown` / `session_shutdown`
+//! is reachable only from the abort branch of `afterRun`
+//! (`sdk/packages/core/src/hooks/hook-file-hooks.ts`), so it never fires on
+//! teardown — and on an abort the session is still live, so surfacing it as
+//! `session_exited` would mislabel the lifecycle. There is likewise no
+//! permission/question primitive under the default auto-approve launch. A
+//! node's clean process exit is still observed through PTY EOF, exactly as it
+//! was before this change.
 //!
 //! **Transcript**: not wired yet (`#1776`), so `produces_readable_transcript`
 //! stays `false` and the digest degrades to a spine-only read.
@@ -101,8 +108,8 @@ fn shell_for(platform: Platform) -> WindowsShell {
 
 /// Minimum Cline release the Buildmesh attention hook has been validated
 /// against (issue #1775). Verified against `cline` 3.0.62's file-hook layer
-/// (`sdk/packages/core/src/hooks/hook-file-config.ts`): `TaskComplete` →
-/// `agent_end`, `SessionShutdown` → `session_shutdown`.
+/// (`sdk/packages/core/src/hooks/hook-file-config.ts`): the `TaskComplete` file
+/// maps to `agent_end`, and `agent_end` is dispatched only for a completed run.
 pub const CLINE_MIN_HOOK_VERSION: &str = "3.0.62";
 
 /// Marker identifying a Buildmesh-owned Cline hook file. Cline resolves hook
@@ -111,12 +118,15 @@ pub const CLINE_MIN_HOOK_VERSION: &str = "3.0.62";
 /// is what distinguishes our hook from a user-authored file at the same path.
 pub const CLINE_HOOK_MARKER: &str = "BUILDMESH_CLINE_ATTENTION_HOOK";
 
-/// The Cline file hooks Buildmesh provisions, written verbatim as the file's
-/// base name. `TaskComplete` maps to `agent_end` (turn finished) and
-/// `SessionShutdown` to `session_shutdown` (session going away). No other file
-/// is written: Cline has no permission/question/background primitive under its
-/// default auto-approve launch, so those events are never claimed.
-const CLINE_PROVISIONED_HOOKS: &[&str] = &["TaskComplete", "SessionShutdown"];
+/// The Cline file hook Buildmesh provisions, written verbatim as the file's
+/// base name. `TaskComplete` maps to `agent_end` — Cline's file-hook layer
+/// dispatches it from `afterRun` only when `result.status === "completed"`.
+///
+/// Nothing else is provisioned: `SessionShutdown`/`session_shutdown` is
+/// abort-only (see the module doc), Cline raises no permission/question prompt
+/// under its default auto-approve launch, and the failure dispatch
+/// (`TaskError`/`agent_error`) has no consumer here.
+const CLINE_PROVISIONED_HOOKS: &[&str] = &["TaskComplete"];
 
 /// POSIX hook body. Expands the callback URL from `BUILDMESH_PORT` /
 /// `BUILDMESH_SESSION_ID` at hook-run time, so one file serves every node.
@@ -204,6 +214,12 @@ fn hook_script(env_type: EnvType) -> &'static str {
 /// converted back to a host path (never a Linux path handed to a Windows API).
 /// `None` means no home was resolvable — the caller returns `Ok(())` with no
 /// side effects, matching the mcode precedent.
+///
+/// `launch_runtime()` only populates `harness_home` for a Codex proxy today, so
+/// a real Cline spawn always takes the `cli_dir_for_spawn` branch. The override
+/// stays because it is the harness-specific seam every other provisioner
+/// exposes (mcode / kimi) and the only way a test can aim provisioning at a
+/// temp directory without touching the real `~/.cline`.
 fn hooks_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf> {
     if let Some(home) = runtime.harness_home.as_deref() {
         let trimmed = home.trim();
@@ -263,10 +279,9 @@ fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
 /// without the spawn-path contract. Returns `Ok(())` with no side effects when
 /// `hooks_root` is `None`.
 ///
-/// Each event is provisioned independently: a file we refuse to clobber for
-/// one event (a user-authored hook at that exact name) must not suppress the
-/// other signal — the two hooks are unrelated, and losing the session-exit
-/// callback because the turn-completion file is occupied would be gratuitous.
+/// The provisioned set is one file today (`TaskComplete`), but each entry is
+/// written independently: a file we refuse to clobber for one event must never
+/// suppress another, so adding an event later cannot silently drop its signal.
 /// Every failure is logged; the first is returned so the spawn path can mark
 /// the node `SignalHealth::Unavailable` (which a later successful callback
 /// clears).
@@ -384,23 +399,25 @@ impl AgentProvider for ClineAdapter {
         true
     }
 
-    /// `true` — the file hooks are provisioned at spawn (issue #1775) and open
-    /// the Autopilot / review-circuit gate. See [`Self::attention_capability`]
-    /// for the structured contract.
+    /// `true` — the `TaskComplete` file hook is provisioned at spawn (issue
+    /// #1775) and opens the Autopilot / review-circuit gate. See
+    /// [`Self::attention_capability`] for the structured contract.
     fn requires_attention_hook(&self) -> bool {
         true
     }
 
-    /// Issue #1775 — the honest Cline contract. Cline's file-hook layer
-    /// (`TaskComplete` → `agent_end`, `SessionShutdown` → `session_shutdown`)
-    /// delivers a completed turn and a session-exit signal. Buildmesh launches
-    /// Cline with its default auto-approve policy and passes no approval flag,
-    /// so no permission prompt is raised — `permission_requested` /
-    /// `question_requested` / `background_running` / `process_idle` are
-    /// impossible by construction and are not advertised.
+    /// Issue #1775 — the honest Cline contract: `TaskComplete` → `agent_end`
+    /// delivers a completed turn, and nothing else. Cline's file-hook layer has
+    /// no clean-exit dispatch (`session_shutdown` is abort-only), no
+    /// permission/question primitive under the default auto-approve launch
+    /// (Buildmesh passes no approval flag), and no failure dispatch Buildmesh
+    /// provisions — so `permission_requested`, `question_requested`,
+    /// `background_running`, `process_idle`, and `session_exited` are all
+    /// deliberately absent. Mirrors `mcode`, which likewise advertises only
+    /// `TurnCompleted`.
     fn attention_capability(&self) -> AttentionCapability {
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::SessionExited],
+            events: vec![LifecycleKind::TurnCompleted],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: None,
             min_version: Some(CLINE_MIN_HOOK_VERSION.into()),
@@ -528,12 +545,12 @@ impl AgentProvider for ClineAdapter {
         }
     }
 
-    /// Provision Cline's attention file hooks (issue #1775). Writes
-    /// `<cline home>/hooks/TaskComplete.<ext>` and `.../SessionShutdown.<ext>`
-    /// with a node-agnostic script that expands the callback URL from
-    /// `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID` at hook-run time.
+    /// Provision Cline's attention file hook (issue #1775). Writes
+    /// `<cline home>/hooks/TaskComplete.<ext>` with a node-agnostic script that
+    /// expands the callback URL from `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`
+    /// at hook-run time.
     ///
-    /// The write is additive (only our two event files, and we never touch a
+    /// The write is additive (only our own event files, and we never touch a
     /// file that lacks our marker) and idempotent (issue #886 — an unchanged
     /// file is not rewritten). A user-authored file at our exact path returns
     /// `Err` rather than being clobbered; an unresolvable home returns `Ok(())`
@@ -926,12 +943,13 @@ mod tests {
 
     // —— Issue #1775: attention hook provisioning ———————————————————————
 
-    /// Pin the structured attention contract. `agent_end`/`session_shutdown`
-    /// are the only events Cline's file-hook layer emits for us; a permission
-    /// or question signal is impossible under the default auto-approve launch
-    /// and must not be claimed.
+    /// Pin the structured attention contract. Only `TaskComplete` → `agent_end`
+    /// (a completed turn) is wired. Cline's file-hook layer has no clean-exit
+    /// dispatch (`session_shutdown` is abort-only), no permission/question
+    /// primitive under the default auto-approve launch, and no failure signal
+    /// Buildmesh provisions — none of those may be advertised.
     #[test]
-    fn attention_capability_advertises_turn_completed_and_session_exited_only() {
+    fn attention_capability_advertises_turn_completed_only() {
         let capability = CLINE.attention_capability();
         match &capability {
             AttentionCapability::Hook {
@@ -942,18 +960,19 @@ mod tests {
             } => {
                 assert_eq!(
                     events,
-                    &vec![LifecycleKind::TurnCompleted, LifecycleKind::SessionExited],
-                    "TaskComplete + SessionShutdown are the only wired events"
+                    &vec![LifecycleKind::TurnCompleted],
+                    "TaskComplete → agent_end is the only wired event"
                 );
-                for impossible in [
+                for absent in [
+                    LifecycleKind::SessionExited,
                     LifecycleKind::PermissionRequested,
                     LifecycleKind::QuestionRequested,
                     LifecycleKind::BackgroundRunning,
                     LifecycleKind::ProcessIdle,
                 ] {
                     assert!(
-                        !events.contains(&impossible),
-                        "{impossible:?} has no Cline primitive and must not be advertised"
+                        !events.contains(&absent),
+                        "{absent:?} has no Cline file-hook primitive and must not be advertised"
                     );
                 }
                 assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
@@ -1032,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn provision_writes_both_hook_files_with_env_expanded_url() {
+    fn provision_writes_the_hook_file_with_env_expanded_url() {
         let home = tempfile::tempdir().unwrap();
         let hooks = provision_test_home(home.path(), EnvType::Windows);
         let extension = hook_extension(EnvType::Windows);
@@ -1126,15 +1145,41 @@ mod tests {
             "#!/bin/sh\necho mine\n",
             "the user's file must survive intact"
         );
-        // The other event is provisioned regardless: one occupied file must not
-        // suppress the session-exit signal.
-        let other = hooks.join(format!("SessionShutdown.{extension}"));
-        let other_body = std::fs::read_to_string(&other)
-            .unwrap_or_else(|error| panic!("{other:?} must still be written: {error}"));
-        assert!(
-            other_body.contains(CLINE_HOOK_MARKER),
-            "SessionShutdown must be provisioned even when TaskComplete is occupied"
+    }
+
+    /// A Buildmesh-owned file whose content drifted (e.g. provisioned by an
+    /// earlier build, or the callback URL changed) is rewritten in place — the
+    /// only path that runs `write_atomic` over an *existing* file, and the one
+    /// the Windows rename-over-existing write depends on.
+    #[test]
+    fn provision_rewrites_a_drifted_buildmesh_hook_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let extension = hook_extension(EnvType::Windows);
+        let target = hooks.join(format!("TaskComplete.{extension}"));
+        // Marker present, body stale (an old baked-URL shape).
+        let stale = format!(
+            "#!/bin/sh\n# {CLINE_HOOK_MARKER}\ncurl http://localhost:1999/api/attention/0\n"
         );
+        std::fs::write(&target, &stale).unwrap();
+
+        provision_test_home(home.path(), EnvType::Windows);
+
+        let rewritten = std::fs::read_to_string(&target).unwrap();
+        assert_ne!(rewritten, stale, "drifted Buildmesh content must be replaced");
+        assert!(
+            !rewritten.contains("localhost:1999"),
+            "the stale callback must be gone: {rewritten}"
+        );
+        assert_eq!(
+            rewritten,
+            hook_script(EnvType::Windows),
+            "the rewrite must install the current script verbatim"
+        );
+        // Still exactly one file — the rewrite must not leave residue.
+        let count = std::fs::read_dir(&hooks).unwrap().count();
+        assert_eq!(count, 1, "rewrite must not add files: {count}");
     }
 
     #[test]

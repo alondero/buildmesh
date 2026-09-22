@@ -883,7 +883,7 @@ mod tests {
         // Issue #1773 — Cline is a Native Provider: it owns its own auth
         // (`cline auth`) and Buildmesh only injects the user's Model Provider
         // credentials through the spawn env-var seam. Issue #1775 wired the
-        // file-hook attention integration (`TaskComplete`/`SessionShutdown`), so
+        // file-hook attention integration (`TaskComplete` only), so
         // the hook flags are now honest-true; the transcript reader (#1776) is
         // still not shipped. Effort is Cline's closed `--thinking` vocabulary.
         let cline = cline_caps();
@@ -891,19 +891,28 @@ mod tests {
         assert!(cline.supports_resume);
         assert!(cline.auto_resume_on_startup);
         assert!(cline.requires_attention_hook);
-        // Issue #1775 — pin the Hook shape. Only a completed turn and a
-        // session exit are delivered; Cline auto-approves by default, so a
-        // permission/question/background/idle signal is impossible by
-        // construction and must not be advertised.
-        assert!(matches!(
-            cline.attention_capability,
+        // Issue #1775 — pin the Hook shape. Only a completed turn is delivered:
+        // Cline's file-hook layer has no clean-exit dispatch (`session_shutdown`
+        // is abort-only, so it never fires on teardown), and the default
+        // auto-approve launch means no permission/question/background signal
+        // exists. Neither `session_exited` nor those kinds may be advertised.
+        match &cline.attention_capability {
             AttentionCapability::Hook {
-                launch_mode: AttentionLaunchMode::SkipPermissions,
-                trust: None,
-                min_version: Some(ref v),
-                ..
-            } if v == crate::agent::provider::adapters::cline::CLINE_MIN_HOOK_VERSION
-        ));
+                events,
+                launch_mode,
+                trust,
+                min_version,
+            } => {
+                assert_eq!(events, &vec![crate::agent::session_lifecycle::LifecycleKind::TurnCompleted]);
+                assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
+                assert_eq!(*trust, None);
+                assert_eq!(
+                    min_version.as_deref(),
+                    Some(crate::agent::provider::adapters::cline::CLINE_MIN_HOOK_VERSION)
+                );
+            }
+            other => panic!("expected Hook, got {other:?}"),
+        }
         assert!(!cline.supports_passive_turn_watcher);
         assert!(!cline.produces_readable_transcript);
         assert!(cline.supports_model_override);
