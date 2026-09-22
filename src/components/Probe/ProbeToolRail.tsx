@@ -304,7 +304,6 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
               aria-label={group.title}
               className={groupIndex === TOOL_DISCOVERY_GROUPS.length - 1 ? '' : 'mb-1.5'}
             >
-              {/* Heading only — the palette's scope notes were removed (ADR-0031). */}
               <span className="block mt-1 mb-1 text-2xs font-semibold uppercase tracking-[0.14em] text-text-muted">
                 {group.title}
               </span>
