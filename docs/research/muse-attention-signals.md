@@ -108,7 +108,11 @@ is the #1681 surface).
 
 ## (d) Would untrusted-workspace hook files load?
 
-Moot: **no hook files exist**. `muse --help` exposes no hook registration; a recursive
+> **Superseded for Muse 1.3.0 — see the update at the end of this document.** Hook files
+> *do* exist on the version Buildmesh supports today (a plugin bundle); the finding below
+> is the 1.1.1 baseline it was probed against.
+
+Moot on 1.1.1: **no hook files exist**. `muse --help` exposes no hook registration; a recursive
 search of `~/.config/muse`, the feature-config cache, and the runtime directory found no
 hook configuration, and `~/.config/muse` holds only `auth.json`, `trust.json`, and
 `settings.json`. Muse's `--trust-workspace` loads a workspace's *skills and rules*, not
@@ -135,3 +139,86 @@ for session recovery, converting the guest path with `env::to_host_path` for WSL
 defers unterminated trailing lines (Muse may be mid-write), suppresses an earlier terminal
 when a newer run has already started, and baselines resumed sessions at their pre-spawn EOF
 so a prior completed turn is never replayed as the resumed node's signal.
+
+## Update — Muse 1.3.0 (2026-09-21)
+
+Re-probed against the version Buildmesh supports today: **Muse Code 1.3.0
+(1.3.0-R3401.1)**, the native Windows build at
+`%LOCALAPPDATA%\Programs\muse\muse.exe`. All observations are local and unpaid
+(`--provider echo`, no model calls). This supersedes (d) and refreshes (a) and
+(b); (c) is unchanged.
+
+### (a) refreshed
+
+`muse schema generate-json-schema` still exports the precomputed bundle; the manifest
+fingerprint is now `sha256:7469c9e3…` (was `sha256:c669a30c…`). `turn/*`, `approval/*` and
+`userInput/*` are unchanged. New since 1.1.1: methods
+`goal/{set,edit,clear,pause,resume}`, `session/rename`, `session/setReasoningEffort`,
+`skill/list`, `task/{background,stop,stopAll}`, `usage/read`,
+`workflow/{cancel,childControl}`; notifications `session/statusChanged`,
+`session/nameChanged`, `session/modelRouteUnserved`, `session/listChanged`,
+`session/viewHealthChanged`, `usage/changed`, `skill/changed`. None of these change the turn
+signal.
+
+### (b) re-verified — the wired signal still holds
+
+The durable-log contract the watcher depends on is unchanged on 1.3.0: `runtime.session`
+records with `payload.kind == "run"` and `event.kind == "terminal"` (carrying
+`event.terminal` = `completed | failed | cancelled`) are still appended. Across the 27
+retained top-level 1.3.0 session logs: **58 `started` / 57 `terminal`** (the shortfall is one
+node killed mid-run, not a format change). The record shape is byte-identical to the 1.1.1
+sample in (b), so `services::muse_watcher` parses live 1.3.0 logs without change. See
+[Harness attention reliability audit](../learning/harness-attention-reliability.md).
+
+### (d) rewritten — a native hook surface *does* exist on 1.3.0
+
+1.3.0 ships a **plugin system with a claude-compatible hook surface** (the 1.1.1 finding that
+"no hook files exist" no longer holds). A bundle's manifest lives at a root `plugin.json`
+with the exact Agent Plugins 1.0.0 `$schema`, or at exactly one nested `.muse-plugin/`,
+`.codex-plugin/` or `.claude-plugin/plugin.json`; `muse plugins validate <dir> --json`
+reports `manifest_family: "claude-compatible"` for the last.
+
+Events accepted as `classification: "supported"`: `PreToolUse`, `PostToolUse`,
+`PostToolUseFailure`, `Notification`, `Stop`, `SubagentStop`, `UserPromptSubmit`,
+`SessionStart`, `SessionEnd`, `PreCompact`, `PermissionRequest`. Rejected as
+`unsupported-hook-event`: `TaskCompleted`, `ApprovalRequested`, `UserInputRequested`,
+`TurnStarted`, `TurnCompleted`, `MessageDisplay`, `BeforeTool`, `AfterTool`,
+`PreToolUseFailure`.
+
+The handler shape differs from mcode's: `{ "type": "command", "command": "<one shell
+string>" }` — a separate `args` array is **rejected** (`unsupported-field`), and hooks must
+be async observation-only.
+
+**A `Stop` hook fires in a live session** (offline `muse exec --provider echo`) and delivers
+a payload the existing attention route already classifies:
+
+```json
+{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"…",
+ "session_id":"<uuid>","turn_id":"<uuid>","cwd":"…","transcript_path":null,
+ "model":"unknown","permission_mode":"default"}
+```
+
+That is the Claude `Stop` shape `http::routes::attention` already maps to a clean turn
+completion, so no new classifier would be needed.
+
+**Activation is gated, which is why it is not wired.** `muse plugins install <path> --scope
+user|project` copies the bundle into a **global** content-addressed cache
+(`~/.local/share/muse/plugins/cache/local/<id>/<sha>/package`) plus a global `installed.json`
+lockfile. A third-party bundle's hooks then sit at `status: "review_needed"` with
+`effective_capabilities: []` ("third-party plugin: hooks require review before activation")
+until an explicit, non-interactive `muse plugins approve <id>`. The **project-scoped** path —
+node-local, no global state — is refused outright: *"project-local plugin source is blocked
+because the workspace is untrusted"*, where trust is a per-workspace entry in
+`~/.config/muse/trust.json` (issue **#1706**). Muse does not pass `BUILDMESH_*` to hooks, so
+the callback URL must be baked per node — which changes the capability definition hash every
+spawn, forcing a re-approve and a new cache directory per node.
+
+### Verdict after the update
+
+The **passive watcher remains the wired signal** and is unaffected by 1.3.0. The native hook
+is now known to be *possible*, but wiring it today would have Buildmesh silently approve
+arbitrary-command hooks into the user's global Muse state on every spawn, with per-node cache
+growth — a consent and shared-state cost it should not pay unattended. **Wiring the hook
+belongs in a separate follow-up ticket once Muse workspace trust (#1706) lands**, at which
+point a project-scoped install avoids both the global cache and the consent bypass. This
+update corrects the record; it does not change the wiring.

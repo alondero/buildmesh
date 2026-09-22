@@ -835,4 +835,103 @@ mod tests {
         assert_eq!(session_log_path_in(dir.path(), SESSION), Some(log));
         assert!(session_log_path_in(dir.path(), "different-session").is_none());
     }
+
+    /// Newest top-level `session.jsonl` under a Muse data root (subagent logs
+    /// excluded — they share the tree but carry no run boundary for the node).
+    fn newest_top_level_session_log(root: &Path) -> Option<PathBuf> {
+        fn visit(dir: &Path, best: &mut Option<(std::time::SystemTime, PathBuf)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|name| name.to_str()) == Some("subagent") {
+                        continue;
+                    }
+                    visit(&path, best);
+                } else if path.file_name().and_then(|name| name.to_str()) == Some("session.jsonl")
+                {
+                    if let Ok(modified) = path.metadata().and_then(|meta| meta.modified()) {
+                        if best
+                            .as_ref()
+                            .map(|(seen, _)| modified > *seen)
+                            .unwrap_or(true)
+                        {
+                            *best = Some((modified, path));
+                        }
+                    }
+                }
+            }
+        }
+        let mut best = None;
+        visit(&root.join("sessions"), &mut best);
+        best.map(|(_, path)| path)
+    }
+
+    /// Live smoke (issue #1709). Drives the real `muse` binary in a scratch
+    /// workspace — offline, because the deterministic `echo` provider makes no
+    /// model call — and then asserts the watcher's *own* classifier consumes the
+    /// freshly written session log and emits exactly one completed turn. This
+    /// exercises the live data path end to end (live Muse → live `session.jsonl`
+    /// → `SessionLogTail` → Node Turn) rather than a recorded fixture.
+    ///
+    /// `#[ignore]`d because it spawns an external CLI and appends a session log
+    /// to the user's real Muse data root. Run it explicitly:
+    /// `cargo test --lib muse_watcher::tests::live_muse_turn_smoke -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns the real muse CLI; run explicitly for the #1709 live smoke"]
+    fn live_muse_turn_smoke() {
+        use std::time::{Duration, Instant};
+
+        let binary = ["muse", "muse.exe"]
+            .into_iter()
+            .find(|candidate| {
+                std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            })
+            .expect("the live smoke needs the muse CLI on PATH");
+
+        let workspace = tempfile::tempdir().expect("scratch workspace");
+        let run = std::process::Command::new(binary)
+            .current_dir(workspace.path())
+            .args(["exec", "--provider", "echo", "buildmesh live smoke"])
+            .output()
+            .expect("spawn muse exec");
+        assert!(
+            run.status.success(),
+            "muse exec failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let workspace_path = workspace.path().to_string_lossy().to_string();
+        let root =
+            crate::services::muse_sessions::data_root(&workspace_path).expect("muse data root");
+
+        // The run's log is written live; poll briefly instead of treating a
+        // mid-write read as "no turn".
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut turns = Vec::new();
+        while Instant::now() < deadline {
+            if let Some(log) = newest_top_level_session_log(&root) {
+                if let Ok(found) = SessionLogTail::default().read_turns(&log) {
+                    if !found.is_empty() {
+                        turns = found;
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+
+        assert_eq!(
+            turns.len(),
+            1,
+            "the watcher must classify exactly one turn from the live session log; got {turns:?}"
+        );
+        assert_eq!(turns[0].terminal, "completed");
+    }
 }
