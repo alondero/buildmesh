@@ -396,19 +396,26 @@ mod tests {
         //
         // Issue #1775 review: the wrapper reads the live process env, and
         // `cline_dir()` now honours `CLINE_DIR` — so the expectation must account
-        // for it, or a developer who exports the override sees a spurious
-        // failure. Rebuilt from raw env vars, independently of the resolver.
+        // for both that and the host branch, or a developer who exports the
+        // override (or runs `cargo test` in a WSL guest) sees a spurious failure.
+        // Rebuilt from raw env vars, independently of the resolver.
         let base = match std::env::var("CLINE_DIR")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         {
             Some(dir) => std::path::PathBuf::from(dir),
-            None => std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"))
-                .join(".cline"),
+            None => match current_env() {
+                Environment::Wsl => std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
+                    .join(".cline"),
+                Environment::Windows => std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Users\Public"))
+                    .join(".cline"),
+            },
         };
         let path = cline_db_path_for_env(EnvType::Windows, "")
             .expect("windows home must resolve to a Cline DB path");
@@ -461,18 +468,28 @@ mod tests {
         use crate::env::cline_db_path_with_resolver;
         use crate::models::EnvType;
         // Inject the home as well: the resolver is hermetic (the native arm now
-        // reads the injected env, not the process env), so the expectation is
-        // built from the same injected values instead of the developer's machine.
-        let expected = std::path::PathBuf::from(r"C:\Users\dev")
-            .join(".cline")
-            .join("data")
-            .join("db")
-            .join("sessions.db");
+        // reads the injected env, not the process env).
+        //
+        // That arm keys the home off the **host** (`current_env()`), not the
+        // spawn target, so inject *both* home variables and branch the
+        // expectation on the host. Injecting only `USERPROFILE` would silently
+        // couple this test to the host being Windows: under `cargo test` inside
+        // a WSL guest `detect()` returns `Wsl`, the arm reads `HOME` — which the
+        // closure would answer with `None` — and the assertion fails.
+        let expected = match current_env() {
+            Environment::Wsl => std::path::PathBuf::from("/home/dev"),
+            Environment::Windows => std::path::PathBuf::from(r"C:\Users\dev"),
+        }
+        .join(".cline")
+        .join("data")
+        .join("db")
+        .join("sessions.db");
         for empty_value in ["", " ", "\t", "  \t "] {
             let injected: std::ffi::OsString = empty_value.into();
             let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| match key {
                 "CLINE_DATA_DIR" => Some(injected.clone()),
                 "USERPROFILE" => Some(r"C:\Users\dev".into()),
+                "HOME" => Some("/home/dev".into()),
                 _ => None,
             })
             .expect("default path must resolve when override is empty");
@@ -492,15 +509,22 @@ mod tests {
     fn cline_db_path_ignores_unrelated_env_vars() {
         use crate::env::cline_db_path_with_resolver;
         use crate::models::EnvType;
-        // Hermetic: inject the home, and assert the unrelated var is ignored.
-        let expected = std::path::PathBuf::from(r"C:\Users\dev")
-            .join(".cline")
-            .join("data")
-            .join("db")
-            .join("sessions.db");
+        // Hermetic *and* host-independent: inject both home variables and branch
+        // the expectation on the host, so the unrelated-var assertion holds under
+        // `cargo test` in a WSL guest as well as on Windows/native Linux (see the
+        // note in the test above).
+        let expected = match current_env() {
+            Environment::Wsl => std::path::PathBuf::from("/home/dev"),
+            Environment::Windows => std::path::PathBuf::from(r"C:\Users\dev"),
+        }
+        .join(".cline")
+        .join("data")
+        .join("db")
+        .join("sessions.db");
         let path = cline_db_path_with_resolver(EnvType::Windows, "", |key| match key {
             "SOME_OTHER_VAR" => Some("/totally/different/path".into()),
             "USERPROFILE" => Some(r"C:\Users\dev".into()),
+            "HOME" => Some("/home/dev".into()),
             _ => None,
         })
         .expect("default path must resolve when CLINE_DATA_DIR is unset");
