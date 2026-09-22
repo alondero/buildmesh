@@ -125,14 +125,19 @@ const CLINE_PROVISIONED_HOOKS: &[&str] = &["TaskComplete", "SessionShutdown"];
 ///
 /// The URL uses the literal `127.0.0.1`, not `localhost`: the attention server
 /// binds IPv4 loopback explicitly, and a numeric literal keeps the callback off
-/// DNS/`::1` resolution on the hook's hot path.
+/// DNS/`::1` resolution on the hook's hot path. `--noproxy '*'` is the POSIX
+/// mirror of the PowerShell path's disabled default proxy — curl has no
+/// built-in loopback exemption, so without it a user's `http_proxy` would send
+/// the loopback POST to the corporate proxy and the delivery would fail
+/// silently (`|| true`).
 const CLINE_HOOK_SCRIPT_SH: &str = r#"#!/usr/bin/env bash
 # Buildmesh Cline attention hook. Marker: BUILDMESH_CLINE_ATTENTION_HOOK
 # Managed by Buildmesh — edits are overwritten on the next spawn.
-# 127.0.0.1 (not localhost) keeps the callback off DNS/IPv6 resolution.
+# 127.0.0.1 (not localhost) + --noproxy '*' keep the callback off DNS/IPv6
+# resolution and off any machine-configured HTTP proxy.
 payload=$(cat)
 if [ -n "$BUILDMESH_PORT" ] && [ -n "$BUILDMESH_SESSION_ID" ]; then
-  printf '%s' "$payload" | curl -sf --connect-timeout 1 --max-time 2 -o /dev/null \
+  printf '%s' "$payload" | curl -sf --noproxy '*' --connect-timeout 1 --max-time 2 -o /dev/null \
     -X POST -H "Content-Type: application/json" --data-binary @- \
     "http://127.0.0.1:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID" || true
 fi
@@ -257,6 +262,14 @@ fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
 /// Inner provisioner, split out so the "no home resolvable" branch is testable
 /// without the spawn-path contract. Returns `Ok(())` with no side effects when
 /// `hooks_root` is `None`.
+///
+/// Each event is provisioned independently: a file we refuse to clobber for
+/// one event (a user-authored hook at that exact name) must not suppress the
+/// other signal — the two hooks are unrelated, and losing the session-exit
+/// callback because the turn-completion file is occupied would be gratuitous.
+/// Every failure is logged; the first is returned so the spawn path can mark
+/// the node `SignalHealth::Unavailable` (which a later successful callback
+/// clears).
 fn provision_at(
     hooks_root: Option<&Path>,
     env_type: EnvType,
@@ -272,10 +285,18 @@ fn provision_at(
         .map_err(|error| format!("failed to create Cline hooks dir {root:?}: {error}"))?;
     let script = hook_script(env_type);
     let extension = hook_extension(env_type);
+    let mut first_error: Option<String> = None;
     for event in CLINE_PROVISIONED_HOOKS {
-        ensure_hook_file(&root.join(format!("{event}.{extension}")), script)?;
+        let path = root.join(format!("{event}.{extension}"));
+        if let Err(error) = ensure_hook_file(&path, script) {
+            tracing::warn!("cline provision_attention_hooks: {error}");
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Off-`PATH` install candidates for Cline, in the documented resolver order:
@@ -953,6 +974,13 @@ mod tests {
 
     /// The extension Cline will execute. Pinned so a refactor cannot silently
     /// switch Windows to a script PowerShell cannot run (or vice versa).
+    ///
+    /// The first assertion is not Windows-only: `runtime_for_spawn_path`
+    /// reports `EnvType::Windows` for a *native* path even on a macOS/Linux
+    /// host (the enum tracks Windows-ness, not the host OS), so the host OS and
+    /// `env_type` must agree before we write a `.ps1`. On a Unix host this
+    /// asserts `"sh"` for `EnvType::Windows` — the exact case a bare
+    /// `env_type` check would get wrong.
     #[test]
     fn hook_extension_matches_host_platform() {
         let expected_win = if cfg!(target_os = "windows") { "ps1" } else { "sh" };
@@ -971,6 +999,15 @@ mod tests {
             !CLINE_HOOK_SCRIPT_SH.contains("Invoke-WebRequest")
                 && !CLINE_HOOK_SCRIPT_PS1.contains("curl"),
             "each script must use its own platform's fetch primitive"
+        );
+        assert!(
+            CLINE_HOOK_SCRIPT_SH.contains("--noproxy"),
+            "the POSIX hook must bypass any configured HTTP proxy explicitly; \
+             without it a user's http_proxy would swallow the loopback callback"
+        );
+        assert!(
+            CLINE_HOOK_SCRIPT_PS1.contains("DefaultWebProxy"),
+            "the Windows hook must disable the machine proxy explicitly"
         );
     }
 
@@ -1029,14 +1066,32 @@ mod tests {
 
         let ours = hooks.join(format!("TaskComplete.{extension}"));
         let first = std::fs::read_to_string(&ours).unwrap();
+        let ours_before = std::fs::metadata(&ours).unwrap().modified().unwrap();
+        let sibling_before = std::fs::metadata(&sibling).unwrap().modified().unwrap();
 
-        // Re-provisioning with identical content is a no-op (no rewrite).
+        // Exceed any coarse filesystem timestamp granularity so a rewrite is
+        // observable through mtime, not merely through content equality.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        // Re-provisioning with identical content is a no-op: the file is not
+        // rewritten (mtime unchanged — the issue #886 idempotency invariant),
+        // and the sibling user hook is untouched.
         provision_test_home(home.path(), EnvType::Windows);
         assert_eq!(std::fs::read_to_string(&ours).unwrap(), first);
+        assert_eq!(
+            std::fs::metadata(&ours).unwrap().modified().unwrap(),
+            ours_before,
+            "an unchanged hook must not be rewritten (mtime must not bump)"
+        );
         assert_eq!(
             std::fs::read_to_string(&sibling).unwrap(),
             "console.log('user hook');",
             "a sibling user hook must not be touched"
+        );
+        assert_eq!(
+            std::fs::metadata(&sibling).unwrap().modified().unwrap(),
+            sibling_before,
+            "a sibling user hook must not be rewritten"
         );
     }
 
@@ -1071,6 +1126,15 @@ mod tests {
             "#!/bin/sh\necho mine\n",
             "the user's file must survive intact"
         );
+        // The other event is provisioned regardless: one occupied file must not
+        // suppress the session-exit signal.
+        let other = hooks.join(format!("SessionShutdown.{extension}"));
+        let other_body = std::fs::read_to_string(&other)
+            .unwrap_or_else(|error| panic!("{other:?} must still be written: {error}"));
+        assert!(
+            other_body.contains(CLINE_HOOK_MARKER),
+            "SessionShutdown must be provisioned even when TaskComplete is occupied"
+        );
     }
 
     #[test]
@@ -1099,7 +1163,9 @@ mod tests {
     /// loopback listener with `BUILDMESH_*` in its environment and assert it
     /// POSTs the stdin payload to `/api/attention/<node>` and prints `{}`.
     /// This is the evidence that the env-expanded (non-baked) URL actually
-    /// reaches the route.
+    /// reaches the route. The child env carries a dead proxy and no `NO_PROXY`,
+    /// so the test also proves the hook bypasses a configured proxy on its own
+    /// (the POSIX `--noproxy '*'` / PowerShell `DefaultWebProxy = null`).
     #[test]
     fn provisioned_hook_posts_stdin_to_the_attention_route() {
         use std::io::{Read, Write};
@@ -1183,8 +1249,18 @@ mod tests {
         invocation
             .env("BUILDMESH_PORT", port.to_string())
             .env("BUILDMESH_SESSION_ID", "741")
-            .env("NO_PROXY", "localhost,127.0.0.1")
-            .env("no_proxy", "localhost,127.0.0.1")
+            // Point every proxy variable at a dead loopback port and clear any
+            // inherited NO_PROXY: the hook must bypass the proxy itself
+            // (`--noproxy '*'` / `DefaultWebProxy = null`) rather than relying
+            // on the environment to exempt loopback. A hook that honoured the
+            // proxy would fail here instead of silently dropping the callback.
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
             .stdin(std::process::Stdio::from(input));
         let output = crate::process_util::run_command_with_timeout(
             invocation,
