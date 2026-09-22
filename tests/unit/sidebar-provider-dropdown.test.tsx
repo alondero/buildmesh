@@ -126,12 +126,12 @@ describe('ProviderDropdown', () => {
     });
   });
 
-  it('renders a harness-grouped menu (issue #575) with no "Legacy" header', () => {
+  it('renders harness parents without flat routes, even when there are no recipes', () => {
     // The legacy enum rows and their "Legacy" header were retired in
     // #538. Issue #575 reframes the list as a harness-grouped Spawn
     // Menu: each harness gets a clickable header (`<button
-    // data-spawn-harness=...>`), and Proxied children render indented
-    // inside the same group.
+    // data-spawn-harness=...>`). Direct routes remain in the provider
+    // list for selectors but do not become flat spawn choices.
     const profiles: SpawnOption[] = [
       { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
       { id: 'claude:minimax', label: 'MiniMax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
@@ -140,14 +140,12 @@ describe('ProviderDropdown', () => {
     ];
     render(<ProviderDropdown dropdownKey="mesh-1" providers={profiles} onSelect={() => {}} />);
     expect(screen.queryByText('Legacy')).toBeNull();
-    // Issue #814 — 4 menuitems: 3 native headers + 1 proxied child.
-    expect(screen.getAllByRole('menuitem')).toHaveLength(4);
+    expect(screen.getAllByRole('menuitem')).toHaveLength(3);
     expect(screen.getByRole('menuitem', { name: /Claude Code/ })).toBeTruthy();
     // The harness headers carry the `data-spawn-harness` attribute so a
     // future test (or e2e) can target them directly.
     expect(screen.getByRole('menuitem', { name: /Claude Code/ }).getAttribute('data-spawn-harness')).toBe('claude');
-    // The Proxied child renders the label, not a "harness" badge.
-    expect(screen.getByRole('menuitem', { name: /^MiniMax$/ })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: /^MiniMax$/ })).toBeNull();
   });
 
   describe('Escape forwards through to GroupedProviderMenu (issue #814)', () => {
@@ -174,13 +172,9 @@ describe('ProviderDropdown', () => {
     });
   });
 
-  // Issue #837 — the viewport-clamp assertions were moved to the
-  // `useViewportClamp` hook tests (`tests/unit/use-viewport-clamp.test.tsx`).
-  // The hook tests pin the apply/no-apply, the `rect.top - MARGIN` cap,
-  // the custom-margin option, and the cleanup behaviour. ProviderDropdown
-  // here just consumes the hook; the smoke below proves the hook is wired
-  // in (a regression that swapped the hook for a no-op would flip this).
-  it('wires the useViewportClamp hook in (smoke: overflow rect produces a translateY transform)', () => {
+  // The shared clamp hook keeps the dropdown in the viewport when its
+  // trigger is near the bottom edge.
+  it('wires the viewport clamp hook for an overflowing dropdown', () => {
     const rectSpy = vi
       .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
       .mockReturnValue({

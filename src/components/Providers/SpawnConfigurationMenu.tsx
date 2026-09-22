@@ -2,14 +2,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
-import { deleteSpawnConfiguration, getLaunchTargets, listSpawnConfigurations, saveSpawnConfiguration } from '../../lib/tauri/provider';
+import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, saveSpawnConfiguration } from '../../lib/tauri/provider';
 import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 
-export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onClose, onDismiss, onEditingChange }: {
+function belongsToHarness(configuration: SpawnConfiguration, harnessId: string): boolean {
+  return (configuration.harness_id ?? configuration.spawn_option_id.split(':')[0]) === harnessId;
+}
+
+export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
   anchor: HTMLElement;
   keyboard: boolean;
+  configurationRows: SpawnOption[];
   onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
   onClose: () => void;
   onDismiss: () => void;
@@ -18,15 +23,19 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
   const [configurations, setConfigurations] = useState<SpawnConfiguration[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [targetError, setTargetError] = useState<string | null>(null);
   const [draft, setDraft] = useState<SpawnConfiguration | null>(option.configuration ?? null);
   const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
+  const draftSession = useRef(0);
   const [position, setPosition] = useState({ left: 0, top: 0 });
+  const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
+  const mounted = useRef(false);
   const caps = option.capabilities;
   const effort = caps?.effort_control;
-  const allowed = effort && effort.kind !== 'none' ? effort.allowed : [];
+  const allowedEfforts = effort && effort.kind !== 'none' ? effort.allowed : [];
 
   useEffect(() => {
     onEditingChange(draft !== null);
@@ -34,19 +43,32 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
   }, [draft, onEditingChange]);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    setUnavailableById(new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
+  }, [configurationRows]);
+
+  useEffect(() => {
     let current = true;
-    if (option.configuration) {
-      getLaunchTargets().then((values) => { if (current) { setTargets(values); setLoaded(true); } })
-        .catch((e: unknown) => { if (current) setError(String(e)); });
-      return () => { current = false; };
-    }
     listSpawnConfigurations().then((values) => {
       if (!current) return;
-      setConfigurations(values.filter((v) => v.spawn_option_id === option.id));
+      setConfigurations(values.filter((value) => belongsToHarness(value, option.harness_id)));
       setLoaded(true);
     }).catch((e: unknown) => { if (current) setError(String(e)); });
     return () => { current = false; };
-  }, [option.id, option.configuration]);
+  }, [option.id, option.harness_id, option.configuration]);
+
+  useEffect(() => {
+    if (!draft?.id && !option.configuration) return;
+    let current = true;
+    setTargetError(null);
+    getLaunchTargets().then((values) => { if (current) { setTargets(values); setTargetError(null); } })
+      .catch((e: unknown) => { if (current) setTargetError(String(e)); });
+    return () => { current = false; };
+  }, [draft?.id, option.configuration]);
 
   useLayoutEffect(() => {
     // The top layer escapes animated/scrolling ancestors while the DOM stays
@@ -69,7 +91,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [anchor, draft, configurations, error, loaded]);
+  }, [anchor, draft, configurations, error, targetError, targets, loaded]);
 
   useEffect(() => {
     if (keyboard) panel.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
@@ -85,36 +107,65 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
   }, [draft]);
 
   const close = () => { onClose(); anchor.focus({ preventScroll: true }); };
-  const save = async () => {
-    if (!draft || busy) return;
-    setBusy(true);
+  const openDraft = (value: SpawnConfiguration) => {
+    draftSession.current += 1;
+    setDraft(value);
+  };
+  const cancelDraft = () => {
+    draftSession.current += 1;
+    setDraft(null);
+    setBusy(false);
     setError(null);
+  };
+  const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
+    setConfigurations((previous) => {
+      const index = previous.findIndex((entry) => entry.id === saved.id);
+      if (harnessId !== option.harness_id) return previous.filter((entry) => entry.id !== saved.id);
+      if (index < 0) return [...previous, saved];
+      const next = [...previous];
+      next[index] = saved;
+      return next;
+    });
+  };
+  const refreshAvailability = async (saved: SpawnConfiguration, session: number) => {
     try {
-      const saved = await saveSpawnConfiguration(draft);
-      setConfigurations((prev) => {
-        const index = prev.findIndex((v) => v.id === saved.id);
-        if (index < 0) return [...prev, saved];
-        const next = [...prev];
-        next[index] = saved;
+      const savedRow = (await listProviders()).find((row) => row.id === saved.id);
+      if (!mounted.current) return;
+      replaceConfiguration(saved, savedRow?.harness_id);
+      setUnavailableById((previous) => {
+        const next = new Map(previous);
+        if (savedRow) next.set(saved.id, savedRow.unavailable_reason);
+        else next.delete(saved.id);
         return next;
       });
-      setDraft(null);
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
+    } catch (e) {
+      if (mounted.current && draftSession.current === session) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
+    }
   };
-  const remove = async () => {
-    if (!draft?.id || busy) return;
+  const persistConfiguration = async (value: SpawnConfiguration) => {
+    const session = draftSession.current;
+    const saved = await saveSpawnConfiguration(value);
+    if (!mounted.current) return;
+    replaceConfiguration(saved, saved.harness_id ?? saved.spawn_option_id.split(':')[0]);
+    await refreshAvailability(saved, session);
+    if (mounted.current && draftSession.current === session) setDraft(null);
+  };
+  const save = async () => {
+    if (!draft || busy) return;
+    const session = draftSession.current;
     setBusy(true);
     setError(null);
     try {
-      await deleteSpawnConfiguration(draft.id);
-      setConfigurations((prev) => prev.filter((v) => v.id !== draft.id));
-      setDraft(null);
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
+      await persistConfiguration(draft);
+    } catch (e) {
+      if (draftSession.current === session) setError(String(e));
+    } finally {
+      if (draftSession.current === session) setBusy(false);
+    }
   };
   const fieldClass = 'w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary';
   const menuClass = 'w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
+  const mutedMenuClass = 'w-full px-3 py-2 text-left text-sm text-text-muted';
   const menuEntries = [
     { id: 'defaults', kind: 'spawn' as const },
     ...configurations.flatMap((value) => [
@@ -158,7 +209,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
         e.stopPropagation();
         if (e.key === 'Escape' || (!draft && e.key === 'ArrowLeft')) {
           e.preventDefault();
-          if (!busy) { if (draft && !option.configuration) setDraft(null); else close(); }
+          if (draft && !option.configuration) cancelDraft(); else close();
         }
         if (draft) return;
         const items = Array.from(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
@@ -173,11 +224,23 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
         }
       }}
     >
-      {draft && option.configuration ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={close}
-        onSave={async (value) => { await saveSpawnConfiguration(value); onDismiss(); }}
-        onDelete={async () => { await deleteSpawnConfiguration(draft.id); onDismiss(); }} /> : draft ? (
+      {draft?.id ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? () => { cancelDraft(); close(); } : cancelDraft}
+        onSave={persistConfiguration}
+        onDelete={async () => {
+          const session = draftSession.current;
+          const deletedId = draft.id;
+          await deleteSpawnConfiguration(deletedId);
+          if (!mounted.current) return;
+          setConfigurations((previous) => previous.filter((entry) => entry.id !== deletedId));
+          setUnavailableById((previous) => {
+            const next = new Map(previous);
+            next.delete(deletedId);
+            return next;
+          });
+          if (draftSession.current === session) cancelDraft();
+        }} /> : draft ? (
         <form className="space-y-3 p-3" aria-label="Edit spawn configuration" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-          <p className="text-sm font-medium text-text-primary">{draft.id ? 'Edit configuration' : 'New configuration'}</p>
+          <p className="text-sm font-medium text-text-primary">New configuration</p>
           <p className="text-xs text-text-muted">{option.label}. Unset fields inherit current defaults.</p>
           <fieldset disabled={busy} className="space-y-3">
             <label className="block text-xs text-text-secondary">Name
@@ -186,10 +249,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
             {caps?.supports_model_override && <label className="block text-xs text-text-secondary">Model
               <input value={draft.model ?? ''} placeholder="Default" onChange={(e) => setDraft({ ...draft, model: e.target.value || null })} className={fieldClass} />
             </label>}
-            {allowed.length > 0 && <label className="block text-xs text-text-secondary">Effort
+            {allowedEfforts.length > 0 && <label className="block text-xs text-text-secondary">Effort
               <select aria-label="Effort" value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })} className={fieldClass}>
                 <option value="">Default</option>
-                {allowed.map((value) => <option key={value} value={value}>{value}</option>)}
+                {allowedEfforts.map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
             </label>}
             {caps?.supports_extra_args && <label className="block text-xs text-text-secondary">Extra arguments
@@ -197,8 +260,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
             </label>}
             <div className="flex gap-3 text-sm text-text-primary">
               <button type="submit" disabled={!draft.name.trim()}>Save</button>
-              <button type="button" onClick={() => setDraft(null)}>Cancel</button>
-              {draft.id && <button type="button" onClick={() => void remove()}>Delete</button>}
+              <button type="button" onClick={cancelDraft}>Cancel</button>
             </div>
           </fieldset>
         </form>
@@ -207,14 +269,21 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, onSelect, onC
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">No saved configurations</p>}
-          {configurations.map((value) => <div key={value.id} role="presentation" className="flex">
-            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1} className={`${menuClass} min-w-0 flex-1 break-words`} onClick={(e) => onSelect(option.id, e.altKey, value.id)}>{value.name}</button>
-            <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
-          </div>)}
-          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={menuClass} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
+          {configurations.map((value) => {
+            const unavailable = unavailableById.get(value.id);
+            return <div key={value.id} role="presentation" className="flex">
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
+                aria-disabled={Boolean(unavailable)} title={unavailable ?? undefined}
+                className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
+                {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
+              </button>
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => openDraft(value)}>Edit</button>
+            </div>;
+          })}
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => openDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
         </div>
       )}
-      {error && <p role="alert" className="p-3 text-xs text-status-error">{error}</p>}
+      {(error || (draft && targetError)) && <p role="alert" className="p-3 text-xs text-status-error">{error ?? targetError}</p>}
     </div>,
     anchor.closest('[role="dialog"]') ?? document.body,
   );

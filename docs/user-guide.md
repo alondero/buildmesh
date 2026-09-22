@@ -32,8 +32,11 @@ Buildmesh so the detection cache is refreshed.
 
 The two columns are independent: a detected harness can run with its own
 login, while a compatible provider profile can supply routing or usage data.
-If a CLI is installed in both Windows and WSL, Buildmesh presents separate
-runtime entries; configure credentials in the runtime you select.
+On Windows, the spawn menu offers Windows-capable harnesses only from a native
+installation; a WSL-only installation is not substituted when that native CLI
+is absent. A WSL entry is offered only for a harness without Windows support.
+Saved WSL recipes for Windows-capable harnesses remain stored but do not appear
+in spawn menus. Configure credentials in the runtime you use.
 
 A provider that isn't signed in right now keeps showing its last known usage for
 up to seven days, marked **Last known value · …** on the Usage tab — so a fresh
@@ -45,8 +48,9 @@ yet, its meter stays hidden.
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).
 2. Install at least one supported agent CLI on the runtime where it will run.
-   Native Windows and WSL installations are detected separately. Sign in to
-   that CLI or configure its API key according to the CLI's own documentation.
+   Native Windows and WSL installations are detected separately, but the spawn
+   menu offers WSL only for harnesses without native Windows support. Sign in
+   to that CLI or configure its API key according to the CLI's own documentation.
 3. Create or open a Mesh for the repository you want to work on. Confirm that
    Git can read the repository and that the base branch/ref is the one you
    expect.
@@ -85,7 +89,8 @@ accessible. Grouping does not combine nodes from different Meshes.
 
 ## Harnesses and capabilities
 
-The Spawn Menu lists detected harnesses and any compatible proxied providers.
+The Spawn Menu lists detected harnesses. Each harness's configurations submenu
+contains its saved native and compatible proxied provider recipes.
 The current built-in catalog is:
 
 | Harness | Resume after restart | Attention signal | Notes |
@@ -147,7 +152,10 @@ and model-tier overrides; **Providers** continues to own credentials and billing
 Adding or enabling a known provider creates compatible routes and generated
 configurations. Saving an edit makes a generated configuration user-owned;
 **Clone** creates an independent recipe. Deleted configurations are not recreated
-automatically. Native and proxied recipes share the harness-grouped spawn menu.
+automatically. In the desktop spawn menu, choose a harness directly for its
+defaults or open its configurations submenu for a named recipe, including
+provider routes such as MiniMax via Claude Code. Mobile groups the same recipes
+under each harness.
 Unavailable entries explain whether a harness, key, route, or verification needs
 attention. Codex proxy routes still require verification for their exact model
 and runtime before launch.

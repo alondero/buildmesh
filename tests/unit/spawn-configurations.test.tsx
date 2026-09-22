@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
 import type { SpawnOption } from '../../src/lib/groups';
@@ -6,8 +6,11 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listSpawnConfigurations: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
+  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
 }));
+
+const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
+  models: [], efforts: ['low', 'high', 'max'], manual_model: true, supports_model: true, supports_extra_args: true };
 
 const option: SpawnOption = {
   id: 'codex', label: 'Codex', harness_id: 'codex', provider_id: null,
@@ -26,10 +29,14 @@ const option: SpawnOption = {
 const saved: SpawnConfiguration = {
   id: 'sol', name: 'Sol Max', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: 'max', extra_args: null,
 };
+const savedRow = { ...option, id: saved.id, label: saved.name, configuration: saved };
+const claudeTarget = { ...target, id: 'claude', harness_id: 'claude', harness_name: 'Claude Code' };
 afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.listProviders).mockResolvedValue([option, savedRow]);
   vi.mocked(api.listSpawnConfigurations).mockResolvedValue([saved]);
+  vi.mocked(api.getLaunchTargets).mockResolvedValue([target]);
 });
 
 describe('Spawn configurations', () => {
@@ -53,14 +60,16 @@ describe('Spawn configurations', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Sol' } });
     fireEvent.keyDown(screen.getByLabelText('Name'), { key: 'Tab' });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5.6-sol' } });
+    fireEvent.change(await screen.findByLabelText('Model'), { target: { value: 'gpt-5.6-sol' } });
     expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default', 'low', 'high', 'max']);
     const cancel = screen.getByRole('button', { name: 'Cancel' });
     fireEvent.focus(cancel);
     fireEvent.keyDown(cancel, { key: 'Tab' });
     expect(document.activeElement).toBe(screen.getByLabelText('Name'));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await screen.findByRole('menuitem', { name: 'Sol' });
+    expect(await screen.findByRole('menuitem', { name: 'Sol' })).toBeTruthy();
+    expect(screen.getByTestId('spawn-configurations')).toBeTruthy();
+    expect(api.saveSpawnConfiguration).toHaveBeenCalled();
     expect(api.saveSpawnConfiguration).toHaveBeenCalledWith({
       id: '', name: 'Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null,
     });
@@ -110,15 +119,129 @@ describe('Spawn configurations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect((await screen.findByRole('alert')).textContent).toContain('disk full');
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Renamed');
     vi.mocked(api.deleteSpawnConfiguration).mockRejectedValueOnce(new Error('delete failed')).mockResolvedValueOnce();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('delete failed'));
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete Launch Configuration?' })).getByRole('button', { name: 'Delete' }));
     await screen.findByText('No saved configurations');
     expect(api.deleteSpawnConfiguration).toHaveBeenCalledWith('sol');
+  });
+
+  it('removes a saved recipe from its old submenu when its harness changes', async () => {
+    const moved = { ...saved, spawn_option_id: 'claude', harness_id: 'claude' };
+    const movedRow = { ...option, id: saved.id, label: saved.name, harness_id: 'claude', group_key: 'claude', configuration: moved };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([target, claudeTarget]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(moved);
+    vi.mocked(api.listProviders).mockResolvedValue([option, movedRow]);
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Claude Code' });
+    fireEvent.change(screen.getByLabelText('Harness'), { target: { value: 'claude' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
+    expect(api.listProviders).toHaveBeenCalled();
+    await screen.findByText('No saved configurations');
+    expect(screen.queryByRole('menuitem', { name: 'Sol Max' })).toBeNull();
+    expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({ spawn_option_id: 'claude' }));
+  });
+
+  it('refreshes recipe availability after an edit', async () => {
+    const unavailableRow = { ...savedRow, unavailable_reason: 'Harness is unavailable' };
+    const refreshedRow = { ...savedRow, unavailable_reason: undefined };
+    vi.mocked(api.listProviders).mockResolvedValue([option, refreshedRow]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue(saved);
+    render(<GroupedProviderMenu providers={[option, unavailableRow]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    await screen.findByLabelText('Edit Sol Max');
+    const recipe = screen.getByText('Sol Max').closest('button[role="menuitem"]')!;
+    expect(recipe.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Codex' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await screen.findByLabelText('Edit Sol Max');
+    expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false');
+  });
+
+  it('tracks provider availability changes while the submenu stays open', async () => {
+    const unavailableRow = { ...savedRow, unavailable_reason: 'Harness is unavailable' };
+    const refreshedRow = { ...savedRow, unavailable_reason: undefined };
+    const { rerender } = render(<GroupedProviderMenu providers={[option, unavailableRow]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const recipe = await screen.findByText('Sol Max');
+    expect(recipe.closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('true');
+
+    rerender(<GroupedProviderMenu providers={[option, refreshedRow]} onSelect={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false'));
+  });
+
+  it('does not let a pending save close a newer draft after Escape', async () => {
+    let resolveSave!: (value: SpawnConfiguration) => void;
+    vi.mocked(api.saveSpawnConfiguration).mockReturnValueOnce(new Promise((resolve) => { resolveSave = resolve; }));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Codex' });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Older edit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
+
+    fireEvent.keyDown(screen.getByLabelText('Name'), { key: 'Escape' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep this draft' } });
+
+    await act(async () => {
+      resolveSave({ ...saved, name: 'Older edit' });
+      await Promise.resolve();
+    });
+
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Keep this draft');
+    expect(screen.getByLabelText('Edit spawn configuration')).toBeTruthy();
+  });
+
+  it('reports launch-target load failures while editing a saved recipe', async () => {
+    vi.mocked(api.getLaunchTargets).mockRejectedValueOnce(new Error('targets unavailable'));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('targets unavailable');
+    expect(screen.getByLabelText('Name')).toBeTruthy();
+  });
+
+  it('ignores a launch-target response after its editor is cancelled and reopened', async () => {
+    let resolveFirst!: (value: typeof target[]) => void;
+    let resolveSecond!: (value: typeof target[]) => void;
+    vi.mocked(api.getLaunchTargets)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+
+    await act(async () => {
+      resolveSecond([target, claudeTarget]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveFirst([{ ...target, id: 'ghost', harness_id: 'ghost', harness_name: 'Ghost Harness' }]);
+      await Promise.resolve();
+    });
+
+    const harnesses = screen.getByLabelText('Harness') as HTMLSelectElement;
+    expect(Array.from(harnesses.options).map((entry) => entry.value)).toContain('claude');
+    expect(Array.from(harnesses.options).map((entry) => entry.value)).not.toContain('ghost');
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
@@ -132,18 +255,18 @@ describe('Spawn configurations', () => {
     expect(screen.queryByLabelText('Extra arguments')).toBeNull();
   });
 
-  it('ignores an old response after switching Spawn Options and returns keyboard focus to the parent', async () => {
+  it('ignores an old response after switching harnesses and returns keyboard focus to the parent', async () => {
     let resolveOld!: (value: SpawnConfiguration[]) => void;
     vi.mocked(api.listSpawnConfigurations).mockReturnValueOnce(new Promise((r) => { resolveOld = r; })).mockResolvedValueOnce([]);
-    const second = { ...option, id: 'codex:openrouter', label: 'OpenRouter', provider_id: 'openrouter', is_proxied: true };
+    const second = { ...option, id: 'claude', harness_id: 'claude', group_key: 'claude', label: 'Claude Code' };
     render(<GroupedProviderMenu providers={[option, second]} onSelect={vi.fn()} />);
     fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Codex', exact: true }), { key: 'ArrowRight' });
-    const parent = screen.getByRole('menuitem', { name: 'OpenRouter' });
+    const parent = screen.getByRole('menuitem', { name: 'Claude Code' });
     fireEvent.mouseEnter(parent);
     await screen.findByText('No saved configurations');
     resolveOld([saved]);
     expect(screen.queryByText('Sol Max')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter configurations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Claude Code configurations', exact: true }));
     fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Spawn with defaults' }), { key: 'ArrowLeft' });
     expect(document.activeElement).toBe(parent);
     expect(screen.queryByTestId('spawn-configurations')).toBeNull();

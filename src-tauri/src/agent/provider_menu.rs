@@ -199,23 +199,33 @@ pub(super) fn compose_provider_menu(
     accounts: Vec<crate::preferences::ProviderAccount>,
     pairings: Vec<crate::preferences::ProviderPairing>,
     host: Platform,
+    distro: Option<&str>,
     order: &[String],
     proxied_order: &[crate::preferences::ProxiedProviderOrder],
 ) -> Vec<ProviderInfo> {
-    let profiles = crate::agent::detection::preferred_profiles(&profiles, host, None);
-    let mut rows: Vec<ProviderInfo> = profiles
+    let menu_profiles = profiles.iter().filter(|profile| crate::agent::detection::visible_in_spawn_menu(profile, host))
+        .cloned().collect::<Vec<_>>();
+    let visible_profiles = crate::agent::detection::preferred_profiles(&menu_profiles, host, distro);
+    let mut rows: Vec<ProviderInfo> = visible_profiles
         .iter()
         .filter_map(|profile| provider_info_for(profile, host))
         .collect();
     // The Claude Code harness header the derived default pairings group under
     // (shared rule — see `preferences::claude_harness_id_from`).
-    let _claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
+    let _claude_harness_id = crate::preferences::claude_harness_id_from(&visible_profiles);
     let effective = crate::preferences::effective_pairings(&accounts, &pairings);
     for pairing in &effective {
+        let hidden_wsl = if let Some(profile) = profiles.iter().find(|profile| profile.id == pairing.harness_id) {
+            !crate::agent::detection::visible_in_spawn_menu(profile, host)
+        } else {
+            host == Platform::Windows && crate::agent::detection::canonical_wsl_harness(&pairing.harness_id)
+                .is_some_and(|harness| crate::models::Provider::from_db_str(harness).adapter().available_on().contains(&host))
+        };
+        if hidden_wsl { continue; }
         let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
             continue;
         };
-        if let Some(info) = provider_info_for_pairing(pairing, account, &profiles, host) {
+        if let Some(info) = provider_info_for_pairing(pairing, account, &visible_profiles, host) {
             if !rows.iter().any(|r| r.id == info.id) {
                 rows.push(info);
             }
@@ -275,31 +285,41 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         })
         .collect();
     let profiles = crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles());
-    let profiles = crate::agent::detection::preferred_profiles(&profiles, Platform::current(),
-        if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None }.as_deref());
+    let distro = if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None };
     let menu = compose_provider_menu(
         profiles,
         accounts,
         pairings,
         Platform::current(),
+        distro.as_deref(),
         &crate::preferences::harness_order(),
         &crate::preferences::proxied_provider_order(),
     );
     let Ok(mut prefs) = crate::preferences::load() else { return menu; };
     crate::preferences::launch_configurations::reconcile(&mut prefs);
-    configuration_menu(menu, &prefs)
+    configuration_menu(menu, &prefs, Platform::current())
 }
 
-fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::AppPreferences) -> Vec<ProviderInfo> {
+// Keep the native harness rows as submenu parents. Route rows still serve
+// selectors that choose a provider directly; configuration rows carry launch
+// availability, including the reason a saved recipe cannot start.
+fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::AppPreferences, host: Platform) -> Vec<ProviderInfo> {
     let available = menu.iter().map(|row| row.id.clone()).collect::<std::collections::HashSet<_>>();
     for configuration in &prefs.spawn_configurations {
         let id = crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
+        let wsl_harness = crate::agent::detection::canonical_wsl_harness(id.harness_id());
         let fallback = crate::preferences::HarnessProfile {
             id: id.harness_id.clone(), name: id.harness_id.clone(),
-            harness: if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() },
-            runtime: None, wsl_distro: None, executable: None,
+            harness: wsl_harness.map(str::to_owned).unwrap_or_else(|| if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() }),
+            runtime: wsl_harness.map(|_| crate::models::EnvType::Wsl), wsl_distro: None, executable: None,
         };
         let profile = prefs.harness_profiles.iter().find(|p| p.id == id.harness_id()).unwrap_or(&fallback);
+        if !crate::agent::detection::visible_in_spawn_menu(profile, host) { continue; }
+        if !menu.iter().any(|row| row.id == id.harness_id()) {
+            let mut header = profile_row(profile);
+            header.unavailable_reason = Some("Harness is unavailable; install and enable it".into());
+            menu.push(header);
+        }
         let mut row = menu.iter().find(|r| r.id == configuration.spawn_option_id).cloned()
             .unwrap_or_else(|| profile_row(profile));
         row.id = configuration.id.clone();
@@ -317,7 +337,6 @@ fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::A
         }
         menu.push(row);
     }
-    menu.retain(|row| row.configuration.is_some());
     order_proxied_children(order_providers(menu, &prefs.harness_order), &prefs.proxied_provider_order)
 }
 
@@ -507,6 +526,78 @@ mod tests {
             configuration: None,
             unavailable_reason: None,
         }
+    }
+
+    #[test]
+    fn launch_configurations_keep_harness_parents_for_spawn_submenus() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.spawn_configurations = vec![
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/codex-sol".into(), name: "Sol".into(),
+                spawn_option_id: "codex".into(), ..Default::default()
+            },
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude:minimax".into(), name: "MiniMax".into(),
+                spawn_option_id: "claude:minimax".into(), ..Default::default()
+            },
+        ];
+        let menu = configuration_menu(vec![row_native("claude"), row_proxied("claude", "minimax"), row_native("codex")], &prefs, Platform::Windows);
+        let ids: Vec<_> = menu.iter().map(|row| row.id.as_str()).collect();
+        assert!(ids.contains(&"claude"), "Claude Code must remain a submenu parent: {ids:?}");
+        assert!(ids.contains(&"codex"), "Codex must remain a submenu parent: {ids:?}");
+        assert!(ids.contains(&"launch/codex-sol"));
+        assert!(ids.contains(&"launch/claude:minimax"));
+
+        let unavailable = configuration_menu(Vec::new(), &prefs, Platform::Windows);
+        let codex = unavailable.iter().find(|row| row.id == "codex").expect("saved Codex recipe keeps an unavailable harness parent");
+        assert!(codex.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn windows_spawn_menu_omits_saved_wsl_configuration_for_windows_harness() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.harness_profiles.push(crate::preferences::HarnessProfile {
+            id: "codex-wsl-test".into(), name: "Codex (WSL: Test)".into(), harness: "codex".into(),
+            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Test".into()), executable: None,
+        });
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/codex-wsl-test".into(), name: "Codex (WSL: Test)".into(),
+            spawn_option_id: "codex-wsl-test".into(), ..Default::default()
+        });
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/claude-wsl-old".into(), name: "Claude Code (WSL: Old)".into(),
+            spawn_option_id: "claude-wsl-old".into(), ..Default::default()
+        });
+        let menu = configuration_menu(vec![row_native("codex")], &prefs, Platform::Windows);
+        assert_eq!(menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["codex"]);
+    }
+
+    #[test]
+    fn windows_spawn_menu_omits_routes_for_hidden_wsl_profiles() {
+        let mut wsl = profile("claude-wsl-test", "anthropic");
+        wsl.runtime = Some(crate::models::EnvType::Wsl);
+        let mut route = claude_pairing("minimax");
+        route.harness_id = wsl.id.clone();
+        let mut old_route = claude_pairing("minimax");
+        old_route.harness_id = "claude-wsl-old".into();
+        let mut custom_wsl = profile("my-claude-guest", "anthropic");
+        custom_wsl.runtime = Some(crate::models::EnvType::Wsl);
+        let mut custom_route = claude_pairing("minimax");
+        custom_route.harness_id = custom_wsl.id.clone();
+        let menu = compose_provider_menu(
+            vec![profile("claude", "anthropic"), wsl, custom_wsl],
+            vec![acct("minimax", true, Some("sk-mm"))], vec![route, old_route, custom_route], Platform::Windows, None, &[], &[],
+        );
+        assert!(!menu.iter().any(|row| row.harness_id.starts_with("claude-wsl-") || row.harness_id == "my-claude-guest"),
+            "hidden WSL routes must not leak into the backend menu: {menu:?}");
+    }
+
+    #[test]
+    fn windows_spawn_menu_omits_wsl_only_install_of_windows_capable_codex() {
+        let mut wsl = profile("codex-wsl-test", "codex");
+        wsl.runtime = Some(crate::models::EnvType::Wsl);
+        let menu = compose_provider_menu(vec![wsl], Vec::new(), Vec::new(), Platform::Windows, Some("Test"), &[], &[]);
+        assert!(menu.is_empty(), "Codex supports Windows, so its WSL install is not a spawn choice: {menu:?}");
     }
 
     /// Issue #534: Terminal is the least-common pick, so it must sort to the
@@ -967,6 +1058,7 @@ mod tests {
             // ADR-0025: menu rows come from stored pairings only.
             vec![claude_pairing("minimax"), claude_pairing("moonshot")],
             Platform::Windows,
+            None,
             &[],
             // User dragged Moonshot above MiniMax under Claude.
             &[ProxiedProviderOrder {
@@ -1137,6 +1229,7 @@ mod tests {
             ],
             vec![claude_pairing("minimax"), claude_pairing("moonshot")],
             Platform::Windows,
+            None,
             &[],
             // No stored per-harness child order — natural insertion order applies.
             &[],
@@ -1174,6 +1267,7 @@ mod tests {
             ],
             vec![],
             Platform::Windows,
+            None,
             &[],
             &[],
         );
@@ -1190,6 +1284,7 @@ mod tests {
             vec![acct("claude", true, Some("k"))],
             vec![],
             Platform::Windows,
+            None,
             &[],
             &[],
         );

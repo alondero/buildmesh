@@ -1242,11 +1242,9 @@ describe("NodeList", () => {
   });
 
   it("renders the live backend-derived providers in the spawn picker (issue #815)", async () => {
-    // The live list INCLUDES a Proxied account row the old hard-coded
-    // fallback never had (`claude:minimax-prod`). If the picker rendered a
-    // static fallback list the Proxied row would be missing entirely — this
-    // assertion catches that regression. (`claude` itself appears in the live
-    // list too, so the test still exercises the harness-header native row.)
+    // The live list includes a saved MiniMax recipe absent from the old
+    // hard-coded fallback. It belongs under the Claude harness disclosure;
+    // the raw Proxied route is not itself a flat spawn choice.
     mockApi([], {
       providers: [
         {
@@ -1277,6 +1275,18 @@ describe("NodeList", () => {
           is_proxied: true,
           group_key: "claude",
         },
+        {
+          id: "launch/claude:minimax-prod",
+          label: "MiniMax Pro Account",
+          color: "#1d7cfc",
+          icon: "A",
+          resumable: false,
+          harness_id: "claude",
+          provider_id: "minimax-prod",
+          is_proxied: true,
+          group_key: "claude",
+          configuration: { id: "launch/claude:minimax-prod", name: "MiniMax Pro Account", spawn_option_id: "claude:minimax-prod", model: null, effort: null, extra_args: null },
+        },
       ],
     });
 
@@ -1302,16 +1312,15 @@ describe("NodeList", () => {
       expect(screen.getByTestId("provider-picker")).toBeTruthy();
     });
 
-    // The Proxied row's live label is what the user sees — not the
-    // raw id.
-    const proxiedRow = await screen.findByTestId("provider-claude:minimax-prod");
-    expect(proxiedRow.textContent).toContain("MiniMax Pro Account");
+    expect(screen.queryByTestId("provider-claude:minimax-prod")).toBeNull();
 
     // The harness header row is also rendered from the live list.
     expect(screen.getByTestId("provider-claude")).toBeTruthy();
 
-    // Harness grouping (issue #575): native + Proxied share a bucket.
+    // Harness grouping: the recipe is discoverable inside the parent.
     expect(screen.getByTestId("spawn-group-claude")).toBeTruthy();
+    fireEvent.click(screen.getByText("Claude Code configurations"));
+    expect(screen.getByRole("button", { name: "MiniMax Pro Account" })).toBeTruthy();
   });
 
   it("NodeRow badge consumes the live listProviders() payload (issue #328)", async () => {
