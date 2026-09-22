@@ -29,6 +29,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
+  const draftSession = useRef(0);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
   const mounted = useRef(false);
@@ -45,6 +46,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+
+  useEffect(() => {
+    setUnavailableById(new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
+  }, [configurationRows]);
 
   useEffect(() => {
     let current = true;
@@ -102,6 +107,16 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   }, [draft]);
 
   const close = () => { onClose(); anchor.focus({ preventScroll: true }); };
+  const openDraft = (value: SpawnConfiguration) => {
+    draftSession.current += 1;
+    setDraft(value);
+  };
+  const cancelDraft = () => {
+    draftSession.current += 1;
+    setDraft(null);
+    setBusy(false);
+    setError(null);
+  };
   const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
     setConfigurations((previous) => {
       const index = previous.findIndex((entry) => entry.id === saved.id);
@@ -112,7 +127,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       return next;
     });
   };
-  const refreshAvailability = async (saved: SpawnConfiguration) => {
+  const refreshAvailability = async (saved: SpawnConfiguration, session: number) => {
     try {
       const savedRow = (await listProviders()).find((row) => row.id === saved.id);
       if (!mounted.current) return;
@@ -124,26 +139,28 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         return next;
       });
     } catch (e) {
-      if (mounted.current) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
+      if (mounted.current && draftSession.current === session) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
     }
   };
   const persistConfiguration = async (value: SpawnConfiguration) => {
+    const session = draftSession.current;
     const saved = await saveSpawnConfiguration(value);
     if (!mounted.current) return;
     replaceConfiguration(saved, saved.harness_id ?? saved.spawn_option_id.split(':')[0]);
-    await refreshAvailability(saved);
-    setDraft(null);
+    await refreshAvailability(saved, session);
+    if (mounted.current && draftSession.current === session) setDraft(null);
   };
   const save = async () => {
     if (!draft || busy) return;
+    const session = draftSession.current;
     setBusy(true);
     setError(null);
     try {
       await persistConfiguration(draft);
     } catch (e) {
-      setError(String(e));
+      if (draftSession.current === session) setError(String(e));
     } finally {
-      setBusy(false);
+      if (draftSession.current === session) setBusy(false);
     }
   };
   const fieldClass = 'w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary';
@@ -192,7 +209,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         e.stopPropagation();
         if (e.key === 'Escape' || (!draft && e.key === 'ArrowLeft')) {
           e.preventDefault();
-          if (draft && !option.configuration) setDraft(null); else close();
+          if (draft && !option.configuration) cancelDraft(); else close();
         }
         if (draft) return;
         const items = Array.from(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
@@ -207,17 +224,20 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         }
       }}
     >
-      {draft?.id ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? close : () => setDraft(null)}
+      {draft?.id ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? () => { cancelDraft(); close(); } : cancelDraft}
         onSave={persistConfiguration}
         onDelete={async () => {
-          await deleteSpawnConfiguration(draft.id);
-          setConfigurations((previous) => previous.filter((entry) => entry.id !== draft.id));
+          const session = draftSession.current;
+          const deletedId = draft.id;
+          await deleteSpawnConfiguration(deletedId);
+          if (!mounted.current) return;
+          setConfigurations((previous) => previous.filter((entry) => entry.id !== deletedId));
           setUnavailableById((previous) => {
             const next = new Map(previous);
-            next.delete(draft.id);
+            next.delete(deletedId);
             return next;
           });
-          setDraft(null);
+          if (draftSession.current === session) cancelDraft();
         }} /> : draft ? (
         <form className="space-y-3 p-3" aria-label="Edit spawn configuration" onSubmit={(e) => { e.preventDefault(); void save(); }}>
           <p className="text-sm font-medium text-text-primary">New configuration</p>
@@ -240,7 +260,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
             </label>}
             <div className="flex gap-3 text-sm text-text-primary">
               <button type="submit" disabled={!draft.name.trim()}>Save</button>
-              <button type="button" onClick={() => setDraft(null)}>Cancel</button>
+              <button type="button" onClick={cancelDraft}>Cancel</button>
             </div>
           </fieldset>
         </form>
@@ -257,10 +277,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
                 className={`${menuClass} min-w-0 flex-1 break-words ${unavailable ? 'cursor-default text-text-muted' : ''}`} onClick={(e) => { if (!unavailable) onSelect(value.spawn_option_id, e.altKey, value.id); }}>
                 {value.name}{unavailable && <span className="block text-text-muted">{unavailable}</span>}
               </button>
-              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => setDraft(value)}>Edit</button>
+              <button type="button" role="menuitem" data-menu-index={menuIndex.get(`edit:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`edit:${value.id}`) ? 0 : -1} aria-label={`Edit ${value.name}`} className="px-3 text-xs text-text-secondary hover:bg-bg-selection focus:bg-bg-selection" onClick={() => openDraft(value)}>Edit</button>
             </div>;
           })}
-          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => setDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('new')} tabIndex={activeMenuIndex === menuIndex.get('new') && loaded ? 0 : -1} disabled={!loaded} className={loaded ? menuClass : mutedMenuClass} onClick={() => openDraft({ id: '', name: '', spawn_option_id: option.id, model: null, effort: null, extra_args: null })}>New configuration…</button>
         </div>
       )}
       {(error || (draft && targetError)) && <p role="alert" className="p-3 text-xs text-status-error">{error ?? targetError}</p>}

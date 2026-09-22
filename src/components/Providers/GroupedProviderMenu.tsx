@@ -113,6 +113,11 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
     flatItems.forEach((it, i) => map.set(it.id, i));
     return map;
   }, [flatItems]);
+  const submenuHarnessId = submenu?.option.harness_id;
+  const configurationRows = useMemo(
+    () => submenuHarnessId ? providers.filter((row) => row.configuration && row.harness_id === submenuHarnessId) : [],
+    [providers, submenuHarnessId],
+  );
 
   return (
     <div ref={menuRef} className={className} role="menu" aria-label="Select a provider">
@@ -172,7 +177,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
         </div>
       ))}
       {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
-        configurationRows={providers.filter((row) => row.configuration && row.harness_id === submenu.option.harness_id)}
+        configurationRows={configurationRows}
         onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
     </div>
   );

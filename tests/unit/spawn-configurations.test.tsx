@@ -171,6 +171,43 @@ describe('Spawn configurations', () => {
     expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false');
   });
 
+  it('tracks provider availability changes while the submenu stays open', async () => {
+    const unavailableRow = { ...savedRow, unavailable_reason: 'Harness is unavailable' };
+    const refreshedRow = { ...savedRow, unavailable_reason: undefined };
+    const { rerender } = render(<GroupedProviderMenu providers={[option, unavailableRow]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    const recipe = await screen.findByText('Sol Max');
+    expect(recipe.closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('true');
+
+    rerender(<GroupedProviderMenu providers={[option, refreshedRow]} onSelect={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText('Sol Max').closest('button[role="menuitem"]')?.getAttribute('aria-disabled')).toBe('false'));
+  });
+
+  it('does not let a pending save close a newer draft after Escape', async () => {
+    let resolveSave!: (value: SpawnConfiguration) => void;
+    vi.mocked(api.saveSpawnConfiguration).mockReturnValueOnce(new Promise((resolve) => { resolveSave = resolve; }));
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit Sol Max' }));
+    await screen.findByRole('option', { name: 'Codex' });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Older edit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalled());
+
+    fireEvent.keyDown(screen.getByLabelText('Name'), { key: 'Escape' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep this draft' } });
+
+    await act(async () => {
+      resolveSave({ ...saved, name: 'Older edit' });
+      await Promise.resolve();
+    });
+
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Keep this draft');
+    expect(screen.getByLabelText('Edit spawn configuration')).toBeTruthy();
+  });
+
   it('reports launch-target load failures while editing a saved recipe', async () => {
     vi.mocked(api.getLaunchTargets).mockRejectedValueOnce(new Error('targets unavailable'));
     render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
