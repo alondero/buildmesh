@@ -95,14 +95,14 @@ from the context menu:
   and pressed Enter — so a multi-line review report arrives as one prompt instead
   of one prompt per line.
 
-The agents this one already shares a card with are offered first — the pair you
-grouped into tabs, or a review agent spawned from this node — which keeps a
-grouped implementer/reviewer pair one click apart, and every row shows the
-target's status. A handover needs a selection in the source terminal, and the
-target must have a live agent process; without one the action reports the failure
-instead of dispatching. If the harness does not take the submit, the text is left
-staged in that node's input box, so you can press Enter (or edit it) yourself
-rather than losing the handover.
+The agents this one already shares tabs with are offered first — the pair you
+grouped, or a review agent spawned from this node — which keeps an
+implementer/reviewer pair one click apart, and every row shows the target's
+status. A handover needs a selection in the source terminal, and the target must
+have a live agent process; without one the action reports the failure instead of
+dispatching. If the harness does not take the submit, the text is left staged in
+that node's input box, so you can press Enter (or edit it) yourself rather than
+losing the handover.
 
 ## Harnesses and capabilities
 

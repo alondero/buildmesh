@@ -860,6 +860,34 @@ pub fn watch_child_exit(
     })
 }
 
+/// Reusable PTY-write test doubles, in the shape of
+/// [`crate::agent::session_lifecycle::testing`]. They live in their own
+/// `cfg(test)` module rather than inside `mod tests` for two reasons: the
+/// capture seam swaps [`AgentProcess::writer_tx`], a private field, and
+/// `autopilot::pipeline`'s injected-registry tests need the same fixture.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// A fresh registry holding one live stand-in agent for `session_id`, plus
+    /// the receiver for every chunk written to that agent's PTY. The
+    /// injected-registry sibling of `http::ws`'s `MockRegistry`, for callers
+    /// that need the real `AgentProcessRegistry` surface
+    /// (`write_bytes_if_current` is not on `ProcessRegistryApi`).
+    pub(crate) fn capturing_registry(
+        session_id: i64,
+    ) -> (Arc<AgentProcessRegistry>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let registry = Arc::new(AgentProcessRegistry::new());
+        super::tests::insert_trivial_agent(&registry, session_id);
+        // Swap the draining writer for a channel the caller owns, so every byte
+        // the path under test enqueues is observable instead of leaving the
+        // process for a real PTY.
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        *registry.get(&session_id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        (registry, rx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,7 +1027,9 @@ mod tests {
         assert_eq!(input_buffer_state_after(5, true, b"\x1b[201~"), (5, false));
     }
 
-    fn insert_trivial_agent(
+    /// `pub(crate)` so [`super::testing::capturing_registry`] can reuse the
+    /// fixture rather than duplicating the spawn setup.
+    pub(crate) fn insert_trivial_agent(
         registry: &AgentProcessRegistry,
         session_id: i64,
     ) -> (u64, Arc<AtomicBool>) {
@@ -1059,6 +1089,24 @@ mod tests {
     fn insert_and_get() {
         let registry = AgentProcessRegistry::new();
         assert!(registry.is_empty());
+    }
+
+    /// The user-facing half of `handover_to_agent`: an empty selection must be
+    /// refused at the IPC boundary rather than staging nothing into a target's
+    /// input box (where it would look like a submitted empty prompt). The
+    /// command itself needs a real `AppHandle`, so the rule is tested here.
+    #[test]
+    fn handover_rejects_text_with_nothing_in_it() {
+        for text in ["", " ", "\n", "\t \r\n"] {
+            let err = validate_handover_text(text)
+                .expect_err("whitespace-only is not a handover");
+            assert!(err.contains("Nothing to hand over"), "{err}");
+        }
+        // The selection is handed over as-is: surrounding whitespace is part of
+        // what the user selected, so it is not trimmed off the payload.
+        for text in ["fix the race\r", "\n  fix the race\n"] {
+            assert!(validate_handover_text(text).is_ok(), "{text:?} carries text");
+        }
     }
 
     #[test]
@@ -1734,6 +1782,16 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
     write_to_agent(app, session_id, format!("{}\n", input)).await
 }
 
+/// Reject a handover that carries nothing. Split from [`handover_to_agent`]
+/// because the command takes an `AppHandle` only the real app can construct,
+/// and this is the half with a user-facing rule in it.
+fn validate_handover_text(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Nothing to hand over — select text in the source terminal first".to_string());
+    }
+    Ok(())
+}
+
 /// Hand the text selected in one node's terminal over to another **running**
 /// node: stage it in the target's PTY input box and submit it. The
 /// existing-node sibling of `commands::agent::spawn_handover_agent`, and the
@@ -1744,18 +1802,16 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 /// buffer has to arrive as ONE bracketed paste and the Enter has to land as its
 /// own write at an idle input box, or an ink TUI swallows the keystroke into
 /// the paste and the prompt sits staged forever (issue #874). That primitive
-/// also settles before the Enter when the target's output is *not* observable —
-/// the ordinary case here, since the agent a human hands work to is one the
-/// user spawned rather than one the evaluator buffers.
+/// also settles before the Enter when the target is one the turn evaluator does
+/// *not* buffer — the ordinary case here, since the agent a human hands work to
+/// is one the user spawned rather than one Autopilot owns.
 #[command]
 pub async fn handover_to_agent(
     app: AppHandle,
     target_node_id: i64,
     text: String,
 ) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("Nothing to hand over — select text in the source terminal first".to_string());
-    }
+    validate_handover_text(&text)?;
     // The registry — not the DB status — is the liveness gate
     // (`write_prompt_to_pty` rejects a target with no live process before
     // writing): a node still reading `pending`/`spawning` can already accept

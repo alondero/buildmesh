@@ -35,12 +35,13 @@
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::{hash_map::Entry, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
 use super::evaluator::{self, Classification};
+use crate::agent::process::AgentProcessRegistry;
 
 // ---------------------------------------------------------------------------
 // Wire types — Tauri event payloads (issue #161)
@@ -359,13 +360,14 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 
 /// Write a (possibly multi-line) prompt into the node's PTY stdin, then
 /// submit it from a background watcher: wait for the paste to echo and the
-/// redraw to settle, send Enter as its own write, and — when the node's output
-/// is tracked — verify output follows, retrying Enter a bounded number of
-/// times. `Ok` means "staged and submission scheduled"; a verified submit that
-/// never takes marks the node for human attention instead of stalling silently.
-/// A node with no evaluator clock gets one Enter and no verification (see
-/// [`settle_after_paste`] and [`press_enter_until_output_guarded`]) — the
-/// stages that exist to *observe* the submit are skipped rather than faked.
+/// redraw to settle, send Enter as its own write, and — when the target is one
+/// the turn evaluator buffers — verify output follows, retrying Enter a bounded
+/// number of times. `Ok` means "staged and submission scheduled"; a verified
+/// submit that never takes marks the node for human attention instead of
+/// stalling silently. A target the evaluator does not buffer gets one Enter and
+/// no verification (see [`settle_after_paste`] and
+/// [`press_enter_until_output_guarded`]) — the stages that exist to *observe*
+/// the submit are skipped rather than faked.
 ///
 /// Deliberately NOT routed through `coordinator::drive::AgentDriver`
 /// (whose "no parallel write path" rule targets *Coordinator/scheduler*
@@ -374,14 +376,30 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 /// retried remote requests, which an in-process turn reaction doesn't
 /// have. If `AgentDriver` grows multi-line paste support, converge on it.
 pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> Result<(), String> {
-    write_prompt_to_pty_guarded(node_id, text, app, None).map(|_| ())
+    write_prompt_to_pty_guarded(&crate::agent::process::PROCESS_REGISTRY, node_id, text, app, None).map(|_| ())
 }
 
-pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHandle, expected_input: Option<&str>) -> Result<bool, String> {
-    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-        return Err(format!("node {} has no live agent process", node_id));
+/// The liveness gate for a staged prompt: the **registry**, not the DB status,
+/// is the source of truth — a node still reading `pending`/`spawning` can
+/// already accept input, and an archived row could not. Split out so the
+/// contract is testable without the `AppHandle` the rest of the submit path
+/// needs.
+fn ensure_prompt_target_alive(registry: &AgentProcessRegistry, node_id: i64) -> Result<(), String> {
+    if registry.is_alive(&node_id) {
+        Ok(())
+    } else {
+        Err(format!("node {} has no live agent process", node_id))
     }
-    let registry = &crate::agent::process::PROCESS_REGISTRY;
+}
+
+pub(crate) fn write_prompt_to_pty_guarded(
+    registry: &Arc<AgentProcessRegistry>,
+    node_id: i64,
+    text: &str,
+    app: &AppHandle,
+    expected_input: Option<&str>,
+) -> Result<bool, String> {
+    ensure_prompt_target_alive(registry, node_id)?;
     let guarded = if let Some(expected) = expected_input {
         let Some(next) = registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)? else { return Ok(false); };
         Some(next)
@@ -392,18 +410,19 @@ pub(crate) fn write_prompt_to_pty_guarded(node_id: i64, text: &str, app: &AppHan
     if expected_input.is_some() {
         // A continuation is not delivered until the separate Enter write has
         // been acknowledged by fresh PTY output.
-        submit_staged_prompt_result(node_id, guarded).map(|submitted| submitted.is_some())
+        submit_staged_prompt_result(registry, node_id, guarded).map(|submitted| submitted.is_some())
     } else {
+        let registry = Arc::clone(registry);
         let app = app.clone();
-        std::thread::spawn(move || submit_staged_prompt(node_id, &app, guarded));
+        std::thread::spawn(move || submit_staged_prompt(&registry, node_id, &app, guarded));
         Ok(true)
     }
 }
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
-fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
+fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app: &AppHandle, guard: Option<String>) {
     settle_after_paste(node_id);
-    match press_enter_until_output_guarded(node_id, guard) {
+    match press_enter_until_output_guarded(registry, node_id, guard, ENTER_ACK_WINDOW) {
         Ok(Some(attempt)) => tracing::info!(
             "autopilot inject({}): staged prompt submitted (Enter attempt {})",
             node_id,
@@ -426,17 +445,23 @@ fn submit_staged_prompt(node_id: i64, app: &AppHandle, guard: Option<String>) {
 
 /// Wait for the staged paste to land at an idle input box.
 ///
-/// A node registered with the evaluator has an output clock, and the wait is
-/// signal-driven off it: the paste's echo first (so a provider that renders no
-/// echo falls through at the deadline), then a quiet redraw. A node with **no**
-/// clock — an ordinary node a human spawned, which the evaluator never buffers
-/// ([`evaluator::millis_since_last_output`] is `None` for it) — has nothing to
-/// read, so it waits [`PASTE_SETTLE_QUIET_MS`] unconditionally: the same window
-/// the observable path waits to see, which keeps the decoupled Enter out of the
-/// paste burst (#874) without pretending to a signal that does not exist.
+/// A node the turn evaluator **buffers** ([`evaluator::is_piloted`]) has an
+/// output clock, and the wait is signal-driven off it: the paste's echo first
+/// (so a provider that renders no echo falls through at the deadline), then a
+/// quiet redraw. A node the evaluator never buffers — an ordinary node a human
+/// spawned — has nothing to read, so it waits [`PASTE_SETTLE_QUIET_MS`]
+/// unconditionally: the same window the observable path waits *to see*, which
+/// keeps the decoupled Enter out of the paste burst (#874) without pretending to
+/// a signal that does not exist.
+///
+/// The gate is buffered-vs-not, deliberately NOT "has produced output yet": a
+/// piloted node that has not written its first byte is still observable a moment
+/// later, and the Autopilot prefill path injects into exactly that state
+/// (`node_launch` registers the evaluator before spawning). Reading the clock
+/// instead would quietly demote those callers to the unobservable path.
 fn settle_after_paste(node_id: i64) {
     let wrote_at = Instant::now();
-    if evaluator::millis_since_last_output(node_id).is_none() {
+    if !evaluator::is_piloted(node_id) {
         std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
         return;
     }
@@ -458,9 +483,9 @@ fn settle_after_paste(node_id: i64) {
     }
 }
 
-fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
+fn submit_staged_prompt_result(registry: &Arc<AgentProcessRegistry>, node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
     settle_after_paste(node_id);
-    press_enter_until_output_guarded(node_id, guard)
+    press_enter_until_output_guarded(registry, node_id, guard, ENTER_ACK_WINDOW)
 }
 
 /// Send Enter and wait for PTY output to acknowledge it, retrying up to
@@ -468,30 +493,40 @@ fn submit_staged_prompt_result(node_id: i64, guard: Option<String>) -> Result<Op
 /// Shared with the launch watcher — a swallowed Enter stalls a prefilled
 /// launch the same way it stalls an injection.
 pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
-    press_enter_until_output_guarded(node_id, None)?.ok_or_else(|| "Input changed before submission".into())
+    press_enter_until_output_guarded(&crate::agent::process::PROCESS_REGISTRY, node_id, None, ENTER_ACK_WINDOW)?
+        .ok_or_else(|| "Input changed before submission".into())
 }
 
-fn press_enter_until_output_guarded(node_id: i64, mut guard: Option<String>) -> Result<Option<u32>, String> {
-    // An Enter can only be *acknowledged* against an output clock. A node with
-    // no clock (an ordinary, hand-spawned node — see `settle_after_paste`) gets
-    // exactly one Enter instead of the retry ladder: a retry would type extra
-    // carriage returns into an agent that is already working on the prompt, and
-    // reporting "never submitted" would mark a node the user just handed work
-    // to as needing attention, for a submission this path has no way to observe
-    // either way.
-    let verifiable = evaluator::millis_since_last_output(node_id).is_some();
+/// `ack_window` is injected rather than read from [`ENTER_ACK_WINDOW`] directly
+/// so a test can drive the retry ladder without paying 6 s per attempt. It is
+/// the window an attempt waits for the acknowledgement, not a timeout on the
+/// whole submit.
+fn press_enter_until_output_guarded(
+    registry: &Arc<AgentProcessRegistry>,
+    node_id: i64,
+    mut guard: Option<String>,
+    ack_window: Duration,
+) -> Result<Option<u32>, String> {
+    // An Enter can only be *acknowledged* against an output clock, so the retry
+    // ladder only exists for a node the evaluator buffers. A node it does not
+    // (an ordinary, hand-spawned node — see `settle_after_paste`) gets exactly
+    // one Enter: a retry would type extra carriage returns into an agent that is
+    // already working on the prompt, and reporting "never submitted" would mark
+    // a node the user just handed work to as needing attention, for a
+    // submission this path has no way to observe either way.
+    let verifiable = evaluator::is_piloted(node_id);
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
         if let Some(expected) = guard.as_deref() {
-            let Some(next) = crate::agent::process::PROCESS_REGISTRY.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
+            let Some(next) = registry.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
             guard = Some(next);
         } else {
-            crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
+            registry.write_bytes(node_id, b"\r")?;
         }
         if !verifiable {
             return Ok(Some(attempt));
         }
         let sent_at = Instant::now();
-        while Instant::now() < sent_at + ENTER_ACK_WINDOW {
+        while Instant::now() < sent_at + ack_window {
             std::thread::sleep(SUBMIT_POLL);
             if output_seen_within(
                 evaluator::millis_since_last_output(node_id),
@@ -1475,6 +1510,87 @@ mod tests {
         assert!(!output_seen_within(Some(800), 500));
         // No output tracked at all → never an acknowledgement.
         assert!(!output_seen_within(None, 10_000));
+    }
+
+    // ── submit posture (#874): what a target that cannot be observed gets ───
+    //
+    // The staged-submit path verifies its Enter against the evaluator's output
+    // clock, which exists only for nodes the evaluator buffers. The terminal's
+    // "Handover to node" injects into a target a human spawned, which is never
+    // buffered — and that case previously ran the retry ladder anyway, typing
+    // two extra carriage returns into an agent already working on the prompt and
+    // then reporting "never submitted" (which marks the node for attention).
+
+    /// Everything the path under test wrote, drained until the channel goes
+    /// quiet. Asserted as a whole so a missing or extra Enter fails loudly
+    /// instead of hanging the suite on a blocking `recv`.
+    fn drained(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    #[test]
+    fn a_target_with_no_output_clock_submits_with_exactly_one_enter() {
+        let id = -930_020;
+        let (registry, rx) = crate::agent::process::testing::capturing_registry(id);
+        assert!(
+            !evaluator::is_piloted(id),
+            "fixture precondition: this target is not buffered by the evaluator"
+        );
+
+        assert_eq!(
+            press_enter_until_output_guarded(&registry, id, None, Duration::from_millis(50))
+                .expect("an unobservable submit cannot fail: nothing can be compared"),
+            Some(1),
+        );
+        assert_eq!(
+            drained(&rx),
+            vec![b"\r".to_vec()],
+            "one Enter, and no retry ladder behind it"
+        );
+        registry.kill_session(id);
+    }
+
+    /// The ladder must survive for a buffered node — including one that has not
+    /// produced output yet, which is the state `node_launch` injects its prefill
+    /// into (it registers the evaluator before spawning). Keying the posture off
+    /// "has output yet" instead of "is buffered" would silently demote that
+    /// caller to a single blind Enter.
+    #[test]
+    fn a_buffered_but_silent_target_retries_then_fails_loudly() {
+        let id = -930_021;
+        let (registry, rx) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        assert!(
+            evaluator::is_piloted(id) && evaluator::millis_since_last_output(id).is_none(),
+            "fixture precondition: buffered, but no output to acknowledge against"
+        );
+
+        let err = press_enter_until_output_guarded(&registry, id, None, Duration::from_millis(50))
+            .expect_err("nothing acknowledges the Enter ⇒ the path must not claim success");
+        assert!(err.contains("no PTY output followed"), "{err}");
+        assert_eq!(
+            drained(&rx),
+            vec![b"\r".to_vec(); MAX_ENTER_ATTEMPTS as usize],
+            "a buffered target keeps its retry ladder"
+        );
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn a_staged_prompt_needs_a_live_process_not_a_db_row() {
+        let id = -930_022;
+        let (registry, _rx) = crate::agent::process::testing::capturing_registry(id);
+        assert!(ensure_prompt_target_alive(&registry, id).is_ok());
+
+        let err = ensure_prompt_target_alive(&registry, -930_099)
+            .expect_err("a node with no registry entry has no live process");
+        assert!(err.contains("no live agent process"), "{err}");
+        registry.kill_session(id);
     }
 
     // ── in-flight guard: queue, don't drop (#874 candidate 3) ──────────────

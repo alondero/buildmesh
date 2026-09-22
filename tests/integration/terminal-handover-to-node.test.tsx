@@ -147,7 +147,7 @@ const MESH: Mesh = {
 };
 
 // The Reviewer is the review child of the Implementer (circuit ownership
-// lineage), which is what puts it in the `linked` half of the picker.
+// lineage), which is what puts it in the `sameActivity` half of the picker.
 const OWNERSHIPS = {
   2: { node_id: 2, run_id: 7, circuit_id: 2, circuit_name: 'Review', state: 'running', parent_node_id: 1 },
 };
@@ -197,7 +197,7 @@ describe('terminal handover to an existing node', () => {
     vi.restoreAllMocks();
   });
 
-  it('lists this Mesh\'s other agents with the linked node first, and hands the selection over', async () => {
+  it('lists this Mesh\'s other agents with the shared-activity node first, and hands the selection over', async () => {
     const { open } = await mountAndOpen('review found a race in the parser');
     expect(within(open).getByText('Handover to node')).toBeTruthy();
     // Ordering is the whole "prefer the paired node" affordance: the review
@@ -230,7 +230,7 @@ describe('terminal handover to an existing node', () => {
     expect(invoke).not.toHaveBeenCalledWith('handover_to_agent', expect.anything());
   });
 
-  it('treats a manually grouped node as linked too', async () => {
+  it('treats a manually grouped node as sharing the activity too', async () => {
     // No ownership lineage here — the manual group is the only thing tying
     // Scratch to the Implementer, so Scratch takes the preferred slot and the
     // by-standing Reviewer drops below it.

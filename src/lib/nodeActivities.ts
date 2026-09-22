@@ -99,19 +99,19 @@ export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeO
   return groups;
 }
 
-/** Candidates for a node's "Handover to node" picker, split so the nodes that
- *  share the source's card come first — the implementer↔reviewer pairing the
- *  menu exists for is one such card, whether it was grouped by hand or born
- *  from the review circuit's ownership lineage. */
+/** Candidates for a node's "Handover to node" picker, split so the agents that
+ *  share the source's Node Activity come first — the implementer↔reviewer
+ *  pairing this picker exists for is one Node Activity, whether it was grouped
+ *  by hand or born from the review circuit's ownership lineage. */
 export interface HandoverTargets {
-  linked: AgentNode[];
+  sameActivity: AgentNode[];
   others: AgentNode[];
 }
 
-/** Same-Mesh agents a node can hand its terminal selection to. `linked` are the
- *  ones resolving to the source's card (see [`activityRootId`]); both halves are
- *  ordered by the canonical `(position, id)` the grid uses, so the picker is
- *  stable across fetches. */
+/** Same-Mesh agents a node can hand its terminal selection to. `sameActivity`
+ *  are the ones resolving to the source's activity root (see
+ *  [`activityRootId`]); both halves are ordered by the canonical `(position, id)`
+ *  the grid uses, so the picker is stable across fetches. */
 export function handoverTargets(
   sourceId: number,
   nodesById: NodeIndex,
@@ -119,17 +119,17 @@ export function handoverTargets(
   groups: NodeGroups = [],
 ): HandoverTargets {
   const source = nodesById[sourceId];
-  if (!source) return { linked: [], others: [] };
+  if (!source) return { sameActivity: [], others: [] };
   const rootId = activityRootId(sourceId, nodesById, ownerships, groups);
-  const linked: AgentNode[] = [];
+  const sameActivity: AgentNode[] = [];
   const others: AgentNode[] = [];
   for (const node of Object.values(nodesById)) {
     if (!node || node.id === sourceId || node.mesh_id !== source.mesh_id || node.status === 'archived') continue;
-    const bucket = activityRootId(node.id, nodesById, ownerships, groups) === rootId ? linked : others;
+    const bucket = activityRootId(node.id, nodesById, ownerships, groups) === rootId ? sameActivity : others;
     bucket.push(node);
   }
   const byPosition = (a: AgentNode, b: AgentNode) => a.position - b.position || a.id - b.id;
-  return { linked: linked.sort(byPosition), others: others.sort(byPosition) };
+  return { sameActivity: sameActivity.sort(byPosition), others: others.sort(byPosition) };
 }
 
 export type ActivityStatusTone = 'warning' | 'error' | 'active' | 'idle';

@@ -601,7 +601,7 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
               </button>
             </>
           )}
-          {handoverPicker && (handoverPicker.linked.length > 0 || handoverPicker.others.length > 0) && (
+          {handoverPicker && (handoverPicker.sameActivity.length > 0 || handoverPicker.others.length > 0) && (
             <>
               <div className="border-t border-border-default my-0.5" />
               {/* Flat rows, not a flyout submenu: the target set is one Mesh's
@@ -611,7 +611,7 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
               <div role="presentation" className="px-3 pt-1 pb-0.5 text-2xs uppercase tracking-wider text-text-muted">
                 Handover to node
               </div>
-              {handoverPicker.linked.map(target => (
+              {handoverPicker.sameActivity.map(target => (
                 <HandoverTargetItem
                   key={target.id}
                   node={target}
@@ -620,7 +620,7 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
                   onPick={handleHandoverTo}
                 />
               ))}
-              {handoverPicker.linked.length > 0 && handoverPicker.others.length > 0 && (
+              {handoverPicker.sameActivity.length > 0 && handoverPicker.others.length > 0 && (
                 <div className="border-t border-border-default my-0.5" />
               )}
               {handoverPicker.others.map(target => (

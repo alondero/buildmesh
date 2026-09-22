@@ -2172,7 +2172,7 @@ pub(super) fn execute_effects(
                 }
                 let expected = view.context.get(&format!("node.{node_id}.continuation.input"))
                     .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
-                match crate::autopilot::pipeline::write_prompt_to_pty_guarded(*target_agent_id, prompt, app, Some(expected)) {
+                match crate::autopilot::pipeline::write_prompt_to_pty_guarded(&crate::agent::process::PROCESS_REGISTRY, *target_agent_id, prompt, app, Some(expected)) {
                     Ok(true) => {
                         let _ = db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
                         outcome_events.push(CircuitEvent::ContinuationDelivered {
