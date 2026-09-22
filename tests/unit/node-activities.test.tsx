@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
-import { activityRootId, groupActivityNodes, indexAgentNodes } from '../../src/lib/nodeActivities';
+import { activityMemberIds, activityRootId, groupActivityNodes, indexAgentNodes } from '../../src/lib/nodeActivities';
 import { deriveVisibleNodes } from '../../src/components/AgentNodeView/gridFilterSort';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { jumpToNextAwaitingNode } from '../../src/lib/awaitingInputShortcuts';
@@ -58,14 +58,138 @@ function card() {
 }
 
 beforeEach(() => {
+  localStorage.removeItem('buildmesh.node-groups');
   useAgentNodeStore.setState({ nodeIds: nodes.map(n => n.id), nodesById: Object.fromEntries(nodes.map(n => [n.id, n])),
     circuitOwnerships: ownerships, activeNodeId: 1, closingNodeIds: new Set(), semanticTurns: {} });
-  useNodeActivityStore.setState({ selections: {}, utilities: {} });
+  useNodeActivityStore.setState({ selections: {}, utilities: {}, groups: [] });
   disposeUtility.mockClear();
   focusAgentTerminal.mockClear();
 });
 
 describe('node activities', () => {
+  it('groups whole activity cards, persists membership and navigates to the selected member', () => {
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    const state = useNodeActivityStore.getState();
+    expect(state.groups).toEqual([[3, 1]]);
+    expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
+    expect(activityMemberIds(nodes, ownerships, state.groups)).toEqual({ 3: [3, 1, 2] });
+    expect(deriveVisibleNodes('all', nodes, 1, 2, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    state.activateNode(2, true, 'build');
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 2, utility: true });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+    expect(deriveVisibleNodes('filtered', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    expect(deriveVisibleNodes('pinned', nodes.map(n => ({ ...n, is_pinned: n.id === 2 })), 1, 2, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+  });
+
+  it('merges groups in insertion order and refuses self, missing, archived and cross-mesh targets', () => {
+    const extra = [node(4), node(5), node(6, { mesh_id: 2 }), node(7, { status: 'archived' })];
+    useAgentNodeStore.setState({ nodesById: indexAgentNodes([...nodes, ...extra]) });
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    state.groupNodes(4, 5);
+    state.groupNodes(3, 5);
+    expect(useNodeActivityStore.getState().groups).toEqual([[5, 4, 3, 1]]);
+    for (const [a, b] of [[1, 2], [1, 99], [1, 6], [7, 1]]) state.groupNodes(a, b);
+    expect(useNodeActivityStore.getState().groups).toEqual([[5, 4, 3, 1]]);
+  });
+
+  it('ungroups a reviewer with its owner and utilities without closing processes', () => {
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    state.activateNode(2, true, 'run');
+    state.ungroupNode(2);
+    expect(useNodeActivityStore.getState().groups).toEqual([]);
+    expect(useNodeActivityStore.getState().utilities[2]).toBe('run');
+    expect(activityMemberIds(nodes, ownerships, useNodeActivityStore.getState().groups)).toEqual({ 1: [1, 2], 3: [3] });
+    expect(disposeUtility).not.toHaveBeenCalled();
+  });
+
+  it('repairs the old card selection when ungrouping a selected source', () => {
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 1, utility: false });
+    state.ungroupNode(1);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 3, utility: false });
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 1, utility: false });
+  });
+
+  it('repairs the old card selection when ungrouping a selected reviewer', () => {
+    const state = useNodeActivityStore.getState();
+    state.groupNodes(1, 3);
+    state.activateNode(2);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 2, utility: false });
+    state.ungroupNode(2);
+    expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 3, utility: false });
+    expect(useNodeActivityStore.getState().selections[1]).toEqual({ nodeId: 2, utility: false });
+  });
+
+  it('prunes deleted IDs from groups and localStorage while preserving empty bootstrap state', () => {
+    useNodeActivityStore.setState({ groups: [[3, 1, 99], [2, 4]] });
+    localStorage.setItem('buildmesh.node-groups', JSON.stringify([[3, 1, 99], [2, 4]]));
+    useNodeActivityStore.getState().prune(new Set([1, 3]));
+    expect(useNodeActivityStore.getState().groups).toEqual([[3, 1]]);
+    expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
+    useNodeActivityStore.setState({ groups: [[3, 1]] });
+    localStorage.setItem('buildmesh.node-groups', JSON.stringify([[3, 1]]));
+    useNodeActivityStore.getState().prune(new Set());
+    expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
+  });
+
+  it('keeps surviving members accessible after the group representative disappears', () => {
+    const groups = [[3, 1]];
+    const remaining = nodes.filter(n => n.id !== 3);
+    expect(activityMemberIds(remaining, ownerships, groups)).toEqual({ 1: [1, 2] });
+    expect(activityRootId(2, indexAgentNodes([...remaining, node(3, { status: 'archived' })]), ownerships, groups)).toBe(1);
+  });
+
+  it('swaps and inserts grouped cards by the visible representative, not a hidden member', async () => {
+    const independent = [node(1), node(2), node(3)];
+    useAgentNodeStore.setState({ nodesById: indexAgentNodes(independent), circuitOwnerships: {} });
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    const visible = () => deriveVisibleNodes('all', useAgentNodeStore.getState().getAgentNodes(), 1, 1,
+      controls, {}, useNodeActivityStore.getState().groups).map(n => n.id);
+    expect(visible()).toEqual([2, 3]);
+    await useAgentNodeStore.getState().swapAgentNodes(2, 3);
+    expect(visible()).toEqual([3, 2]);
+    await useAgentNodeStore.getState().reorderAgentNode(3, 3);
+    expect(visible()).toEqual([2, 3]);
+    expect(activityMemberIds(useAgentNodeStore.getState().getAgentNodes(), {}, useNodeActivityStore.getState().groups)[3]).toEqual([3, 1]);
+  });
+
+  it('reconciles delayed circuit ownership before merging and separating groups', () => {
+    useAgentNodeStore.setState({ circuitOwnerships: {}, nodesById: indexAgentNodes([...nodes, node(4)]) });
+    useNodeActivityStore.getState().groupNodes(3, 2);
+    expect(useNodeActivityStore.getState().groups).toEqual([[2, 3]]);
+    useAgentNodeStore.setState({ circuitOwnerships: ownerships });
+    useNodeActivityStore.getState().groupNodes(1, 4);
+    expect(useNodeActivityStore.getState().groups).toEqual([[4, 1, 3]]);
+    expect(activityMemberIds([...nodes, node(4)], ownerships, useNodeActivityStore.getState().groups)).toEqual({ 4: [4, 1, 2, 3] });
+    useNodeActivityStore.getState().ungroupNode(2);
+    expect(useNodeActivityStore.getState().groups).toEqual([[4, 3]]);
+  });
+
+  it('labels manual group tabs by name, switches terminals and provides keyboard-accessible ungrouping', async () => {
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    render(<NodeCard nodeId={3} memberIds={[3, 1, 2]} isActive onActivate={useNodeActivityStore.getState().activateNode} />);
+    expect(screen.getByRole('status').textContent).toBe('Running');
+    fireEvent.keyDown(screen.getByRole('tab', { name: /^Agent 1/ }), { key: 'ArrowRight' });
+    expect(screen.getByLabelText('Agent 2')).toBeTruthy();
+    const detach = screen.getByRole('button', { name: 'Move selected node out of group' });
+    detach.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(useNodeActivityStore.getState().groups).toEqual([]);
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
+  });
+
+  it('does not repeat grouped agent names in the All sessions menu', async () => {
+    useNodeActivityStore.getState().groupNodes(1, 3);
+    render(<NodeCard nodeId={3} memberIds={[3, 1, 2]} isActive onActivate={useNodeActivityStore.getState().activateNode} />);
+    await userEvent.click(screen.getByRole('button', { name: 'All sessions (3)' }));
+    const item = screen.getByRole('menuitem', { name: /^Agent 1/ });
+    expect(item.textContent).not.toMatch(/Agent 1.*Agent 1/);
+    expect(item.textContent).toContain('main');
+  });
+
   it('coordinates entity focus and activity selection at the UI store boundary', () => {
     act(() => useNodeActivityStore.getState().activateNode(2));
 
@@ -220,7 +344,10 @@ describe('node activities', () => {
     await userEvent.click(screen.getByRole('button', { name: 'All sessions (2)' }));
     const reviewer = screen.getByRole('menuitem', { name: /Review.*Reviewer/ });
     reviewer.focus();
-    fireEvent.click(reviewer, { detail: 0 });
+    act(() => {
+      reviewer.focus();
+      fireEvent.click(reviewer, { detail: 0 });
+    });
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(focusAgentTerminal).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Review.*Reviewer/ }));

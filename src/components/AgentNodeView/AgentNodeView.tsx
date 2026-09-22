@@ -150,10 +150,11 @@ export function AgentNodeView() {
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const nodesById = useAgentNodeStore(state => state.nodesById);
   const ownerships = useAgentNodeStore(state => state.circuitOwnerships);
-  const activeRootId = activeNodeId === null ? null : activityRootId(activeNodeId, nodesById, ownerships);
+  const groups = useNodeActivityStore(state => state.groups);
+  const activeRootId = activeNodeId === null ? null : activityRootId(activeNodeId, nodesById, ownerships, groups);
   const activityMembersByRoot = useMemo(
-    () => activityMemberIds(agentNodes, ownerships),
-    [agentNodes, ownerships],
+    () => activityMemberIds(agentNodes, ownerships, groups),
+    [agentNodes, ownerships, groups],
   );
   useEffect(() => {
     useNodeActivityStore.getState().prune(
@@ -195,6 +196,7 @@ export function AgentNodeView() {
       activeNodeId,
       { gridSearchQuery, gridProviderFilter, gridStatusFilter, gridSortBy, gridSortDirection },
       ownerships,
+      groups,
     ),
     [
       viewMode,
@@ -207,6 +209,7 @@ export function AgentNodeView() {
       gridSortBy,
       gridSortDirection,
       ownerships,
+      groups,
     ],
   );
 
@@ -223,11 +226,11 @@ export function AgentNodeView() {
           gridProviderFilter,
           gridStatusFilter,
         });
-      return resolved ? nodesById[activityRootId(resolved.id, nodesById, ownerships)] ?? resolved : null;
+      return resolved ? nodesById[activityRootId(resolved.id, nodesById, ownerships, groups)] ?? resolved : null;
     },
     // Controls shape (not each field) keeps the memo dep list stable and the
     // Filtered fallback controls-aware (`resolveSingleNode` narrows by them).
-    [viewMode, agentNodes, activeNodeId, nodesById, ownerships, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
+    [viewMode, agentNodes, activeNodeId, nodesById, ownerships, groups, lastNonSingleMode, selectedMeshId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
   );
 
   useEffect(() => {
@@ -304,6 +307,7 @@ export function AgentNodeView() {
   const [activeDragNodeId, setActiveDragNodeId] = useState<number | null>(null);
   const [dropIntent, setDropIntent] = useState<DropIntent>(null);
   const activatorXRef = useRef(0);
+  const activatorYRef = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -324,6 +328,9 @@ export function AgentNodeView() {
       overRectLeft: e.over?.rect.left ?? 0,
       overRectWidth: e.over?.rect.width ?? 0,
       pointerX: activatorXRef.current + e.delta.x,
+      overRectTop: e.over?.rect.top ?? 0,
+      overRectHeight: e.over?.rect.height ?? 0,
+      pointerY: activatorYRef.current + e.delta.y,
       draggedId: data.nodeId,
       draggedMeshId: data.meshId,
     });
@@ -334,6 +341,7 @@ export function AgentNodeView() {
     const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
     if (!data) return;
     activatorXRef.current = (e.activatorEvent as PointerEvent).clientX ?? 0;
+    activatorYRef.current = (e.activatorEvent as PointerEvent).clientY ?? 0;
     setActiveDragNodeId(data.nodeId);
     setDropIntent(null);
   };
@@ -353,6 +361,10 @@ export function AgentNodeView() {
     setDropIntent(null);
     if (!dragEnabled) return;
     if (!data || !intent) return;
+    if (intent.kind === 'group') {
+      useNodeActivityStore.getState().groupNodes(data.nodeId, intent.targetNodeId);
+      return;
+    }
     if (intent.kind === 'swap') {
       swapAgentNodes(data.nodeId, intent.targetNodeId);
       return;

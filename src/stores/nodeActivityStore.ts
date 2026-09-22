@@ -1,6 +1,23 @@
 import { create } from 'zustand';
 import { useAgentNodeStore } from './agentNodeStore';
-import { activityRootId } from '../lib/nodeActivities';
+import { activityRootId, resolveNodeGroups, type NodeGroups } from '../lib/nodeActivities';
+
+const GROUPS_KEY = 'buildmesh.node-groups';
+function loadGroups(): NodeGroups {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(GROUPS_KEY) ?? '[]');
+    const seen = new Set<number>();
+    if (!Array.isArray(value)) return [];
+    return value.filter((ids): ids is number[] => Array.isArray(ids)
+      && ids.length > 1 && ids.every(id => Number.isSafeInteger(id) && id > 0))
+      .map(ids => ids.filter(id => { if (seen.has(id)) return false; seen.add(id); return true; }))
+      .filter(ids => ids.length > 1);
+  } catch { return []; }
+}
+
+function saveGroups(groups: NodeGroups) {
+  try { localStorage.setItem(GROUPS_KEY, JSON.stringify(groups)); } catch { /* View state still works without storage. */ }
+}
 
 export type UtilityMode = 'build' | 'run' | 'terminal';
 type Selection = { nodeId: number; utility: boolean };
@@ -9,18 +26,71 @@ type Selection = { nodeId: number; utility: boolean };
 export const useNodeActivityStore = create<{
   selections: Record<number, Selection>;
   utilities: Record<number, UtilityMode>;
+  groups: NodeGroups;
+  groupNodes: (sourceId: number, targetId: number) => void;
+  ungroupNode: (nodeId: number) => void;
   /** Canonical UI navigation transition: focus an agent and its activity. */
   activateNode: (nodeId: number, utility?: boolean, utilityMode?: UtilityMode) => void;
   select: (rootId: number, nodeId: number, utility?: boolean) => void;
   openUtility: (rootId: number, nodeId: number, mode: UtilityMode) => void;
   closeUtility: (rootId: number, nodeId: number) => void;
   prune: (validNodeIds: ReadonlySet<number>) => void;
-}>((set) => ({
+}>((set, get) => ({
   selections: {},
   utilities: {},
+  groups: loadGroups(),
+  groupNodes: (sourceId, targetId) => {
+    const { nodesById, circuitOwnerships } = useAgentNodeStore.getState();
+    const source = nodesById[sourceId];
+    const target = nodesById[targetId];
+    if (!source || !target || source.status === 'archived' || target.status === 'archived'
+      || source.mesh_id !== target.mesh_id) return;
+    set(s => {
+      const currentGroups = resolveNodeGroups(s.groups, nodesById, circuitOwnerships);
+      const sourceRoot = activityRootId(sourceId, nodesById, circuitOwnerships, currentGroups);
+      const targetRoot = activityRootId(targetId, nodesById, circuitOwnerships, currentGroups);
+      if (sourceRoot === targetRoot) return s;
+      const sourceGroup = currentGroups.find(ids => ids.includes(sourceRoot));
+      const targetGroup = currentGroups.find(ids => ids.includes(targetRoot));
+      const groups = [...currentGroups.filter(ids => ids !== sourceGroup && ids !== targetGroup),
+        [...(targetGroup ?? [targetRoot]), ...(sourceGroup ?? [sourceRoot])]];
+      saveGroups(groups);
+      return { groups, selections: { ...s.selections, [targetRoot]: { nodeId: sourceId, utility: false } } };
+    });
+    get().activateNode(sourceId);
+  },
+  ungroupNode: (nodeId) => {
+    const { nodesById, circuitOwnerships } = useAgentNodeStore.getState();
+    const root = activityRootId(nodeId, nodesById, circuitOwnerships);
+    set(s => {
+      const currentGroups = resolveNodeGroups(s.groups, nodesById, circuitOwnerships);
+      const groups = currentGroups.map(ids => ids.filter(id => id !== root))
+        .filter(ids => ids.length > 1);
+      const selections = { ...s.selections };
+      // A grouped selection is keyed by the card representative. Removing a
+      // member can make the selected source or reviewer standalone; repair the
+      // old representative key before activateNode records the new key below.
+      const oldRepresentative = currentGroups.find(ids => ids.includes(root))?.[0];
+      const representativeSelection = oldRepresentative == null ? undefined : s.selections[oldRepresentative];
+      if (oldRepresentative != null && oldRepresentative !== root && representativeSelection) {
+        const newRoot = activityRootId(representativeSelection.nodeId, nodesById, circuitOwnerships, groups);
+        if (newRoot !== oldRepresentative) {
+          const keyNode = nodesById[oldRepresentative];
+          if (keyNode && keyNode.status !== 'archived') {
+            selections[oldRepresentative] = { nodeId: oldRepresentative, utility: false };
+          } else {
+            delete selections[oldRepresentative];
+          }
+        }
+      }
+      saveGroups(groups);
+      return { groups, selections };
+    });
+    get().activateNode(nodeId);
+  },
   activateNode: (nodeId, utility = false, utilityMode) => {
     const agentState = useAgentNodeStore.getState();
-    const rootId = activityRootId(nodeId, agentState.nodesById, agentState.circuitOwnerships);
+    const rootId = activityRootId(nodeId, agentState.nodesById, agentState.circuitOwnerships, get().groups);
     agentState.setActiveNode(nodeId);
     if (utility && utilityMode) {
       set(s => ({
@@ -57,8 +127,16 @@ export const useNodeActivityStore = create<{
     const utilities = Object.fromEntries(
       Object.entries(s.utilities).filter(([nodeId]) => validNodeIds.has(Number(nodeId))),
     );
+    const groups = validNodeIds.size === 0
+      ? s.groups
+      : s.groups.map(ids => ids.filter(id => validNodeIds.has(id))).filter(ids => ids.length > 1);
+    const groupsChanged = groups.length !== s.groups.length
+      || groups.some((ids, index) => ids.length !== s.groups[index]?.length
+        || ids.some((id, memberIndex) => id !== s.groups[index]?.[memberIndex]));
+    if (groupsChanged) saveGroups(groups);
     if (Object.keys(selections).length === Object.keys(s.selections).length
-      && Object.keys(utilities).length === Object.keys(s.utilities).length) return s;
-    return { selections, utilities };
+      && Object.keys(utilities).length === Object.keys(s.utilities).length
+      && !groupsChanged) return s;
+    return { selections, utilities, groups };
   }),
 }));

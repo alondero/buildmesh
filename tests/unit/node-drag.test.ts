@@ -12,6 +12,18 @@ const base = {
 };
 
 describe('computeDropIntent', () => {
+  const geometry = { overRectTop: 100, overRectHeight: 400, pointerX: 50 };
+  it('groups over the title or upper centre and swaps over the lower half', () => {
+    expect(computeDropIntent({ ...base, ...geometry, pointerY: 120 })).toEqual({ kind: 'group', targetNodeId: 2 });
+    expect(computeDropIntent({ ...base, ...geometry, pointerX: 10, pointerY: 120 })).toEqual({ kind: 'group', targetNodeId: 2 });
+    expect(computeDropIntent({ ...base, ...geometry, pointerY: 299 })).toEqual({ kind: 'group', targetNodeId: 2 });
+    expect(computeDropIntent({ ...base, ...geometry, pointerY: 300 })).toEqual({ kind: 'swap', targetNodeId: 2 });
+    expect(computeDropIntent({ ...base, ...geometry, pointerX: 10, pointerY: 400 })).toEqual({ kind: 'insert-before', targetNodeId: 2 });
+  });
+  it('never groups a node with itself or across meshes', () => {
+    expect(computeDropIntent({ ...base, ...geometry, pointerY: 120, overNodeId: 1 })).toBeNull();
+    expect(computeDropIntent({ ...base, ...geometry, pointerY: 120, overMeshId: 2 })).toBeNull();
+  });
   it('returns null when there is no node under the pointer', () => {
     expect(computeDropIntent({ ...base, overNodeId: null, overMeshId: null, pointerX: 50 })).toBeNull();
   });

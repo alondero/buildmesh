@@ -16,9 +16,11 @@ interface NodeActivityTabsProps {
   showingUtility: boolean;
   onSelect: (id: number, utility?: boolean, focusTerminal?: boolean) => void;
   onClose: (id: number) => void;
+  grouped?: boolean;
+  onUngroup?: (id: number) => void;
 }
 
-export function NodeActivityTabs({ rootId, members, utilities, selectedId, showingUtility, onSelect, onClose }: NodeActivityTabsProps) {
+export function NodeActivityTabs({ rootId, members, utilities, selectedId, showingUtility, onSelect, onClose, grouped = false, onUngroup }: NodeActivityTabsProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -30,7 +32,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   const activationRef = useRef<'pointer' | 'keyboard'>('keyboard');
   const menuId = `activity-list-${rootId}`;
   const tabs = members.flatMap(member => {
-    const role = member.id === rootId ? (members.length > 1 ? 'Implementation' : 'Agent')
+    const role = grouped ? member.name : member.id === rootId ? (members.length > 1 ? 'Implementation' : 'Agent')
       : members.length > 2 ? `Review ${members.filter(n => n.id !== rootId).findIndex(n => n.id === member.id) + 1}` : 'Review';
     const agent = { key: `agent-${member.id}`, member, utility: false, label: role };
     const mode = utilities.get(member.id);
@@ -55,7 +57,9 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   useEffect(() => {
     tabRefs.current[selectedIndex]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [selectedIndex]);
-  const fullLabel = (tab: typeof tabs[number]) => `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
+  const fullLabel = (tab: typeof tabs[number]) => tab.label === tab.member.name
+    ? `${tab.label} · ${tab.member.status.replace(/_/g, ' ')}`
+    : `${tab.label} · ${tab.member.name}${tab.utility ? '' : ` · ${tab.member.status.replace(/_/g, ' ')}`}`;
   const statusGlyph = (status: string) => status === 'awaiting_input' ? '!' : status === 'error' ? '×'
     : status === 'completed' || status === 'ready' ? '✓' : status === 'suspended' ? 'Ⅱ' : '●';
 
@@ -110,8 +114,12 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
             </div>;
         })}
       </div>
-
-
+      {grouped && onUngroup && <button type="button" aria-label="Move selected node out of group"
+        title="Move selected node out of group (includes its review and utility tabs)"
+        onClick={event => { event.stopPropagation(); onUngroup(selectedId); }}
+        className="flex w-8 shrink-0 items-center justify-center border-l border-border-subtle text-text-secondary hover:bg-bg-card hover:text-text-primary">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 3h7v7m0-7L11 13M10 5H3v16h16v-7" /></svg>
+      </button>}
       <button ref={triggerRef} type="button" data-dropdown-for={menuId} aria-label={`All sessions (${tabs.length})`} title="All sessions"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
         // No `setActiveIndex` here — the hook's mount layout effect seeds
@@ -150,7 +158,7 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
               : 'text-text-secondary'
           }`}>
           <span aria-hidden="true" className={tab.utility ? 'text-text-muted' : getStatusConfig(tab.member.status).color}>{index === selectedIndex ? '✓' : tab.utility ? '›' : statusGlyph(tab.member.status)}</span>
-          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.member.name}</span></span>
+          <span className="min-w-0 flex-1"><span className="block font-medium text-text-primary">{tab.label}</span><span className="block truncate text-text-muted">{tab.label === tab.member.name ? (tab.member.branch || tab.member.provider) : tab.member.name}</span></span>
           {!tab.utility && <span className="text-2xs text-text-muted">{tab.member.status.replace(/_/g, ' ')}</span>}
         </button>)}
       </div>, document.body)}
