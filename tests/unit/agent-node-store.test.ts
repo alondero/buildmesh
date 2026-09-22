@@ -9,6 +9,7 @@ import {
   useAgentNodeStore,
   type AgentNode,
 } from '../../src/stores/agentNodeStore';
+import { attachAgentNodeListeners } from '../../src/stores/agentNodeListeners';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
@@ -563,6 +564,56 @@ describe('useAgentNodeStore', () => {
       await waitFor(() => expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy());
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
       expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+    });
+
+    // Issue #1751 review: `autopilot-node-closed` is an eviction from the
+    // active nodes, not a patch. The backend archived the row, so the next
+    // `list_agent_nodes` snapshot excludes it (`WHERE status != 'archived'`)
+    // and the store must drop it from nodeIds/nodesById. Presence in the
+    // cache must never guard that eviction — even with a seconds-fresh
+    // snapshot, the closed node has to leave the grid.
+    it('evicts the archived node on autopilot-node-closed despite a fresh snapshot', async () => {
+      const node = makeNode({ id: 7, status: 'running' });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([node]);
+        return Promise.resolve([]);
+      });
+      // Stamp a fresh snapshot with the node present.
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      expect(useAgentNodeStore.getState().nodeIds).toContain(7);
+
+      // The backend archived the row: snapshots from here on exclude it.
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_agent_nodes') return Promise.resolve([]);
+        return Promise.resolve([]);
+      });
+      // Attach with the real store surface (self-contained: unlisten
+      // afterwards so no handler leaks into sibling tests).
+      const s = useAgentNodeStore.getState();
+      const unlisten = await attachAgentNodeListeners({
+        fetchAgentNodes: s.fetchAgentNodes,
+        refreshIfStale: s.refreshIfStale,
+        setActiveNode: s.setActiveNode,
+        patchAgentNode: s.patchAgentNode,
+        patchAutopilotState: s.patchAutopilotState,
+        patchCircuitOwnershipState: s.patchCircuitOwnershipState,
+        refreshCircuitOwnerships: s.refreshCircuitOwnerships,
+        setSemanticTurn: s.setSemanticTurn,
+        findAgentNode: s.findAgentNode,
+        removeAgentNode: s.removeAgentNode,
+      });
+      try {
+        await mockEmit('autopilot-node-closed', { node_id: 7, pr_number: 12 });
+
+        await waitFor(() => {
+          expect(useAgentNodeStore.getState().nodeIds).not.toContain(7);
+        });
+        expect(useAgentNodeStore.getState().nodesById[7]).toBeUndefined();
+        expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
+        expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
+      } finally {
+        unlisten();
+      }
     });
   });
 

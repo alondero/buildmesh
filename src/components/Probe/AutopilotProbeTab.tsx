@@ -432,6 +432,15 @@ export function AutopilotProbeTab() {
     activeMeshIdRef.current = activeMeshId;
   }, [activeMeshId]);
 
+  // Mode guard for the loop-status refresh (issue #1751 review): the
+  // event subscription below is only enabled in Looping mode, but a
+  // debounced refresh scheduled just before a mode flip must still not
+  // issue IPC for telemetry no section renders. A ref keeps
+  // `refreshLoopStatus` stable so the listeners aren't re-attached on
+  // every keystroke in the loop form.
+  const formModeRef = useRef(form.mode);
+  formModeRef.current = form.mode;
+
   // Provider catalogue for the issue-driven "Autopilot provider" select.
   // Mirrors `MeshPropertiesTab`'s pattern: fetch once on mount; the
   // `provider-list-changed` event keeps it honest. We deliberately
@@ -668,7 +677,10 @@ export function AutopilotProbeTab() {
    *  read-only telemetry, not a save the user just triggered. */
   const refreshLoopStatus = useCallback(async () => {
     const meshId = activeMeshIdRef.current;
-    if (meshId === null) return;
+    // Mode gate (issue #1751 review): loop telemetry is only rendered in
+    // Looping mode — never fetch it for Issue-Driven, even if a debounced
+    // event refresh was scheduled just before a mode flip.
+    if (meshId === null || formModeRef.current !== 'looping') return;
     try {
       const dto = await getLoopStatus(meshId);
       if (!mountedRef.current || activeMeshIdRef.current !== meshId) return;
@@ -689,7 +701,13 @@ export function AutopilotProbeTab() {
   const refreshLoopStatusSoon = useCallback(() => {
     void refreshLoopStatus();
   }, [refreshLoopStatus]);
-  useLoopStatusInvalidation(refreshLoopStatusSoon);
+  // Enabled only while the Looping section is showing (issue #1751
+  // review): in Issue-Driven mode no section renders loop telemetry, so
+  // the listeners stay detached and lifecycle traffic issues no
+  // `get_loop_status` IPC at all. The 45s fallback below is gated the
+  // same way.
+  const loopStatusLive = !loading && form.mode === 'looping' && activeMeshId !== null;
+  useLoopStatusInvalidation(refreshLoopStatusSoon, loopStatusLive);
 
   // Stale-while-revalidate fallback while the Looping section is
   // showing: a dropped Tauri event never strands the badge for longer

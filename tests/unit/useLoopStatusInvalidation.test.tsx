@@ -15,8 +15,8 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 
-function Harness({ refresh }: { refresh: () => void }) {
-  useLoopStatusInvalidation(refresh);
+function Harness({ refresh, enabled = true }: { refresh: () => void; enabled?: boolean }) {
+  useLoopStatusInvalidation(refresh, enabled);
   return null;
 }
 
@@ -93,6 +93,22 @@ describe('useLoopStatusInvalidation (issue #1751)', () => {
     handlers.get('agent-lifecycle')?.({ payload: { session_id: 9 } });
     vi.advanceTimersByTime(200);
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('attaches nothing while disabled (issue-driven mode issues no loop IPC)', () => {
+    const refresh = vi.fn();
+    render(<Harness refresh={refresh} enabled={false} />);
+    expect(listenMock).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('subscribes when toggled from disabled to enabled', () => {
+    const refresh = vi.fn();
+    const { rerender } = render(<Harness refresh={refresh} enabled={false} />);
+    expect(listenMock).not.toHaveBeenCalled();
+
+    rerender(<Harness refresh={refresh} enabled />);
+    expect(listenMock).toHaveBeenCalledTimes(LOOP_STATUS_INVALIDATION_EVENTS.length);
   });
 
   it('drops a pending debounced refresh on unmount (no orphaned timer)', () => {

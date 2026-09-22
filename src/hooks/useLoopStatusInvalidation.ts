@@ -50,9 +50,14 @@ const INVALIDATION_DEBOUNCE_MS = 200;
  * `useProviderListInvalidation(refresh)` pattern: pass a stable
  * reference (wrap with `useCallback`) so the listeners aren't torn
  * down and re-attached on every parent re-render.
+ *
+ * `enabled` tears the subscription down entirely (issue #1751 review):
+ * surfaces that render no loop telemetry (e.g. Issue-Driven mode) must
+ * not issue `get_loop_status` IPC on unrelated lifecycle traffic.
  */
-export function useLoopStatusInvalidation(refresh: () => void): void {
+export function useLoopStatusInvalidation(refresh: () => void, enabled = true): void {
   useEffect(() => {
+    if (!enabled) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const schedule = () => {
@@ -73,5 +78,5 @@ export function useLoopStatusInvalidation(refresh: () => void): void {
         for (const fn of fns) fn();
       });
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 }

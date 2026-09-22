@@ -1040,6 +1040,30 @@ describe('AutopilotProbeTab — Issue-Driven Autopilot Policy (ticket #1013)', (
     // frame of the event instead of waiting for the next poll tick.
     emit('autopilot-submitted', { node_id: 11, issue: 42 });
     await waitFor(() => expect(loopStatusCalls()).toBe(2));
+    // Flush the event-triggered refresh's setState inside act so the
+    // trailing resolve can't warn after the assertion.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+  });
+
+  it('issues no loop-status IPC on lifecycle events in issue-driven mode (issue #1751 review)', async () => {
+    // Issue-Driven renders no loop telemetry, so the listeners stay
+    // detached: agent lifecycle traffic must not trigger get_loop_status.
+    mockBackend(meshRow());
+    openProbeDestination('autopilot');
+    await screen.findByLabelText(/^Autopilot on/i);
+
+    emit('agent-lifecycle', { session_id: 5 });
+    emit('node-created', { id: 5 });
+    emit('node-spawn-completed', { node_id: 5 });
+    emit('autopilot-submitted', { node_id: 5, issue: 7 });
+    // Let any debounce window lapse inside act so trailing updates can't
+    // warn after the assertion.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+    expect(loopStatusCalls()).toBe(0);
   });
 
   it('falls back to a slow poll with no 5s storm, and clears it on unmount', async () => {

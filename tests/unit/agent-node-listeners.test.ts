@@ -44,7 +44,6 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
   return {
     fetchAgentNodes: spy('fetchAgentNodes', async () => undefined),
     refreshIfStale: spy('refreshIfStale', async () => undefined),
-    cancelSchedule: spy('cancelSchedule', () => {}),
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
     patchAutopilotState: spy('patchAutopilotState', () => {}),
@@ -538,7 +537,7 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('autopilot-node-closed patches archived + cancels schedule, then refreshes scoped (issue #1751)', async () => {
+  it('autopilot-node-closed triggers fetchAgentNodes (no dispose, never scoped)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -553,16 +552,12 @@ describe('attachAgentNodeListeners', () => {
 
     await capturedHandler!({ payload: { node_id: 7 } });
 
-    // Archive keeps the row/branch/scrollback — the terminal-persistence
-    // rule says only delete disposes — so the transition applies first
-    // (patch + schedule cancel) and the trailing refresh is scoped: a
-    // skipped fan-out can never leave the archived state unapplied.
-    expect(surface.__calls).toEqual([
-      { method: 'patchAgentNode', args: [7, { status: 'archived' }] },
-      { method: 'cancelSchedule', args: [7] },
-      { method: 'refreshIfStale', args: [[7]] },
-    ]);
-    expect(surface.fetchAgentNodes).not.toHaveBeenCalled();
+    // Archive keeps the row/branch/scrollback; only refetch. The
+    // terminal-persistence rule says only delete disposes. This stays a
+    // full fetch on purpose (issue #1751 review): an archive is an
+    // eviction, and presence in the cache must never guard the fetch
+    // that purges it — a scoped skip would strand a zombie card.
+    expect(surface.__calls.map(c => c.method)).toEqual(['fetchAgentNodes']);
   });
 
   it('node-spawn-failed dispatches patchAgentNode with status error', async () => {

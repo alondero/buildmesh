@@ -335,15 +335,15 @@ interface AgentNodeState {
   getActiveMeshId: () => number | null;
 
   fetchAgentNodes: () => Promise<void>;
-  /// Conditional full refresh for event handlers (issue #1751). Skips
-  /// the `fetchAgentNodes` fan-out when the last successful snapshot is
-  /// still fresh AND every scoped id is already in the map — the event
-  /// then carries nothing the store doesn't have (e.g. a duplicate
-  /// `node-created` for a row an earlier fetch already picked up).
-  /// Fetches otherwise. The scope only ever *skips* a redundant fetch;
-  /// handlers must apply the event's own state transition (patch/cancel)
-  /// unconditionally first, so a skipped fetch can never leave newer
-  /// event state unapplied (issue #1073 pattern).
+  /// Conditional full refresh for additive events (issue #1751).
+  /// Skips the `fetchAgentNodes` fan-out when the last successful
+  /// snapshot is still fresh AND every scoped id is already in the map
+  /// — the event then carries nothing the store doesn't have (e.g. a
+  /// duplicate `node-created` for a row an earlier fetch already picked
+  /// up). Fetches otherwise. Never use for evictions: an archived or
+  /// deleted id is *supposed* to be in the map, and the fetch is what
+  /// purges it — presence must not guard a removal (issue #1073
+  /// pattern: a skipped fetch must never leave event state unapplied).
   refreshIfStale: (nodeIds?: number[]) => Promise<void>;
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) => Promise<AgentNode>;
   /// Sidebar "click + or pick provider" entrypoint — creates a node on the
@@ -733,7 +733,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         await attachAgentNodeListeners({
           fetchAgentNodes: get().fetchAgentNodes,
           refreshIfStale: get().refreshIfStale,
-          cancelSchedule: get().cancelSchedule,
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
           patchAutopilotState: get().patchAutopilotState,
