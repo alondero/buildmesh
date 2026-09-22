@@ -286,6 +286,66 @@ mod tests {
         assert_eq!(cline_dir(), expected);
     }
 
+    /// Issue #1775 review: Buildmesh must resolve Cline's home the same way
+    /// Cline does (`resolveClineDir()`), so `CLINE_DIR` wins over
+    /// `<home>/.cline`. Otherwise the attention hook is written to a directory
+    /// Cline never searches, while `requires_attention_hook` stays true — a
+    /// node that can never yield but still passes the Autopilot/review gate.
+    /// Pure (injected env), so no process-state mutation.
+    #[test]
+    fn cline_dir_honours_the_cline_dir_override() {
+        use std::path::PathBuf;
+
+        fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+            let pairs: Vec<(String, std::ffi::OsString)> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), std::ffi::OsString::from(*v)))
+                .collect();
+            move |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        }
+
+        // Explicit CLINE_DIR wins over the home fallback, on both environments.
+        assert_eq!(
+            cline_dir_with_resolver(
+                Environment::Windows,
+                env(&[("CLINE_DIR", "D:/cline-custom"), ("USERPROFILE", "C:/Users/dev")]),
+            ),
+            PathBuf::from("D:/cline-custom")
+        );
+        assert_eq!(
+            cline_dir_with_resolver(
+                Environment::Wsl,
+                env(&[("CLINE_DIR", "/opt/cline"), ("HOME", "/home/dev")]),
+            ),
+            PathBuf::from("/opt/cline")
+        );
+
+        // Blank / whitespace-only collapses to unset, like CLINE_DATA_DIR.
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                cline_dir_with_resolver(
+                    Environment::Windows,
+                    env(&[("CLINE_DIR", blank), ("USERPROFILE", "C:/Users/dev")]),
+                ),
+                PathBuf::from("C:/Users/dev").join(".cline"),
+                "a blank CLINE_DIR ({blank:?}) must fall through to the home"
+            );
+        }
+
+        // Unset → <home>/.cline.
+        assert_eq!(
+            cline_dir_with_resolver(
+                Environment::Windows,
+                env(&[("USERPROFILE", "C:/Users/dev")]),
+            ),
+            PathBuf::from("C:/Users/dev").join(".cline")
+        );
+        assert_eq!(
+            cline_dir_with_resolver(Environment::Wsl, env(&[("HOME", "/home/dev")])),
+            PathBuf::from("/home/dev").join(".cline")
+        );
+    }
+
     /// Issue #1774: `cline_db_path_for_env` must always append the
     /// authoritative `data/db/sessions.db` suffix onto whatever home
     /// the spawn-aware resolver picked (override or `~/.cline`). The

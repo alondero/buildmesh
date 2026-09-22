@@ -215,6 +215,12 @@ fn hook_script(env_type: EnvType) -> &'static str {
 /// `None` means no home was resolvable — the caller returns `Ok(())` with no
 /// side effects, matching the mcode precedent.
 ///
+/// On a native spawn `cli_dir_for_spawn` returns `cline_dir()`, which honours
+/// `CLINE_DIR` exactly as Cline's own `resolveClineDir()` does — so a user who
+/// set the override gets the hook in the directory Cline searches rather than
+/// one it never reads. (A WSL/Interop guest's `CLINE_DIR` lives in the guest
+/// environment and is not visible here; Cline is WSL-excluded regardless.)
+///
 /// `launch_runtime()` only populates `harness_home` for a Codex proxy today, so
 /// a real Cline spawn always takes the `cli_dir_for_spawn` branch. The override
 /// stays because it is the harness-specific seam every other provisioner

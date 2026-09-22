@@ -106,7 +106,7 @@ Cline's CLI resolves **file hooks** — executable files named exactly after an
 event — additively from four fixed directories:
 
 1. `~/Documents/Cline/Hooks`
-2. `~/.cline/hooks` (`resolveClineDir()` honours `CLINE_DIR` — read by the code, though it is not listed in the CLI's env table)
+2. `~/.cline/hooks` — `resolveClineDir()` honours `CLINE_DIR` (read by Cline's code, though it is absent from the CLI's env table). Buildmesh resolves the same override, so the hook lands where Cline actually searches rather than in a directory it never reads.
 3. `<workspace>/.clinerules/hooks`
 4. `<workspace>/.cline/hooks`
 
