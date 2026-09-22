@@ -16,8 +16,10 @@
 //! CLAUDE.md hard rule is *structurally* enforced by this module's surface:
 //! there are no `to_host_path`-shaped functions here, only detection results.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::env;
+use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 
@@ -347,10 +349,90 @@ pub(crate) fn runtime_for_spawn_path(path: &str) -> EnvType {
     }
 }
 
+/// A `Hash`able tag for [`EnvType`] (the enum itself doesn't derive `Hash`).
+/// Used as half of the [`SPAWN_ENV_MEMO`] fingerprint.
+fn env_type_tag(env_type: EnvType) -> &'static str {
+    match env_type {
+        EnvType::Windows => "windows",
+        EnvType::Wsl => "wsl",
+        EnvType::WindowsInterop => "windows-interop",
+    }
+}
+
+/// The `(runtime tag, distro)` fingerprint a spawn-env memo entry is keyed on.
+type SpawnEnvFingerprint = (&'static str, Option<String>);
+
+/// The `(provider env, mesh env fingerprint)` key the spawn-env memo is keyed
+/// on: the resolved runtime plus the target distro. A change to either is a
+/// different key, so a settings change can never produce a stale hit.
+fn spawn_env_memo_key(runtime: EnvType, distro: Option<&str>) -> SpawnEnvFingerprint {
+    (env_type_tag(runtime), distro.map(str::to_string))
+}
+
+/// Process-lifetime memo for spawn-time env probes that are keyed on the
+/// resolved runtime (so they cannot use the one-shot [`Lazy`] their siblings
+/// use). Without this, every spawn re-runs the underlying subprocess.
+/// Values are the *host-form* paths the callers consume; only **successful**
+/// probes are stored (see [`memoized_spawn_env`]), so there is no negative
+/// entry to represent here.
+static SPAWN_ENV_MEMO: Lazy<Mutex<HashMap<SpawnEnvFingerprint, PathBuf>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Test/diagnostic hook: drop every memoised spawn-env probe.
+#[cfg(test)]
+pub(crate) fn clear_spawn_env_memo() {
+    SPAWN_ENV_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+/// Memoise `compute` under `key`. The lock is released across `compute` — the
+/// probe spawns a subprocess, and holding the mutex through it would serialise
+/// concurrent spawns on the probe (the exact cost this avoids).
+///
+/// **Only successful probes are memoised.** A `None` (WSL not up yet,
+/// `wsl.exe` missing, a transient failure) is returned but *not* stored, so the
+/// next spawn retries it. Latching a negative result would disable the harness
+/// for the whole process lifetime, with no recovery short of an app restart.
+fn memoized_spawn_env(
+    key: SpawnEnvFingerprint,
+    compute: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(hit) = SPAWN_ENV_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return Some(hit.clone());
+    }
+    let value = compute();
+    if let Some(path) = value.as_ref() {
+        SPAWN_ENV_MEMO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, path.clone());
+    }
+    value
+}
+
 /// Resolve Kimi Code's config in the environment that will execute the CLI.
 /// Guest login overrides belong to the guest, never to the Windows host.
+///
+/// Memoised per `(runtime, distro)` — see [`SPAWN_ENV_MEMO`] — because the
+/// underlying probe is a `wsl.exe` / `powershell.exe` subprocess on the Windows
+/// side and is otherwise re-run on *every* spawn (issue #1752).
 pub(crate) fn kimi_home_for_spawn(spawn_path: &str, distro: Option<&str>) -> Option<PathBuf> {
     let runtime = runtime_for_spawn_path(spawn_path);
+    memoized_spawn_env(spawn_env_memo_key(runtime, distro), || {
+        kimi_home_probe(runtime, distro)
+    })
+}
+
+/// The uncached probe [`kimi_home_for_spawn`] memoises. Split out so the memo
+/// wrapper owns the fingerprint while this keeps the platform-specific probe
+/// (and its exact stdout contract) unchanged.
+fn kimi_home_probe(runtime: EnvType, distro: Option<&str>) -> Option<PathBuf> {
     let path = if runtime == EnvType::Wsl {
         let distro = distro.map(str::to_string).or_else(get_default_wsl_distro)?;
         let mut command = command_no_window("wsl.exe");
@@ -396,6 +478,70 @@ mod kimi_tests {
         assert_eq!(kimi_home_from_vars(false, |key| if key == "KIMI_CODE_HOME" { Some("/custom/kimi".into()) } else { vars(key) }), Some(PathBuf::from("/custom/kimi")));
         assert_eq!(kimi_home_from_vars(false, |_| None), None);
         assert_eq!(parse_marked_wsl_path(b"banner\n__BUILDMESH_KIMI_HOME__/custom/kimi\n", "__BUILDMESH_KIMI_HOME__"), Some(PathBuf::from("/custom/kimi")));
+    }
+
+    /// Issue #1752: the spawn-env probe must run **once per fingerprint**, not
+    /// once per spawn. `probe` counts invocations so a regression that dropped
+    /// the memo (re-introducing the per-spawn subprocess) trips here. The
+    /// fingerprint is `(runtime, distro)`: a changed distro is a different key
+    /// and must re-probe; a memoised `None` (failed probe) must NOT re-probe.
+    #[test]
+    fn spawn_env_memo_probes_once_per_fingerprint() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        clear_spawn_env_memo();
+        let calls = AtomicUsize::new(0);
+        let probe = |value: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some(PathBuf::from(value))
+        };
+
+        let ubuntu = spawn_env_memo_key(EnvType::Wsl, Some("Ubuntu"));
+        assert_eq!(
+            memoized_spawn_env(ubuntu.clone(), || probe("/home/u/.kimi-code")),
+            Some(PathBuf::from("/home/u/.kimi-code"))
+        );
+        assert_eq!(
+            memoized_spawn_env(ubuntu, || probe("/must-not-run")),
+            Some(PathBuf::from("/home/u/.kimi-code")),
+            "a repeated fingerprint must return the cached value, not re-probe"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call must hit the memo");
+
+        // A different distro is a different fingerprint → re-probe.
+        let debian = spawn_env_memo_key(EnvType::Wsl, Some("Debian"));
+        assert_eq!(
+            memoized_spawn_env(debian, || probe("/home/u/.kimi-code")),
+            Some(PathBuf::from("/home/u/.kimi-code"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a changed distro must re-probe");
+
+        // A failed probe (`None`) must NOT be latched: a transient failure (WSL
+        // not up yet during startup, a flaky subprocess) has to be retryable on
+        // the next spawn, not memoised away for the process lifetime.
+        let no_distro = spawn_env_memo_key(EnvType::Wsl, None);
+        assert_eq!(
+            memoized_spawn_env(no_distro.clone(), || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            memoized_spawn_env(no_distro, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some(PathBuf::from("/recovered"))
+            }),
+            Some(PathBuf::from("/recovered")),
+            "a failed probe must be retried rather than served from a latched None"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "the failed probe must run twice (once failing, once recovering) — \
+             a negative result is not cached"
+        );
+
+        clear_spawn_env_memo();
     }
 }
 

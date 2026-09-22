@@ -474,6 +474,7 @@ pub(super) async fn provision_workspace(
 
     let filesystem_env = crate::env::resolve_raw_path(&resolved.raw_path).env_type;
     let git_paths = resolved.clone();
+    timer.checkpoint("before_worktree_sanitize");
     crate::blocking::run_blocking("cross_runtime_git", move || -> Result<(), String> {
         if filesystem_env != git_paths.env_type
             || (cfg!(windows) && git_paths.env_type == crate::models::EnvType::Wsl)
@@ -489,6 +490,7 @@ pub(super) async fn provision_workspace(
         }
         Ok(())
     }).await?;
+    timer.checkpoint("after_worktree_sanitize");
 
     // Muse's WSL and native Windows runtimes scan project rules and skills
     // before the PTY is usable. Windows Git may have checked the tracked
@@ -551,6 +553,7 @@ pub(super) async fn provision_workspace(
         }
     };
 
+    timer.checkpoint("before_provider_provisioning");
     let launch_runtime = routing.launch_runtime();
     let provisioning_resolved = resolved.clone();
     let provisioning_runtime = launch_runtime.clone();
