@@ -19,8 +19,8 @@
 use std::path::PathBuf;
 
 use super::adapters::{
-    AgyAdapter, ClaudeCodeAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter, GrokAdapter,
-    McodeAdapter, MuseAdapter, OpenCodeAdapter,
+    AgyAdapter, ClaudeCodeAdapter, ClineAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter,
+    GrokAdapter, McodeAdapter, MuseAdapter, OpenCodeAdapter,
 };
 use super::types::Parsed;
 
@@ -139,6 +139,7 @@ pub(crate) enum HookDecision {
 
 static CLAUDE_CODE_ADAPTER: ClaudeCodeAdapter = ClaudeCodeAdapter;
 static AGY_ADAPTER: AgyAdapter = AgyAdapter;
+static CLINE_ADAPTER: ClineAdapter = ClineAdapter;
 static CODEX_ADAPTER: CodexAdapter = CodexAdapter;
 static CURSOR_ADAPTER: CursorAdapter = CursorAdapter;
 static COMMANDCODE_ADAPTER: CommandCodeAdapter = CommandCodeAdapter;
@@ -147,7 +148,7 @@ static MCODE_ADAPTER: McodeAdapter = McodeAdapter;
 static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
 static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
 
-static ADAPTERS: [&'static dyn TranscriptAdapter; 9] = [
+static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
     // Claude Code is the registry default for hook classification when no
     // adapter claims the payload (`default_adapter`). This is NOT the
     // transcript-format resolver: `TranscriptFormat::for_harness` returns
@@ -157,6 +158,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 9] = [
     // Every other adapter is keyed by its harness id; an unknown harness id
     // falls back to Claude Code.
     &AGY_ADAPTER,
+    &CLINE_ADAPTER,
     &MCODE_ADAPTER,
     &CODEX_ADAPTER,
     &CURSOR_ADAPTER,

@@ -903,15 +903,18 @@ pub(crate) fn cline_db_path_with_resolver<
     spawn_path: &str,
     get: F,
 ) -> Option<PathBuf> {
-    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, get) {
+    if let Some(override_dir) = cline_data_dir_override_for_env(env_type, &get) {
         return Some(override_dir.join("db").join("sessions.db"));
     }
     // Default derivation: cline home + data/db/sessions.db.
+    // The native arm goes through the same injectable `get` as the override above,
+    // so the whole helper is hermetic: a test that injects an environment must
+    // not pick up the process CLINE_DIR through cline_dir()'s live-env wrapper.
     let dir = match env_type {
         EnvType::WindowsInterop => super::windows_cli_home(".cline")?,
         EnvType::Windows => {
             let _ = spawn_path;
-            cline_dir()
+            cline_dir_with_resolver(current_env(), &get)
         }
         EnvType::Wsl => {
             let _ = spawn_path;
@@ -954,16 +957,44 @@ pub(crate) fn cline_db_path_for_host(env_type: EnvType, spawn_path: &str) -> Opt
 /// no `CLINE_DATA_DIR` honoured at this level (the spawn-aware helpers
 /// above are the only ones that need to reason about guest vs host).
 pub fn cline_dir() -> PathBuf {
-    match current_env() {
-        Environment::Wsl => env::var("HOME")
+    cline_dir_with_resolver(current_env(), |key| env::var_os(key))
+}
+
+/// Cline's own home precedence (`resolveClineDir()` in
+/// `@cline/shared/storage`, verified in the shipped 3.0.62 bundle): an
+/// explicit `CLINE_DIR` wins, otherwise `<home>/.cline`. `get` lets tests
+/// inject an environment without mutating process state.
+///
+/// Honouring `CLINE_DIR` keeps Buildmesh's hook directory and session store
+/// under the same root Cline actually uses: without it, a user who set the
+/// override would get a hook written to `~/.cline/hooks` that Cline never
+/// searches, and a capture poller reading the wrong store. A blank or
+/// whitespace-only value collapses to unset (the same normalisation the
+/// `CLINE_DATA_DIR` helper applies). The spawn-aware WSL/Interop arms do
+/// **not** honour it - that override lives in the guest environment, which
+/// this process cannot read.
+pub(crate) fn cline_dir_with_resolver<F: Fn(&str) -> Option<std::ffi::OsString>>(
+    environment: Environment,
+    get: F,
+) -> PathBuf {
+    if let Some(dir) = get("CLINE_DIR").and_then(|value| {
+        let trimmed = value.to_string_lossy().trim().to_string();
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    }) {
+        return dir;
+    }
+    match environment {
+        Environment::Wsl => get("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/root"))
+            .unwrap_or_else(|| PathBuf::from("/root"))
             .join(".cline"),
-        Environment::Windows => env::var("USERPROFILE")
-            .or_else(|_| env::var("HOME"))
+        Environment::Windows => get("USERPROFILE")
+            .or_else(|| get("HOME"))
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+            .unwrap_or_else(|| {
+                let user = get("USERNAME")
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Public".to_string());
                 PathBuf::from(format!("C:\\Users\\{user}"))
             })
             .join(".cline"),

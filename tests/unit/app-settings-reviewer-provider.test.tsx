@@ -135,6 +135,7 @@ describe('AppSettingsModal reviewer provider', () => {
     tauriMocks.listProviders.mockResolvedValue([
       provider('anthropic', 'Anthropic'),
       provider('cline', 'Cline'),
+      provider('freebuff', 'Freebuff'),
       provider('terminal', 'Terminal'),
     ]);
     const select = (await renderModal()) as HTMLSelectElement;
@@ -143,8 +144,10 @@ describe('AppSettingsModal reviewer provider', () => {
     // Greying out (not hiding) keeps the limitation discoverable — the same
     // reason the node title-bar picker renders these rows disabled.
     expect(options.find(o => o.value === 'anthropic')?.disabled).toBe(false);
-    expect(options.find(o => o.value === 'cline')?.disabled).toBe(true);
-    expect(options.find(o => o.value === 'cline')?.textContent).toBe('Cline (no review support)');
+    // Issue #1775: Cline carries a native attention hook now and is pickable.
+    expect(options.find(o => o.value === 'cline')?.disabled).toBe(false);
+    expect(options.find(o => o.value === 'freebuff')?.disabled).toBe(true);
+    expect(options.find(o => o.value === 'freebuff')?.textContent).toBe('Freebuff (no review support)');
     // The plain shell is absent entirely: it is not an agent at all.
     expect(options.find(o => o.value === 'terminal')).toBeUndefined();
   });

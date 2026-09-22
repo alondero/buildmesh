@@ -1750,19 +1750,19 @@ mod reviewer_tests {
         }
     }
 
-    /// The issue's named cases: `dsh`, `freebuff`, and `cline` are
-    /// rejected with the Inspector/docs label naming the harness (not the
-    /// Terminal message), including through a composite `harness:provider`
-    /// id and uppercase input (lookup normalises case).
+    /// The issue's named cases: `dsh` and `freebuff` are rejected with the
+    /// Inspector/docs label naming the harness (not the Terminal message),
+    /// including through a composite `harness:provider` id and uppercase
+    /// input (lookup normalises case). Issue #1775 gave `cline` a file hook,
+    /// so it is now eligible (see [`reviewer_accepts_eligible_unknown_and_blank`]).
     #[test]
     fn reviewer_rejects_harnesses_without_turn_signal() {
         for (picked, name) in [
             ("dsh", "DeepSeek Harness"),
             ("DSH", "DeepSeek Harness"),
             ("freebuff", "Freebuff"),
-            ("cline", "Cline"),
-            ("CLINE", "Cline"),
-            ("cline:minimax", "Cline"),
+            ("FREEBUFF", "Freebuff"),
+            ("freebuff:minimax", "Freebuff"),
             ("  freebuff  ", "Freebuff"),
         ] {
             let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
@@ -1787,6 +1787,8 @@ mod reviewer_tests {
         for picked in [
             "claude", "anthropic", "claude_code", "codex", "agy", "antigravity",
             "opencode", "commandcode", "cmd", "muse", "codex:minimax",
+            // Issue #1775: Cline now provisions an attention hook.
+            "cline", "cline:minimax",
         ] {
             let got = normalize_reviewer_provider(Some(picked.into())).unwrap();
             assert_eq!(got.as_deref(), Some(picked), "{picked:?} must pass through");
@@ -1812,17 +1814,17 @@ mod reviewer_tests {
     fn preset_reviewer_gates_override_then_stored_app_wide_value() {
         // Override wins; stored value never consulted.
         assert_eq!(
-            resolve_preset_reviewer(Some("codex".into()), Some("cline".into())).unwrap().as_deref(),
+            resolve_preset_reviewer(Some("codex".into()), Some("freebuff".into())).unwrap().as_deref(),
             Some("codex")
         );
         // Ineligible override refused with the harness-named reason.
-        let err = resolve_preset_reviewer(Some("cline".into()), None).unwrap_err();
-        assert!(err.contains("Cline"), "got {err:?}");
+        let err = resolve_preset_reviewer(Some("freebuff".into()), None).unwrap_err();
+        assert!(err.contains("Freebuff"), "got {err:?}");
         assert!(!err.contains("Settings"), "override refusal must not blame Settings, got {err:?}");
         // Blank override + ineligible stored value: refuse with guidance.
         for blank in [None, Some("   ".to_string())] {
-            let err = resolve_preset_reviewer(blank, Some("cline".into())).unwrap_err();
-            assert!(err.contains("Cline"), "got {err:?}");
+            let err = resolve_preset_reviewer(blank, Some("freebuff".into())).unwrap_err();
+            assert!(err.contains("Freebuff"), "got {err:?}");
             assert!(err.contains("Settings"), "stale-value refusal must name Settings, got {err:?}");
         }
         // Blank override + eligible stored value: inherit (None).

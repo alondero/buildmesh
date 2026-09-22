@@ -112,13 +112,13 @@ describe('effortAllowedFor', () => {
 
 describe('blocksReviewCircuit', () => {
   it('blocks the harnesses with no turn signal, and the plain shell', () => {
-    for (const id of ['dsh', 'freebuff', 'cline', 'terminal']) {
+    for (const id of ['dsh', 'freebuff', 'terminal']) {
       expect(blocksReviewCircuit(id), id).toBe(true);
     }
   });
 
   it('allows a harness with either a native hook or a passive turn watcher', () => {
-    for (const id of ['anthropic', 'codex', 'commandcode', 'muse']) {
+    for (const id of ['anthropic', 'codex', 'commandcode', 'muse', 'cline']) {
       expect(blocksReviewCircuit(id), id).toBe(false);
     }
   });
@@ -140,12 +140,14 @@ describe('blocksReviewCircuit', () => {
 
   it('resolves a Proxied Spawn Option id under its harness half', () => {
     expect(blocksReviewCircuit('claude:minimax')).toBe(false);
-    expect(blocksReviewCircuit('cline:some-account')).toBe(true);
+    // Issue #1775: Cline now provisions a native hook, so it is eligible.
+    expect(blocksReviewCircuit('cline:some-account')).toBe(false);
+    expect(blocksReviewCircuit('freebuff:some-account')).toBe(true);
   });
 
   it('normalises case and whitespace', () => {
     expect(blocksReviewCircuit('  DeepSeek  ')).toBe(true);
-    expect(blocksReviewCircuit('CLINE')).toBe(true);
+    expect(blocksReviewCircuit('CLINE')).toBe(false);
     expect(blocksReviewCircuit('  Codex ')).toBe(false);
   });
 
@@ -171,13 +173,13 @@ describe('review-circuit eligibility across the shipped catalog', () => {
     expect(HARNESS_IDS.filter(id => !blocksReviewCircuit(id)))
       .toEqual([
         'anthropic', 'agy', 'opencode', 'codex', 'cursor', 'grok',
-        'kimi', 'mcode', 'commandcode', 'muse',
+        'kimi', 'mcode', 'commandcode', 'muse', 'cline',
       ]);
   });
 
   it('excludes the harnesses with no turn signal, plus the plain shell', () => {
     expect(HARNESS_IDS.filter(id => blocksReviewCircuit(id)))
-      .toEqual(['dsh', 'freebuff', 'cline', 'terminal']);
+      .toEqual(['dsh', 'freebuff', 'terminal']);
   });
 });
 

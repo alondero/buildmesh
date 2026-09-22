@@ -8,6 +8,7 @@
 
 pub mod agy;
 pub mod claude_code;
+pub mod cline;
 pub mod codex;
 pub mod commandcode;
 pub mod cursor;
@@ -18,6 +19,7 @@ pub mod opencode;
 
 pub(crate) use agy::AgyAdapter;
 pub(crate) use claude_code::ClaudeCodeAdapter;
+pub(crate) use cline::ClineAdapter;
 pub(crate) use codex::CodexAdapter;
 pub(crate) use commandcode::CommandCodeAdapter;
 pub(crate) use cursor::CursorAdapter;

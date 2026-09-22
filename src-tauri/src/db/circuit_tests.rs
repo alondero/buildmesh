@@ -383,12 +383,13 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
         assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
     }
     // Issue #1816: the gate is attention compatibility, not a
-    // Terminal-only denylist — `dsh`, `freebuff`, and `cline` have
+    // Terminal-only denylist — `dsh` and `freebuff` have
     // neither an attention hook nor a passive turn watcher, so they are
     // rejected with the Inspector/docs label naming the harness and the
-    // missing turn-completion signal. Rejections happen before any DB
+    // missing turn-completion signal. (Issue #1775 gave `cline` a file hook,
+    // so it is no longer ineligible.) Rejections happen before any DB
     // work, so the same source row is reusable across picks here.
-    for (picked, name) in [("dsh", "DeepSeek Harness"), ("freebuff", "Freebuff"), ("cline", "Cline"), ("cline:minimax", "Cline")] {
+    for (picked, name) in [("dsh", "DeepSeek Harness"), ("freebuff", "Freebuff"), ("freebuff:minimax", "Freebuff")] {
         let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()), false).unwrap_err();
         assert!(err.contains(name), "{picked:?} must name the harness ({name}), got {err:?}");
         assert!(err.contains("turn-completion"), "{picked:?} must name the missing capability, got {err:?}");
@@ -419,7 +420,7 @@ fn node_review_ignores_ineligible_override_for_authored_circuit() {
     let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
     // Would be refused on the built-in preset path; the authored path
     // ignores the value entirely, so the run mints.
-    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("cline".into()), false).unwrap();
+    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("freebuff".into()), false).unwrap();
     let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
@@ -448,7 +449,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     // Store the stale value directly, bypassing the now-validating
     // settings command — that is exactly the pre-gate state under test.
     crate::preferences::save(crate::preferences::AppPreferences {
-        reviewer_provider: Some("cline".to_string()),
+        reviewer_provider: Some("freebuff".to_string()),
         ..Default::default()
     }).expect("store stale app-wide reviewer");
     let mut conn = isolated_test_conn();
@@ -457,7 +458,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
         "claude", None, None, None, None, true, None, None, None).unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None, false).unwrap_err();
-    assert!(err.contains("Cline"), "stale value must name the harness, got {err:?}");
+    assert!(err.contains("Freebuff"), "stale value must name the harness, got {err:?}");
     assert!(err.contains("Settings"), "stale value must point at Settings, got {err:?}");
     assert!(
         err.contains("turn-completion"),

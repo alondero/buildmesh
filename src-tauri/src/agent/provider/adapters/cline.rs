@@ -44,16 +44,38 @@
 //! WSL is not a supported or tested target in this slice — the guest-side
 //! cross-runtime probes skip Cline (`detection::WSL_EXCLUDED`).
 //!
-//! **Attention / transcript**: honest-empty in this slice — `#1775` provisions
-//! the attention hook and `#1776` the transcript reader, so the descriptor
-//! reports [`AttentionCapability::None`](crate::agent::capabilities::AttentionCapability::None),
-//! `supports_passive_turn_watcher: false` and `produces_readable_transcript:
-//! false`.
+//! **Attention** (issue #1775): Cline's CLI resolves *file hooks* — executable
+//! files named exactly after an event — from four fixed directories
+//! (`~/Documents/Cline/Hooks`, `~/.cline/hooks`, `<ws>/.clinerules/hooks`,
+//! `<ws>/.cline/hooks`). Buildmesh provisions `<cline home>/hooks/TaskComplete.<ext>`,
+//! which maps to Cline's `agent_end` — a completed turn. The file POSTs its
+//! stdin payload to the local attention route, expanding `$BUILDMESH_PORT` /
+//! `$BUILDMESH_SESSION_ID` at hook-run time (Cline runs file hooks with the
+//! inherited `process.env`, so one node-agnostic file set serves every node and
+//! never bakes a node id). `--hooks-dir` / `CLINE_HOOKS_DIR` are inert in
+//! 3.0.62, so the fixed paths are the only lever.
+//!
+//! The advertised set is deliberately just `turn_completed`. Cline's file-hook
+//! layer has **no clean-exit dispatch**: `SessionShutdown` / `session_shutdown`
+//! is reachable only from the abort branch of `afterRun`
+//! (`sdk/packages/core/src/hooks/hook-file-hooks.ts`), so it never fires on
+//! teardown — and on an abort the session is still live, so surfacing it as
+//! `session_exited` would mislabel the lifecycle. There is likewise no
+//! permission/question primitive under the default auto-approve launch. A
+//! node's clean process exit is still observed through PTY EOF, exactly as it
+//! was before this change.
+//!
+//! **Transcript**: not wired yet (`#1776`), so `produces_readable_transcript`
+//! stays `false` and the digest degrades to a spine-only read.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::agent::capabilities::EffortControlKind;
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, EffortControlKind};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
+};
+use crate::agent::session_lifecycle::LifecycleKind;
 use crate::models::EnvType;
 
 pub struct ClineAdapter;
@@ -79,6 +101,222 @@ fn shell_for(platform: Platform) -> WindowsShell {
     match platform {
         Platform::Macos | Platform::Linux => WindowsShell::Direct,
         Platform::Windows => WindowsShell::Cmd,
+    }
+}
+
+// ── Attention hook provisioning (issue #1775) ───────────────────────────────
+
+/// Minimum Cline release the Buildmesh attention hook has been validated
+/// against (issue #1775). Verified against `cline` 3.0.62's file-hook layer
+/// (`sdk/packages/core/src/hooks/hook-file-config.ts`): the `TaskComplete` file
+/// maps to `agent_end`, and `agent_end` is dispatched only for a completed run.
+pub const CLINE_MIN_HOOK_VERSION: &str = "3.0.62";
+
+/// Marker identifying a Buildmesh-owned Cline hook file. Cline resolves hook
+/// files by *exact base name* (`toHookConfigFileName` strips only the
+/// extension), so the file name is not ours to namespace — this content marker
+/// is what distinguishes our hook from a user-authored file at the same path.
+pub const CLINE_HOOK_MARKER: &str = "BUILDMESH_CLINE_ATTENTION_HOOK";
+
+/// The Cline file hook Buildmesh provisions, written verbatim as the file's
+/// base name. `TaskComplete` maps to `agent_end` — Cline's file-hook layer
+/// dispatches it from `afterRun` only when `result.status === "completed"`.
+///
+/// Nothing else is provisioned: `SessionShutdown`/`session_shutdown` is
+/// abort-only (see the module doc), Cline raises no permission/question prompt
+/// under its default auto-approve launch, and the failure dispatch
+/// (`TaskError`/`agent_error`) has no consumer here.
+const CLINE_PROVISIONED_HOOKS: &[&str] = &["TaskComplete"];
+
+/// POSIX hook body. Expands the callback URL from `BUILDMESH_PORT` /
+/// `BUILDMESH_SESSION_ID` at hook-run time, so one file serves every node.
+/// Prints `{}` so a blocking hook still returns valid control JSON; a
+/// non-Buildmesh Cline session (env absent) is a no-op.
+///
+/// The URL uses the literal `127.0.0.1`, not `localhost`: the attention server
+/// binds IPv4 loopback explicitly, and a numeric literal keeps the callback off
+/// DNS/`::1` resolution on the hook's hot path. `--noproxy '*'` is the POSIX
+/// mirror of the PowerShell path's disabled default proxy — curl has no
+/// built-in loopback exemption, so without it a user's `http_proxy` would send
+/// the loopback POST to the corporate proxy and the delivery would fail
+/// silently (`|| true`).
+const CLINE_HOOK_SCRIPT_SH: &str = r#"#!/usr/bin/env bash
+# Buildmesh Cline attention hook. Marker: BUILDMESH_CLINE_ATTENTION_HOOK
+# Managed by Buildmesh — edits are overwritten on the next spawn.
+# 127.0.0.1 (not localhost) + --noproxy '*' keep the callback off DNS/IPv6
+# resolution and off any machine-configured HTTP proxy.
+payload=$(cat)
+if [ -n "$BUILDMESH_PORT" ] && [ -n "$BUILDMESH_SESSION_ID" ]; then
+  printf '%s' "$payload" | curl -sf --noproxy '*' --connect-timeout 1 --max-time 2 -o /dev/null \
+    -X POST -H "Content-Type: application/json" --data-binary @- \
+    "http://127.0.0.1:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID" || true
+fi
+printf '{}'
+"#;
+
+/// Windows hook body (`powershell -File`). Sends the payload as UTF-8 bytes so
+/// `agent_end`'s `turn.outputText` survives non-ASCII. Three lines are
+/// load-bearing: the literal `127.0.0.1` (not `localhost`) keeps the callback
+/// off DNS/`::1` resolution, `DefaultWebProxy = $null` stops a machine proxy
+/// intercepting a loopback POST, and `Expect100Continue = $false` stops
+/// `HttpWebRequest` waiting for an interim `100 Continue` that Buildmesh's HTTP
+/// server never emits (the hook would otherwise stall and drop the callback).
+/// See [`CLINE_HOOK_SCRIPT_SH`].
+const CLINE_HOOK_SCRIPT_PS1: &str = r#"# Buildmesh Cline attention hook. Marker: BUILDMESH_CLINE_ATTENTION_HOOK
+# Managed by Buildmesh - edits are overwritten on the next spawn.
+# 127.0.0.1 (not localhost) keeps the callback off DNS/IPv6 resolution.
+$ErrorActionPreference = 'SilentlyContinue'
+[System.Net.WebRequest]::DefaultWebProxy = $null
+[System.Net.ServicePointManager]::Expect100Continue = $false
+$payload = [Console]::In.ReadToEnd()
+if ($env:BUILDMESH_PORT -and $env:BUILDMESH_SESSION_ID) {
+  $url = "http://127.0.0.1:$($env:BUILDMESH_PORT)/api/attention/$($env:BUILDMESH_SESSION_ID)"
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+    Invoke-WebRequest -UseBasicParsing -Method Post -Uri $url -ContentType 'application/json' -Body $bytes -TimeoutSec 2 | Out-Null
+  } catch { }
+}
+[Console]::Out.Write('{}')
+"#;
+
+/// The hook-file extension Cline executes for this spawn. Windows uses
+/// PowerShell (`powershell -File`); every other runtime uses the POSIX script
+/// (`bash <path>`). Both extensions are first-class in Cline's
+/// `inferHookCommand`, so neither needs an exec bit and neither depends on
+/// `node`/`bun` being on `PATH`. The predicate mirrors `mcode`: a macOS/Linux
+/// host reports `EnvType::Windows` for a native path, so the host OS — not only
+/// `env_type` — decides the shell.
+fn hook_extension(env_type: EnvType) -> &'static str {
+    if cfg!(target_os = "windows") && env_type == EnvType::Windows {
+        "ps1"
+    } else {
+        "sh"
+    }
+}
+
+fn hook_script(env_type: EnvType) -> &'static str {
+    if hook_extension(env_type) == "ps1" {
+        CLINE_HOOK_SCRIPT_PS1
+    } else {
+        CLINE_HOOK_SCRIPT_SH
+    }
+}
+
+/// Resolve the directory Buildmesh's Cline hook files live in:
+/// `<cline home>/hooks`. Cline's four search roots also include
+/// `<ws>/.clinerules/hooks` and `<ws>/.cline/hooks`, but Buildmesh provisions
+/// only the user-global root — the hook content is node-agnostic, so a single
+/// file set serves every node and never writes into (or pollutes) a node's
+/// worktree.
+///
+/// `runtime.harness_home` wins when set; otherwise the home is resolved through
+/// `cli_dir_for_spawn` so a WSL/Interop guest resolves the *guest* home
+/// converted back to a host path (never a Linux path handed to a Windows API).
+/// `None` means no home was resolvable — the caller returns `Ok(())` with no
+/// side effects, matching the mcode precedent.
+///
+/// On a native spawn `cli_dir_for_spawn` returns `cline_dir()`, which honours
+/// `CLINE_DIR` exactly as Cline's own `resolveClineDir()` does — so a user who
+/// set the override gets the hook in the directory Cline searches rather than
+/// one it never reads. (A WSL/Interop guest's `CLINE_DIR` lives in the guest
+/// environment and is not visible here; Cline is WSL-excluded regardless.)
+///
+/// `launch_runtime()` only populates `harness_home` for a Codex proxy today, so
+/// a real Cline spawn always takes the `cli_dir_for_spawn` branch. The override
+/// stays because it is the harness-specific seam every other provisioner
+/// exposes (mcode / kimi) and the only way a test can aim provisioning at a
+/// temp directory without touching the real `~/.cline`.
+fn hooks_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf> {
+    if let Some(home) = runtime.harness_home.as_deref() {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(crate::env::to_host_path(trimmed)).join("hooks"));
+        }
+    }
+    crate::env::cli_dir_for_spawn(crate::env::cline_dir(), ".cline", &resolved.spawn_path)
+        .map(|dir| dir.join("hooks"))
+}
+
+/// Atomically persist `content` to `path` via a sibling temp file + rename.
+/// Mirrors `grok.rs:133` / `mcode.rs` — a crash leaves the canonical file
+/// untouched.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+/// Add or refresh one Buildmesh-owned hook file, idempotently and without ever
+/// clobbering a user-authored file.
+///
+/// - Missing file → write it.
+/// - Existing file carrying [`CLINE_HOOK_MARKER`] → rewrite only when the
+///   content drifted (a re-provision with identical content is a no-op, so no
+///   spurious mtime bump — issue #886).
+/// - Existing file **without** the marker → `Err`. Cline names hooks by event,
+///   so this path is not ours to take silently; surfacing the error lets the
+///   spawn mark `SignalHealth::Unavailable` instead of destroying the user's
+///   hook (the mcode / cursor malformed-file precedent).
+fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
+    match std::fs::read_to_string(path) {
+        Ok(existing) => {
+            if !existing.contains(CLINE_HOOK_MARKER) {
+                return Err(format!(
+                    "refusing to overwrite non-Buildmesh Cline hook at {path:?}; \
+                     rename or remove it and respawn"
+                ));
+            }
+            if existing == content {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("failed to read {path:?}: {error}")),
+    }
+    write_atomic(path, content)
+        .map_err(|error| format!("failed to write Cline hook {path:?}: {error}"))?;
+    tracing::info!("cline provision_attention_hooks: wrote {path:?}");
+    Ok(())
+}
+
+/// Inner provisioner, split out so the "no home resolvable" branch is testable
+/// without the spawn-path contract. Returns `Ok(())` with no side effects when
+/// `hooks_root` is `None`.
+///
+/// The provisioned set is one file today (`TaskComplete`), but each entry is
+/// written independently: a file we refuse to clobber for one event must never
+/// suppress another, so adding an event later cannot silently drop its signal.
+/// Every failure is logged; the first is returned so the spawn path can mark
+/// the node `SignalHealth::Unavailable` (which a later successful callback
+/// clears).
+fn provision_at(
+    hooks_root: Option<&Path>,
+    env_type: EnvType,
+) -> Result<(), String> {
+    let Some(root) = hooks_root else {
+        tracing::debug!(
+            "cline provision_attention_hooks: hook config root unresolvable; \
+             skipping with no side effects"
+        );
+        return Ok(());
+    };
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("failed to create Cline hooks dir {root:?}: {error}"))?;
+    let script = hook_script(env_type);
+    let extension = hook_extension(env_type);
+    let mut first_error: Option<String> = None;
+    for event in CLINE_PROVISIONED_HOOKS {
+        let path = root.join(format!("{event}.{extension}"));
+        if let Err(error) = ensure_hook_file(&path, script) {
+            tracing::warn!("cline provision_attention_hooks: {error}");
+            first_error.get_or_insert(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -167,10 +405,29 @@ impl AgentProvider for ClineAdapter {
         true
     }
 
-    /// Honest-empty in this slice: the attention hook lands with #1775, so
-    /// Cline stays outside the Autopilot attention contract for now.
+    /// `true` — the `TaskComplete` file hook is provisioned at spawn (issue
+    /// #1775) and opens the Autopilot / review-circuit gate. See
+    /// [`Self::attention_capability`] for the structured contract.
     fn requires_attention_hook(&self) -> bool {
-        false
+        true
+    }
+
+    /// Issue #1775 — the honest Cline contract: `TaskComplete` → `agent_end`
+    /// delivers a completed turn, and nothing else. Cline's file-hook layer has
+    /// no clean-exit dispatch (`session_shutdown` is abort-only), no
+    /// permission/question primitive under the default auto-approve launch
+    /// (Buildmesh passes no approval flag), and no failure dispatch Buildmesh
+    /// provisions — so `permission_requested`, `question_requested`,
+    /// `background_running`, `process_idle`, and `session_exited` are all
+    /// deliberately absent. Mirrors `mcode`, which likewise advertises only
+    /// `TurnCompleted`.
+    fn attention_capability(&self) -> AttentionCapability {
+        AttentionCapability::Hook {
+            events: vec![LifecycleKind::TurnCompleted],
+            launch_mode: AttentionLaunchMode::SkipPermissions,
+            trust: None,
+            min_version: Some(CLINE_MIN_HOOK_VERSION.into()),
+        }
     }
 
     fn auto_resume_on_startup(&self) -> bool {
@@ -293,6 +550,29 @@ impl AgentProvider for ClineAdapter {
                 .collect(),
         }
     }
+
+    /// Provision Cline's attention file hook (issue #1775). Writes
+    /// `<cline home>/hooks/TaskComplete.<ext>` with a node-agnostic script that
+    /// expands the callback URL from `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`
+    /// at hook-run time.
+    ///
+    /// The write is additive (only our own event files, and we never touch a
+    /// file that lacks our marker) and idempotent (issue #886 — an unchanged
+    /// file is not rewritten). A user-authored file at our exact path returns
+    /// `Err` rather than being clobbered; an unresolvable home returns `Ok(())`
+    /// with no side effects, so an unusual spawn still proceeds with only the
+    /// attention callback lost.
+    fn provision_attention_hooks(
+        &self,
+        resolved: &ResolvedPath,
+        runtime: &LaunchRuntime,
+        _node_id: i64,
+    ) -> Result<(), String> {
+        // `node_id` is unused: the URL expands from the per-agent environment
+        // Cline inherits (`env: process.env`), so the file is node-agnostic and
+        // shared across nodes.
+        provision_at(hooks_dir(resolved, runtime).as_deref(), resolved.env_type)
+    }
 }
 
 #[cfg(test)]
@@ -403,17 +683,19 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_descriptor_is_honest_empty_for_attention_and_transcript() {
+    fn capabilities_descriptor_advertises_attention_and_honest_empty_transcript() {
         let caps = CLINE.capabilities();
         assert_eq!(caps.harness_id, "cline");
         assert!(caps.supports_resume);
         assert!(caps.auto_resume_on_startup);
-        assert!(!caps.requires_attention_hook);
-        assert_eq!(
+        // Issue #1775 — the file hooks are provisioned and open the gate.
+        assert!(caps.requires_attention_hook);
+        assert!(matches!(
             caps.attention_capability,
-            crate::agent::capabilities::AttentionCapability::None
-        );
+            crate::agent::capabilities::AttentionCapability::Hook { .. }
+        ));
         assert!(!caps.supports_passive_turn_watcher);
+        // The transcript reader is issue #1776 — still honest-empty.
         assert!(!caps.produces_readable_transcript);
         assert!(caps.supports_model_override);
         assert!(caps.supports_effort_override);
@@ -663,5 +945,404 @@ mod tests {
             no_home_result.is_none(),
             "without a resolvable Cline home, the adapter must return None, not a synthesised id"
         );
+    }
+
+    // —— Issue #1775: attention hook provisioning ———————————————————————
+
+    /// Pin the structured attention contract. Only `TaskComplete` → `agent_end`
+    /// (a completed turn) is wired. Cline's file-hook layer has no clean-exit
+    /// dispatch (`session_shutdown` is abort-only), no permission/question
+    /// primitive under the default auto-approve launch, and no failure signal
+    /// Buildmesh provisions — none of those may be advertised.
+    #[test]
+    fn attention_capability_advertises_turn_completed_only() {
+        let capability = CLINE.attention_capability();
+        match &capability {
+            AttentionCapability::Hook {
+                events,
+                launch_mode,
+                trust,
+                min_version,
+            } => {
+                assert_eq!(
+                    events,
+                    &vec![LifecycleKind::TurnCompleted],
+                    "TaskComplete → agent_end is the only wired event"
+                );
+                for absent in [
+                    LifecycleKind::SessionExited,
+                    LifecycleKind::PermissionRequested,
+                    LifecycleKind::QuestionRequested,
+                    LifecycleKind::BackgroundRunning,
+                    LifecycleKind::ProcessIdle,
+                ] {
+                    assert!(
+                        !events.contains(&absent),
+                        "{absent:?} has no Cline file-hook primitive and must not be advertised"
+                    );
+                }
+                assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
+                assert!(trust.is_none(), "Cline needs no workspace-trust step: {trust:?}");
+                assert_eq!(min_version.as_deref(), Some(CLINE_MIN_HOOK_VERSION));
+            }
+            _ => panic!("expected Hook, got {capability:?}"),
+        }
+    }
+
+    #[test]
+    fn requires_attention_hook_is_enabled_after_1775() {
+        assert!(
+            CLINE.requires_attention_hook(),
+            "issue #1775 wires the file hooks; reverting to false would re-close the Autopilot gate"
+        );
+    }
+
+    /// The extension Cline will execute. Pinned so a refactor cannot silently
+    /// switch Windows to a script PowerShell cannot run (or vice versa).
+    ///
+    /// The first assertion is not Windows-only: `runtime_for_spawn_path`
+    /// reports `EnvType::Windows` for a *native* path even on a macOS/Linux
+    /// host (the enum tracks Windows-ness, not the host OS), so the host OS and
+    /// `env_type` must agree before we write a `.ps1`. On a Unix host this
+    /// asserts `"sh"` for `EnvType::Windows` — the exact case a bare
+    /// `env_type` check would get wrong.
+    #[test]
+    fn hook_extension_matches_host_platform() {
+        let expected_win = if cfg!(target_os = "windows") { "ps1" } else { "sh" };
+        assert_eq!(hook_extension(EnvType::Windows), expected_win);
+        // Any WSL/Interop runtime always uses the POSIX script.
+        assert_eq!(hook_extension(EnvType::Wsl), "sh");
+        assert_eq!(hook_extension(EnvType::WindowsInterop), "sh");
+        // The chosen script always carries the marker and the callback anchors.
+        for script in [CLINE_HOOK_SCRIPT_SH, CLINE_HOOK_SCRIPT_PS1] {
+            assert!(script.contains(CLINE_HOOK_MARKER));
+            assert!(script.contains("BUILDMESH_PORT"));
+            assert!(script.contains("BUILDMESH_SESSION_ID"));
+            assert!(script.contains("/api/attention/"));
+        }
+        assert!(
+            !CLINE_HOOK_SCRIPT_SH.contains("Invoke-WebRequest")
+                && !CLINE_HOOK_SCRIPT_PS1.contains("curl"),
+            "each script must use its own platform's fetch primitive"
+        );
+        assert!(
+            CLINE_HOOK_SCRIPT_SH.contains("--noproxy"),
+            "the POSIX hook must bypass any configured HTTP proxy explicitly; \
+             without it a user's http_proxy would swallow the loopback callback"
+        );
+        assert!(
+            CLINE_HOOK_SCRIPT_PS1.contains("DefaultWebProxy"),
+            "the Windows hook must disable the machine proxy explicitly"
+        );
+    }
+
+    fn provision_test_home(home: &Path, env_type: EnvType) -> PathBuf {
+        let path = home.to_string_lossy().to_string();
+        CLINE
+            .provision_attention_hooks(
+                &crate::env::ResolvedPath {
+                    host_path: path.clone(),
+                    spawn_path: path.clone(),
+                    raw_path: path,
+                    env_type,
+                },
+                &LaunchRuntime {
+                    harness_home: Some(home.to_string_lossy().to_string()),
+                    wsl_distro: None,
+                },
+                7,
+            )
+            .expect("provision_attention_hooks should succeed");
+        home.join("hooks")
+    }
+
+    #[test]
+    fn provision_writes_the_hook_file_with_env_expanded_url() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let extension = hook_extension(EnvType::Windows);
+        for event in CLINE_PROVISIONED_HOOKS {
+            let path = hooks.join(format!("{event}.{extension}"));
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{path:?} not written: {error}"));
+            assert!(body.contains(CLINE_HOOK_MARKER), "{event} missing marker");
+            // Node-agnostic: the URL is expanded from the run environment, never
+            // baked, so one file set serves every node.
+            assert!(
+                body.contains("$BUILDMESH_PORT") || body.contains("$env:BUILDMESH_PORT"),
+                "{event} must expand the port at hook-run time: {body}"
+            );
+            assert!(
+                !body.contains("/api/attention/7") && !body.contains("/api/attention/7 "),
+                "{event} must not bake the node id: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn provision_is_idempotent_and_preserves_sibling_user_files() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let extension = hook_extension(EnvType::Windows);
+        // A user-authored hook for the same event with a *different* extension
+        // coexists — Cline runs every matching file — and must round-trip.
+        let sibling = hooks.join("TaskComplete.mjs");
+        std::fs::write(&sibling, "console.log('user hook');").unwrap();
+
+        let ours = hooks.join(format!("TaskComplete.{extension}"));
+        let first = std::fs::read_to_string(&ours).unwrap();
+        let ours_before = std::fs::metadata(&ours).unwrap().modified().unwrap();
+        let sibling_before = std::fs::metadata(&sibling).unwrap().modified().unwrap();
+
+        // Exceed any coarse filesystem timestamp granularity so a rewrite is
+        // observable through mtime, not merely through content equality.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        // Re-provisioning with identical content is a no-op: the file is not
+        // rewritten (mtime unchanged — the issue #886 idempotency invariant),
+        // and the sibling user hook is untouched.
+        provision_test_home(home.path(), EnvType::Windows);
+        assert_eq!(std::fs::read_to_string(&ours).unwrap(), first);
+        assert_eq!(
+            std::fs::metadata(&ours).unwrap().modified().unwrap(),
+            ours_before,
+            "an unchanged hook must not be rewritten (mtime must not bump)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sibling).unwrap(),
+            "console.log('user hook');",
+            "a sibling user hook must not be touched"
+        );
+        assert_eq!(
+            std::fs::metadata(&sibling).unwrap().modified().unwrap(),
+            sibling_before,
+            "a sibling user hook must not be rewritten"
+        );
+    }
+
+    /// A non-Buildmesh file occupying our exact event name is the user's — we
+    /// fail closed instead of clobbering it (the mcode / cursor precedent).
+    #[test]
+    fn provision_refuses_to_clobber_a_non_buildmesh_hook() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let extension = hook_extension(EnvType::Windows);
+        let occupied = hooks.join(format!("TaskComplete.{extension}"));
+        std::fs::write(&occupied, "#!/bin/sh\necho mine\n").unwrap();
+
+        let path = home.path().to_string_lossy().to_string();
+        let result = CLINE.provision_attention_hooks(
+            &crate::env::ResolvedPath {
+                host_path: path.clone(),
+                spawn_path: path.clone(),
+                raw_path: path,
+                env_type: EnvType::Windows,
+            },
+            &LaunchRuntime {
+                harness_home: Some(home.path().to_string_lossy().to_string()),
+                wsl_distro: None,
+            },
+            7,
+        );
+        assert!(result.is_err(), "must refuse a user-authored hook: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "#!/bin/sh\necho mine\n",
+            "the user's file must survive intact"
+        );
+    }
+
+    /// A Buildmesh-owned file whose content drifted (e.g. provisioned by an
+    /// earlier build, or the callback URL changed) is rewritten in place — the
+    /// only path that runs `write_atomic` over an *existing* file, and the one
+    /// the Windows rename-over-existing write depends on.
+    #[test]
+    fn provision_rewrites_a_drifted_buildmesh_hook_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let extension = hook_extension(EnvType::Windows);
+        let target = hooks.join(format!("TaskComplete.{extension}"));
+        // Marker present, body stale (an old baked-URL shape).
+        let stale = format!(
+            "#!/bin/sh\n# {CLINE_HOOK_MARKER}\ncurl http://localhost:1999/api/attention/0\n"
+        );
+        std::fs::write(&target, &stale).unwrap();
+
+        provision_test_home(home.path(), EnvType::Windows);
+
+        let rewritten = std::fs::read_to_string(&target).unwrap();
+        assert_ne!(rewritten, stale, "drifted Buildmesh content must be replaced");
+        assert!(
+            !rewritten.contains("localhost:1999"),
+            "the stale callback must be gone: {rewritten}"
+        );
+        assert_eq!(
+            rewritten,
+            hook_script(EnvType::Windows),
+            "the rewrite must install the current script verbatim"
+        );
+        // Still exactly one file — the rewrite must not leave residue.
+        let count = std::fs::read_dir(&hooks).unwrap().count();
+        assert_eq!(count, 1, "rewrite must not add files: {count}");
+    }
+
+    #[test]
+    fn provision_at_with_no_root_is_a_side_effect_free_no_op() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let before = std::fs::read_dir(sandbox.path()).unwrap().count();
+        let result = provision_at(None, EnvType::Windows);
+        assert!(result.is_ok(), "unresolvable home must be Ok(()): {result:?}");
+        let after = std::fs::read_dir(sandbox.path()).unwrap().count();
+        assert_eq!(before, after, "nothing may be created for an unresolvable root");
+    }
+
+    #[test]
+    fn provision_leaves_no_tmp_residue() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let residue: Vec<_> = std::fs::read_dir(&hooks)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "atomic write left .tmp residue: {residue:?}");
+    }
+
+    /// End-to-end delivery: run the provisioned hook script against a real
+    /// loopback listener with `BUILDMESH_*` in its environment and assert it
+    /// POSTs the stdin payload to `/api/attention/<node>` and prints `{}`.
+    /// This is the evidence that the env-expanded (non-baked) URL actually
+    /// reaches the route. The child env carries a dead proxy and no `NO_PROXY`,
+    /// so the test also proves the hook bypasses a configured proxy on its own
+    /// (the POSIX `--noproxy '*'` / PowerShell `DefaultWebProxy = null`).
+    #[test]
+    fn provisioned_hook_posts_stdin_to_the_attention_route() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        // Returns the request, or `None` when the hook never connected — the
+        // caller reports that alongside the hook's own stderr rather than
+        // panicking inside this thread.
+        let server = std::thread::spawn(move || -> Option<(String, Vec<u8>)> {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => return None,
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut byte = [0u8; 1];
+            while !headers.ends_with(b"\r\n\r\n") {
+                if stream.read_exact(&mut byte).is_err() {
+                    return None;
+                }
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).ok()?;
+            // A compliant server answers the interim `Expect: 100-continue`
+            // before the body arrives.
+            if headers.to_ascii_lowercase().contains("expect: 100-continue") {
+                stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").ok()?;
+            }
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })?;
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).ok()?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .ok()?;
+            Some((headers, body))
+        });
+
+        let home = tempfile::tempdir().unwrap();
+        let hooks = provision_test_home(home.path(), EnvType::Windows);
+        let extension = hook_extension(EnvType::Windows);
+        let script = hooks.join(format!("TaskComplete.{extension}"));
+        assert!(script.is_file(), "hook script not written: {script:?}");
+
+        let payload = br#"{"hookName":"agent_end","taskId":"session_1790003303940_9ouga","turn":{"status":"completed","outputText":"caf\u00e9"}}"#;
+        let mut input = tempfile::tempfile().unwrap();
+        input.write_all(payload).unwrap();
+        use std::io::Seek;
+        input.rewind().unwrap();
+
+        let mut invocation = if cfg!(target_os = "windows") {
+            let mut command = crate::process_util::command_no_window("powershell.exe");
+            command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"]);
+            command.arg(&script);
+            command
+        } else {
+            let mut command = crate::process_util::command_no_window("bash");
+            command.arg(&script);
+            command
+        };
+        invocation
+            .env("BUILDMESH_PORT", port.to_string())
+            .env("BUILDMESH_SESSION_ID", "741")
+            // Point every proxy variable at a dead loopback port and clear any
+            // inherited NO_PROXY: the hook must bypass the proxy itself
+            // (`--noproxy '*'` / `DefaultWebProxy = null`) rather than relying
+            // on the environment to exempt loopback. A hook that honoured the
+            // proxy would fail here instead of silently dropping the callback.
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .stdin(std::process::Stdio::from(input));
+        let output = crate::process_util::run_command_with_timeout(
+            invocation,
+            "cline attention hook",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        let request = server.join().unwrap();
+        assert!(
+            output.status.success(),
+            "hook exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "{}",
+            "hook stdout must be valid control JSON; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (headers, body) = request.unwrap_or_else(|| {
+            panic!(
+                "hook never reached the listener; stdout: {:?}, stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert!(
+            headers.starts_with("POST /api/attention/741 HTTP/1.1\r\n"),
+            "{headers}"
+        );
+        assert_eq!(body, payload, "the stdin payload must be forwarded verbatim");
     }
 }

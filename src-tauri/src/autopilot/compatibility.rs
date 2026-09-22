@@ -882,13 +882,15 @@ mod tests {
         assert!(result.reasons.is_empty());
     }
 
-    /// Issue #1816: freebuff and cline have neither an attention hook nor a
+    /// Issue #1816: freebuff and dsh have neither an attention hook nor a
     /// passive turn watcher, so the gate emits `MissingAttentionHook` naming
     /// the harness — the same reason the reviewer gate reuses. Cursor has a
-    /// native hook and stays allowed.
+    /// native hook and stays allowed. Issue #1775 gave Cline a native file
+    /// hook, so it is allowed here too (its only remaining reason would be the
+    /// mesh's worktree setting).
     #[test]
-    fn evaluate_freebuff_and_cline_emit_missing_attention_hook_cursor_allowed() {
-        for harness in ["freebuff", "cline", "dsh"] {
+    fn evaluate_freebuff_and_dsh_emit_missing_attention_hook_and_cline_allowed() {
+        for harness in ["freebuff", "dsh"] {
             let caps = lookup_capabilities(harness).unwrap_or_else(|| panic!("{harness} known"));
             assert!(!caps.requires_attention_hook, "{harness} must lack a hook");
             assert!(!caps.supports_passive_turn_watcher, "{harness} must lack a watcher");
@@ -910,16 +912,26 @@ mod tests {
                 result.reasons
             );
         }
-        let cursor = lookup_capabilities("cursor").expect("cursor known");
-        assert!(cursor.requires_attention_hook);
-        let allowed = evaluate(AutopilotCompatibilityInput {
-            resolved_spawn_option: "cursor",
-            resolved_harness_id: "cursor",
-            capabilities: Some(cursor),
-            mesh_use_worktree: true,
-            explicit_autopilot_provider: false,
-        });
-        assert!(allowed.allowed, "cursor must be allowed: {:?}", allowed.reasons);
+        for allowed_harness in ["cursor", "cline"] {
+            let caps = lookup_capabilities(allowed_harness)
+                .unwrap_or_else(|| panic!("{allowed_harness} known"));
+            assert!(
+                caps.requires_attention_hook,
+                "{allowed_harness} must advertise a hook"
+            );
+            let allowed = evaluate(AutopilotCompatibilityInput {
+                resolved_spawn_option: allowed_harness,
+                resolved_harness_id: allowed_harness,
+                capabilities: Some(caps),
+                mesh_use_worktree: true,
+                explicit_autopilot_provider: false,
+            });
+            assert!(
+                allowed.allowed,
+                "{allowed_harness} must be allowed: {:?}",
+                allowed.reasons
+            );
+        }
     }
 
     /// Issue #1816 review: the reviewer gate reuses the reason enum rather
@@ -941,7 +953,7 @@ mod tests {
         // MissingAttentionHook names the harness via the catalog label.
         // (Composite ids split at the `validate_...` seam; `reason` takes
         // the bare harness half.)
-        for (harness, label) in [("cline", "Cline"), ("freebuff", "Freebuff"), ("dsh", "DeepSeek Harness")] {
+        for (harness, label) in [("freebuff", "Freebuff"), ("dsh", "DeepSeek Harness")] {
             match reviewer_harness_reason(harness) {
                 Some(AutopilotCompatibilityReason::MissingAttentionHook { harness_id }) => {
                     assert_eq!(harness_id, harness);
@@ -965,7 +977,7 @@ mod tests {
             "Cline cannot be used as the reviewer provider: it has no turn-completion signal."
         );
         // Eligible harnesses (hook or passive watcher) yield no reason.
-        for harness in ["claude", "codex", "cursor", "agy", "commandcode", "muse", "antigravity", "claude_code", "cmd"] {
+        for harness in ["claude", "codex", "cursor", "agy", "commandcode", "muse", "antigravity", "claude_code", "cmd", "cline"] {
             assert_eq!(
                 reviewer_harness_reason(harness),
                 None,
@@ -988,10 +1000,12 @@ mod tests {
         assert!(validate_reviewer_provider_id("codex").is_ok());
         assert!(validate_reviewer_provider_id("codex:minimax").is_ok());
         assert!(validate_reviewer_provider_id("antigravity").is_ok());
-        let err = validate_reviewer_provider_id("cline:minimax").unwrap_err();
+        // Issue #1775: Cline now carries a hook, so it is an eligible reviewer.
+        assert!(validate_reviewer_provider_id("cline:minimax").is_ok());
+        let err = validate_reviewer_provider_id("freebuff:minimax").unwrap_err();
         assert_eq!(
             err,
-            "Cline cannot be used as the reviewer provider: it has no turn-completion signal."
+            "Freebuff cannot be used as the reviewer provider: it has no turn-completion signal."
         );
         let err = validate_reviewer_provider_id("  terminal:foo  ").unwrap_err();
         assert_eq!(err, "Terminal cannot be used as the reviewer provider.");

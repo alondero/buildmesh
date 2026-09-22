@@ -1015,7 +1015,7 @@ mod resolved_view_tests {
         );
         // Ineligible harnesses are refused with the harness-named reason
         // and the stored value is untouched.
-        for picked in ["cline", "terminal", "dsh:minimax"] {
+        for picked in ["freebuff", "terminal", "dsh:minimax"] {
             let err = set_app_reviewer_provider(Some(picked.to_string())).unwrap_err();
             assert!(
                 err.contains("reviewer provider"),

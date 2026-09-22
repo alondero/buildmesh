@@ -69,10 +69,11 @@ struct HookPayload {
         alias = "sessionId",
         alias = "sessionID",
         alias = "conversationId",
-        alias = "conversation_id"
+        alias = "conversation_id",
+        alias = "taskId"
     )]
     session_id: Option<String>,
-    #[serde(alias = "hookEventName", alias = "hook_event_name")]
+    #[serde(alias = "hookEventName", alias = "hook_event_name", alias = "hookName")]
     hook_event_name: Option<String>,
     #[serde(alias = "transcriptPath", alias = "transcript_path")]
     transcript_path: Option<String>,
@@ -170,9 +171,10 @@ impl HookPayload {
                     "sessionID",
                     "conversationId",
                     "conversation_id",
+                    "taskId",
                 ][..],
             ),
-            ("hook_event_name", &["hookEventName"][..]),
+            ("hook_event_name", &["hookEventName", "hookName"][..]),
             ("transcript_path", &["transcriptPath"][..]),
             ("notification_type", &["notificationType"][..]),
             ("tool_name", &["toolName"][..]),
@@ -3365,5 +3367,78 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
         assert_eq!(classify_decision(&body, "", |_| Some(0)), Decision::Ready);
+    }
+
+    // —— Issue #1775: Cline file-hook normalisation ——————————————————————
+
+    /// `TaskComplete` → `agent_end` is a clean turn completion (`afterRun`
+    /// only fires for a completed run), so the node lands in `Ready`.
+    #[test]
+    fn cline_task_complete_is_a_clean_turn_completion() {
+        let body = serde_json::json!({
+            "hookName": "agent_end",
+            "taskId": "session_1790003303940_9ouga",
+            "iteration": 1,
+            "turn": { "status": "completed", "outputText": "done" }
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "cline", |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready);
+        assert_eq!(classified.detail.provider_event.as_deref(), Some("agent_end"));
+    }
+
+    /// Cline's `session_shutdown` is the **abort** dispatch, not an exit: it
+    /// fires on a user interrupt while the session is still live. It must stay
+    /// lifecycle-neutral so the node is never written `Idle` (the #1853
+    /// blocking finding — a clean exit is still observed via PTY EOF).
+    #[test]
+    fn cline_session_shutdown_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hookName": "session_shutdown",
+            "taskId": "session_1790003303940_9ouga",
+            "reason": "user-cancel"
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "cline", |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ignore);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok,
+            "a claimed-but-neutral Cline event must not degrade the health"
+        );
+    }
+
+    /// A Cline event Buildmesh does not provision is lifecycle-neutral — it
+    /// must not fall through to the generic "unknown event → degraded attention
+    /// mark" arm (which would set `Degraded` and flip the node to
+    /// `AwaitingInput`).
+    #[test]
+    fn cline_unprovisioned_event_is_lifecycle_neutral() {
+        let body = serde_json::json!({
+            "hookName": "tool_call",
+            "taskId": "session_1790003303940_9ouga"
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "cline", |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ignore);
+        assert_eq!(
+            classified.detail.signal_health,
+            crate::agent::session_lifecycle::SignalHealth::Ok,
+            "a claimed-but-neutral Cline event must not degrade the health"
+        );
+    }
+
+    /// Cline's `hookName` / `taskId` field names parse through the shared
+    /// envelope aliases.
+    #[test]
+    fn cline_hook_name_and_task_id_aliases_parse() {
+        let payload =
+            HookPayload::parse(br#"{"hookName":"agent_end","taskId":"1789757012702_7of3e"}"#)
+                .expect("must parse");
+        assert_eq!(payload.hook_event_name.as_deref(), Some("agent_end"));
+        assert_eq!(payload.session_id.as_deref(), Some("1789757012702_7of3e"));
     }
 }
