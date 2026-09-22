@@ -52,6 +52,37 @@
 //! untouched and workspace trust is not forced, so the issue #1705
 //! rejection of `--yolo` still stands.
 //!
+//! **Workspace trust (issue #1706).** Muse gates a workspace's skills and
+//! rules behind an explicit trust decision. `--trust-workspace` ("trust this
+//! workspace for this run (load its skills and rules); does not save trust")
+//! and `--yolo` are **per-invocation** flags; the persistent store is
+//! `~/.config/muse/trust.json` (the XDG config root on every platform),
+//! observed on the installed 1.3.0 as
+//!
+//! ```json
+//! { "schema_version": 1,
+//!   "projects": { "\\?\F:\src\buildmesh": { "decision": "trusted" } } }
+//! ```
+//!
+//! Keys are the **canonicalized** workspace root, so a Windows-hosted binary
+//! writes a verbatim `\\?\…` path while a POSIX (WSL guest / Linux / macOS)
+//! binary writes the plain absolute path — both shapes are present in the
+//! store of a machine that runs Muse on both sides.
+//!
+//! Buildmesh **pre-provisions** the entry (`ensure_workspace_trusted`) rather
+//! than baking a flag into `spawn_recipe`, because the flag is not accepted on
+//! the subcommands Buildmesh drives — Muse rejects `--trust-workspace` on
+//! `muse plugins install` — and it does not persist across processes, so a
+//! per-run flag could not unblock the project-scoped attention-hook install
+//! (#1709) either. The merge is additive (sibling projects and unknown keys
+//! round-trip), idempotent, and refuses a malformed user file instead of
+//! overwriting it, mirroring the mcode / Cursor provisioning precedent.
+//!
+//! Only the **PTY spawn path** takes this step. The MSP `muse serve` plane
+//! (#1681) has no in-repo launcher — only its telemetry slice landed under
+//! `agent::provider::muse` — so there is no second call site to keep in sync;
+//! a future serve launcher must provision trust the same way.
+//!
 //! **Attention (issue #1709).** The interactive TUI exposes no hook/event flag,
 //! so Muse's turn signal comes from the passive watcher
 //! (`services::muse_watcher`), mirroring Command Code: `requires_attention_hook`
@@ -75,11 +106,38 @@
 //! `PermissionRequested` lifecycle signal is impossible by construction and is
 //! deliberately not classified. A `run/terminal` record yields the node back
 //! to the user; `terminal` is `completed | failed | cancelled`.
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::models::EnvType;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 pub struct MuseAdapter;
 pub static MUSE: MuseAdapter = MuseAdapter;
+
+/// Muse's configuration directory, relative to the runtime home. Muse uses the
+/// XDG layout on every platform — including the native Windows binary, whose
+/// store is `%USERPROFILE%\.config\muse` (observed on the installed 1.3.0).
+const MUSE_CONFIG_DIR: &str = ".config/muse";
+
+/// `trust.json` schema version Buildmesh writes when it creates the file.
+const MUSE_TRUST_SCHEMA_VERSION: u64 = 1;
+
+/// The decision Muse records for a trusted workspace.
+const MUSE_TRUST_DECISION: &str = "trusted";
+
+/// Serialises the read/merge/write of the machine-global trust store. Two
+/// agents can start together from different linked worktrees, so an unguarded
+/// read-modify-write could atomically replace a sibling's freshly added entry
+/// with our own (a lost update — atomic write only prevents torn reads).
+static TRUST_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Counter backing the PID+counter `.tmp` suffix for atomic writes
+/// (Cursor / AGY / mcode precedent).
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Post-spawn session-index capture window (issue #1794).
 ///
@@ -137,6 +195,267 @@ where
         }
     }
     CaptureOutcome::GaveUp
+}
+
+/// Atomically persist `content` to `path` via a PID+counter `.tmp` file and a
+/// rename, so a concurrent reader of the trust store sees either the previous
+/// file or the new one — never a partial write. A `.tmp` left by an earlier
+/// crash is overwritten. Mirrors `mcode::atomic_write` (the Cursor / AGY
+/// shape).
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("trust.json");
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ));
+
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        if let Err(cleanup) = std::fs::remove_file(&tmp) {
+            tracing::warn!(
+                "muse atomic_write: failed to clean up temp file {:?}: {}",
+                tmp,
+                cleanup
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Human-readable JSON kind tag for malformed-file rejections, mirroring
+/// `mcode::settings_kind` — the rejection names the actual shape rather than
+/// `serde_json::Value`.
+fn settings_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Object(_) => "Object",
+        serde_json::Value::Array(_) => "Array",
+        serde_json::Value::String(_) => "String",
+        serde_json::Value::Number(_) => "Number",
+        serde_json::Value::Bool(_) => "Boolean",
+        serde_json::Value::Null => "Null",
+    }
+}
+
+/// The path the spawned Muse process treats as its workspace: the CWD
+/// Buildmesh hands the child, which is the value Muse canonicalizes into a
+/// `trust.json` key. A WSL guest and a Windows binary reached through interop
+/// both run in `spawn_path`; a native launch runs in `host_path` (equal to
+/// `spawn_path` on a native host). Mirrors `codex::trust_project_path`.
+fn workspace_for(resolved: &ResolvedPath) -> &str {
+    match resolved.env_type {
+        EnvType::Wsl | EnvType::WindowsInterop => &resolved.spawn_path,
+        EnvType::Windows => &resolved.host_path,
+    }
+}
+
+/// The key Muse files a workspace under in `trust.json`.
+///
+/// Muse canonicalizes the workspace root, so a native target yields that
+/// platform's canonical form — a verbatim `\\?\F:\src\…` path on Windows,
+/// the plain absolute path on POSIX. Both shapes are observable in a 1.3.0
+/// store on a machine that runs Muse natively and under WSL.
+///
+/// Canonicalizing is attempted only when **this host** can interpret the path
+/// (`is_windows_path` agrees with the host OS). The cross-runtime directions
+/// cannot: a Windows host resolving a guest's `/mnt/…` would land on the
+/// current drive's `\mnt\…`, and a Linux host cannot resolve `C:\…` at all.
+/// Those keys are therefore built verbatim from the runtime's own path,
+/// which is what the target binary's own canonicalization produces once the
+/// workspace holds no symlinks.
+fn trust_key(workspace: &str) -> String {
+    let windows_path = crate::env::is_windows_path(workspace);
+    if windows_path == cfg!(windows) {
+        if let Ok(canonical) = std::fs::canonicalize(workspace) {
+            return canonical.to_string_lossy().into_owned();
+        }
+    }
+    if windows_path {
+        let normalized = workspace.replace('/', "\\");
+        if normalized.starts_with("\\\\?\\") {
+            normalized
+        } else {
+            format!("\\\\?\\{normalized}")
+        }
+    } else {
+        workspace.to_string()
+    }
+}
+
+/// Resolve the config directory of the Muse runtime that will execute the
+/// spawn — the native home, the WSL guest home, or the Windows home reached
+/// through interop. The same seam `services::muse_sessions::data_root` uses
+/// for Muse's data root, and `mcode::resolve_plugin_dir` for its plugin
+/// manifest (including the `harness_home` override it honours).
+///
+/// Trust must land in the store the spawned child will read, so a runtime
+/// preflight that already selected a config root wins. The default branch
+/// resolves the **default** WSL distro's home — a node pinned to another
+/// distro is #1697's concern, not this one's.
+fn resolve_config_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf> {
+    if let Some(home) = runtime
+        .harness_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|home| !home.is_empty())
+    {
+        // An empty string is the Library's way of saying "I didn't pick one",
+        // not "use the cwd" (the `mcode::resolve_plugin_dir` rule).
+        return Some(PathBuf::from(crate::env::to_host_path(home)));
+    }
+    let native = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)?
+        .join(MUSE_CONFIG_DIR);
+    crate::env::cli_dir_for_spawn(native, MUSE_CONFIG_DIR, &resolved.spawn_path)
+}
+
+/// Add `workspace` to Muse's `trust.json` as `trusted`, preserving every other
+/// project entry and every sibling top-level key the user's file carries.
+///
+/// Muse resolves a workspace's skills, rules and project-scoped plugins
+/// through this store; `--trust-workspace` is per-run and is not accepted on
+/// the subcommands Buildmesh drives (verified: `muse plugins install` takes no
+/// trust flag), so a persisted entry is the only lever that unblocks both the
+/// spawned session (#1706) and the project-scoped attention-hook install
+/// (#1709).
+///
+/// Idempotent: an entry that already reads `{"decision":"trusted"}` leaves the
+/// file untouched (no spurious mtime bump). A malformed file — bad JSON, a
+/// non-object `projects`, or a non-object entry for this workspace — is
+/// refused with `Err` rather than overwritten, so the user's content reaches
+/// the spawn path as an actionable provisioning failure (the mcode / Cursor
+/// precedent). Any *other* fields Muse may carry inside this workspace's entry
+/// survive the decision update.
+///
+/// A write re-serialises the whole document through serde_json's sorted map,
+/// so top-level key order can differ from Muse's own field order (Muse writes
+/// `schema_version` first). Values — including every entry Buildmesh does not
+/// own — are untouched; only the idempotent no-op path leaves the bytes alone.
+fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
+    let (mut trust, trailing_newline): (serde_json::Value, bool) =
+        match std::fs::read_to_string(path) {
+            Ok(content) => (
+                serde_json::from_str(&content).map_err(|error| {
+                    format!(
+                        "refusing to overwrite malformed {path:?}: {error}. \
+                         Repair or remove the file and retry"
+                    )
+                })?,
+                content.ends_with('\n'),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (serde_json::json!({}), false)
+            }
+            Err(error) => return Err(format!("failed to read {path:?}: {error}")),
+        };
+    if !trust.is_object() {
+        return Err(format!(
+            "muse trust.json top-level must be a JSON object; got {}",
+            settings_kind(&trust)
+        ));
+    }
+
+    let key = trust_key(workspace);
+    let mut changed = false;
+    {
+        let entry = trust
+            .as_object_mut()
+            .expect("trust.json verified object above");
+        if entry.get("schema_version").is_none() {
+            entry.insert(
+                "schema_version".to_string(),
+                serde_json::json!(MUSE_TRUST_SCHEMA_VERSION),
+            );
+            changed = true;
+        }
+
+        let projects = entry
+            .entry("projects")
+            .or_insert_with(|| serde_json::json!({}));
+        if !projects.is_object() {
+            return Err(format!(
+                "muse trust.json `projects` must be a JSON object; got {}",
+                settings_kind(projects)
+            ));
+        }
+        let projects = projects
+            .as_object_mut()
+            .expect("projects verified object above");
+        match projects.get_mut(&key) {
+            Some(serde_json::Value::Object(record)) => {
+                if record.get("decision").and_then(|decision| decision.as_str())
+                    != Some(MUSE_TRUST_DECISION)
+                {
+                    record.insert(
+                        "decision".to_string(),
+                        serde_json::json!(MUSE_TRUST_DECISION),
+                    );
+                    changed = true;
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "muse trust.json entry for {key:?} must be a JSON object; got {}",
+                    settings_kind(other)
+                ));
+            }
+            None => {
+                projects.insert(
+                    key.clone(),
+                    serde_json::json!({ "decision": MUSE_TRUST_DECISION }),
+                );
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(());
+    }
+    let mut content = serde_json::to_string_pretty(&trust)
+        .map_err(|error| format!("serialize muse trust.json failed: {error}"))?;
+    if trailing_newline {
+        content.push('\n');
+    }
+    atomic_write(path, &content).map_err(|error| format!("failed to write muse trust.json: {error}"))?;
+    tracing::info!("muse ensure_workspace_trusted: trusted {:?}", key);
+    Ok(())
+}
+
+/// Inner provisioner used by [`MuseAdapter::ensure_workspace_trusted`]. Split
+/// out so the unresolvable-config-root branch is unit-testable without
+/// touching the process env or the real user store (mirrors
+/// `mcode::provision_at`).
+///
+/// An unresolvable config root is an `Err`, not the silent `Ok(())` mcode uses
+/// for its own unresolvable case: trust is *the* thing #1706 exists to
+/// establish, so failing to record it must surface as
+/// `SignalHealth`/provider-error feedback rather than a workspace that
+/// silently runs without its skills and rules.
+fn provision_trust_at(config_dir: Option<&Path>, workspace: &str) -> Result<(), String> {
+    let Some(root) = config_dir else {
+        return Err(
+            "muse config directory is unresolvable; the workspace trust decision cannot be recorded"
+                .to_string(),
+        );
+    };
+    let path = root.join("trust.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create muse config dir {parent:?}: {error}"))?;
+    }
+    ensure_trust_file(&path, workspace)
 }
 
 impl AgentProvider for MuseAdapter {
@@ -197,6 +516,26 @@ impl AgentProvider for MuseAdapter {
     fn requires_attention_hook(&self) -> bool {
         false
     }
+
+    /// Issue #1706 — record the workspace in Muse's persistent trust store
+    /// before the process starts, so the workspace's skills, rules and
+    /// Buildmesh-authored agent config load. The whole read/merge/write runs
+    /// under one process-wide lock: the store is machine-global, and two
+    /// spawns starting together from different worktrees would otherwise each
+    /// lose the other's entry. See the module docstring for why this is
+    /// pre-provisioning rather than a `spawn_recipe` flag.
+    fn ensure_workspace_trusted(
+        &self,
+        resolved: &ResolvedPath,
+        runtime: &LaunchRuntime,
+    ) -> Result<(), String> {
+        let _guard = TRUST_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_dir = resolve_config_dir(resolved, runtime);
+        provision_trust_at(config_dir.as_deref(), workspace_for(resolved))
+    }
+
     // Issue #1709: no native hook exists, so Muse's turn signal comes from the
     // backend-owned session-log watcher instead.
     fn supports_passive_turn_watcher(&self) -> bool {
@@ -773,5 +1112,445 @@ mod tests {
     async fn capture_window_stops_when_the_process_exits() {
         let outcome = run_capture_window(|| async { false }, |_| async {}, || false).await;
         assert_eq!(outcome, CaptureOutcome::Stopped);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #1706 — Muse workspace trust (`~/.config/muse/trust.json`).
+    //
+    // Contract pinned here:
+    //   1. `trust_key` matches Muse's canonicalization — a verbatim `\\?\`
+    //      path for a Windows workspace, the plain absolute path on POSIX —
+    //      and never host-resolves a cross-runtime path.
+    //   2. A fresh store gets `schema_version` 1 and one trusted entry.
+    //   3. Additive merge preserves sibling projects and unknown keys.
+    //   4. Idempotent re-provision rewrites nothing.
+    //   5. Malformed files and unexpected shapes are refused, not clobbered.
+    //   6. An unresolvable config root is an error, not a silent pass.
+    //   7. Atomic write leaves no `.tmp` residue.
+    // -----------------------------------------------------------------
+
+    fn trust_path(home: &Path) -> PathBuf {
+        home.join("trust.json")
+    }
+
+    fn read_trust(home: &Path) -> serde_json::Value {
+        let body = std::fs::read_to_string(trust_path(home)).expect("trust.json must exist");
+        serde_json::from_str(&body).expect("trust.json must be valid JSON")
+    }
+
+    fn decision_for(value: &serde_json::Value, key: &str) -> Option<String> {
+        value["projects"][key]["decision"].as_str().map(str::to_string)
+    }
+
+    /// A workspace that exists on disk, so `trust_key` canonicalizes it the
+    /// way Muse does rather than taking the verbatim fallback.
+    fn existing_workspace() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        (dir, path)
+    }
+
+    #[test]
+    fn trust_key_canonicalizes_an_existing_workspace() {
+        let (_dir, workspace) = existing_workspace();
+        let key = trust_key(&workspace);
+        assert_eq!(
+            key,
+            std::fs::canonicalize(&workspace)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "Muse keys the canonicalized workspace root"
+        );
+        if cfg!(windows) {
+            assert!(
+                key.starts_with("\\\\?\\"),
+                "a native Windows store keys a verbatim `\\\\?\\` path (observed on 1.3.0): {key}"
+            );
+        }
+    }
+
+    /// A guest `/mnt/…` path must be keyed verbatim: a Windows host resolving
+    /// it would land on its own current drive's `\mnt\…` and trust the wrong
+    /// directory.
+    #[test]
+    fn trust_key_never_host_resolves_a_cross_runtime_path() {
+        assert_eq!(
+            trust_key("/mnt/f/src/buildmesh/.claude/worktrees/gh1706"),
+            "/mnt/f/src/buildmesh/.claude/worktrees/gh1706"
+        );
+    }
+
+    /// A Windows runtime path keyed from a non-Windows host (interop) gets the
+    /// verbatim form Muse stores; separators are normalized and an
+    /// already-verbatim path is left alone.
+    #[test]
+    fn trust_key_builds_a_verbatim_windows_path() {
+        assert_eq!(trust_key("Q:/buildmesh-trust-probe/nope"), "\\\\?\\Q:\\buildmesh-trust-probe\\nope");
+        assert_eq!(trust_key("Q:\\buildmesh-trust-probe\\nope"), "\\\\?\\Q:\\buildmesh-trust-probe\\nope");
+        assert_eq!(
+            trust_key("\\\\?\\Q:\\buildmesh-trust-probe\\nope"),
+            "\\\\?\\Q:\\buildmesh-trust-probe\\nope",
+            "an already-verbatim key must not gain a second prefix"
+        );
+    }
+
+    /// The harness runs in `spawn_path`; `host_path` is the host-readable form
+    /// of the same directory on a cross-runtime spawn. Keying the UNC form for
+    /// a WSL node would record a path the guest Muse never sees.
+    #[test]
+    fn workspace_for_uses_the_path_the_harness_runs_in() {
+        // The host-readable form of a guest worktree, as `ResolvedPath` spells
+        // it on a Windows host: the guest binary never sees this one.
+        let host_form = "\\\\wsl$\\Ubuntu\\home\\u\\proj"; // allow-wsl-path
+        let resolved = |env_type| ResolvedPath {
+            host_path: host_form.into(),
+            spawn_path: "/home/u/proj".into(),
+            raw_path: "/home/u/proj".into(),
+            env_type,
+        };
+        assert_eq!(workspace_for(&resolved(EnvType::Wsl)), "/home/u/proj");
+        assert_eq!(
+            workspace_for(&resolved(EnvType::WindowsInterop)),
+            "/home/u/proj"
+        );
+        assert_eq!(workspace_for(&resolved(EnvType::Windows)), host_form);
+    }
+
+    /// The runtime's selected config root wins, so trust lands in the store the
+    /// spawned child actually reads (the `mcode::resolve_plugin_dir`
+    /// convention). A blank override means "none was picked", not "use the
+    /// cwd", so the default branch resolves instead.
+    #[test]
+    fn resolve_config_dir_prefers_the_runtime_config_root() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().to_string_lossy().to_string();
+        let resolved = ResolvedPath {
+            host_path: "C:\\work\\proj".into(),
+            spawn_path: "C:\\work\\proj".into(),
+            raw_path: "C:\\work\\proj".into(),
+            env_type: EnvType::Windows,
+        };
+        assert_eq!(
+            resolve_config_dir(
+                &resolved,
+                &LaunchRuntime {
+                    harness_home: Some(home.clone()),
+                    wsl_distro: None,
+                }
+            ),
+            Some(PathBuf::from(crate::env::to_host_path(&home)))
+        );
+
+        match resolve_config_dir(
+            &resolved,
+            &LaunchRuntime {
+                harness_home: Some("   ".into()),
+                wsl_distro: None,
+            },
+        ) {
+            Some(path) => assert!(
+                path.ends_with("muse"),
+                "a blank override must fall through to Muse's own config dir: {path:?}"
+            ),
+            // No HOME/USERPROFILE in this process env: the default branch has
+            // nothing to resolve, which is not what this test pins.
+            None => {}
+        }
+    }
+
+    #[test]
+    fn provision_writes_a_fresh_store_with_one_trusted_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+
+        provision_trust_at(Some(home.path()), &workspace).expect("fresh provision must succeed");
+
+        let value = read_trust(home.path());
+        assert_eq!(
+            value["schema_version"].as_u64(),
+            Some(MUSE_TRUST_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            decision_for(&value, &trust_key(&workspace)).as_deref(),
+            Some("trusted")
+        );
+        assert_eq!(
+            value["projects"].as_object().unwrap().len(),
+            1,
+            "a fresh store carries exactly the one workspace: {value}"
+        );
+    }
+
+    /// The store is shared across every Muse node on the machine — a re-run
+    /// must merge, never replace. A user's unrelated project and their own
+    /// top-level keys round-trip untouched.
+    #[test]
+    fn provision_preserves_sibling_projects_and_unknown_keys() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        std::fs::write(
+            trust_path(home.path()),
+            r#"{
+                "schema_version": 1,
+                "unrelated": { "keep": true },
+                "projects": {
+                    "\\\\?\\F:\\src\\other": { "decision": "trusted" },
+                    "\\\\?\\F:\\src\\denied": { "decision": "denied", "note": "user" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        provision_trust_at(Some(home.path()), &workspace).unwrap();
+
+        let value = read_trust(home.path());
+        assert_eq!(
+            value["unrelated"]["keep"],
+            serde_json::json!(true),
+            "unknown top-level keys must round-trip: {value}"
+        );
+        assert_eq!(
+            decision_for(&value, &trust_key(&workspace)).as_deref(),
+            Some("trusted")
+        );
+        assert_eq!(
+            value["projects"]["\\\\?\\F:\\src\\other"]["decision"],
+            serde_json::json!("trusted"),
+            "a sibling project entry must be untouched: {value}"
+        );
+        assert_eq!(
+            value["projects"]["\\\\?\\F:\\src\\denied"]["decision"],
+            serde_json::json!("denied"),
+            "a sibling's own decision must not be rewritten: {value}"
+        );
+        assert_eq!(value["projects"]["\\\\?\\F:\\src\\denied"]["note"], "user");
+    }
+
+    /// Distinct worktrees accumulate — the store is a map, not last-writer-wins.
+    #[test]
+    fn provision_accumulates_entries_for_distinct_workspaces() {
+        let home = tempfile::tempdir().unwrap();
+        let (_first, first) = existing_workspace();
+        let (_second, second) = existing_workspace();
+
+        provision_trust_at(Some(home.path()), &first).unwrap();
+        provision_trust_at(Some(home.path()), &second).unwrap();
+
+        let value = read_trust(home.path());
+        assert_eq!(
+            decision_for(&value, &trust_key(&first)).as_deref(),
+            Some("trusted")
+        );
+        assert_eq!(
+            decision_for(&value, &trust_key(&second)).as_deref(),
+            Some("trusted")
+        );
+        assert_eq!(value["projects"].as_object().unwrap().len(), 2);
+    }
+
+    /// Issue #886 idempotency invariant: re-provisioning an already-trusted
+    /// workspace writes nothing. The store is seeded by hand in a *compact*
+    /// form that already carries the trusted decision, so any rewrite would
+    /// re-serialise it and change the bytes — the byte comparison is the
+    /// proof, and unlike a read-only-file check it holds on every platform
+    /// (POSIX `rename(2)` replaces a read-only target happily).
+    #[test]
+    fn provision_is_idempotent_and_leaves_an_already_trusted_file_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
+        let seeded =
+            format!("{{\"schema_version\":1,\"projects\":{{{key}:{{\"decision\":\"trusted\"}}}}}}");
+        std::fs::write(trust_path(home.path()), &seeded).unwrap();
+
+        provision_trust_at(Some(home.path()), &workspace)
+            .expect("an already-trusted workspace is a no-op");
+
+        assert_eq!(
+            std::fs::read_to_string(trust_path(home.path())).unwrap(),
+            seeded,
+            "a no-op pass must not rewrite the store (a write would re-serialise it)"
+        );
+    }
+
+    /// Muse's own store ends with a newline; a rewrite must not silently strip
+    /// it (the `agent::workspace_trust` precedent for `settings.json`).
+    #[test]
+    fn provision_preserves_a_trailing_newline() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        std::fs::write(
+            trust_path(home.path()),
+            "{\"schema_version\":1,\"projects\":{}}\n",
+        )
+        .unwrap();
+
+        provision_trust_at(Some(home.path()), &workspace).unwrap();
+
+        let body = std::fs::read_to_string(trust_path(home.path())).unwrap();
+        assert!(
+            body.ends_with('\n'),
+            "the store's trailing newline must survive a rewrite: {body:?}"
+        );
+        assert_eq!(
+            decision_for(&read_trust(home.path()), &trust_key(&workspace)).as_deref(),
+            Some("trusted")
+        );
+    }
+
+    /// An entry Muse reads but Buildmesh did not write (a different decision,
+    /// with the user's own fields) is upgraded in place — the decision flips,
+    /// nothing else is lost.
+    #[test]
+    fn provision_upgrades_a_non_trusted_decision_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
+        std::fs::write(
+            trust_path(home.path()),
+            format!(r#"{{ "projects": {{ {key}: {{ "decision": "denied", "note": "keep" }} }} }}"#),
+        )
+        .unwrap();
+
+        provision_trust_at(Some(home.path()), &workspace).unwrap();
+
+        let value = read_trust(home.path());
+        assert_eq!(
+            decision_for(&value, &trust_key(&workspace)).as_deref(),
+            Some("trusted")
+        );
+        assert_eq!(
+            value["projects"][trust_key(&workspace)]["note"],
+            serde_json::json!("keep"),
+            "fields inside the entry must survive the decision update: {value}"
+        );
+    }
+
+    /// A broken user file must reach the spawn path as an actionable failure,
+    /// not be silently replaced (the mcode / Cursor precedent).
+    #[test]
+    fn provision_refuses_to_overwrite_a_malformed_file() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        let malformed = r#"{ "projects": {},, }"#;
+        std::fs::write(trust_path(home.path()), malformed).unwrap();
+
+        let result = provision_trust_at(Some(home.path()), &workspace);
+        assert!(
+            result.is_err(),
+            "a malformed store must be refused; got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(trust_path(home.path())).unwrap(),
+            malformed,
+            "malformed content must NOT be overwritten"
+        );
+    }
+
+    /// Valid JSON of the wrong shape is a misconfiguration, not an empty file:
+    /// refuse rather than clobber it with `{"projects": {…}}`.
+    #[test]
+    fn provision_refuses_unexpected_shapes() {
+        let (_dir, workspace) = existing_workspace();
+        let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
+        for body in [
+            "[1, 2, 3]".to_string(),
+            r#"{ "projects": [] }"#.to_string(),
+            format!(r#"{{ "projects": {{ {key}: "denied" }} }}"#),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(trust_path(home.path()), &body).unwrap();
+
+            let result = provision_trust_at(Some(home.path()), &workspace);
+            assert!(
+                result.is_err(),
+                "shape {body} must be refused; got {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(trust_path(home.path())).unwrap(),
+                body,
+                "content must NOT be overwritten"
+            );
+        }
+    }
+
+    /// Trust is the whole point of #1706 — an unresolvable config root must
+    /// surface, not be swallowed.
+    #[test]
+    fn provision_returns_err_when_the_config_root_is_unresolvable() {
+        let result = provision_trust_at(None, "/workspace");
+        assert!(
+            result.is_err(),
+            "an unresolvable config root must surface: {result:?}"
+        );
+        assert!(result.unwrap_err().contains("config directory"));
+    }
+
+    #[test]
+    fn provision_atomic_write_leaves_no_tmp_residue() {
+        let home = tempfile::tempdir().unwrap();
+        let (_dir, workspace) = existing_workspace();
+        provision_trust_at(Some(home.path()), &workspace).unwrap();
+
+        let residue: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "atomic write must not leave .tmp residue; found {residue:?}"
+        );
+    }
+
+    /// Pin the store's identity so a refactor that moves it trips here before
+    /// it silently trusts nothing.
+    #[test]
+    fn muse_trust_constants_are_pinned() {
+        assert_eq!(MUSE_CONFIG_DIR, ".config/muse");
+        assert_eq!(MUSE_TRUST_SCHEMA_VERSION, 1);
+        assert_eq!(MUSE_TRUST_DECISION, "trusted");
+    }
+
+    /// Live evidence for the key derivation, which no hermetic test can prove:
+    /// on a machine whose store Muse populated itself (worktrees trusted
+    /// interactively), `trust_key` must reproduce the stored key **byte for
+    /// byte**. Muse keys a native workspace canonically — a verbatim `\\?\`
+    /// path on Windows, the plain absolute path on POSIX — so the Windows
+    /// prefix is stripped where present and POSIX keys are compared as they
+    /// stand. Ignored by default because it reads the real user store; run
+    /// with `cargo test --lib live_trust_key -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads the real user Muse trust store"]
+    fn live_trust_key_reproduces_the_installed_stores_keys() {
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .expect("a resolvable user home");
+        let store = home.join(MUSE_CONFIG_DIR).join("trust.json");
+        let Ok(body) = std::fs::read_to_string(&store) else {
+            panic!("no Muse trust store at {store:?} — trust a workspace first");
+        };
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid store");
+        let projects = value["projects"].as_object().expect("projects map");
+
+        let mut checked = 0;
+        for stored in projects.keys() {
+            // Strip the verbatim prefix Muse's Windows canonicalization added;
+            // a POSIX key is already the plain path. Skip entries whose
+            // directory no longer exists — they cannot be re-canonicalized.
+            let plain = stored.strip_prefix("\\\\?\\").unwrap_or(stored.as_str());
+            if !Path::new(plain).exists() {
+                continue;
+            }
+            assert_eq!(
+                trust_key(plain),
+                *stored,
+                "trust_key must reproduce the key Muse stored for {plain}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no existing store entry was verifiable");
+        eprintln!("muse trust_key: reproduced {checked} stored key(s)");
     }
 }

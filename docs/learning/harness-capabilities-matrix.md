@@ -104,7 +104,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
-| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0 |
+| Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706) |
 | Cline | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; attention and reader not shipped |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
