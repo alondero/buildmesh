@@ -52,18 +52,19 @@ fn base_flags() -> Vec<String> {
 /// `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot.
 /// Nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never expands and never
 /// sees stdin. Bake the loopback callback URL and let Codex's own shell run
-/// curl. `-o` discards the empty 200 body: Codex Stop treats non-JSON stdout
-/// as a hook failure.
+/// curl. Discard the HTTP response body and print `{}`: Codex Stop requires
+/// JSON on stdout. Attention callbacks are best-effort notifications, so a
+/// stopped server or stale node must not fail the Codex hook itself.
 fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
     serde_json::json!({
         "type": "command",
         "command": if cfg!(windows) { format!(
-            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}; fi"
-        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}") },
-        "commandWindows": crate::env::windows_attention_command(Some(&url)).unwrap_or_else(|| format!(
-            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
+            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
+        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf '{{}}'") },
+        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| format!(
+            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>NUL >NUL & echo {{}}"
         )),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
