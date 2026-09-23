@@ -90,9 +90,8 @@ export function hasSpawnableAgent(
  * Bucket a flat Spawn Option list by `group_key` into
  * `[harness_id, rows]` tuples, preserving input order within each
  * bucket so the native harness row lands first (the backend emits it
- * before its Proxied children, and the harness header badge is
- * load-bearing — see the defensive `find(!is_proxied)` filter in
- * `GroupedProviderMenu`).
+ * before its Proxied children, and `RegenerateProviderMenu` picks a
+ * bucket's native row with a defensive `find(!is_proxied)`).
  *
  * `ProviderInfo.group_key == harness_id` is a deliberate redundancy
  * (issue #575 / ADR-0016 §6) — the wire carries the grouping field
@@ -103,8 +102,9 @@ export function hasSpawnableAgent(
  *
  * An optional `filter` is applied per-row BEFORE bucketing so a
  * filter that drops the native harness row collapses the bucket
- * gracefully (the renderer then has no header to mislabel with the
- * "harness" badge — see code-review finding B2 in #575).
+ * gracefully (the renderer then renders the surviving Proxied
+ * children as peers rather than promote one into the native row's
+ * slot — see code-review finding B2 in #575).
  *
  * Generic over `T extends { group_key: string }` so the mobile
  * `Provider` shape (which carries `group_key` too) can reuse the

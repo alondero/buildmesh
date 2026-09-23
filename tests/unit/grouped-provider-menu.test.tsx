@@ -153,19 +153,19 @@ describe('GroupedProviderMenu', () => {
     expect(container.querySelector('[data-spawn-group="claude"]')).toBeTruthy();
     expect(container.querySelector('[data-spawn-group="codex"]')).toBeNull();
     expect(screen.getAllByRole('menuitem')).toHaveLength(1);
-    // The one surviving row is that Proxied child — never a native
-    // header row.
+    // The one surviving row IS that Proxied child: the composite id
+    // proves no native `claude` row rendered in its place.
     const buttons = container.querySelectorAll('button[data-spawn-harness]');
     expect(buttons).toHaveLength(1);
-    expect(buttons[0].textContent).not.toMatch(/harness/i);
+    expect(buttons[0].getAttribute('data-spawn-id')).toBe('claude:minimax');
   });
 
   it('does not mislabel a Proxied child as the harness header when the native row is filtered out', () => {
     // The defensive case from code-review finding B2: ArchivedNodesTab's
     // `resumable` filter could in theory remove the native claude row
-    // while keeping a Proxied claude:minimax child. The bucket should
-    // render the child as a peer — never promote it to the native
-    // harness header role.
+    // while keeping Proxied claude:minimax / claude:kimi children. The
+    // bucket must render both as peers — neither child may take the
+    // native row's slot.
     const providers = [
       native('claude', 'claude-native'),     // will be filtered out
       proxied('claude', 'minimax'),
@@ -180,9 +180,12 @@ describe('GroupedProviderMenu', () => {
     );
     const group = container.querySelector('[data-spawn-group="claude"]');
     expect(group).toBeTruthy();
-    // No harness header should be rendered.
-    expect(group!.querySelector('.text-text-faint')).toBeNull();
-    // Both children render as peers.
+    // Neither child is promoted: the bucket holds exactly the two
+    // composite-id Proxied rows and no bare `claude` parent — both
+    // children render as peers.
+    const ids = Array.from(group!.querySelectorAll('button[data-spawn-id]'))
+      .map((button) => button.getAttribute('data-spawn-id'));
+    expect(ids).toEqual(['claude:minimax', 'claude:kimi']);
     expect(screen.getAllByRole('menuitem')).toHaveLength(2);
   });
 });
