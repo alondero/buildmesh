@@ -87,9 +87,9 @@ describe('NodeCreationForm', () => {
 
   it('shows the provider dropdown when open', () => {
     setup({ isDropdownOpen: true });
-    // Issue #575 — the harness header carries a "harness" badge, so
-    // the accessible name is "<label> harness" rather than just the
-    // label. Regex matchers keep the test robust to that suffix.
+    // Issue #575 — the row's accessible name comes from its
+    // `aria-label`, and the regex matcher keeps the test robust to
+    // label drift.
     expect(screen.getByRole('menuitem', { name: /Anthropic/ })).toBeTruthy();
     expect(screen.getByRole('menuitem', { name: /Agy/ })).toBeTruthy();
   });
