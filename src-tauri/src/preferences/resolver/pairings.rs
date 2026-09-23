@@ -279,9 +279,18 @@ pub fn upsert_provider_pairing(prefs: &mut AppPreferences, pairing: ProviderPair
 }
 
 /// Remove a stored **Proxied Provider** pairing by its `(harness_id,
-/// `provider_id`)` key (issue #576 / ADR-0025).
+/// `provider_id`)` key (issue #576 / ADR-0025). Records a
+/// `launch/<harness>:<provider>` tombstone so `reconcile`'s route
+/// materialization does not recreate the just-detached pairing on the
+/// following save — the retired generated recipe used to act as that
+/// marker. Re-attaching stores an explicit pairing, which the tombstone
+/// never blocks.
 pub fn remove_provider_pairing(prefs: &mut AppPreferences, harness_id: &str, provider_id: &str) {
     prefs
         .provider_pairings
         .retain(|p| !(p.harness_id == harness_id && p.provider_id == provider_id));
+    let tombstone = format!("launch/{harness_id}:{provider_id}");
+    if !prefs.deleted_launch_configurations.iter().any(|d| d == &tombstone) {
+        prefs.deleted_launch_configurations.push(tombstone);
+    }
 }
