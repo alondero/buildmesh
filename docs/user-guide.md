@@ -170,8 +170,8 @@ and optional extra arguments. Known providers supply catalogue choices; generic
 providers retain manual model entry. **Advanced Provider Routes** owns endpoint
 and model-tier overrides; **Providers** continues to own credentials and billing.
 
-Adding or enabling a known provider creates compatible routes and generated
-configurations. Saving an edit makes a generated configuration user-owned;
+Adding or enabling a known provider creates compatible routes; configurations
+are only the recipes you save, so each harness submenu starts with none.
 **Clone** creates an independent recipe. Deleted configurations are not recreated
 automatically. In the desktop spawn menu, choose a harness directly for its
 defaults or open its configurations submenu for a named recipe, including

@@ -15,7 +15,7 @@ fn preference_files_are_isolated_between_temp_directories() {
     });
 
     let second_dir = with_temp_dir(|_| {
-        assert_eq!(load().unwrap().spawn_configurations[0].id, "launch/terminal");
+        assert!(load().unwrap().spawn_configurations.is_empty());
     });
 
     assert_ne!(first_dir, second_dir);
@@ -25,7 +25,7 @@ fn preference_files_are_isolated_between_temp_directories() {
 fn load_returns_default_when_file_missing() {
     with_temp_dir(|tmp| {
         let prefs = load().unwrap();
-        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+        assert!(prefs.spawn_configurations.is_empty());
         assert_eq!(prefs.default_provider, None);
         assert!(!tmp.join("preferences.json").exists());
     });
@@ -103,7 +103,7 @@ fn malformed_json_falls_back_to_default() {
         std::fs::write(tmp.join("preferences.json"), original).unwrap();
         let prefs = load().unwrap();
         assert_eq!(prefs.default_provider, AppPreferences::default().default_provider);
-        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+        assert!(prefs.spawn_configurations.is_empty());
         assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
     });
 }
@@ -114,7 +114,7 @@ fn type_invalid_preferences_are_not_overwritten_by_a_read() {
         let original = r#"{"spawn_configurations":"not-an-array"}"#;
         std::fs::write(tmp.join("preferences.json"), original).unwrap();
         let prefs = load().unwrap();
-        assert_eq!(prefs.spawn_configurations[0].id, "launch/terminal");
+        assert!(prefs.spawn_configurations.is_empty());
         assert_eq!(std::fs::read_to_string(tmp.join("preferences.json")).unwrap(), original);
     });
 }

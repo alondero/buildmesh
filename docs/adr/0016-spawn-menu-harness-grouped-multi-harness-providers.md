@@ -59,6 +59,11 @@ the same harness parent. This supersedes the flat-child and "without hiding
 provider pairings" presentation rules above, without changing Spawn Option IDs
 or route resolution.
 
+**User-saved-only update:** the catalogue no longer pre-creates one recipe per
+harness — fresh submenus show "No saved configurations" until the user saves
+their own, and upgrades purge catalogue-owned recipes while keeping user-owned
+and user-created ones.
+
 This trades the former one-click proxied launch for a second submenu action;
 the benefit is a stable harness-level menu where named, model-specific routes
 are discoverable without competing with their parent harness. The flat list
