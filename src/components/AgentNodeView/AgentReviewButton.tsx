@@ -7,12 +7,17 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { cancelCircuitRun, isAgentRunning, listCircuits, triggerCircuitFromNode } from '../../lib/tauri';
 import type { SpawnOption } from '../../lib/groups';
-import { groupByHarness } from '../../lib/groups';
 import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
 import type { AutopilotCircuit } from '../../types/generated/AutopilotCircuit';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
+import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { Modal } from '../shared/Modal';
 import { CircuitsIcon } from '../Probe/probeIcons';
+
+/** A reviewer must be an agent, and Terminal is a plain shell — the backend
+ *  refuses it too (`validate_reviewer_provider_id`), so it never reaches the
+ *  picker. */
+const excludeTerminal = (provider: SpawnOption) => provider.harness_id !== 'terminal';
 
 export function AgentReviewButton({ node, providerList }: { node: AgentNode; providerList: SpawnOption[] }) {
   const [open, setOpen] = useState(false);
@@ -29,16 +34,23 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   // bypass the gate; the override is recorded on the run's `context_json`
   // (`source.review_allow_unobserved = "1"`) for audit.
   const [allowUnobserved, setAllowUnobserved] = useState(false);
-  // Same bucketing the Spawn Menu renders (ADR-0016): harness headers with
-  // their Proxied children nested, which keeps composite `harness:provider`
-  // rows unambiguous. Terminal is not an agent, so it is filtered out before
-  // bucketing — the backend enforces the same invariant. Agent harnesses that
-  // cannot yield a turn stay *visible but disabled* (see the option render
-  // below) so the gap is discoverable rather than a silently missing row.
-  const reviewerGroups = useMemo(
-    () => groupByHarness(providerList, { filter: provider => provider.harness_id !== 'terminal' }),
-    [providerList],
-  );
+  // The very Spawn Menu every other surface renders (ADR-0016): harness parents
+  // with their saved Launch Configurations in the disclosure. Terminal is not an
+  // agent, so it is dropped before bucketing — the backend enforces the same
+  // invariant. Agent harnesses that cannot yield a turn stay *visible but
+  // unavailable* so the gap is discoverable rather than a silently missing row.
+  const reviewOptions = useMemo(() => providerList
+    .filter(excludeTerminal)
+    .map(provider => blocksReviewCircuit(provider.harness_id) && !provider.unavailable_reason
+      ? { ...provider, unavailable_reason: `${provider.label} cannot be used as the reviewer: it has no turn-completion signal.` }
+      : provider), [providerList]);
+  // The stored selection is a Spawn Option id or a Launch Configuration id
+  // (`launch/…`) — both are what the backend resolves — so the label beside the
+  // heading is looked up from the same list, standing in for the value a native
+  // select used to display.
+  const reviewerLabel = reviewerProvider
+    ? providerList.find(provider => provider.id === reviewerProvider)?.label ?? reviewerProvider
+    : null;
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[node.id]);
   const activeOwnership = ownership && ['pending', 'running', 'paused'].includes(ownership.state)
     ? ownership
@@ -88,6 +100,19 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
     useMeshStore.getState().selectMesh(node.mesh_id);
     useNodeActivityStore.getState().activateNode(node.id);
     useUIStore.getState().openProbeTab('circuits');
+  }
+
+  // The backend treats whatever reaches it as a launch *selection*: a Launch
+  // Configuration id (`launch/…`) resolves through
+  // `launch_configurations::resolve`, which applies that recipe's model and
+  // effort ahead of the harness's Mesh/application cascade, while a bare
+  // Spawn Option id has no configuration and so falls through to the cascade.
+  // (The built-in preset's spawn path clears the *graph's* mesh-derived
+  // explicit model/effort in `resolve_review_spawn_inputs`; that layer is the
+  // preset's own, not the picked configuration.) The menu hands both halves
+  // back, so prefer the configuration when one was opened.
+  function pickReviewer(providerId: string, _altKey: boolean, configurationId?: string) {
+    setReviewerProvider(configurationId ?? providerId);
   }
 
   async function start() {
@@ -165,34 +190,30 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
           </select>
         </label>
         {circuitId === null ? <>
-        <label className="text-xs block mb-4">Reviewer provider
-          <select value={reviewerProvider}
-            onChange={e => setReviewerProvider(e.target.value)}
-            className="block w-full mt-1 bg-bg-overlay border border-border-subtle rounded-md px-2 py-1 text-text-primary">
-            <option value="">Default (app Reviewer provider or this agent)</option>
-            {reviewerGroups.map(([groupKey, rows]) => (
-              <optgroup key={groupKey} label={rows.find(row => !row.is_proxied)?.label ?? groupKey}>
-                {rows.map(provider => {
-                  // The reviewer's own turn must be observable, or the
-                  // `verdict` gate never fires — same predicate the source
-                  // node faces above, applied to the picked row's harness.
-                  const blocked = blocksReviewCircuit(provider.harness_id);
-                  return (
-                    <option key={provider.id} value={provider.id} disabled={blocked}>
-                      {blocked ? `${provider.label} (no review support)` : provider.label}
-                    </option>
-                  );
-                })}
-              </optgroup>
-            ))}
-          </select>
-        </label>
+        <div className="mb-4">
+          <div className="flex items-baseline justify-between mb-1">
+            <span className="text-xs">Reviewer provider</span>
+            <span className="text-2xs text-text-muted" data-testid="reviewer-provider-selection">{reviewerLabel ?? 'Default'}</span>
+          </div>
+          {/* The shared Spawn Menu, rendered inline the way the canvas spawn
+              dialog renders it — no `onClose`, so its Tab/Escape handling can't
+              tear down this modal (the parent Modal owns both). */}
+          <div className="border border-border-subtle rounded-md bg-bg-overlay max-h-64 overflow-y-auto">
+            <button type="button" onClick={() => setReviewerProvider('')}
+              aria-pressed={reviewerProvider === ''}
+              data-testid="reviewer-provider-default"
+              className="w-full text-left px-3 py-1.5 text-xs text-text-primary border-b border-border-subtle"
+            >Default (app Reviewer provider or this agent)</button>
+            <GroupedProviderMenu providers={reviewOptions} onSelect={pickReviewer} />
+          </div>
+        </div>
         <p className="text-xs text-text-secondary mb-4">
           After this agent finishes its task, a separate reviewer checks its local changes.
           Findings return here for fixes and another review. The loop stops on approval or the round limit.
           The reviewer uses the app-wide Reviewer provider when configured, otherwise this
-          agent's provider — pick a provider above to override it for this review. Model and
-          effort come from the picked provider's own harness configuration.
+          agent's provider — pick a harness or saved configuration above to override it for this
+          review. Model and effort come from the picked configuration, otherwise the harness's own
+          Mesh and application defaults.
           You can pause or cancel in Circuits.
         </p>
         <label className="text-xs flex items-center justify-between gap-3 mb-4">
