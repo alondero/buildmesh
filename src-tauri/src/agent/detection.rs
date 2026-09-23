@@ -424,12 +424,23 @@ pub(crate) fn preferred_profiles(
     )
 }
 
-/// WSL is a menu fallback for harnesses without native Windows support, not
-/// another launch choice for harnesses that can run on Windows.
+/// True when `profile` is a spawn choice the Spawn Menu should offer on `host`.
+///
+/// The detector records a runtime-suffixed **mirror** of every native harness
+/// next to the bare profile — `<id>-windows` (`runtime_profile` /
+/// `detect_windows_from_wsl`) and `<id>-wsl[-<hex>]` (`profiles_from_wsl_probe`).
+/// On the host that owns the native install those mirrors are not extra launch
+/// choices: [`preferred_profiles`] collapses them back onto the bare id. Left
+/// visible they resurrect a duplicate "… (Windows)" / "… (WSL: …)" harness group
+/// beside the canonical row — dragging in the Launch Configurations and Provider
+/// Routes `reconcile` seeded for the mirror (issue #1864).
+///
+/// A mirror of a harness that runs natively here is therefore hidden; the bare
+/// profile and any mirror of a *foreign-runtime-only* install stay visible.
 pub(crate) fn visible_in_spawn_menu(profile: &HarnessProfile, host: crate::agent::provider::Platform) -> bool {
-    !(host == crate::agent::provider::Platform::Windows
-        && profile.runtime == Some(crate::models::EnvType::Wsl)
-        && crate::models::Provider::from_db_str(&profile.harness).adapter().available_on().contains(&host))
+    let native_here = crate::models::Provider::from_db_str(&profile.harness).adapter().available_on().contains(&host);
+    let mirror = matches!(profile.runtime, Some(crate::models::EnvType::Windows | crate::models::EnvType::Wsl));
+    !(host == crate::agent::provider::Platform::Windows && native_here && mirror)
 }
 
 fn preferred_profiles_with_executables(
@@ -690,6 +701,28 @@ mod tests {
         assert_eq!(menu.len(), 2);
         assert_eq!(menu.iter().find(|p| p.harness == "mcode").unwrap().runtime, None);
         assert_eq!(menu.iter().find(|p| p.harness == "grok").unwrap().runtime, Some(EnvType::WindowsInterop));
+    }
+
+    /// Issue #1864 follow-up — a runtime-suffixed mirror of a harness that runs
+    /// natively on Windows is not a second spawn choice: `preferred_profiles`
+    /// collapses it onto the bare id, so leaving it visible resurrects a
+    /// duplicate "… (Windows)" harness group beside the canonical row (and pulls
+    /// in the Launch Configurations / Routes seeded for the mirror).
+    #[test]
+    fn windows_mirror_of_native_harness_is_not_a_spawn_choice() {
+        use crate::agent::provider::Platform;
+        use crate::models::EnvType;
+        let profile = |id: &str, runtime| crate::preferences::HarnessProfile {
+            id: id.into(), name: id.into(), harness: "anthropic".into(), runtime, wsl_distro: None, executable: None,
+        };
+        // Mirrors of a Windows-capable harness are hidden on a Windows host.
+        assert!(!super::visible_in_spawn_menu(&profile("claude-windows", Some(EnvType::Windows)), Platform::Windows));
+        assert!(!super::visible_in_spawn_menu(&profile("claude-wsl-5562756e7475", Some(EnvType::Wsl)), Platform::Windows));
+        // The bare canonical profile stays.
+        assert!(super::visible_in_spawn_menu(&profile("claude", None), Platform::Windows));
+        // On a Linux host the Windows-interop mirror discovered from WSL is a
+        // real choice, so it stays visible.
+        assert!(super::visible_in_spawn_menu(&profile("claude-windows", Some(EnvType::WindowsInterop)), Platform::Linux));
     }
 
     #[test]
