@@ -286,7 +286,7 @@ function SelectedEmptyBranch({
     <EmptyShell
       icon={agentIcon}
       heading="No agents in this mesh"
-      body="Spawn your first agent to start working in this repository. The Spawn Menu picks the harness to launch — native CLI if installed, or a keyed provider."
+      body="Spawn your first agent to start working in this repository. The Spawn Menu picks what to launch — native CLI if installed, or a keyed provider."
       cta={
         harnessReady ? (
           <button

@@ -91,9 +91,9 @@ describe('GroupedProviderMenu', () => {
     const providers = [native('claude'), proxied('claude', 'minimax')];
     render(<GroupedProviderMenu providers={providers} onSelect={() => {}} />);
     // Issue #814 — buttons are now `role="menuitem"` (not default
-    // `role="button"`). The accessible name is still derived from the
-    // button's text content; the regex matcher keeps the test robust to
-    // the trailing "harness" badge on the native row.
+    // `role="button"`). The accessible name comes from the row's
+    // `aria-label`; the regex matcher keeps the test robust to label
+    // drift.
     const header = screen.getByRole('menuitem', { name: /claude/i });
     expect(header.getAttribute('data-spawn-harness')).toBe('claude');
     expect(header.getAttribute('data-spawn-id')).toBe('claude');
@@ -147,26 +147,25 @@ describe('GroupedProviderMenu', () => {
       />,
     );
     // The filter keeps only `claude:minimax`; the Claude group is the
-    // only one left and contains exactly that one row. The native
-    // harness header for `claude` is filtered out, so the bucket
-    // should NOT render a "harness" badge (the only row in the
-    // bucket is a Proxied child).
+    // only one left and contains exactly that one row — the native
+    // harness header for `claude` is filtered out, so the bucket holds
+    // only the Proxied child.
     expect(container.querySelector('[data-spawn-group="claude"]')).toBeTruthy();
     expect(container.querySelector('[data-spawn-group="codex"]')).toBeNull();
     expect(screen.getAllByRole('menuitem')).toHaveLength(1);
-    // The one surviving row has no "harness" badge — it's a Proxied
-    // child rendered without a header.
+    // The one surviving row IS that Proxied child: the composite id
+    // proves no native `claude` row rendered in its place.
     const buttons = container.querySelectorAll('button[data-spawn-harness]');
     expect(buttons).toHaveLength(1);
-    expect(buttons[0].textContent).not.toMatch(/harness/i);
+    expect(buttons[0].getAttribute('data-spawn-id')).toBe('claude:minimax');
   });
 
   it('does not mislabel a Proxied child as the harness header when the native row is filtered out', () => {
     // The defensive case from code-review finding B2: ArchivedNodesTab's
     // `resumable` filter could in theory remove the native claude row
-    // while keeping a Proxied claude:minimax child. The bucket should
-    // render the child WITHOUT the "harness" badge — it would be
-    // misleading to label a proxied row as the native harness header.
+    // while keeping Proxied claude:minimax / claude:kimi children. The
+    // bucket must render both as peers — neither child may take the
+    // native row's slot.
     const providers = [
       native('claude', 'claude-native'),     // will be filtered out
       proxied('claude', 'minimax'),
@@ -181,9 +180,12 @@ describe('GroupedProviderMenu', () => {
     );
     const group = container.querySelector('[data-spawn-group="claude"]');
     expect(group).toBeTruthy();
-    // No harness header should be rendered.
-    expect(group!.querySelector('.text-text-faint')).toBeNull();
-    // Both children render as peers.
+    // Neither child is promoted: the bucket holds exactly the two
+    // composite-id Proxied rows and no bare `claude` parent — both
+    // children render as peers.
+    const ids = Array.from(group!.querySelectorAll('button[data-spawn-id]'))
+      .map((button) => button.getAttribute('data-spawn-id'));
+    expect(ids).toEqual(['claude:minimax', 'claude:kimi']);
     expect(screen.getAllByRole('menuitem')).toHaveLength(2);
   });
 });

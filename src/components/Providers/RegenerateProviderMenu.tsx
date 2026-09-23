@@ -147,7 +147,6 @@ export function RegenerateProviderMenu({
                 >
                   <ProviderIcon providerId={native.provider_id ?? native.harness_id} className="h-3.5 w-3.5 shrink-0" />
                   <span className="flex-1 truncate">{native.label}</span>
-                  {!native.configuration && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
                 </button>
               )}
               {proxied.map((child) => (

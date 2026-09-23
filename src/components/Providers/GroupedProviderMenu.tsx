@@ -161,7 +161,6 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
               >
                 <ProviderIcon providerId={option.provider_id ?? option.harness_id} className="h-3.5 w-3.5 shrink-0" />
                 <span className="min-w-0 flex-1"><span className="block truncate">{option.label}</span>{option.unavailable_reason && <span className="block whitespace-normal text-text-secondary">{option.unavailable_reason}</span>}</span>
-                {!option.configuration && !option.is_proxied && <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>}
               </button>
               {configurable(option) && <button type="button" tabIndex={-1} aria-label={`${option.label} configurations`}
                 aria-haspopup="menu" aria-expanded={submenu?.option.id === option.id}
