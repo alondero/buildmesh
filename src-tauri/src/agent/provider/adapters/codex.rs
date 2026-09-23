@@ -55,17 +55,37 @@ fn base_flags() -> Vec<String> {
 /// curl. Discard the HTTP response body and print `{}`: Codex Stop requires
 /// JSON on stdout. Attention callbacks are best-effort notifications, so a
 /// stopped server or stale node must not fail the Codex hook itself.
+fn attention_hook_unix_command(url: &str) -> String {
+    format!(
+        "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf '{{}}'"
+    )
+}
+
+fn attention_hook_windows_shell_command(url: &str) -> String {
+    format!(
+        "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
+    )
+}
+
+fn attention_hook_windows_fallback_command(url: &str) -> String {
+    format!(
+        "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>NUL >NUL & echo {{}}"
+    )
+}
+
 fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
     serde_json::json!({
         "type": "command",
-        "command": if cfg!(windows) { format!(
-            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
-        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf '{{}}'") },
-        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| format!(
-            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>NUL >NUL & echo {{}}"
-        )),
+        "command": if cfg!(windows) {
+            attention_hook_windows_shell_command(&url)
+        } else {
+            attention_hook_unix_command(&url)
+        },
+        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| {
+            attention_hook_windows_fallback_command(&url)
+        }),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -940,8 +960,8 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
     Ok(document.to_string())
 }
 
-/// Ensure `<project>/.codex/hooks.json` carries the Stop + PermissionRequest
-/// attention webhooks. Codex's matcher/event schema nests hook entries one
+/// Ensure `<project>/.codex/hooks.json` carries the seven attention webhooks.
+/// Codex's matcher/event schema nests hook entries one
 /// level deeper than Claude Code's (each event maps to matcher groups, each
 /// carrying a `hooks` array — issue #884). `PreToolUse` is matched to the
 /// native question tool; `PostToolUse` is catch-all so approved permissions
@@ -1707,8 +1727,8 @@ mod tests {
             .unwrap();
     }
 
-    /// Injection writes both files: the feature flag and the SessionStart +
-    /// Stop + PermissionRequest webhooks in Codex's nested matcher/event
+    /// Injection writes both files: the feature flag and all seven attention
+    /// webhooks in Codex's nested matcher/event
     /// schema, POSTing the hook's stdin to the attention endpoint. The
     /// request_user_input pre-hook remains narrowly matched, while
     /// PostToolUse is catch-all so an approved permission for any tool can
@@ -1724,7 +1744,15 @@ mod tests {
         assert!(config.contains("hooks = true"), "config: {config}");
 
         let hooks = read_hooks_json(temp.path());
-        for event in ["SessionStart", "Stop", "PermissionRequest", "PreToolUse", "PostToolUse"] {
+        for event in [
+            "SessionStart",
+            "Stop",
+            "PermissionRequest",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Interrupt",
+        ] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
@@ -1745,6 +1773,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn attention_hook_commands_fail_open_and_emit_json() {
+        let url = "http://localhost:1992/api/attention/42";
+
+        let unix = attention_hook_unix_command(url);
+        assert!(unix.contains("2>/dev/null || true; printf '{}'"), "{unix}");
+
+        let windows = attention_hook_windows_fallback_command(url);
+        assert!(windows.contains("2>NUL >NUL & echo {}"), "{windows}");
+        assert!(
+            !windows.contains("&& echo"),
+            "must not gate echo on curl: {windows}"
+        );
     }
 
     /// Re-running injection over an already-correct project is a no-op.
