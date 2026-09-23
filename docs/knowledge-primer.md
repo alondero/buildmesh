@@ -140,8 +140,9 @@ rows in `BUILTIN_PROVIDER_ACCOUNTS` — they live in
 `AppPreferences::provider_pairings` and `effective_pairings` returns stored
 rows only (ADR-0025: no auto-derived Claude pairing on key alone). Endpoint
 URL + model tiers live on the pairing (Harnesses page), not the account.
-The desktop spawn picker renders harness parents and puts their generated and
-saved Launch Configurations in each harness submenu. The backend also retains
+The desktop spawn picker renders harness parents and puts their saved Launch
+Configurations in each harness submenu — only user-saved recipes appear, so a
+fresh install shows none. The backend also retains
 the pairing rows for selectors that still choose a provider route directly.
 
 **The registries are independent.** The brand string may coincide across

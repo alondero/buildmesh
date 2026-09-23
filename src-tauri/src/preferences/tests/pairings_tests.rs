@@ -35,6 +35,11 @@ fn upsert_and_remove_provider_pairing_by_harness_provider_key() {
     assert_eq!(prefs.provider_pairings[0].surface, ApiSurface::OpenAI);
     crate::preferences::remove_provider_pairing(&mut prefs, "claude", "minimax");
     assert!(prefs.provider_pairings.is_empty());
+    // The detach decision is recorded separately from recipe deletions so
+    // reconcile's route materialization does not recreate the pairing on
+    // the following save — while retired-id alias migration still heals.
+    assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+    assert!(!prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()));
 }
 
 #[test]

@@ -25,8 +25,6 @@ pub struct ProviderCatalogueEntry {
     pub manual_model: bool,
 }
 
-pub const REVISION: u32 = 1;
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "LaunchTarget.ts")]
 pub struct LaunchTarget {

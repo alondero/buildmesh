@@ -20,25 +20,39 @@ pub struct GeneratedLaunch {
 }
 
 /// Reconciliation is pure and runs inside preference writes. It never reads the cache recursively.
-pub fn reconcile(prefs: &mut AppPreferences) {
-    use super::spawn_configurations::SpawnConfiguration;
-    let mut materialized_routes = Vec::new();
+///
+/// Spawn-menu submenus list only what the user saved: reconciliation never
+/// creates launch configurations. Catalogue-generated recipes from older
+/// installs (where every harness shipped a `launch/<harness>` entry) are
+/// purged unless the user edited them into user-owned recipes. Provider
+/// routes for enabled accounts are still materialized so proxied harness
+/// rows keep appearing without a manual attach.
+/// Effective harness profiles for reconciliation: the code-defined defaults
+/// with stored profiles merged over them by id. Shared by [`reconcile`] and
+/// [`retired_configuration_aliases`] so the two never disagree on the
+/// profile set.
+fn effective_profiles(prefs: &AppPreferences) -> Vec<HarnessProfile> {
     let mut profiles = super::default_harness_profiles();
     for profile in &prefs.harness_profiles {
         if let Some(existing) = profiles.iter_mut().find(|h| h.id == profile.id) { *existing = profile.clone(); }
         else { profiles.push(profile.clone()); }
     }
+    profiles
+}
+
+pub fn reconcile(prefs: &mut AppPreferences) {
+    let profiles = effective_profiles(prefs);
     for profile in &profiles {
         let surface = super::surface_for_executor(Provider::from_db_str(&profile.harness));
         for account in prefs.provider_accounts.iter().filter(|a| a.enabled) {
             let source = format!("{}:{}", profile.id, account.id);
             if prefs.spawn_configurations.iter().any(|c| c.generated.as_ref().is_some_and(|g| g.source == source))
-                || prefs.deleted_launch_configurations.contains(&format!("launch/{source}")) {
+                || prefs.deleted_launch_configurations.contains(&format!("launch/{source}"))
+                || prefs.detached_provider_routes.iter().any(|d| d == &source) {
                 continue;
             }
             if let Some(endpoint) = super::first_class_surfaces(&account.id).into_iter().find(|e| Some(e.surface) == surface) {
                 if !prefs.provider_pairings.iter().any(|p| p.harness_id == profile.id && p.provider_id == account.id) {
-                    materialized_routes.push(source);
                     prefs.provider_pairings.push(ProviderPairing {
                         harness_id: profile.id.clone(), provider_id: account.id.clone(), surface: endpoint.surface,
                         base_url: Some(endpoint.base_url), model_tiers: endpoint.model_tiers,
@@ -47,50 +61,53 @@ pub fn reconcile(prefs: &mut AppPreferences) {
             }
         }
     }
-    let candidates = profiles.iter().map(|h| (h.id.clone(), h.name.clone(), None, None))
-        .chain(prefs.provider_pairings.iter().map(|route| {
-            let name = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
-                .map_or_else(|| route.provider_id.clone(), |a| a.name.clone());
-            (format!("{}:{}", route.harness_id, route.provider_id), name, route.model_tiers.default.clone(), Some(route.clone()))
-        })).collect::<Vec<_>>();
-    for (source, name, model, route) in candidates {
-        let id = format!("launch/{source}");
-        if prefs.deleted_launch_configurations.contains(&id) { continue; }
-        if let Some(existing) = prefs.spawn_configurations.iter_mut().find(|c| c.id == id) {
-            if existing.generated.as_ref().is_some_and(|g| !g.user_owned && g.catalogue_revision < super::launch_catalog::REVISION) {
-                existing.name = name;
-                existing.model = model;
-                // Only routes still equal to their generated baseline may be refreshed.
-                // Advanced endpoint/tier edits remain authoritative.
-                if let Some(route) = route.as_ref().filter(|r| existing.generated.as_ref().and_then(|g| g.route.as_ref()) == Some(*r)) {
-                    if let Some(endpoint) = super::first_class_surfaces(&route.provider_id).into_iter().find(|e| e.surface == route.surface) {
-                        let updated = ProviderPairing { base_url: Some(endpoint.base_url), model_tiers: endpoint.model_tiers, ..route.clone() };
-                        existing.model = updated.model_tiers.default.clone();
-                        if let Some(stored) = prefs.provider_pairings.iter_mut().find(|p| p.harness_id == route.harness_id && p.provider_id == route.provider_id) {
-                            *stored = updated.clone();
-                        }
-                        existing.generated.as_mut().unwrap().route = Some(updated);
-                    }
+    // Drop catalogue-generated recipes the user never touched. User-owned
+    // edits (saved through the editor, flagged `user_owned`) and
+    // user-created recipes (`generated: None`) are the user's own and stay.
+    let mut purged: Vec<(String, String)> = Vec::new();
+    let mut detached: Vec<String> = Vec::new();
+    prefs.spawn_configurations.retain(|c| {
+        let catalogue_owned = c.generated.as_ref().is_some_and(|g| !g.user_owned);
+        if catalogue_owned {
+            // Upgrade window: a catalogue recipe whose route pairing is
+            // already gone was detached under the old regime, where the
+            // recipe itself was the marker blocking re-materialization.
+            // Carry that detach decision into the detach record so the
+            // route stays detached — without tombstoning the recipe id,
+            // so saved references still heal. Harness-only sources gate
+            // nothing.
+            if let Some(source) = c.generated.as_ref().map(|g| g.source.clone()) {
+                let id = SpawnOptionId::from(source.as_str());
+                let paired = id.provider_id.as_deref().is_none_or(|provider| {
+                    prefs.provider_pairings.iter()
+                        .any(|p| p.harness_id == id.harness_id && p.provider_id == provider)
+                });
+                if id.is_proxied() && !paired
+                    && !prefs.detached_provider_routes.iter().any(|d| d == &source)
+                {
+                    detached.push(source);
                 }
-                existing.generated.as_mut().unwrap().catalogue_revision = super::launch_catalog::REVISION;
             }
+            purged.push((c.id.clone(), c.spawn_option_id.clone()));
+            false
         } else {
-            let route = route.filter(|_| materialized_routes.contains(&source));
-            prefs.spawn_configurations.push(SpawnConfiguration {
-                id, name, spawn_option_id: source.clone(), model,
-                generated: Some(GeneratedLaunch { source, catalogue_revision: super::launch_catalog::REVISION, user_owned: false, route }),
-                ..Default::default()
-            });
+            true
         }
-    }
+    });
+    prefs.detached_provider_routes.extend(detached);
     for value in &mut prefs.spawn_configurations { let _ = normalize_identity(value); }
-    // Keep legacy identities as read aliases, while all future preference writes carry configuration IDs.
-    let configurations = &prefs.spawn_configurations;
-    for selection in [&mut prefs.default_provider, &mut prefs.reviewer_provider, &mut prefs.naming_provider] {
-        if let Some(value) = selection.as_mut() {
-            if configurations.iter().any(|c| c.id == *value) { continue; }
-            let canonical = format!("launch/{value}");
-            if configurations.iter().any(|c| c.id == canonical) { *value = canonical; }
+    // Selections that pointed at a purged recipe fall back to its bare Spawn
+    // Option (same harness/route, native defaults) so existing nodes and
+    // app-wide defaults keep resolving. Other selections are left alone:
+    // bare Spawn Option ids resolve directly, and surviving configuration
+    // ids keep working.
+    if !purged.is_empty() {
+        for selection in [&mut prefs.default_provider, &mut prefs.reviewer_provider, &mut prefs.naming_provider] {
+            if let Some(value) = selection.as_mut() {
+                if let Some((_, option)) = purged.iter().find(|(id, _)| id == value) {
+                    *value = option.clone();
+                }
+            }
         }
     }
 }
@@ -259,6 +276,37 @@ fn resolve_plan(
     })
 }
 
+/// Aliases that heal stored references to retired catalogue-generated
+/// configurations (`launch/<harness>` / `launch/<harness>:<provider>`)
+/// back to their bare Spawn Option after the purge in [`reconcile`].
+/// Same harness/route, native defaults — so meshes and circuits that
+/// pointed at a pre-made recipe keep resolving. Pure so the mapping is
+/// the unit-test seam; the DB write lives in
+/// `services::agent_node::migrate_launch_history`.
+///
+/// A retired id stays unmapped when its recipe still exists (a user-owned
+/// edit keeps working as-is) or when the user explicitly deleted it
+/// (those references must keep surfacing "no longer exists" rather than
+/// silently rerouting to defaults). Detached routes are still mapped: the
+/// reference heals to the bare option, which resolves again once the route
+/// is re-attached (and reports the missing route, not a missing recipe,
+/// while detached).
+pub(crate) fn retired_configuration_aliases(prefs: &AppPreferences) -> std::collections::HashMap<String, String> {
+    let live: std::collections::HashSet<&str> = prefs.spawn_configurations.iter().map(|c| c.id.as_str()).collect();
+    let deleted: std::collections::HashSet<&str> = prefs.deleted_launch_configurations.iter().map(String::as_str).collect();
+    let mut aliases = std::collections::HashMap::new();
+    for source in effective_profiles(prefs).into_iter().map(|p| p.id)
+        .chain(prefs.provider_pairings.iter().map(|p| format!("{}:{}", p.harness_id, p.provider_id)))
+        .chain(prefs.detached_provider_routes.iter().cloned())
+    {
+        let retired = format!("launch/{source}");
+        if !live.contains(retired.as_str()) && !deleted.contains(retired.as_str()) {
+            aliases.insert(retired, source);
+        }
+    }
+    aliases
+}
+
 /// Resolve an identity at legacy adapter entrypoints without teaching the parser about storage.
 pub fn selection_option(selection: &str) -> Result<String, String> {
     let prefs = match super::load() {
@@ -316,8 +364,8 @@ mod tests {
         let mut prefs = generated_preferences();
         prefs.harness_profiles[0].runtime = Some(if cfg!(windows) { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl });
         reconcile(&mut prefs);
-        assert!(resolve(&prefs, "launch/claude", &Default::default(), &Default::default()).unwrap_err().contains("unavailable"));
-        assert!(resolve_for_edit(&prefs, "launch/claude").is_ok());
+        assert!(resolve(&prefs, "claude", &Default::default(), &Default::default()).unwrap_err().contains("unavailable"));
+        assert!(resolve_for_edit(&prefs, "claude").is_ok());
     }
 
     fn generated_preferences() -> AppPreferences {
@@ -328,73 +376,70 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_materializes_routes_once_and_preserves_deleted_or_edited_choices() {
+    fn reconciliation_materializes_routes_once_and_creates_no_configurations() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         assert_eq!(prefs.provider_pairings.len(), 1);
-        let generated = prefs.spawn_configurations.iter().find(|c| c.id == "launch/claude:minimax").unwrap();
-        assert_eq!(generated.model.as_deref(), Some("MiniMax-M3[1m]"));
+        assert!(prefs.spawn_configurations.is_empty());
         let once = prefs.clone();
         reconcile(&mut prefs);
         assert_eq!(prefs, once);
-        let generated = prefs.spawn_configurations.iter_mut().find(|c| c.id == "launch/claude:minimax").unwrap();
-        generated.name = "My review".into();
-        generated.generated.as_mut().unwrap().catalogue_revision = 0;
-        generated.generated.as_mut().unwrap().user_owned = true;
+        // A user-saved recipe survives reconciliation untouched.
+        prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
+            "id": "launch/my-review", "name": "My review", "spawn_option_id": "claude",
+            "model": null, "effort": null, "extra_args": null
+        })).unwrap());
         reconcile(&mut prefs);
-        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/claude:minimax").unwrap().name, "My review");
-        prefs.spawn_configurations.retain(|c| c.id != "launch/claude:minimax");
+        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/my-review").unwrap().name, "My review");
+        // A deleted route id is not re-materialized.
+        prefs.provider_pairings.clear();
         prefs.deleted_launch_configurations.push("launch/claude:minimax".into());
         reconcile(&mut prefs);
-        assert!(!prefs.spawn_configurations.iter().any(|c| c.id == "launch/claude:minimax"));
+        assert!(prefs.provider_pairings.is_empty());
     }
 
     #[test]
-    fn migrated_custom_route_is_not_owned_by_catalogue_refresh() {
+    fn reconcile_leaves_custom_routes_untouched_and_creates_no_configurations() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.spawn_configurations.clear();
         prefs.provider_pairings[0].base_url = Some("https://custom.example/anthropic".into());
         prefs.provider_pairings[0].model_tiers.default = Some("custom-model".into());
         let route = prefs.provider_pairings[0].clone();
         reconcile(&mut prefs);
-        let config = prefs.spawn_configurations.iter_mut().find(|c| c.id == "launch/claude:minimax").unwrap();
-        assert!(config.generated.as_ref().unwrap().route.is_none());
-        config.generated.as_mut().unwrap().catalogue_revision = 0;
-        reconcile(&mut prefs);
         assert_eq!(prefs.provider_pairings[0], route);
-        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/claude:minimax").unwrap().model.as_deref(), Some("custom-model"));
+        assert!(prefs.spawn_configurations.is_empty());
     }
 
     #[test]
-    fn generated_refresh_and_new_harness_preserve_user_configuration_ids() {
+    fn new_harness_creates_no_configuration_and_preserves_user_ids() {
         let mut prefs = generated_preferences();
         prefs.default_provider = Some("custom-choice".into());
         prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
             "id":"custom-choice","name":"Personal","spawn_option_id":"claude","model":"sonnet","effort":"high","extra_args":null
         })).unwrap());
-        reconcile(&mut prefs);
-        let generated = prefs.spawn_configurations.iter_mut().find(|c| c.id == "launch/claude:minimax").unwrap();
-        generated.name = "Obsolete catalogue label".into();
-        generated.generated.as_mut().unwrap().catalogue_revision = 0;
-        generated.model = Some("retired-model".into());
-        generated.generated.as_mut().unwrap().route.as_mut().unwrap().model_tiers.default = Some("retired-model".into());
-        prefs.provider_pairings[0].model_tiers.default = Some("retired-model".into());
         prefs.harness_profiles.push(HarnessProfile { id: "codex".into(), name: "Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
         reconcile(&mut prefs);
         assert_eq!(prefs.default_provider.as_deref(), Some("custom-choice"));
-        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/claude:minimax").unwrap().name, "MiniMax");
-        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/claude:minimax").unwrap().model.as_deref(), Some("MiniMax-M3[1m]"));
-        assert_eq!(prefs.provider_pairings[0].model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
-        assert!(prefs.spawn_configurations.iter().any(|c| c.id == "launch/codex:minimax"));
+        assert!(prefs.spawn_configurations.iter().any(|c| c.id == "custom-choice"));
+        assert!(!prefs.spawn_configurations.iter().any(|c| c.id == "launch/codex:minimax"),
+            "a new harness must not gain a pre-made configuration: {:?}",
+            prefs.spawn_configurations.iter().map(|c| &c.id).collect::<Vec<_>>());
         assert_eq!(prefs.provider_accounts[0].api_key.as_deref(), Some("private-key"));
+    }
+
+    fn user_minimax_configuration() -> serde_json::Value {
+        serde_json::json!({
+            "id": "launch/my-minimax", "name": "My MiniMax", "spawn_option_id": "claude:minimax",
+            "model": null, "effort": null, "extra_args": null
+        })
     }
 
     #[test]
     fn resolver_reports_missing_dependencies_without_native_fallback() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        let resolve_current = |prefs: &AppPreferences| resolve(prefs, "launch/claude:minimax", &Default::default(), &Default::default());
+        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        let resolve_current = |prefs: &AppPreferences| resolve(prefs, "launch/my-minimax", &Default::default(), &Default::default());
         assert!(resolve_current(&prefs).is_ok());
         prefs.provider_accounts[0].api_key = None;
         assert!(resolve_current(&prefs).unwrap_err().contains("credential"));
@@ -411,14 +456,14 @@ mod tests {
         reconcile(&mut prefs);
         prefs.harness_defaults.insert("claude".into(), HarnessConfigValue { model: Some("app".into()), effort: Some("low".into()) });
         let mesh = HarnessConfigValue { model: Some("mesh".into()), effort: Some("medium".into()) };
-        let plan = resolve(&prefs, "launch/claude", &Default::default(), &mesh).unwrap();
+        let plan = resolve(&prefs, "claude", &Default::default(), &mesh).unwrap();
         assert_eq!(plan.model.as_deref(), Some("mesh"));
         assert_eq!(plan.effort.as_deref(), Some("medium"));
         let overrides = LaunchOverrides { model: Some("explicit".into()), effort: Some("high".into()), extra_args: Some("--verbose".into()) };
-        let plan = resolve(&prefs, "launch/claude", &overrides, &mesh).unwrap();
+        let plan = resolve(&prefs, "claude", &overrides, &mesh).unwrap();
         assert_eq!(plan.model.as_deref(), Some("explicit"));
         assert_eq!(plan.extra_args.as_deref(), Some("--verbose"));
-        let plan = resolve(&prefs, "launch/terminal", &overrides, &mesh).unwrap();
+        let plan = resolve(&prefs, "terminal", &overrides, &mesh).unwrap();
         assert_eq!((plan.model, plan.effort, plan.extra_args), (None, None, None));
     }
 
@@ -428,7 +473,8 @@ mod tests {
         super::super::init_for_tests(dir.path().into());
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        let plan = resolve(&prefs, "launch/claude:minimax", &Default::default(), &Default::default()).unwrap();
+        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        let plan = resolve(&prefs, "launch/my-minimax", &Default::default(), &Default::default()).unwrap();
         prefs.harness_profiles.clear();
         prefs.provider_pairings.clear();
         prefs.spawn_configurations.clear();
@@ -457,6 +503,124 @@ mod tests {
         let mut disabled = prefs.clone();
         disabled.provider_accounts[0].enabled = false;
         assert!(resolve(&disabled, "launch/private", &LaunchOverrides::default(), &HarnessConfigValue::default()).unwrap_err().contains("disabled"));
+    }
+
+    #[test]
+    fn fresh_preferences_start_with_no_spawn_configurations() {
+        // Spawn-menu submenus list only what the user saved. A fresh install
+        // must not materialize one generated recipe per harness.
+        let mut prefs = AppPreferences::default();
+        reconcile(&mut prefs);
+        assert!(prefs.spawn_configurations.is_empty(),
+            "fresh prefs must not pre-create configurations, got {:?}", prefs.spawn_configurations);
+        let mut known = generated_preferences();
+        reconcile(&mut known);
+        assert!(known.spawn_configurations.is_empty(),
+            "a known provider must materialize its route, not a configuration: {:?}",
+            known.spawn_configurations);
+        assert_eq!(known.provider_pairings.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_purges_catalogue_generated_configurations_but_keeps_user_ones() {
+        let mut prefs = generated_preferences();
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/claude".into(), name: "Claude Code".into(), spawn_option_id: "claude".into(),
+            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: false, route: None }),
+            ..Default::default()
+        });
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/my-review".into(), name: "My review".into(), spawn_option_id: "claude".into(),
+            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: true, route: None }),
+            ..Default::default()
+        });
+        prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
+            "id": "launch/personal", "name": "Personal", "spawn_option_id": "claude",
+            "model": null, "effort": null, "extra_args": null
+        })).unwrap());
+        reconcile(&mut prefs);
+        let ids: Vec<_> = prefs.spawn_configurations.iter().map(|c| c.id.as_str()).collect();
+        assert!(!ids.contains(&"launch/claude"), "catalogue-generated recipes must be purged: {ids:?}");
+        assert!(ids.contains(&"launch/my-review"), "user-owned recipes must survive: {ids:?}");
+        assert!(ids.contains(&"launch/personal"), "user-created recipes must survive: {ids:?}");
+    }
+
+    #[test]
+    fn detached_route_is_not_rematerialized() {
+        // Detaching a route must stick: the save following a detach runs
+        // reconcile, which must not recreate the just-removed pairing.
+        // Re-attaching stores an explicit pairing, which the detach record
+        // never blocks.
+        let mut prefs = generated_preferences();
+        reconcile(&mut prefs);
+        assert_eq!(prefs.provider_pairings.len(), 1);
+        let pairing = prefs.provider_pairings.clone();
+        super::super::remove_provider_pairing(&mut prefs, "claude", "minimax");
+        reconcile(&mut prefs);
+        assert!(prefs.provider_pairings.is_empty(),
+            "detach must stick, got {:?}", prefs.provider_pairings);
+        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+        for route in pairing {
+            super::super::upsert_provider_pairing(&mut prefs, route);
+        }
+        reconcile(&mut prefs);
+        assert_eq!(prefs.provider_pairings.len(), 1, "explicit re-attach must win over the detach record");
+    }
+
+    #[test]
+    fn purge_carries_pre_upgrade_detach_into_detach_record() {
+        // Old install: the route was detached (pairing gone) while its
+        // catalogue recipe remained as the marker blocking re-creation.
+        // Purging that marker must preserve the detach decision — without
+        // tombstoning the recipe id, so saved references still heal.
+        let mut prefs = generated_preferences();
+        reconcile(&mut prefs);
+        prefs.provider_pairings.clear();
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/claude:minimax".into(), name: "MiniMax".into(), spawn_option_id: "claude:minimax".into(),
+            generated: Some(GeneratedLaunch { source: "claude:minimax".into(), catalogue_revision: 1, user_owned: false, route: None }),
+            ..Default::default()
+        });
+        reconcile(&mut prefs);
+        assert!(prefs.provider_pairings.is_empty(),
+            "pre-upgrade detach must survive the purge, got {:?}", prefs.provider_pairings);
+        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+        assert!(!prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()),
+            "a detach record must not masquerade as a recipe deletion");
+        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
+            Some("claude:minimax"), "detached routes must still heal to their bare option");
+    }
+
+    #[test]
+    fn retired_aliases_heal_purged_recipes_but_respect_user_choices() {
+        let mut prefs = generated_preferences();
+        reconcile(&mut prefs);
+        // The pairing materialized but no configurations exist: the retired
+        // catalogue ids for the harness, its route, and Terminal all heal
+        // to their bare Spawn Option.
+        let aliases = retired_configuration_aliases(&prefs);
+        assert_eq!(aliases.get("launch/claude").map(String::as_str), Some("claude"));
+        assert_eq!(aliases.get("launch/claude:minimax").map(String::as_str), Some("claude:minimax"));
+        assert_eq!(aliases.get("launch/terminal").map(String::as_str), Some("terminal"));
+        // A user-owned edit keeps its id live: no alias reroutes it.
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/claude".into(), name: "My Claude".into(), spawn_option_id: "claude".into(),
+            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: true, route: None }),
+            ..Default::default()
+        });
+        assert!(!retired_configuration_aliases(&prefs).contains_key("launch/claude"));
+        // An explicitly deleted recipe is never resurrected as an alias.
+        prefs.spawn_configurations.clear();
+        prefs.deleted_launch_configurations.push("launch/claude:minimax".into());
+        assert!(!retired_configuration_aliases(&prefs).contains_key("launch/claude:minimax"));
+        // A detached (not deleted) route still heals, even with no pairing
+        // stored: references migrate to the bare option and resolve again
+        // once the route is re-attached.
+        prefs.deleted_launch_configurations.clear();
+        prefs.provider_pairings.clear();
+        prefs.detached_provider_routes.push("claude:minimax".into());
+        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
+            Some("claude:minimax"));
     }
 
     #[test]

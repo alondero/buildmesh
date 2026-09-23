@@ -6,9 +6,13 @@ use crate::db;
 /// Upgrade legacy history outside DB locks; the existing JSON column keeps the operation additive.
 pub fn migrate_launch_history() -> Result<(), String> {
     let prefs = crate::preferences::load()?;
-    let mappings = prefs.spawn_configurations.iter().filter(|c| c.generated.is_some())
+    let mut mappings: std::collections::HashMap<String, String> = prefs.spawn_configurations.iter().filter(|c| c.generated.is_some())
         .filter(|c| !prefs.spawn_configurations.iter().any(|other| other.id == c.spawn_option_id))
         .map(|c| (c.spawn_option_id.clone(), c.id.clone())).collect();
+    // Stored references to retired catalogue recipes (`launch/<harness>`)
+    // heal to the equivalent bare Spawn Option; user-owned and explicitly
+    // deleted ids are excluded by the helper.
+    mappings.extend(crate::preferences::launch_configurations::retired_configuration_aliases(&prefs));
     db::migrate_launch_selections(&mappings).map_err(|e| e.to_string())?;
     let nodes = db::legacy_launch_nodes().map_err(|e| e.to_string())?;
     for node in nodes {
@@ -2108,7 +2112,7 @@ mod tests {
         db::update_cli_session_id(node.id, "sess-abc")
             .expect("set cli_session_id");
 
-        let resume = regenerate_apply_blocking(node.id, "claude", "launch/claude:minimax")
+        let resume = regenerate_apply_blocking(node.id, "claude", "claude:minimax")
             .expect("apply should succeed");
         assert!(resume, "same-harness swap with a session id must resume");
 
