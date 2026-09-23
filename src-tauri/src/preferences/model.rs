@@ -470,6 +470,17 @@ pub struct AppPreferences {
     pub spawn_configurations: Vec<super::spawn_configurations::SpawnConfiguration>,
     #[serde(default)]
     pub deleted_launch_configurations: Vec<String>,
+    /// Provider routes (`<harness_id>:<provider_id>` sources) the user
+    /// explicitly detached. [`super::launch_configurations::reconcile`]
+    /// never auto-materializes these; only an explicit re-attach stores
+    /// the pairing again. Tracked separately from
+    /// `deleted_launch_configurations`: a detached route's retired
+    /// `launch/...` id must still heal to its bare Spawn Option via alias
+    /// migration, while a deleted recipe's references must keep reporting
+    /// "no longer exists". Additive on disk — older `preferences.json`
+    /// files load as empty via `#[serde(default)]`.
+    #[serde(default)]
+    pub detached_provider_routes: Vec<String>,
     /// Buildmesh-wide default Worktree Node directory (issue #1519).
     /// Optional raw user input — relative values resolve from the Mesh root,
     /// absolute values must be in the same host environment (native/Windows

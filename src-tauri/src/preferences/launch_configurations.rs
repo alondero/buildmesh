@@ -47,7 +47,8 @@ pub fn reconcile(prefs: &mut AppPreferences) {
         for account in prefs.provider_accounts.iter().filter(|a| a.enabled) {
             let source = format!("{}:{}", profile.id, account.id);
             if prefs.spawn_configurations.iter().any(|c| c.generated.as_ref().is_some_and(|g| g.source == source))
-                || prefs.deleted_launch_configurations.contains(&format!("launch/{source}")) {
+                || prefs.deleted_launch_configurations.contains(&format!("launch/{source}"))
+                || prefs.detached_provider_routes.iter().any(|d| d == &source) {
                 continue;
             }
             if let Some(endpoint) = super::first_class_surfaces(&account.id).into_iter().find(|e| Some(e.surface) == surface) {
@@ -71,19 +72,20 @@ pub fn reconcile(prefs: &mut AppPreferences) {
             // Upgrade window: a catalogue recipe whose route pairing is
             // already gone was detached under the old regime, where the
             // recipe itself was the marker blocking re-materialization.
-            // Carry that detach decision into the tombstone list so the
-            // route stays detached. Harness-only sources gate nothing.
+            // Carry that detach decision into the detach record so the
+            // route stays detached — without tombstoning the recipe id,
+            // so saved references still heal. Harness-only sources gate
+            // nothing.
             if let Some(source) = c.generated.as_ref().map(|g| g.source.clone()) {
                 let id = SpawnOptionId::from(source.as_str());
-                let tombstone = format!("launch/{source}");
                 let paired = id.provider_id.as_deref().is_none_or(|provider| {
                     prefs.provider_pairings.iter()
                         .any(|p| p.harness_id == id.harness_id && p.provider_id == provider)
                 });
                 if id.is_proxied() && !paired
-                    && !prefs.deleted_launch_configurations.iter().any(|d| d == &tombstone)
+                    && !prefs.detached_provider_routes.iter().any(|d| d == &source)
                 {
-                    detached.push(tombstone);
+                    detached.push(source);
                 }
             }
             purged.push((c.id.clone(), c.spawn_option_id.clone()));
@@ -92,7 +94,7 @@ pub fn reconcile(prefs: &mut AppPreferences) {
             true
         }
     });
-    prefs.deleted_launch_configurations.extend(detached);
+    prefs.detached_provider_routes.extend(detached);
     for value in &mut prefs.spawn_configurations { let _ = normalize_identity(value); }
     // Selections that pointed at a purged recipe fall back to its bare Spawn
     // Option (same harness/route, native defaults) so existing nodes and
@@ -285,13 +287,17 @@ fn resolve_plan(
 /// A retired id stays unmapped when its recipe still exists (a user-owned
 /// edit keeps working as-is) or when the user explicitly deleted it
 /// (those references must keep surfacing "no longer exists" rather than
-/// silently rerouting to defaults).
+/// silently rerouting to defaults). Detached routes are still mapped: the
+/// reference heals to the bare option, which resolves again once the route
+/// is re-attached (and reports the missing route, not a missing recipe,
+/// while detached).
 pub(crate) fn retired_configuration_aliases(prefs: &AppPreferences) -> std::collections::HashMap<String, String> {
     let live: std::collections::HashSet<&str> = prefs.spawn_configurations.iter().map(|c| c.id.as_str()).collect();
     let deleted: std::collections::HashSet<&str> = prefs.deleted_launch_configurations.iter().map(String::as_str).collect();
     let mut aliases = std::collections::HashMap::new();
     for source in effective_profiles(prefs).into_iter().map(|p| p.id)
         .chain(prefs.provider_pairings.iter().map(|p| format!("{}:{}", p.harness_id, p.provider_id)))
+        .chain(prefs.detached_provider_routes.iter().cloned())
     {
         let retired = format!("launch/{source}");
         if !live.contains(retired.as_str()) && !deleted.contains(retired.as_str()) {
@@ -543,20 +549,30 @@ mod tests {
     fn detached_route_is_not_rematerialized() {
         // Detaching a route must stick: the save following a detach runs
         // reconcile, which must not recreate the just-removed pairing.
+        // Re-attaching stores an explicit pairing, which the detach record
+        // never blocks.
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         assert_eq!(prefs.provider_pairings.len(), 1);
+        let pairing = prefs.provider_pairings.clone();
         super::super::remove_provider_pairing(&mut prefs, "claude", "minimax");
         reconcile(&mut prefs);
         assert!(prefs.provider_pairings.is_empty(),
             "detach must stick, got {:?}", prefs.provider_pairings);
+        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+        for route in pairing {
+            super::super::upsert_provider_pairing(&mut prefs, route);
+        }
+        reconcile(&mut prefs);
+        assert_eq!(prefs.provider_pairings.len(), 1, "explicit re-attach must win over the detach record");
     }
 
     #[test]
-    fn purge_carries_pre_upgrade_detach_into_tombstone() {
+    fn purge_carries_pre_upgrade_detach_into_detach_record() {
         // Old install: the route was detached (pairing gone) while its
         // catalogue recipe remained as the marker blocking re-creation.
-        // Purging that marker must preserve the detach decision.
+        // Purging that marker must preserve the detach decision — without
+        // tombstoning the recipe id, so saved references still heal.
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         prefs.provider_pairings.clear();
@@ -568,7 +584,11 @@ mod tests {
         reconcile(&mut prefs);
         assert!(prefs.provider_pairings.is_empty(),
             "pre-upgrade detach must survive the purge, got {:?}", prefs.provider_pairings);
-        assert!(prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()));
+        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+        assert!(!prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()),
+            "a detach record must not masquerade as a recipe deletion");
+        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
+            Some("claude:minimax"), "detached routes must still heal to their bare option");
     }
 
     #[test]
@@ -593,6 +613,14 @@ mod tests {
         prefs.spawn_configurations.clear();
         prefs.deleted_launch_configurations.push("launch/claude:minimax".into());
         assert!(!retired_configuration_aliases(&prefs).contains_key("launch/claude:minimax"));
+        // A detached (not deleted) route still heals, even with no pairing
+        // stored: references migrate to the bare option and resolve again
+        // once the route is re-attached.
+        prefs.deleted_launch_configurations.clear();
+        prefs.provider_pairings.clear();
+        prefs.detached_provider_routes.push("claude:minimax".into());
+        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
+            Some("claude:minimax"));
     }
 
     #[test]
