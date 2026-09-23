@@ -253,6 +253,8 @@ fn save_result(record: PairingVerification) -> Result<PairingVerification, Strin
             existing.harness_id != record.harness_id
                 || existing.provider_id != record.provider_id
                 || existing.runtime != record.runtime
+                || existing.endpoint != record.endpoint
+                || existing.model_id != record.model_id
         });
         prefs.pairing_verifications.push(record.clone());
     })?;
@@ -274,8 +276,14 @@ pub fn verify_pairing_blocking(
 ) -> Result<PairingVerification, String> {
     let prefs = preferences::load()?;
     let (pairing, account) = pairing_and_account(&prefs, harness_id, provider_id)?;
-    let descriptor = preferences::endpoint_model_descriptor(&pairing);
-    let compatibility = preferences::pairing_compatibility(&pairing);
+    verify_route_blocking(&pairing, &account, env_type)
+}
+
+pub fn verify_route_blocking(pairing: &ProviderPairing, account: &ProviderAccount, env_type: EnvType) -> Result<PairingVerification, String> {
+    let harness_id = pairing.harness_id.as_str();
+    let provider_id = pairing.provider_id.as_str();
+    let descriptor = preferences::endpoint_model_descriptor(pairing);
+    let compatibility = preferences::pairing_compatibility(pairing);
     let mut record = PairingVerification {
         harness_id: harness_id.into(),
         provider_id: provider_id.into(),
@@ -297,7 +305,7 @@ pub fn verify_pairing_blocking(
         return save_result(record);
     }
     if !compatibility.compatible {
-        record.status = incompatible_status(&pairing);
+        record.status = incompatible_status(pairing);
         record.reason = compatibility.reason;
         return save_result(record);
     }
@@ -307,7 +315,7 @@ pub fn verify_pairing_blocking(
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| "provider credential is missing".to_string())?;
     let install = codex::discover_supported_install(env_type)?;
-    record.pairing_signature = signature_for(&pairing, &account, &install);
+    record.pairing_signature = signature_for(pairing, account, &install);
     record.runtime = install.runtime_identity.clone();
     record.executable = install.executable.clone();
     record.codex_version = install.version.clone();
@@ -350,11 +358,12 @@ pub fn matching_verification(
         .ok()?
         .pairing_verifications
         .into_iter()
-        .find(|record| {
+        .filter(|record| {
             record.harness_id == pairing.harness_id
                 && record.provider_id == pairing.provider_id
                 && record.runtime == install.runtime_identity
-        })?;
+        }).min_by_key(|record| (record.endpoint != pairing.base_url.as_deref().unwrap_or("")) as u8
+            + (record.model_id != pairing.model_tiers.default.as_deref().unwrap_or("")) as u8)?;
     Some(check_verification(record, pairing, install, &expected))
 }
 
@@ -759,7 +768,16 @@ mod tests {
             verified_at: Some(Utc::now()),
             reason: None,
         };
-        preferences::update(|prefs| prefs.pairing_verifications.push(record.clone())).unwrap();
+        save_result(record.clone()).unwrap();
+        let mut other_model = pairing.clone();
+        other_model.model_tiers.default = Some("another-model".into());
+        let mut other_record = record.clone();
+        other_record.model_id = "another-model".into();
+        other_record.pairing_signature = signature_for(&other_model, &account, &old_install);
+        save_result(other_record).unwrap();
+        assert_eq!(preferences::load().unwrap().pairing_verifications.len(), 2);
+        assert_eq!(matching_verification(&pairing, &account, &old_install).unwrap().status, PairingVerificationStatus::Verified);
+        assert_eq!(matching_verification(&other_model, &account, &old_install).unwrap().status, PairingVerificationStatus::Verified);
 
         let new_install = codex::CodexInstall {
             version: "0.149.0".into(),

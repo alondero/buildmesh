@@ -167,8 +167,20 @@ correct or safe by itself:
 Use **Settings → Launch Configurations** to name the recipes you launch. Choose
 a harness, native authentication or a provider, then a model, supported effort,
 and optional extra arguments. Known providers supply catalogue choices; generic
-providers retain manual model entry. **Advanced Provider Routes** owns endpoint
-and model-tier overrides; **Providers** continues to own credentials and billing.
+providers retain manual model entry. The same editor opens from **New configuration**
+in a harness's spawn submenu. Add credentials in **Providers** first: enabled,
+keyed providers can be selected even before a pairing exists. New pairings collect
+their endpoint in the editor and are saved together with the configuration;
+cancelling creates neither. **Advanced Provider Routes** edits existing shared
+endpoints and model-tier overrides; **Providers** owns credentials and billing.
+
+Model choices belong to the selected provider and API surface; **Custom model**
+allows a model not yet in the catalogue. Effort choices are restricted to documented
+provider/model and harness support. MiniMax M3 through Codex offers `none` (thinking
+off) and `high` (thinking on), not graded reasoning depth. MiniMax through Claude
+Code has no documented graded effort selector; use the harness's thinking toggle.
+See MiniMax's [Codex guide](https://platform.minimax.io/docs/token-plan/codex) and
+[Claude Code guide](https://platform.minimax.io/docs/token-plan/claude-code).
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
@@ -179,10 +191,14 @@ provider routes such as MiniMax via Claude Code. Mobile groups the same recipes
 under each harness.
 Unavailable entries explain whether a harness, key, route, or verification needs
 attention. Codex proxy routes still require verification for their exact model
-and runtime before launch.
+and runtime before launch. Use **Verify provider and model** in the configuration
+editor; it sends a small tool-call request using the stored credential without
+saving the draft. Changing the model or endpoint requires verification again.
 
 Explicit launch overrides win over the selected recipe, followed by Mesh and
-application defaults. New nodes retain a secret-free snapshot: changing or
+application defaults for native authentication. Proxied configurations instead
+use the provider route's model default; native harness model and effort defaults
+do not cross into them. New nodes retain a secret-free snapshot: changing or
 deleting a recipe does not change existing or archived nodes. Resume reads the
 current credential for the saved account; restore a missing key in **Providers**.
 Changing credentials or the Codex installation can require route verification

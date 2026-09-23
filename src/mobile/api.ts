@@ -135,8 +135,10 @@ export async function listProviders(): Promise<Provider[]> {
 export const launchConfigurationApi = {
   list: async (): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration[]> => (await apiFetch('/api/launch-configurations')).json(),
   targets: async (): Promise<import('../types/generated/LaunchTarget').LaunchTarget[]> => (await apiFetch('/api/launch-targets')).json(),
-  save: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration> =>
-    (await apiFetch('/api/launch-configurations/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })).json(),
+  save: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration, route?: import('../types/generated/ProviderPairing').ProviderPairing): Promise<import('../types/generated/SpawnConfiguration').SpawnConfiguration> =>
+    (await apiFetch('/api/launch-configurations/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...value, route }) })).json(),
+  verify: async (value: import('../types/generated/SpawnConfiguration').SpawnConfiguration, route?: import('../types/generated/ProviderPairing').ProviderPairing): Promise<import('../types/generated/PairingVerification').PairingVerification> =>
+    (await apiFetch('/api/launch-configurations/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...value, route }) })).json(),
   remove: async (id: string): Promise<void> => { await apiFetch('/api/launch-configurations/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); },
 };
 

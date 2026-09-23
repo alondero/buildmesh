@@ -6,11 +6,11 @@ import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfigur
 import * as api from '../../src/lib/tauri/provider';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
-  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
+  listProviders: vi.fn(), listSpawnConfigurations: vi.fn(), verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn(), saveSpawnConfiguration: vi.fn(), deleteSpawnConfiguration: vi.fn(),
 }));
 
 const target = { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI',
-  models: [], efforts: ['low', 'high', 'max'], manual_model: true, supports_model: true, supports_extra_args: true };
+  models: [], efforts: ['low', 'high', 'max'], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true };
 
 const option: SpawnOption = {
   id: 'codex', label: 'Codex', harness_id: 'codex', provider_id: null,
@@ -40,6 +40,26 @@ beforeEach(() => {
 });
 
 describe('Spawn configurations', () => {
+  it('creates a proxied configuration from the new-configuration submenu', async () => {
+    const route = { harness_id: 'codex', provider_id: 'minimax', surface: 'openai' as const, base_url: 'https://api.minimax.io/v1',
+      model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([target, { ...target, id: 'codex:minimax', provider_name: 'MiniMax',
+      route, route_attached: false, default_model: 'MiniMax-M3', manual_model: false,
+      models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'openai', efforts: ['none', 'high'] }] }]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValue({ ...saved, spawn_option_id: 'codex:minimax' });
+    render(<GroupedProviderMenu providers={[option]} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /New configuration/ }));
+    await screen.findByRole('option', { name: 'MiniMax' });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'MiniMax thinking' } });
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'codex:minimax' } });
+    fireEvent.change(screen.getByLabelText('Effort'), { target: { value: 'high' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.saveSpawnConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'MiniMax thinking', spawn_option_id: 'codex:minimax', effort: 'high', model: null,
+    }), route));
+    await screen.findByRole('menuitem', { name: 'Edit Sol Max' });
+  });
   it('keeps default launch and selects a saved configuration with Alt preserved', async () => {
     const select = vi.fn();
     render(<GroupedProviderMenu providers={[option]} onSelect={select} />);
@@ -205,7 +225,7 @@ describe('Spawn configurations', () => {
     });
 
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Keep this draft');
-    expect(screen.getByLabelText('Edit spawn configuration')).toBeTruthy();
+    expect(screen.getByRole('form', { name: 'Launch Configuration' })).toBeTruthy();
   });
 
   it('reports launch-target load failures while editing a saved recipe', async () => {
@@ -245,12 +265,13 @@ describe('Spawn configurations', () => {
   });
 
   it('does not expose effort or extra arguments when unsupported', async () => {
+    vi.mocked(api.getLaunchTargets).mockResolvedValue([{ ...target, efforts: [], supports_extra_args: false }]);
     const limited = { ...option, capabilities: { ...option.capabilities!, supports_effort_override: false, supports_extra_args: false, effort_control: { kind: 'none' as const } } };
     render(<GroupedProviderMenu providers={[limited]} onSelect={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Codex configurations', exact: true }));
     await waitFor(() => expect((screen.getByRole('menuitem', { name: /New configuration/ }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('menuitem', { name: /New configuration/ }));
-    expect(screen.getByLabelText('Model')).toBeTruthy();
+    expect(await screen.findByLabelText('Model')).toBeTruthy();
     expect(screen.queryByLabelText('Effort')).toBeNull();
     expect(screen.queryByLabelText('Extra arguments')).toBeNull();
   });

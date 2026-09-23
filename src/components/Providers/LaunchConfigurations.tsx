@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
+import type { ProviderPairing } from '../../types/generated/ProviderPairing';
+import type { PairingVerification } from '../../types/generated/PairingVerification';
 import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
 
 export interface LaunchConfigurationApi {
   list: () => Promise<SpawnConfiguration[]>;
   targets: () => Promise<LaunchTarget[]>;
-  save: (value: SpawnConfiguration) => Promise<SpawnConfiguration>;
+  save: (value: SpawnConfiguration, route?: ProviderPairing) => Promise<SpawnConfiguration>;
+  verify?: (value: SpawnConfiguration, route?: ProviderPairing) => Promise<PairingVerification>;
   remove: (id: string) => Promise<void>;
 }
 
@@ -28,7 +31,8 @@ export function LaunchConfigurations({ api, onDirtyChange, onChanged, refreshTok
   const refresh = () => { setDraft(null); setRevision((v) => v + 1); onChanged?.(); };
   if (draft) return <LaunchConfigurationEditor key={draft.id} value={draft} targets={targets} onCancel={() => setDraft(null)}
     onDirtyChange={onDirtyChange}
-    onSave={async (value) => { await api.save(value); refresh(); }}
+    onVerify={api.verify}
+    onSave={async (value, route) => { if (route) await api.save(value, route); else await api.save(value); refresh(); }}
     onDelete={draft.id ? async () => { await api.remove(draft.id); refresh(); } : undefined} />;
   return <div className="launch-config-form">
     {loading && <p role="status">Loading Launch Configurations…</p>}

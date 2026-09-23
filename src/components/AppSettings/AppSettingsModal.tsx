@@ -7,7 +7,7 @@ import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
 import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
-import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration } from '../../lib/tauri/provider';
+import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import { UpdateAboutSection } from './UpdateAboutSection';
 import * as api from '../../lib/tauri';
 import type {
@@ -34,7 +34,7 @@ interface AppSettingsModalProps {
 }
 
 const NO_OVERRIDE = '__no_override__';
-const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration };
+const launchConfigurationApi = { list: listSpawnConfigurations, targets: getLaunchTargets, save: saveSpawnConfiguration, remove: deleteSpawnConfiguration, verify: verifyLaunchConfiguration };
 
 async function getHostPairingVerifications(): Promise<PairingVerification[]> {
   const runtimes: api.EnvType[] = isWindows ? ['windows', 'wsl'] : ['windows'];
