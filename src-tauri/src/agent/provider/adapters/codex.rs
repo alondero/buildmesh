@@ -52,19 +52,40 @@ fn base_flags() -> Vec<String> {
 /// `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot.
 /// Nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never expands and never
 /// sees stdin. Bake the loopback callback URL and let Codex's own shell run
-/// curl. `-o` discards the empty 200 body: Codex Stop treats non-JSON stdout
-/// as a hook failure.
+/// curl. Discard the HTTP response body and print `{}`: Codex Stop requires
+/// JSON on stdout. Attention callbacks are best-effort notifications, so a
+/// stopped server or stale node must not fail the Codex hook itself.
+fn attention_hook_unix_command(url: &str) -> String {
+    format!(
+        "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf '{{}}'"
+    )
+}
+
+fn attention_hook_windows_shell_command(url: &str) -> String {
+    format!(
+        "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
+    )
+}
+
+fn attention_hook_windows_fallback_command(url: &str) -> String {
+    format!(
+        "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>NUL >NUL & echo {{}}"
+    )
+}
+
 fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
     serde_json::json!({
         "type": "command",
-        "command": if cfg!(windows) { format!(
-            "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}; fi"
-        ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}") },
-        "commandWindows": crate::env::windows_attention_command(Some(&url)).unwrap_or_else(|| format!(
-            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
-        )),
+        "command": if cfg!(windows) {
+            attention_hook_windows_shell_command(&url)
+        } else {
+            attention_hook_unix_command(&url)
+        },
+        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| {
+            attention_hook_windows_fallback_command(&url)
+        }),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -939,8 +960,8 @@ fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
     Ok(document.to_string())
 }
 
-/// Ensure `<project>/.codex/hooks.json` carries the Stop + PermissionRequest
-/// attention webhooks. Codex's matcher/event schema nests hook entries one
+/// Ensure `<project>/.codex/hooks.json` carries the seven attention webhooks.
+/// Codex's matcher/event schema nests hook entries one
 /// level deeper than Claude Code's (each event maps to matcher groups, each
 /// carrying a `hooks` array — issue #884). `PreToolUse` is matched to the
 /// native question tool; `PostToolUse` is catch-all so approved permissions
@@ -1706,8 +1727,8 @@ mod tests {
             .unwrap();
     }
 
-    /// Injection writes both files: the feature flag and the SessionStart +
-    /// Stop + PermissionRequest webhooks in Codex's nested matcher/event
+    /// Injection writes both files: the feature flag and all seven attention
+    /// webhooks in Codex's nested matcher/event
     /// schema, POSTing the hook's stdin to the attention endpoint. The
     /// request_user_input pre-hook remains narrowly matched, while
     /// PostToolUse is catch-all so an approved permission for any tool can
@@ -1723,7 +1744,15 @@ mod tests {
         assert!(config.contains("hooks = true"), "config: {config}");
 
         let hooks = read_hooks_json(temp.path());
-        for event in ["SessionStart", "Stop", "PermissionRequest", "PreToolUse", "PostToolUse"] {
+        for event in [
+            "SessionStart",
+            "Stop",
+            "PermissionRequest",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Interrupt",
+        ] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
@@ -1744,6 +1773,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn attention_hook_commands_fail_open_and_emit_json() {
+        let url = "http://localhost:1992/api/attention/42";
+
+        let unix = attention_hook_unix_command(url);
+        assert!(unix.contains("2>/dev/null || true; printf '{}'"), "{unix}");
+
+        let windows = attention_hook_windows_fallback_command(url);
+        assert!(windows.contains("2>NUL >NUL & echo {}"), "{windows}");
+        assert!(
+            !windows.contains("&& echo"),
+            "must not gate echo on curl: {windows}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_attention_hook_emits_json_after_callback_failure() {
+        use std::process::Command;
+
+        let command = attention_hook_unix_command("http://localhost:1992/api/attention/42");
+        let script = format!("set -e; curl() {{ return 22; }}; {command}");
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .expect("run attention hook in a POSIX shell");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"{}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fallback_emits_json_after_curl_lookup_failure() {
+        use std::process::Command;
+
+        let empty_path = TempDir::new().unwrap();
+        let command = attention_hook_windows_fallback_command(
+            "http://localhost:1992/api/attention/42",
+        );
+        let output = Command::new("cmd.exe")
+            .args(["/d", "/c", &command])
+            .current_dir(empty_path.path())
+            .env("PATH", empty_path.path())
+            .output()
+            .expect("run attention hook in cmd.exe");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
     }
 
     /// Re-running injection over an already-correct project is a no-op.

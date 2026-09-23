@@ -54,6 +54,16 @@ and its integration; some harnesses have no hook or passive watcher.
 - If the badge claims attention after you answered, check the terminal and
   capture the node status plus the surrounding log entries for a report.
 
+## Codex reports “Hook failed”
+
+Buildmesh's Codex attention hook sends lifecycle updates to the local app. The
+hook is best-effort, so an unavailable app or an already archived node should
+not stop Codex. Restart the node from Buildmesh to refresh its project hook
+configuration. If Buildmesh is closed, Codex can continue, but its lifecycle
+state cannot be updated until a later callback succeeds. If the error persists,
+use [What to include in a report](#what-to-include-in-a-report) and include the
+Codex version, node status, and relevant redacted log lines.
+
 ## A phone cannot connect
 
 Check these in order:

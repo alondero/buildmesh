@@ -104,16 +104,46 @@ pub(crate) fn powershell_literal(value: &str) -> String {
 /// Explicitly enter the owning Linux distribution for callbacks. Windows
 /// localhost may belong to a different Buildmesh instance under WSL NAT.
 pub(crate) fn windows_attention_command(url: Option<&str>) -> Option<String> {
+    windows_attention_command_impl(url, None)
+}
+
+pub(crate) fn windows_attention_command_with_json_output(url: Option<&str>) -> Option<String> {
+    windows_attention_command_impl(url, Some("{}"))
+}
+
+fn windows_attention_command_impl(url: Option<&str>, stdout_line: Option<&str>) -> Option<String> {
     if !is_wsl_host() {
         return None;
     }
-    let distro = powershell_literal(&std::env::var("WSL_DISTRO_NAME").ok()?);
+    let distro = std::env::var("WSL_DISTRO_NAME").ok()?;
+    Some(windows_attention_command_for_distro(
+        &distro,
+        url,
+        stdout_line,
+    ))
+}
+
+fn windows_attention_command_for_distro(
+    distro_name: &str,
+    url: Option<&str>,
+    stdout_line: Option<&str>,
+) -> String {
+    let distro = powershell_literal(distro_name);
     let url = url.map(powershell_literal).unwrap_or_else(|| "('http://localhost:' + $env:BUILDMESH_PORT + '/api/attention/' + $env:BUILDMESH_SESSION_ID)".into());
-    let script = format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); $input | & wsl.exe -d {distro} --exec curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary '@-' {url}; exit $LASTEXITCODE");
-    Some(format!(
+    let stdout = stdout_line
+        .map(|line| format!("; [Console]::Out.WriteLine({})", powershell_literal(line)))
+        .unwrap_or_default();
+    let (stderr, exit) = if stdout_line.is_some() {
+        // Codex callbacks observe lifecycle and must not gate the harness.
+        (" 2>$null", "exit 0")
+    } else {
+        ("", "exit $LASTEXITCODE")
+    };
+    let script = format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); $input | & wsl.exe -d {distro} --exec curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary '@-' {url}{stderr}{stdout}; {exit}");
+    format!(
         "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
         encode_powershell(&script)
-    ))
+    )
 }
 
 pub(crate) fn unix_attention_curl() -> &'static str {
@@ -121,6 +151,51 @@ pub(crate) fn unix_attention_curl() -> &'static str {
         "$(command -v curl.exe || command -v curl)"
     } else {
         "buildmesh_curl() { if [ -n \"$BUILDMESH_WSL_HOST\" ]; then wsl.exe -d \"$BUILDMESH_WSL_HOST\" --exec curl \"$@\"; else curl \"$@\"; fi; }; buildmesh_curl"
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    #[test]
+    fn codex_windows_callback_script_fails_open_and_emits_json() {
+        let url = "http://localhost:1992/api/attention/42";
+        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
+
+        assert!(script.contains(" 2>$null"), "{script}");
+        assert!(
+            script.contains("[Console]::Out.WriteLine('{}')"),
+            "{script}"
+        );
+        assert!(script.ends_with("; exit 0"), "{script}");
+        assert!(!script.contains("exit $LASTEXITCODE"), "{script}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_windows_callback_returns_success_after_wsl_failure() {
+        let url = "http://localhost:1992/api/attention/42";
+        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
+        let script = format!(
+            "function wsl.exe {{ Write-Error 'simulated callback failure'; $global:LASTEXITCODE = 22 }}; {script}"
+        );
+        let output = super::powershell_command(&script)
+            .output()
+            .expect("run decoded Codex callback script");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("simulated callback failure"),
+            "callback error escaped stderr suppression: {stderr}"
+        );
     }
 }
 
