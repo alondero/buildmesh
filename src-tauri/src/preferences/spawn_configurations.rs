@@ -123,17 +123,23 @@ pub fn list_spawn_configurations() -> Result<Vec<SpawnConfiguration>, String> {
 pub fn save_spawn_configuration(
     app: tauri::AppHandle,
     value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
 ) -> Result<SpawnConfiguration, String> {
-    let value = save_value(value)?;
+    let value = save_with_route(value, route)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(value)
 }
 
 pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, String> {
+    save_with_route(value, None)
+}
+
+pub fn save_with_route(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<SpawnConfiguration, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
     value.resolved = None;
     super::storage::try_update(|prefs| {
+        prepare_route(prefs, &value, route.clone())?;
         value.generated = prefs.spawn_configurations.iter().find(|c| c.id == value.id)
             .and_then(|c| c.generated.clone()).map(|mut g| { g.user_owned = true; g });
         if let Some(existing) = prefs
@@ -149,6 +155,56 @@ pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, Strin
         Ok(())
     })?;
     Ok(value)
+}
+
+/// Only creation is accepted here: editing a shared route belongs to Advanced Provider Routes.
+/// The caller's preference transaction also owns saving the configuration.
+fn prepare_route(prefs: &mut AppPreferences, value: &SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<(), String> {
+    let Some(mut route) = route else { return Ok(()); };
+    if value.spawn_option_id != format!("{}:{}", route.harness_id, route.provider_id) {
+        return Err("Provider Route does not match the configuration".into());
+    }
+    if let Some(existing) = prefs.provider_pairings.iter().find(|p| p.harness_id == route.harness_id && p.provider_id == route.provider_id) {
+        if existing != &route { return Err("Provider Route changed; reopen the configuration to use its current settings".into()); }
+        return Ok(());
+    }
+    let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
+        .ok_or("Provider account is missing; add its credential in Providers")?;
+    if !account.enabled || account.api_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
+        return Err("Enable this provider and add its credential in Providers".into());
+    }
+    if !super::provider_surfaces(account).contains(&route.surface) {
+        return Err("Provider does not support this API surface".into());
+    }
+    route.base_url = route.base_url.map(|url| url.trim().to_string());
+    if route.model_tiers.default.as_deref().is_none_or(|model| model.trim().is_empty()) {
+        route.model_tiers.default = value.model.clone();
+    }
+    let url = reqwest::Url::parse(route.base_url.as_deref().unwrap_or("")).map_err(|_| "Enter a valid provider endpoint URL")?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err("Provider endpoint must use HTTPS without credentials, query, or fragment".into());
+    }
+    super::upsert_provider_pairing(prefs, route);
+    Ok(())
+}
+
+pub fn verify_draft(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<super::PairingVerification, String> {
+    let mut value = validate(value)?;
+    normalize_id(&mut value);
+    let mut prefs = super::load()?;
+    prepare_route(&mut prefs, &value, route)?;
+    prefs.spawn_configurations.retain(|c| c.id != value.id);
+    prefs.spawn_configurations.push(value.clone());
+    let plan = super::launch_configurations::resolve_for_edit(&prefs, &value.id)?;
+    let route = plan.route.ok_or("Select a proxied provider to verify")?;
+    if route.surface != super::ApiSurface::OpenAI { return Err("This route does not require Responses verification".into()); }
+    let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id).ok_or("Provider account is missing")?;
+    crate::services::provider_verification::verify_route_blocking(&route, account, plan.harness.runtime.unwrap_or(crate::models::EnvType::Windows))
+}
+
+#[tauri::command]
+pub async fn verify_launch_configuration(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<super::PairingVerification, String> {
+    crate::commands::run_blocking("verify_launch_configuration", move || verify_draft(value, route)).await
 }
 
 fn normalize_id(value: &mut SpawnConfiguration) {
@@ -189,6 +245,39 @@ mod tests {
             extra_args: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn configuration_and_pairing_save_atomically_and_preserve_other_routes() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::super::init_for_tests(tmp.path().into());
+        let mut prefs: AppPreferences = serde_json::from_value(serde_json::json!({
+            "provider_accounts":[{"id":"minimax","name":"MiniMax","enabled":true,"api_key":"test","billing_mode":"pay_as_you_go"}],
+            "detached_provider_routes":["claude:minimax", "codex:minimax"]
+        })).unwrap();
+        super::super::save(prefs.clone()).unwrap();
+        let endpoint = super::super::first_class_surfaces("minimax").remove(0);
+        let route = super::super::ProviderPairing {
+            harness_id: "claude".into(), provider_id: "minimax".into(), surface: endpoint.surface,
+            base_url: Some(endpoint.base_url), model_tiers: endpoint.model_tiers,
+        };
+        let mut value = configuration("claude:minimax");
+        value.model = Some("MiniMax-M2.7-highspeed".into());
+        value.effort = Some("high".into());
+        assert!(save_with_route(value.clone(), Some(route.clone())).unwrap_err().contains("Effort"));
+        prefs = super::super::load().unwrap();
+        assert!(prefs.provider_pairings.is_empty());
+        assert!(prefs.spawn_configurations.is_empty());
+        value.effort = None;
+        let saved = save_with_route(value.clone(), Some(route.clone())).unwrap();
+        prefs = super::super::load().unwrap();
+        assert_eq!(prefs.provider_pairings, vec![route.clone()]);
+        assert_eq!(prefs.spawn_configurations, vec![saved]);
+        let mut changed = route;
+        changed.base_url = Some("https://other.example/v1".into());
+        assert!(save_with_route(value, Some(changed)).unwrap_err().contains("changed"));
+        assert_eq!(super::super::load().unwrap(), prefs);
+        super::super::reset_for_tests();
     }
 
     #[test]

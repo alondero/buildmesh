@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SpawnOption } from '../../lib/groups';
 import type { SpawnConfiguration } from '../../types/generated/SpawnConfiguration';
-import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, saveSpawnConfiguration } from '../../lib/tauri/provider';
+import { deleteSpawnConfiguration, getLaunchTargets, listProviders, listSpawnConfigurations, saveSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import { LaunchConfigurationEditor } from './LaunchConfigurationEditor';
+import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { LaunchTarget } from '../../types/generated/LaunchTarget';
 
 function belongsToHarness(configuration: SpawnConfiguration, harnessId: string): boolean {
@@ -27,15 +28,12 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const [draft, setDraft] = useState<SpawnConfiguration | null>(option.configuration ?? null);
   const [targets, setTargets] = useState<LaunchTarget[]>([]);
   const [activeMenuIndex, setActiveMenuIndex] = useState(0);
-  const [busy, setBusy] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
   const draftSession = useRef(0);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const [unavailableById, setUnavailableById] = useState(() => new Map(configurationRows.map((row) => [row.id, row.unavailable_reason])));
   const mounted = useRef(false);
-  const caps = option.capabilities;
-  const effort = caps?.effort_control;
-  const allowedEfforts = effort && effort.kind !== 'none' ? effort.allowed : [];
+
 
   useEffect(() => {
     onEditingChange(draft !== null);
@@ -61,14 +59,15 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     return () => { current = false; };
   }, [option.id, option.harness_id, option.configuration]);
 
+  const editing = draft !== null;
   useEffect(() => {
-    if (!draft?.id && !option.configuration) return;
+    if (!editing) return;
     let current = true;
     setTargetError(null);
     getLaunchTargets().then((values) => { if (current) { setTargets(values); setTargetError(null); } })
       .catch((e: unknown) => { if (current) setTargetError(String(e)); });
     return () => { current = false; };
-  }, [draft?.id, option.configuration]);
+  }, [editing, draft?.id]);
 
   useLayoutEffect(() => {
     // The top layer escapes animated/scrolling ancestors while the DOM stays
@@ -114,7 +113,6 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
   const cancelDraft = () => {
     draftSession.current += 1;
     setDraft(null);
-    setBusy(false);
     setError(null);
   };
   const replaceConfiguration = (saved: SpawnConfiguration, harnessId?: string) => {
@@ -142,28 +140,14 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       if (mounted.current && draftSession.current === session) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
     }
   };
-  const persistConfiguration = async (value: SpawnConfiguration) => {
+  const persistConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing) => {
     const session = draftSession.current;
-    const saved = await saveSpawnConfiguration(value);
+    const saved = route ? await saveSpawnConfiguration(value, route) : await saveSpawnConfiguration(value);
     if (!mounted.current) return;
     replaceConfiguration(saved, saved.harness_id ?? saved.spawn_option_id.split(':')[0]);
     await refreshAvailability(saved, session);
     if (mounted.current && draftSession.current === session) setDraft(null);
   };
-  const save = async () => {
-    if (!draft || busy) return;
-    const session = draftSession.current;
-    setBusy(true);
-    setError(null);
-    try {
-      await persistConfiguration(draft);
-    } catch (e) {
-      if (draftSession.current === session) setError(String(e));
-    } finally {
-      if (draftSession.current === session) setBusy(false);
-    }
-  };
-  const fieldClass = 'w-full border border-border-subtle rounded-md bg-bg-card px-2 py-1 text-sm text-text-primary';
   const menuClass = 'w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
   const mutedMenuClass = 'w-full px-3 py-2 text-left text-sm text-text-muted';
   const menuEntries = [
@@ -224,9 +208,10 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         }
       }}
     >
-      {draft?.id ? <LaunchConfigurationEditor value={draft} targets={targets} onCancel={option.configuration ? () => { cancelDraft(); close(); } : cancelDraft}
+      {draft ? <LaunchConfigurationEditor key={draftSession.current} value={draft} targets={targets} onCancel={option.configuration ? () => { cancelDraft(); close(); } : cancelDraft}
         onSave={persistConfiguration}
-        onDelete={async () => {
+        onVerify={verifyLaunchConfiguration}
+        onDelete={draft.id ? async () => {
           const session = draftSession.current;
           const deletedId = draft.id;
           await deleteSpawnConfiguration(deletedId);
@@ -238,33 +223,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
             return next;
           });
           if (draftSession.current === session) cancelDraft();
-        }} /> : draft ? (
-        <form className="space-y-3 p-3" aria-label="Edit spawn configuration" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-          <p className="text-sm font-medium text-text-primary">New configuration</p>
-          <p className="text-xs text-text-muted">{option.label}. Unset fields inherit current defaults.</p>
-          <fieldset disabled={busy} className="space-y-3">
-            <label className="block text-xs text-text-secondary">Name
-              <input autoFocus required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className={fieldClass} />
-            </label>
-            {caps?.supports_model_override && <label className="block text-xs text-text-secondary">Model
-              <input value={draft.model ?? ''} placeholder="Default" onChange={(e) => setDraft({ ...draft, model: e.target.value || null })} className={fieldClass} />
-            </label>}
-            {allowedEfforts.length > 0 && <label className="block text-xs text-text-secondary">Effort
-              <select aria-label="Effort" value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })} className={fieldClass}>
-                <option value="">Default</option>
-                {allowedEfforts.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-            </label>}
-            {caps?.supports_extra_args && <label className="block text-xs text-text-secondary">Extra arguments
-              <input value={draft.extra_args ?? ''} onChange={(e) => setDraft({ ...draft, extra_args: e.target.value || null })} className={fieldClass} />
-            </label>}
-            <div className="flex gap-3 text-sm text-text-primary">
-              <button type="submit" disabled={!draft.name.trim()}>Save</button>
-              <button type="button" onClick={cancelDraft}>Cancel</button>
-            </div>
-          </fieldset>
-        </form>
-      ) : (
+        } : undefined} /> : (
         <div role="menu" aria-label={`${option.label} configurations`}>
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">Loading configurations…</p>}

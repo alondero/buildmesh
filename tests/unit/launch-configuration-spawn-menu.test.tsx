@@ -10,7 +10,7 @@ vi.mock('../../src/lib/tauri/provider', () => ({
     { id: 'launch/claude:minimax', name: 'MiniMax', spawn_option_id: 'claude:minimax', model: null, effort: null, extra_args: null },
     { id: 'launch/codex-sol', name: 'Codex Sol', spawn_option_id: 'codex', model: 'gpt-5.6-sol', effort: null, extra_args: null },
   ]),
-  getLaunchTargets: vi.fn().mockResolvedValue([]),
+  verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn().mockResolvedValue([]),
   saveSpawnConfiguration: vi.fn(),
   deleteSpawnConfiguration: vi.fn(),
 }));
@@ -70,8 +70,8 @@ describe('launch configurations in the spawn menu', () => {
 
   it('opens the catalogue-backed editor from a Codex recipe', async () => {
     vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
-      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], manual_model: true, supports_model: true, supports_extra_args: true },
-      { id: 'codex:minimax', harness_id: 'codex', harness_name: 'Codex', provider_name: 'MiniMax', models: [], efforts: [], manual_model: true, supports_model: true, supports_extra_args: false },
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+      { id: 'codex:minimax', harness_id: 'codex', harness_name: 'Codex', provider_name: 'MiniMax', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: false },
     ]);
     render(<GroupedProviderMenu providers={[
       row('codex', 'codex'),

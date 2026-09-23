@@ -21,7 +21,7 @@ const { listConfigurations } = vi.hoisted(() => ({ listConfigurations: vi.fn() }
 vi.mock('../../src/lib/tauri/provider', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/lib/tauri/provider')>(),
   listSpawnConfigurations: listConfigurations,
-  getLaunchTargets: vi.fn().mockResolvedValue([]),
+  verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn().mockResolvedValue([]),
 }));
 
 function spawnOption(id: string, label: string): SpawnOption {

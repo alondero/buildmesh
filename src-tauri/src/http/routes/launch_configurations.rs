@@ -1,6 +1,13 @@
 use crate::http::{response::Response, router::ParsedRequest};
 use crate::preferences::{launch_catalog, spawn_configurations};
 
+#[derive(serde::Deserialize)]
+struct ConfigurationRequest {
+    #[serde(flatten)]
+    value: spawn_configurations::SpawnConfiguration,
+    route: Option<crate::preferences::ProviderPairing>,
+}
+
 pub async fn list(_: &ParsedRequest) -> Response {
     respond(crate::commands::run_blocking("list_launch_configurations", || {
         serde_json::to_string(&spawn_configurations::list_spawn_configurations()?).map_err(|e| e.to_string())
@@ -14,14 +21,27 @@ pub async fn targets(_: &ParsedRequest) -> Response {
 }
 
 pub async fn save(req: &ParsedRequest) -> Response {
-    let value = match serde_json::from_slice::<spawn_configurations::SpawnConfiguration>(&req.body) {
+    let value = match serde_json::from_slice::<ConfigurationRequest>(&req.body) {
         Ok(value) => value,
         Err(error) => return Response::json_error("400 Bad Request", &error.to_string()),
     };
     respond(crate::commands::run_blocking("save_launch_configuration", move || {
-        let value = spawn_configurations::save_value(value)?;
+        let value = if value.route.is_none() { spawn_configurations::save_value(value.value)? }
+            else { spawn_configurations::save_with_route(value.value, value.route)? };
         notify();
         serde_json::to_string(&value).map_err(|e| e.to_string())
+    }).await)
+}
+
+pub async fn verify(req: &ParsedRequest) -> Response {
+    let value = match serde_json::from_slice::<ConfigurationRequest>(&req.body) {
+        Ok(value) => value,
+        Err(error) => return Response::json_error("400 Bad Request", &error.to_string()),
+    };
+    respond(crate::commands::run_blocking("verify_launch_configuration", move || {
+        let result = spawn_configurations::verify_draft(value.value, value.route)?;
+        notify();
+        serde_json::to_string(&result).map_err(|e| e.to_string())
     }).await)
 }
 

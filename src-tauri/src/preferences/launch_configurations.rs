@@ -196,7 +196,9 @@ fn resolve_plan(
         return Err("Harness is unavailable; install it for the selected runtime".into());
     }
     let caps = capabilities_for(Provider::from_db_str(&harness.harness).adapter());
-    let app = prefs.harness_defaults.get(&harness.id);
+    // Harness defaults describe its native provider. A proxy has its own model default.
+    let native_defaults = !id.is_proxied();
+    let app = prefs.harness_defaults.get(&harness.id).filter(|_| native_defaults);
     let configured_model = configuration.and_then(|c| c.model.as_deref());
     let configured_effort = configuration.and_then(|c| c.effort.as_deref());
     let nonblank = |value: Option<&str>| value.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -204,8 +206,8 @@ fn resolve_plan(
     let effort = nonblank(overrides.effort.as_deref()).or_else(|| nonblank(configured_effort));
     let extra = nonblank(overrides.extra_args.as_deref()).or_else(|| configuration.and_then(|c| nonblank(c.extra_args.as_deref())));
     let mut config = resolve_agent_config(&caps, AgentConfigInputs {
-        model: FieldInputs { explicit: model.as_deref(), mesh_override: mesh.model.as_deref(), mesh: None, application: app.and_then(|c| c.model.as_deref()) },
-        effort: FieldInputs { explicit: effort.as_deref(), mesh_override: mesh.effort.as_deref(), mesh: None, application: app.and_then(|c| c.effort.as_deref()) },
+        model: FieldInputs { explicit: model.as_deref(), mesh_override: mesh.model.as_deref().filter(|_| native_defaults), mesh: None, application: app.and_then(|c| c.model.as_deref()) },
+        effort: FieldInputs { explicit: effort.as_deref(), mesh_override: mesh.effort.as_deref().filter(|_| native_defaults), mesh: None, application: app.and_then(|c| c.effort.as_deref()) },
     }, extra.as_deref());
     let route = if let Some(provider_id) = id.provider_id() {
         let account = prefs.provider_accounts.iter().find(|a| a.id == provider_id)
@@ -232,22 +234,15 @@ fn resolve_plan(
         if !supports_surface {
             return Err("Provider Route uses an API surface this harness does not support".into());
         }
-        let stored_default = route.model_tiers.default.clone();
         if let Some(model) = config.model.as_ref() { route.model_tiers.default = Some(model.clone()); }
         else { config.model = route.model_tiers.default.clone(); }
         let catalogue = super::launch_catalog::provider_catalogue();
         let entry = catalogue.iter().find(|p| p.id == provider_id);
         let model = entry.and_then(|p| p.models.iter().find(|m| m.surface == route.surface && Some(&m.id) == config.model.as_ref()));
-        if let Some(entry) = entry {
-            if !entry.manual_model && model.is_none() {
-                // Advanced route models remain an escape hatch for newly published endpoints.
-                if config.model != stored_default {
-                    return Err("Model is not in this provider's catalogue; configure a custom model on the advanced route".into());
-                }
-            }
-        }
-        let allowed = super::launch_catalog::allowed_efforts(&caps, model);
-        if config.effort.as_ref().is_some_and(|e| !allowed.contains(e)) {
+        // A custom model is allowed, but absent metadata is not evidence of effort support.
+        let allowed = if model.is_none() && entry.is_some_and(|p| !p.manual_model) { Vec::new() }
+            else { super::launch_catalog::allowed_efforts(&caps, model) };
+        if effort.as_ref().or(config.effort.as_ref()).is_some_and(|e| !allowed.contains(e)) {
             if effort.is_some() { return Err("Effort is not supported by this provider/model and harness".into()); }
             config.effort = None;
         }
@@ -266,7 +261,7 @@ fn resolve_plan(
         && route.as_ref().is_some_and(|r| r.surface == super::ApiSurface::OpenAI)
         && verification.is_none()
     {
-        return Err("Provider Route is unverified or stale for this model; verify it in advanced routes".into());
+        return Err("Provider Route is unverified or stale for this model; verify it in Launch Configurations".into());
     }
     Ok(ResolvedLaunchPlan {
         configuration_id: configuration.map_or_else(|| format!("launch/{selection}"), |c| c.id.clone()),
@@ -432,6 +427,36 @@ mod tests {
             "id": "launch/my-minimax", "name": "My MiniMax", "spawn_option_id": "claude:minimax",
             "model": null, "effort": null, "extra_args": null
         })
+    }
+
+    #[test]
+    fn proxy_defaults_do_not_inherit_native_harness_models() {
+        let mut prefs = generated_preferences();
+        reconcile(&mut prefs);
+        prefs.harness_defaults.insert("claude".into(), HarnessConfigValue {
+            model: Some("sonnet".into()), effort: Some("high".into()),
+        });
+        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        let plan = resolve_plan(&prefs, "launch/my-minimax", &Default::default(),
+            &HarnessConfigValue { model: Some("opus".into()), effort: Some("max".into()) }, false).unwrap();
+        assert_eq!(plan.model.as_deref(), Some("MiniMax-M3[1m]"));
+        assert_eq!(plan.effort, None);
+    }
+
+    #[test]
+    fn minimax_codex_configuration_accepts_documented_thinking_choices() {
+        let mut prefs = generated_preferences();
+        prefs.harness_profiles.push(HarnessProfile { id: "codex".into(), name: "Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
+        reconcile(&mut prefs);
+        for effort in ["none", "high"] {
+            let plan = resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
+                model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
+            }, &Default::default(), false).unwrap();
+            assert_eq!(plan.effort.as_deref(), Some(effort));
+        }
+        assert!(resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
+            model: Some("MiniMax-M3".into()), effort: Some("xhigh".into()), extra_args: None,
+        }, &Default::default(), false).unwrap_err().contains("Effort"));
     }
 
     #[test]

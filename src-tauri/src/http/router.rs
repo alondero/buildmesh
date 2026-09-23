@@ -242,6 +242,7 @@ enum Handler {
     LaunchConfigurations,
     LaunchTargets,
     LaunchConfigurationSave,
+    LaunchConfigurationVerify,
     LaunchConfigurationDelete,
     ApiMeshes,
 }
@@ -267,6 +268,7 @@ const ROUTES: &[Route] = &[
     Route { method: "GET", m: RouteMatch::Exact("/api/launch-configurations"), scope: RouteScope::Admin, body: BodyPolicy::None, handler: Handler::LaunchConfigurations },
     Route { method: "GET", m: RouteMatch::Exact("/api/launch-targets"), scope: RouteScope::Admin, body: BodyPolicy::None, handler: Handler::LaunchTargets },
     Route { method: "POST", m: RouteMatch::Exact("/api/launch-configurations/save"), scope: RouteScope::Admin, body: BodyPolicy::Cap(64 * 1024), handler: Handler::LaunchConfigurationSave },
+    Route { method: "POST", m: RouteMatch::Exact("/api/launch-configurations/verify"), scope: RouteScope::Admin, body: BodyPolicy::Cap(64 * 1024), handler: Handler::LaunchConfigurationVerify },
     Route { method: "POST", m: RouteMatch::Exact("/api/launch-configurations/delete"), scope: RouteScope::Admin, body: BodyPolicy::Cap(8 * 1024), handler: Handler::LaunchConfigurationDelete },
     Route { method: "GET", m: RouteMatch::Exact("/launch-configurations"), scope: RouteScope::CoordinatorRead, body: BodyPolicy::None, handler: Handler::ApiProviders },
     Route { method: "POST", m: RouteMatch::Exact("/nodes/create"), scope: RouteScope::CoordinatorWrite, body: BodyPolicy::Cap(64 * 1024), handler: Handler::NodesCreate },
@@ -723,6 +725,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::LaunchConfigurations => Http(routes::launch_configurations::list(req).await),
         Handler::LaunchTargets => Http(routes::launch_configurations::targets(req).await),
         Handler::LaunchConfigurationSave => Http(routes::launch_configurations::save(req).await),
+        Handler::LaunchConfigurationVerify => Http(routes::launch_configurations::verify(req).await),
         Handler::LaunchConfigurationDelete => Http(routes::launch_configurations::delete(req).await),
         Handler::ApiMeshes => Http(routes::meshes::list(req).await),
     }
@@ -992,6 +995,7 @@ mod tests {
 GET /api/launch-configurations -> Admin
 GET /api/launch-targets -> Admin
 POST /api/launch-configurations/save -> Admin
+POST /api/launch-configurations/verify -> Admin
 POST /api/launch-configurations/delete -> Admin
 GET /launch-configurations -> CoordinatorRead
 POST /nodes/create -> CoordinatorWrite

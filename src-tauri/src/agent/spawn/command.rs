@@ -104,6 +104,11 @@ pub fn build_spawn_command_prepared(
             "--model".into(),
             config.model.clone().unwrap_or_else(|| descriptor.model_id.clone()),
         ]);
+        if descriptor.reasoning_effort == Some(true) {
+            // Unknown model names otherwise suppress Codex's reasoning field entirely.
+            recipe.base_args.extend(["-c".into(), "model_supports_reasoning_summaries=true".into(),
+                "-c".into(), "model_reasoning_summary=\"none\"".into()]);
+        }
     }
 
     let (wsl_distro, executable_override) = match routing {

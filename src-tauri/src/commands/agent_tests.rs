@@ -428,6 +428,26 @@ mod tests {
         assert!(env_of(&cmd, "BUILDMESH_CODEX_PROVIDER_KEY").is_none());
     }
 
+    #[test]
+    fn minimax_effort_enables_reasoning_metadata_on_fresh_and_resume() {
+        let mut routing = codex_proxy("buildmesh_effort", "test-key");
+        if let PreparedLaunchRouting::CodexProxy { descriptor, .. } = &mut routing {
+            descriptor.reasoning_effort = Some(true);
+        }
+        for mode in [SessionIdMode::None, SessionIdMode::Resume("session".into())] {
+            for effort in ["none", "high"] {
+                let cmd = build_spawn_command_prepared(&wsl_resolved(), Provider::Codex, &routing, &mode,
+                    SESSION_ID, &crate::agent::capabilities::ResolvedAgentConfig {
+                        model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
+                    }, None, false);
+                let args = argv(&cmd);
+                assert!(args.windows(2).any(|pair| pair == ["-c", "model_supports_reasoning_summaries=true"]));
+                assert!(args.windows(2).any(|pair| pair == ["-c", "model_reasoning_summary=\"none\""]));
+                assert!(args.contains(&format!("model_reasoning_effort=\"{effort}\"")));
+            }
+        }
+    }
+
     /// Issue #1773 review — when a profile carries a resolved absolute
     /// path (off-`PATH` install of Cline, e.g. `CLINE_BIN_PATH` or the
     /// `node_modules\@cline\cli-windows-{x64,arm64}\bin` walk), the spawn

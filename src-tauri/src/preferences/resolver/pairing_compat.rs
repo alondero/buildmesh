@@ -39,6 +39,7 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
             compatibility::complete_agent_capabilities(),
         ),
     };
+    let reasoning_effort = (pairing.provider_id == "minimax" && pairing.surface == ApiSurface::OpenAI && model_id == "MiniMax-M3").then_some(true);
     EndpointModelDescriptor {
         provider_id: pairing.provider_id.clone(),
         endpoint,
@@ -47,7 +48,7 @@ pub fn endpoint_model_descriptor(pairing: &ProviderPairing) -> EndpointModelDesc
         capabilities,
         auth_modes: vec![ProviderAuthMode::BearerEnv],
         context_window: None,
-        reasoning_effort: None,
+        reasoning_effort,
     }
 }
 
