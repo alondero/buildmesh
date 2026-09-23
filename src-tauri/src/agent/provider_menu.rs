@@ -215,13 +215,16 @@ pub(super) fn compose_provider_menu(
     let _claude_harness_id = crate::preferences::claude_harness_id_from(&visible_profiles);
     let effective = crate::preferences::effective_pairings(&accounts, &pairings);
     for pairing in &effective {
-        let hidden_wsl = if let Some(profile) = profiles.iter().find(|profile| profile.id == pairing.harness_id) {
+        // A route attached to a runtime-suffixed mirror of a natively-installed
+        // harness is the same redundant choice as the mirror profile itself
+        // (issue #1864), so drop it alongside the profile.
+        let hidden_mirror = if let Some(profile) = profiles.iter().find(|profile| profile.id == pairing.harness_id) {
             !crate::agent::detection::visible_in_spawn_menu(profile, host)
         } else {
             host == Platform::Windows && crate::agent::detection::canonical_wsl_harness(&pairing.harness_id)
                 .is_some_and(|harness| crate::models::Provider::from_db_str(harness).adapter().available_on().contains(&host))
         };
-        if hidden_wsl { continue; }
+        if hidden_mirror { continue; }
         let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
             continue;
         };
@@ -598,6 +601,43 @@ mod tests {
         wsl.runtime = Some(crate::models::EnvType::Wsl);
         let menu = compose_provider_menu(vec![wsl], Vec::new(), Vec::new(), Platform::Windows, Some("Test"), &[], &[]);
         assert!(menu.is_empty(), "Codex supports Windows, so its WSL install is not a spawn choice: {menu:?}");
+    }
+
+    /// Issue #1864 follow-up — the Launch Configuration `reconcile` seeds for the
+    /// `-windows` mirror of a native harness must not resurrect a duplicate
+    /// "Claude Code (Windows)" harness group beside the canonical `claude` row.
+    #[test]
+    fn windows_spawn_menu_omits_saved_windows_mirror_configuration() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.harness_profiles.push(crate::preferences::HarnessProfile {
+            id: "claude-windows".into(), name: "Claude Code (Windows)".into(), harness: "anthropic".into(),
+            runtime: Some(crate::models::EnvType::Windows), wsl_distro: None, executable: None,
+        });
+        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
+            id: "launch/claude-windows".into(), name: "Claude Code (Windows)".into(),
+            spawn_option_id: "claude-windows".into(), ..Default::default()
+        });
+        let menu = configuration_menu(vec![row_native("claude")], &prefs, Platform::Windows);
+        assert_eq!(menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["claude"]);
+    }
+
+    /// The mirror's Provider Route leaks through the same door: once the
+    /// `-windows` profile is collapsed, `claude-windows:minimax` has no harness
+    /// group to belong to and must be dropped with it.
+    #[test]
+    fn windows_spawn_menu_omits_routes_for_windows_mirror_profiles() {
+        let mut mirror = profile("claude-windows", "anthropic");
+        mirror.runtime = Some(crate::models::EnvType::Windows);
+        let mut route = claude_pairing("minimax");
+        route.harness_id = mirror.id.clone();
+        let menu = compose_provider_menu(
+            vec![profile("claude", "anthropic"), mirror],
+            vec![acct("minimax", true, Some("sk-mm"))], vec![route], Platform::Windows, None, &[], &[],
+        );
+        assert_eq!(
+            menu.iter().map(|row| row.harness_id.as_str()).collect::<Vec<_>>(), ["claude"],
+            "the mirror's route must not create a second harness group: {menu:?}",
+        );
     }
 
     /// Issue #534: Terminal is the least-common pick, so it must sort to the
