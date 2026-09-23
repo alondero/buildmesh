@@ -170,6 +170,33 @@ mod command_tests {
         assert!(script.ends_with("; exit 0"), "{script}");
         assert!(!script.contains("exit $LASTEXITCODE"), "{script}");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_windows_callback_returns_success_after_wsl_failure() {
+        let url = "http://localhost:1992/api/attention/42";
+        let command = super::windows_attention_command_for_distro("Ubuntu", Some(url), Some("{}"));
+        let script = super::decode_powershell_command(&command).expect("decode PowerShell command");
+        let script = format!(
+            "function wsl.exe {{ Write-Error 'simulated callback failure'; $global:LASTEXITCODE = 22 }}; {script}"
+        );
+        let output = super::powershell_command(&script)
+            .output()
+            .expect("run decoded Codex callback script");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("simulated callback failure"),
+            "callback error escaped stderr suppression: {stderr}"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

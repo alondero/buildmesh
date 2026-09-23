@@ -1790,6 +1790,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_attention_hook_emits_json_after_callback_failure() {
+        use std::process::Command;
+
+        let command = attention_hook_unix_command("http://localhost:1992/api/attention/42");
+        let script = format!("set -e; curl() {{ return 22; }}; {command}");
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .expect("run attention hook in a POSIX shell");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"{}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fallback_emits_json_after_curl_lookup_failure() {
+        use std::process::Command;
+
+        let empty_path = TempDir::new().unwrap();
+        let command = attention_hook_windows_fallback_command(
+            "http://localhost:1992/api/attention/42",
+        );
+        let output = Command::new("cmd.exe")
+            .args(["/d", "/c", &command])
+            .current_dir(empty_path.path())
+            .env("PATH", empty_path.path())
+            .output()
+            .expect("run attention hook in cmd.exe");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    }
+
     /// Re-running injection over an already-correct project is a no-op.
     #[test]
     fn inject_is_idempotent() {
