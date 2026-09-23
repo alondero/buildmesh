@@ -182,6 +182,39 @@ fn current_client_override() -> Option<Client> {
     CLIENT_OVERRIDE.with(|cell| cell.borrow().clone())
 }
 
+/// Generic loopback HTTP fixture for adapter integration tests
+/// (moved from `services::usage::tests` in ARCH-1 so provider test
+/// modules own their fixtures without depending on the god-module).
+/// Stands up a `tiny_http` server on `127.0.0.1:0` that dispatches
+/// on `req.url()`; the re-export at `crate::services::usage::spawn_loopback`
+/// keeps existing users (`freebuff_usage`, `cursor`, `anthropic`) working.
+#[cfg(test)]
+pub(crate) fn spawn_loopback<F>(max_requests: usize, handler: F) -> u16
+where
+    F: Fn(tiny_http::Request) + Send + 'static,
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind loopback");
+    let port = match server.server_addr() {
+        tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(v4)) => v4.port(),
+        other => panic!("expected a v4 loopback listener, got {other:?}"),
+    };
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_thread = counter.clone();
+    thread::spawn(move || {
+        for request in server.incoming_requests() {
+            handler(request);
+            if counter_thread.fetch_add(1, Ordering::SeqCst) + 1 >= max_requests {
+                return;
+            }
+        }
+    });
+    port
+}
+
 /// RAII guard that restores the previous `CLIENT_OVERRIDE` value on Drop
 /// (including during unwinding). Constructed only via
 /// [`with_client_override`].
