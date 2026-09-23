@@ -148,8 +148,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     await refreshAvailability(saved, session);
     if (mounted.current && draftSession.current === session) setDraft(null);
   };
-  const menuClass = 'w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
-  const mutedMenuClass = 'w-full px-3 py-2 text-left text-sm text-text-muted';
+  const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';
+  const mutedMenuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-muted';
   const menuEntries = [
     { id: 'defaults', kind: 'spawn' as const },
     ...configurations.flatMap((value) => [
@@ -226,8 +226,8 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
         } : undefined} /> : (
         <div role="menu" aria-label={`${option.label} configurations`}>
           <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
-          {!loaded && !error && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">Loading configurations…</p>}
-          {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-2 text-xs text-text-muted">No saved configurations</p>}
+          {!loaded && !error && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">Loading configurations…</p>}
+          {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">No saved configurations</p>}
           {configurations.map((value) => {
             const unavailable = unavailableById.get(value.id);
             return <div key={value.id} role="presentation" className="flex">
