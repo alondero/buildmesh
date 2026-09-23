@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { AgentReviewButton } from '../../src/components/AgentNodeView/AgentReviewButton';
 import type { SpawnOption } from '../../src/lib/groups';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
@@ -12,6 +13,15 @@ vi.mock('../../src/lib/tauri', async importOriginal => ({
   triggerCircuitFromNode: trigger,
   listCircuits: list,
   isAgentRunning: isRunning,
+}));
+
+// The reviewer picker is now the shared Spawn Menu, whose disclosure loads the
+// harness's saved Launch Configurations through the provider API.
+const { listConfigurations } = vi.hoisted(() => ({ listConfigurations: vi.fn() }));
+vi.mock('../../src/lib/tauri/provider', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/lib/tauri/provider')>(),
+  listSpawnConfigurations: listConfigurations,
+  getLaunchTargets: vi.fn().mockResolvedValue([]),
 }));
 
 function spawnOption(id: string, label: string): SpawnOption {
@@ -45,6 +55,19 @@ const PROVIDERS: SpawnOption[] = [
   spawnOption('terminal', 'Terminal'),
 ];
 
+/** The generated Launch Configuration row `reconcile` materialises for a
+ *  Spawn Option — what the shared menu's disclosure lists and picks. */
+function configurationOption(id: string, name: string, spawnOptionId: string): SpawnOption {
+  return {
+    ...spawnOption(id, name),
+    provider_id: spawnOptionId.includes(':') ? spawnOptionId.split(':')[1] : null,
+    is_proxied: spawnOptionId.includes(':'),
+    group_key: spawnOptionId.split(':')[0],
+    harness_id: spawnOptionId.split(':')[0],
+    configuration: { id, name, spawn_option_id: spawnOptionId, model: null, effort: null, extra_args: null },
+  };
+}
+
 const node = { id: 42, mesh_id: 7, name: 'Fix parser', provider: 'claude', status: 'ready' } as AgentNode;
 
 describe('agent workflow title-bar control', () => {
@@ -55,6 +78,7 @@ describe('agent workflow title-bar control', () => {
     // the DB status alone makes the button eligible; the liveness check is
     // only consulted for transient statuses (pending/spawning).
     isRunning.mockReset().mockResolvedValue(false);
+    listConfigurations.mockReset().mockResolvedValue([]);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
     useUIStore.setState({ probeOpen: false, pendingCircuitRunFocus: null });
   });
@@ -108,18 +132,16 @@ describe('agent workflow title-bar control', () => {
     expect((screen.getByRole('button', { name: 'Start review or circuit' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('greys out a reviewer harness that cannot yield a turn', () => {
+  it('marks a reviewer harness that cannot yield a turn unavailable in the shared menu', () => {
     renderButton(node, [...PROVIDERS, spawnOption('cline', 'Cline'), spawnOption('freebuff', 'Freebuff')]);
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
-    const options = Array.from(select.querySelectorAll('option'));
-    expect(options.find(o => o.value === 'codex')?.disabled).toBe(false);
+    const blocked = screen.getByRole('menuitem', { name: /Freebuff/ });
+    expect(blocked.getAttribute('aria-disabled')).toBe('true');
+    expect(blocked.textContent).toContain('cannot be used as the reviewer');
     // Issue #1775: Cline carries a hook now, so its row is pickable.
-    expect(options.find(o => o.value === 'cline')?.disabled).toBe(false);
-    expect(options.find(o => o.value === 'freebuff')?.disabled).toBe(true);
-    expect(options.find(o => o.value === 'freebuff')?.textContent).toBe('Freebuff (no review support)');
+    expect(screen.getByRole('menuitem', { name: /Cline/ }).getAttribute('aria-disabled')).toBe('false');
     // Terminal stays filtered out entirely — it is not an agent.
-    expect(options.find(o => o.value === 'terminal')).toBeUndefined();
+    expect(screen.queryByRole('menuitem', { name: /Terminal/ })).toBeNull();
   });
 
   it('starts review for a finished agent and opens its Mesh Circuits', async () => {
@@ -134,13 +156,10 @@ describe('agent workflow title-bar control', () => {
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
   });
 
-  it('parameterises the reviewer provider for the review loop', async () => {
+  it('parametersises the reviewer provider from the shared menu', async () => {
     renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
-    // Terminal is not a reviewer — it is filtered out of the picker.
-    expect(screen.queryByRole('option', { name: 'Terminal' })).toBeNull();
-    fireEvent.change(select, { target: { value: 'codex' } });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
   });
@@ -156,7 +175,6 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     const controls = [
       screen.getByLabelText('Workflow'),
-      screen.getByLabelText('Reviewer provider'),
       screen.getByLabelText('Maximum review rounds'),
     ];
     for (const control of controls) {
@@ -166,20 +184,28 @@ describe('agent workflow title-bar control', () => {
     }
   });
 
-  it('groups providers by harness and nests proxied rows', async () => {
-    renderButton();
+  it('renders the shared harness-grouped menu and forwards a Launch Configuration pick', async () => {
+    // The reviewer picker reuses the one Spawn Menu (ADR-0016) rather than a
+    // native <select>: harness parents at the top, saved configurations in the
+    // disclosure. A proxied route is reachable through its generated recipe —
+    // exactly as on every other spawn surface.
+    listConfigurations.mockResolvedValue([
+      { id: 'launch/claude:minimax', name: 'MiniMax', spawn_option_id: 'claude:minimax', model: null, effort: null, extra_args: null },
+    ]);
+    renderButton(node, [...PROVIDERS, configurationOption('launch/claude:minimax', 'MiniMax', 'claude:minimax')]);
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
-    // Same bucketing as the Spawn Menu: one group per harness, Terminal gone.
-    expect(Array.from(select.querySelectorAll('optgroup')).map(group => group.getAttribute('label')))
-      .toEqual(['Claude Code', 'Codex']);
-    const claude = select.querySelector('optgroup[label="Claude Code"]')!;
-    expect(Array.from(claude.querySelectorAll('option')).map(option => option.textContent))
-      .toEqual(['Claude Code', 'MiniMax']);
-    // The composite id is what reaches the backend, so it must be selectable.
-    fireEvent.change(select, { target: { value: 'claude:minimax' } });
+    const menu = screen.getByRole('menu', { name: 'Select a provider' });
+    expect(within(menu).getAllByRole('menuitem').map(item => item.getAttribute('data-spawn-id')))
+      .toEqual(['claude', 'codex']);
+    await userEvent.click(screen.getByRole('button', { name: 'Claude Code configurations' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'MiniMax' }));
+    // The configuration id is what reaches the backend, where it becomes the
+    // launch *selection*: `launch_configurations::resolve` applies the recipe's
+    // model and effort ahead of the harness's Mesh/application cascade (pinned
+    // by the Rust test `native_configuration_resolves_selected_values_before_defaults`).
+    expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('MiniMax');
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'claude:minimax', false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax', false));
   });
 
   it('sends a cross-harness pick without warning about the model', async () => {
@@ -188,23 +214,23 @@ describe('agent workflow title-bar control', () => {
     // the source agent's harness must not gate the choice.
     renderButton({ ...node, provider: 'claude' });
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const select = screen.getByLabelText('Reviewer provider') as HTMLSelectElement;
-    expect(Array.from(select.querySelectorAll('option')).map(option => option.textContent))
-      .toContain('Codex');
-    fireEvent.change(select, { target: { value: 'codex' } });
+    expect(screen.getByRole('menuitem', { name: /Codex/ })).toBeTruthy();
     expect(screen.queryByText(/#1690/)).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
   });
 
-  it('resets the reviewer provider when the dialog is reopened', () => {
+  it('resets the reviewer provider when the dialog is reopened', async () => {
     renderButton();
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    fireEvent.change(screen.getByLabelText('Reviewer provider'), { target: { value: 'codex' } });
-    expect((screen.getByLabelText('Reviewer provider') as HTMLSelectElement).value).toBe('codex');
+    fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
+    expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('Codex');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    expect((screen.getByLabelText('Reviewer provider') as HTMLSelectElement).value).toBe('');
+    expect(screen.getByTestId('reviewer-provider-default').getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null, false));
   });
 
   it('offers saved manual Circuits and passes the selected id', async () => {
@@ -220,7 +246,7 @@ describe('agent workflow title-bar control', () => {
     // An authored Circuit carries its reviewer provider in its graph, so the
     // picker is not offered — the flag below only proves the value sent is null,
     // not that the control is hidden.
-    expect(screen.queryByLabelText('Reviewer provider')).toBeNull();
+    expect(screen.queryByRole('menu', { name: 'Select a provider' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
     await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null, false));
   });
