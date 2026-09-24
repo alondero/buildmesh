@@ -46,6 +46,30 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The GitHub clone flow creates its mesh with the cloned repo's resolved
+    /// default branch rather than the `origin/main` literal, so the new mesh
+    /// isn't a **drifted root**. Pin both halves: the default still writes
+    /// `origin/main`, and the explicit overload persists what it's given.
+    #[test]
+    fn create_mesh_with_base_ref_persists_supplied_ref() {
+        let _serial = serial();
+        let temp = tempfile::tempdir().unwrap();
+        crate::db::init(&temp.path().join("db.sqlite")).unwrap();
+
+        let default_path = format!("C:/buildmesh-base-default-{}", uuid::Uuid::new_v4());
+        let default_mesh = crate::db::create_mesh("Default", &default_path).unwrap();
+        assert_eq!(default_mesh.base_ref, "origin/main");
+
+        let clone_path = format!("C:/buildmesh-base-clone-{}", uuid::Uuid::new_v4());
+        let cloned =
+            crate::db::create_mesh_with_base_ref("Cloned", &clone_path, "origin/master").unwrap();
+        assert_eq!(cloned.base_ref, "origin/master");
+        assert_eq!(
+            crate::db::get_mesh_by_id(cloned.id).unwrap().base_ref,
+            "origin/master"
+        );
+    }
+
     #[test]
     fn harness_runtime_persists_and_legacy_switch_restores_mesh_runtime() {
         let _serial = serial();

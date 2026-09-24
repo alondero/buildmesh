@@ -113,11 +113,29 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     create_mesh_inner(&db, name, path)
 }
 
+/// Create a mesh whose **Base Ref** is not the `origin/main` default. Used by
+/// the GitHub clone flow, which resolves the cloned repo's real default branch
+/// so worktrees are cut from the right ref instead of booting the mesh up as a
+/// **drifted root**.
+pub fn create_mesh_with_base_ref(name: &str, path: &str, base_ref: &str) -> SqlResult<Mesh> {
+    let db = write_conn();
+    create_mesh_with_base_ref_inner(&db, name, path, base_ref)
+}
+
 /// Per-test isolated variant of [`create_mesh`]. The public function locks
 /// the process-global writer connection; this helper takes an explicit
 /// `&Connection` so parallel tests can each operate against their own
 /// in-memory DB without contending on the global mutex (issue #1691).
 pub(crate) fn create_mesh_inner(db: &Connection, name: &str, path: &str) -> SqlResult<Mesh> {
+    create_mesh_with_base_ref_inner(db, name, path, "origin/main")
+}
+
+pub(crate) fn create_mesh_with_base_ref_inner(
+    db: &Connection,
+    name: &str,
+    path: &str,
+    base_ref: &str,
+) -> SqlResult<Mesh> {
     // Check if mesh with this path already exists (idempotent upsert)
     let existing: Option<i64> = db.query_row(
         "SELECT id FROM meshes WHERE path = ?1",
@@ -142,8 +160,8 @@ pub(crate) fn create_mesh_inner(db: &Connection, name: &str, path: &str) -> SqlR
     // regardless of when the DB was created (ADR 0020).
     db.execute(
         "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref, pre_spawn_pool_size)
-         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main', 1)",
-        params![name, path, next_position],
+         VALUES (?1, ?2, 'grid', ?3, 1, ?4, 1)",
+        params![name, path, next_position, base_ref],
     )?;
     let id = db.last_insert_rowid();
     get_mesh_by_id_inner(db, id)

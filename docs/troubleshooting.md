@@ -127,6 +127,25 @@ fast-forward would overwrite.
 
 Do not reset or delete a worktree as a first response to a sync warning.
 
+## Cloning a repository fails
+
+**Clone from GitHub** in the New Mesh dialog runs a plain `git clone` with your
+machine's own Git authentication, and reports Git's own error in the dialog.
+
+- **`fatal: repository … not found`** — check the `owner/repo` spelling and that
+  the repository exists and you can reach it from this machine.
+- **`fatal: could not read Username` / `Authentication failed`** — a private
+  repository needs credentials that already work from your shell: an SSH key, the
+  Git credential manager, or `gh auth login` followed by `gh auth setup-git` for
+  HTTPS. Buildmesh never stores a GitHub token in the new repository, so an
+  unauthenticated clone fails immediately instead of prompting.
+- **`A folder already exists at …`** — the chosen parent already contains a
+  folder named after the repository. Pick a different parent, or move the
+  existing folder aside.
+- **The dialog hangs on "Cloning…"** — a very large repository over a slow link
+  can outlast the clone timeout; clone it from a terminal, then use **Open
+  folder** on the result.
+
 ## Build or Run fails
 
 Open Mesh Properties and verify the command, working context, and runtime. The

@@ -379,6 +379,96 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
     }
 }
 
+/// `owner/repo` from any github.com remote form the clone flow accepts, adding
+/// the `ssh://git@github.com/owner/repo` shape on top of what
+/// [`parse_owner_repo`] understands. Kept private to the clone flow: that
+/// helper's callers read existing `origin` remotes, which are either HTTPS or
+/// scp-style SSH, so widening its contract would change their behaviour too.
+fn parse_github_owner_repo(input: &str) -> Option<(String, String)> {
+    if let Some(pair) = parse_owner_repo(input) {
+        return Some(pair);
+    }
+    let rest = input.strip_prefix("ssh://git@github.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+        Some((
+            parts[0].to_string(),
+            parts[1].trim_end_matches(".git").to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// A GitHub repository resolved from user input in the "clone" flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneTarget {
+    /// URL handed to `git clone`. SSH forms are kept verbatim so the ssh user
+    /// the user typed is preserved; everything else is normalised to HTTPS.
+    pub url: String,
+    /// Repository name, `.git` suffix stripped. Also the destination folder
+    /// name and the default mesh name.
+    pub repo: String,
+}
+
+/// Resolve user input into a `git clone` target.
+///
+/// Accepts the `owner/repo` shorthand and the github.com remote forms
+/// [`parse_owner_repo`] understands. Returns `None` for anything else so the
+/// command layer can surface a precise "enter owner/repo or a GitHub URL"
+/// error rather than guessing at a host.
+pub fn parse_clone_input(input: &str) -> Option<CloneTarget> {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((owner, repo)) = parse_github_owner_repo(trimmed) {
+        if !is_valid_repo_name(&repo) {
+            return None;
+        }
+        let url = if trimmed.starts_with("git@") || trimmed.starts_with("ssh://") {
+            trimmed.to_string()
+        } else {
+            format!("https://github.com/{owner}/{repo}.git")
+        };
+        return Some(CloneTarget { url, repo });
+    }
+
+    // Bare `owner/repo`. Reject anything that still looks like a URL or path
+    // (scheme, backslash, whitespace) so a typo'd host is an error instead of
+    // being laundered into a "github.com/…" clone.
+    let mut segments = trimmed.split('/');
+    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next()) else {
+        return None;
+    };
+    let owner = owner.trim();
+    let repo = repo.trim().trim_end_matches(".git");
+    if owner.is_empty()
+        || !is_valid_repo_name(repo)
+        || trimmed.contains(':')
+        || trimmed.contains('\\')
+        || trimmed.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(CloneTarget {
+        url: format!("https://github.com/{owner}/{repo}.git"),
+        repo: repo.to_string(),
+    })
+}
+
+/// A GitHub repository name is a single path segment. Reject `.`/`..` and any
+/// separator so it can't be used as a folder name to escape the chosen parent
+/// directory when the clone flow joins it (`parent.join(repo)`).
+fn is_valid_repo_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && !name.contains(char::is_whitespace)
+}
+
 /// How long a successful Issues or Pull Requests probe read stays fresh
 /// enough to skip another background fetch. Both probes share one constant
 /// so they cannot drift into two cadences. Recency is in-memory only: a
@@ -592,6 +682,69 @@ mod tests {
     #[test]
     fn test_parse_owner_repo_invalid() {
         assert_eq!(parse_owner_repo("https://gitlab.com/foo/bar"), None);
+    }
+
+    /// `parse_owner_repo` reads existing `origin` remotes (HTTPS or scp-style
+    /// SSH). The clone flow's `ssh://` support lives in its own parser, so this
+    /// shared helper's contract stays exactly as its other callers expect.
+    #[test]
+    fn test_parse_owner_repo_ignores_ssh_url_form() {
+        assert_eq!(
+            parse_owner_repo("ssh://git@github.com/alondero/buildmesh.git"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_clone_input_https_normalises_to_clone_url() {
+        let target = parse_clone_input("https://github.com/alondero/buildmesh").unwrap();
+        assert_eq!(target.url, "https://github.com/alondero/buildmesh.git");
+        assert_eq!(target.repo, "buildmesh");
+    }
+
+    #[test]
+    fn parse_clone_input_strips_git_suffix_and_trailing_slash() {
+        let target = parse_clone_input("  https://github.com/alondero/buildmesh.git/  ").unwrap();
+        assert_eq!(target.url, "https://github.com/alondero/buildmesh.git");
+        assert_eq!(target.repo, "buildmesh");
+    }
+
+    #[test]
+    fn parse_clone_input_keeps_ssh_forms_verbatim() {
+        let scp = parse_clone_input("git@github.com:alondero/buildmesh.git").unwrap();
+        assert_eq!(scp.url, "git@github.com:alondero/buildmesh.git");
+        assert_eq!(scp.repo, "buildmesh");
+
+        let ssh = parse_clone_input("ssh://git@github.com/alondero/buildmesh").unwrap();
+        assert_eq!(ssh.url, "ssh://git@github.com/alondero/buildmesh");
+        assert_eq!(ssh.repo, "buildmesh");
+    }
+
+    #[test]
+    fn parse_clone_input_accepts_bare_owner_repo() {
+        let target = parse_clone_input("alondero/buildmesh").unwrap();
+        assert_eq!(target.url, "https://github.com/alondero/buildmesh.git");
+        assert_eq!(target.repo, "buildmesh");
+    }
+
+    #[test]
+    fn parse_clone_input_rejects_non_github_and_incomplete() {
+        assert_eq!(parse_clone_input(""), None);
+        assert_eq!(parse_clone_input("   "), None);
+        assert_eq!(parse_clone_input("buildmesh"), None);
+        assert_eq!(parse_clone_input("https://gitlab.com/foo/bar"), None);
+        assert_eq!(parse_clone_input("owner/repo/extra"), None);
+        assert_eq!(parse_clone_input("owner /repo"), None);
+    }
+
+    /// The repo name becomes the destination folder name, so `.`/`..` (or a
+    /// name carrying a separator) must never be accepted — otherwise the clone
+    /// could land outside the parent folder the user picked.
+    #[test]
+    fn parse_clone_input_rejects_path_traversal_repo_names() {
+        assert_eq!(parse_clone_input("owner/.."), None);
+        assert_eq!(parse_clone_input("owner/."), None);
+        assert_eq!(parse_clone_input("https://github.com/owner/.."), None);
     }
 
     #[test]

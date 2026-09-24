@@ -51,9 +51,11 @@ yet, its meter stays hidden.
    Native Windows and WSL installations are detected separately, but the spawn
    menu offers WSL only for harnesses without native Windows support. Sign in
    to that CLI or configure its API key according to the CLI's own documentation.
-3. Create or open a Mesh for the repository you want to work on. Confirm that
-   Git can read the repository and that the base branch/ref is the one you
-   expect.
+3. Create or open a Mesh for the repository you want to work on. **Open folder**
+   points at a repository already on disk; **Clone from GitHub** takes an
+   `owner/repo` or github.com URL, clones it into a new subfolder under a parent
+   folder you pick, and creates the Mesh from the clone in one step. Confirm that
+   Git can read the repository and that the base ref is the one you expect.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an
