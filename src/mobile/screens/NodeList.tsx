@@ -14,20 +14,21 @@ import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { useWsEvents } from "../useWsEvents";
 import { useVisibilityPolling } from "../useVisibilityPolling";
-import {
-  usePullToRefresh,
-} from "../usePullToRefresh";
+import { usePullToRefresh } from "../usePullToRefresh";
 // The hook owns the threshold value internally and exposes
 // `isPastThreshold` as a boolean signal so callers don't pay a render
 // per pixel (review feedback #1). No need to import the numeric
 // `PULL_REFRESH_THRESHOLD_PX` from the hook in this file.
 import { groupByHarness } from "../../lib/groups";
-import { LaunchConfigurations } from '../../components/Providers/LaunchConfigurations';
-import { launchConfigurationApi } from '../api';
+import { LaunchConfigurations } from "../../components/Providers/LaunchConfigurations";
+import { launchConfigurationApi } from "../api";
+import CaptureIdea from "./CaptureIdea";
 import { getStatusConfig } from "../../lib/status";
 
 type Props = {
-  onOpenNode: (node: AgentNode) => void;
+  onOpenNode: (node: AgentNode, prompt?: string) => void;
+  view?: "overview" | "work" | "capture";
+  onViewChange?: (view: "overview" | "work" | "capture") => void;
   onOpenAgentNodes: (mesh: Mesh) => void;
   onOpenIssues: (mesh: Mesh) => void;
   onOffline: () => void;
@@ -50,11 +51,19 @@ type SentAction = "approve" | "reject";
 
 export default function NodeList({
   onOpenNode,
+  view = "overview",
+  onViewChange,
   onOpenAgentNodes,
   onOpenIssues,
   onOffline,
   onAuthFailed,
 }: Props) {
+  const [query, setQuery] = useState("");
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [filter, setFilter] = useState("all");
+  const [localView, setLocalView] = useState(view);
+  const activeView = onViewChange ? view : localView;
+  const changeView = onViewChange ?? setLocalView;
   const [meshes, setMeshes] = useState<Mesh[] | null>(null);
   const [nodes, setNodes] = useState<AgentNode[] | null>(null);
   const [pickerMeshId, setPickerMeshId] = useState<number | null>(null);
@@ -94,9 +103,7 @@ export default function NodeList({
   // the `.tsx` parser when two adjacent `useState<Map<...>>` calls
   // followed each other (the second `<Map` was mis-interpreted as a JSX
   // element opening).
-  const [keyBusy, setKeyBusy] = useState<Map<number, SentAction>>(
-    new Map(),
-  );
+  const [keyBusy, setKeyBusy] = useState<Map<number, SentAction>>(new Map());
   const [keySent, setKeySent] = useState<Map<number, SentAction>>(new Map());
 
   useEffect(() => {
@@ -106,24 +113,27 @@ export default function NodeList({
     };
   }, []);
 
-  const refresh = useCallback(async (isLatest: () => boolean) => {
-    try {
-      const [m, n] = await Promise.all([listMeshes(), listNodes()]);
-      // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
-      // if a newer refresh started while this fetch was in flight, drop
-      // our setState so the hung-fetch-during-mobile-suspend case doesn't
-      // clobber fresh data. `mountedRef` is the unmount check.
-      if (!isLatest() || !mountedRef.current) return;
-      setMeshes(m);
-      setNodes(n);
-    } catch (e) {
-      if (!isLatest() || !mountedRef.current) return;
-      // A 401 means the token was revoked/expired — bounce to Connect
-      // instead of claiming the desktop is offline.
-      if (isAuthError(e)) onAuthFailed();
-      else onOffline();
-    }
-  }, [onOffline, onAuthFailed]);
+  const refresh = useCallback(
+    async (isLatest: () => boolean) => {
+      try {
+        const [m, n] = await Promise.all([listMeshes(), listNodes()]);
+        // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
+        // if a newer refresh started while this fetch was in flight, drop
+        // our setState so the hung-fetch-during-mobile-suspend case doesn't
+        // clobber fresh data. `mountedRef` is the unmount check.
+        if (!isLatest() || !mountedRef.current) return;
+        setMeshes(m);
+        setNodes(n);
+      } catch (e) {
+        if (!isLatest() || !mountedRef.current) return;
+        // A 401 means the token was revoked/expired — bounce to Connect
+        // instead of claiming the desktop is offline.
+        if (isAuthError(e)) onAuthFailed();
+        else onOffline();
+      }
+    },
+    [onOffline, onAuthFailed],
+  );
 
   // 5s poll is the WS-fallback safety net — `useWsEvents` below drives
   // instant refreshes while the socket is up; the poll catches the gap
@@ -244,12 +254,20 @@ export default function NodeList({
       });
   }, [onAuthFailed]);
 
-  const handleCreate = async (meshId: number, providerId: string, configurationId?: string) => {
+  const handleCreate = async (
+    meshId: number,
+    providerId: string,
+    configurationId?: string,
+  ) => {
     setPickerMeshId(null);
     setCreating(meshId);
     setError(null);
     try {
-      const node = await createNode({ mesh_id: meshId, provider: providerId, configuration_id: configurationId });
+      const node = await createNode({
+        mesh_id: meshId,
+        provider: providerId,
+        configuration_id: configurationId,
+      });
       if (!mountedRef.current) return;
       setCreating(null);
       onOpenNode(node);
@@ -266,6 +284,31 @@ export default function NodeList({
 
   // Archived nodes are history, not actionable work — hide them on mobile.
   const visibleNodes = (nodes ?? []).filter((n) => n.status !== "archived");
+
+  const problemNodes = visibleNodes.filter(
+    (n) =>
+      n.status === "error" ||
+      (n.status !== "awaiting_input" &&
+        (n.signal_health === "degraded" || n.signal_health === "unavailable")),
+  );
+  const runningCount = visibleNodes.filter(
+    (n) => n.status === "running",
+  ).length;
+  const matches = (node: AgentNode) => {
+    const mesh = meshes?.find((m) => m.id === node.mesh_id);
+    const textMatches =
+      `${node.name} ${node.branch} ${mesh?.name} ${node.provider}`
+        .toLowerCase()
+        .includes(query.toLowerCase());
+    return (
+      textMatches &&
+      (filter === "all" ||
+        (filter === "attention"
+          ? node.status === "awaiting_input" ||
+            problemNodes.some((p) => p.id === node.id)
+          : node.status === filter))
+    );
+  };
 
   // Mobile-only QoL: pin awaiting-input nodes at the top so attention
   // is one tap away no matter how many meshes you have configured.
@@ -331,7 +374,13 @@ export default function NodeList({
   // pinned, once under its mesh).
   const nodesByMesh = new Map<number, AgentNode[]>();
   for (const node of visibleNodes) {
-    if (node.status === "awaiting_input") continue;
+    if (
+      activeView === "overview" &&
+      (node.status === "awaiting_input" ||
+        problemNodes.some((p) => p.id === node.id))
+    )
+      continue;
+    if (activeView === "work" && !matches(node)) continue;
     if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
     nodesByMesh.get(node.mesh_id)!.push(node);
   }
@@ -354,168 +403,375 @@ export default function NodeList({
         }
       />
 
-      {(pullToRefresh.isPastThreshold || pullToRefresh.refreshing) && (
-        <div
-          ref={pullToRefresh.bindIndicator}
-          data-testid="pull-indicator"
-          className="pull-indicator"
-        >
-          {pullToRefresh.refreshing ? (
-            <PulseDots />
-          ) : (
-            <span
-              style={{ fontSize: 11, color: "var(--text-faint)" }}
-              data-testid="pull-indicator-label"
-            >
-              {pullToRefresh.isPastThreshold
-                ? "Release to refresh"
-                : "Pull to refresh"}
-            </span>
-          )}
+      {activeView === "capture" ? (
+        <div className="list-scroll">
+          <CaptureIdea
+            meshes={meshes ?? []}
+            providers={providers}
+            onStarted={(node) => {
+              changeView("work");
+              onOpenNode(node);
+            }}
+            onAuthFailed={onAuthFailed}
+            onBusyChange={setCaptureBusy}
+          />
         </div>
-      )}
-
-      {meshes === null ? (
-        <div
-          data-testid="nodelist-loading"
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <PulseDots />
-        </div>
-      ) : meshes.length === 0 ? (
-        <CenterNote>
-          No meshes configured. Add a mesh on your desktop app to get started.
-        </CenterNote>
       ) : (
-        <div
-          data-testid="node-list"
-          className="list-scroll"
-          style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
-          {...pullToRefresh.handlers}
-        >
-          {attentionNodes.length > 0 && (
-            <section data-testid="attention-section" style={{ marginBottom: 8 }}>
-              <SectionHeading color="var(--amber)">
-                Needs attention
-              </SectionHeading>
-              <div
-                className={`deck${attentionNodes.length === 1 ? " deck-single" : ""}`}
-                data-testid="attention-deck"
-              >
-                {attentionNodes.map((node) => (
-                  <AttentionCard
-                    key={`attn-${node.id}`}
-                    node={node}
-                    meshName={meshes.find((m) => m.id === node.mesh_id)?.name}
-                    prompt={lastPrompts.get(node.id)}
-                    providers={providers}
-                    busy={keyBusy.get(node.id)}
-                    sent={keySent.get(node.id)}
-                    onApprove={() => void sendQuickAction(node.id, "approve")}
-                    onReject={() => void sendQuickAction(node.id, "reject")}
-                    onFocus={() => onOpenNode(node)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-          {meshes.map((mesh) => {
-            const meshNodes = nodesByMesh.get(mesh.id) ?? [];
-            return (
-              <section key={mesh.id} style={{ marginBottom: 4 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    padding: "10px 12px 6px",
-                    gap: 8,
-                  }}
+        <>
+          {(pullToRefresh.isPastThreshold || pullToRefresh.refreshing) && (
+            <div
+              ref={pullToRefresh.bindIndicator}
+              data-testid="pull-indicator"
+              className="pull-indicator"
+            >
+              {pullToRefresh.refreshing ? (
+                <PulseDots />
+              ) : (
+                <span
+                  style={{ fontSize: 11, color: "var(--text-faint)" }}
+                  data-testid="pull-indicator-label"
                 >
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      color: "var(--text-faint)",
-                      textTransform: "uppercase",
-                      letterSpacing: "0.05em",
-                      flex: 1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {mesh.name}
-                  </span>
+                  {pullToRefresh.isPastThreshold
+                    ? "Release to refresh"
+                    : "Pull to refresh"}
+                </span>
+              )}
+            </div>
+          )}
+
+          {meshes === null ? (
+            <div
+              data-testid="nodelist-loading"
+              style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <PulseDots />
+            </div>
+          ) : meshes.length === 0 ? (
+            <CenterNote>
+              No meshes configured. Add a mesh on your desktop app to get
+              started.
+            </CenterNote>
+          ) : (
+            <div
+              data-testid="node-list"
+              className="list-scroll"
+              style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
+              {...pullToRefresh.handlers}
+            >
+              <div className="overview-heading">
+                <h1>{activeView === "overview" ? "Overview" : "Work"}</h1>
+              </div>
+              {activeView === "overview" && (
+                <>
+                  <div className="overview-stats">
+                    <button
+                      onClick={() => {
+                        setFilter("attention");
+                        changeView("work");
+                      }}
+                    >
+                      <strong
+                        className={
+                          attentionNodes.length + problemNodes.length
+                            ? "needs-you"
+                            : ""
+                        }
+                      >
+                        {attentionNodes.length + problemNodes.length}
+                      </strong>
+                      <span>Attention</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFilter("running");
+                        changeView("work");
+                      }}
+                    >
+                      <strong>{runningCount}</strong>
+                      <span>Running</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFilter("all");
+                        changeView("work");
+                      }}
+                    >
+                      <strong>{visibleNodes.length}</strong>
+                      <span>Total agents</span>
+                    </button>
+                  </div>
                   <button
-                    onClick={() => setPickerMeshId(mesh.id)}
-                    aria-label={`New node in ${mesh.name}`}
-                    data-testid={`new-node-${mesh.id}`}
-                    className="chip-btn"
-                    style={{ width: 38, padding: "8px 0", textAlign: "center", fontSize: 16, lineHeight: 1 }}
+                    className="capture-shortcut"
+                    onClick={() => changeView("capture")}
                   >
-                    +
+                    <span className="capture-plus" aria-hidden="true">
+                      +
+                    </span>
+                    <span>
+                      <strong>Capture an idea</strong>
+                    </span>
+                    <span aria-hidden="true">→</span>
                   </button>
-                  <button
-                    onClick={() => setMeshActions(mesh)}
-                    aria-label={`More actions for ${mesh.name}`}
-                    data-testid={`mesh-actions-${mesh.id}`}
-                    className="chip-btn"
-                    style={{ width: 38, padding: "8px 0", textAlign: "center", fontSize: 14, lineHeight: 1 }}
-                  >
-                    ⋯
-                  </button>
+                  {!attentionNodes.length && !problemNodes.length && (
+                    <div className="all-clear">
+                      <strong>No errors, warnings, or pending replies.</strong>
+                    </div>
+                  )}
+                  {problemNodes.length > 0 && (
+                    <section aria-label="Problems" className="problem-section">
+                      <SectionHeading color="var(--red)">
+                        Check these first
+                      </SectionHeading>
+                      {problemNodes.map((node) => (
+                        <div key={node.id} className="problem-item">
+                          <NodeRow
+                            node={node}
+                            meshName={
+                              meshes.find((mesh) => mesh.id === node.mesh_id)
+                                ?.name
+                            }
+                            providers={providers}
+                            onClick={() =>
+                              onOpenNode(node, lastPrompts.get(node.id))
+                            }
+                          />
+                          <p>
+                            {node.status === "error"
+                              ? "Agent reported an error. Open details to investigate."
+                              : "Status reporting needs checking. Activity may be out of date."}
+                          </p>
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                </>
+              )}
+              {activeView === "work" && (
+                <div className="work-filters">
+                  <input
+                    className="field"
+                    aria-label="Search work"
+                    placeholder="Search agents, meshes, branches…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                  <div className="filter-chips" aria-label="Filter work">
+                    {[
+                      ["all", "All"],
+                      ["attention", "Needs attention"],
+                      ["running", "Running"],
+                      ["idle", "Idle"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        className="chip-btn"
+                        aria-pressed={filter === value}
+                        onClick={() => setFilter(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {!visibleNodes.some(matches) && (
+                    <CenterNote>
+                      No agents match. Try another search or filter.
+                    </CenterNote>
+                  )}
                 </div>
+              )}
+              {activeView === "overview" && attentionNodes.length > 0 && (
+                <section
+                  data-testid="attention-section"
+                  style={{ marginBottom: 8 }}
+                >
+                  <SectionHeading color="var(--amber)">
+                    Waiting for input
+                  </SectionHeading>
+                  <div
+                    className={`deck${attentionNodes.length === 1 ? " deck-single" : ""}`}
+                    data-testid="attention-deck"
+                  >
+                    {attentionNodes.map((node) => (
+                      <AttentionCard
+                        key={`attn-${node.id}`}
+                        node={node}
+                        meshName={
+                          meshes.find((m) => m.id === node.mesh_id)?.name
+                        }
+                        prompt={lastPrompts.get(node.id)}
+                        providers={providers}
+                        busy={keyBusy.get(node.id)}
+                        sent={keySent.get(node.id)}
+                        onApprove={() =>
+                          void sendQuickAction(node.id, "approve")
+                        }
+                        onReject={() => void sendQuickAction(node.id, "reject")}
+                        onFocus={() =>
+                          onOpenNode(node, lastPrompts.get(node.id))
+                        }
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
+              {meshes.map((mesh) => {
+                const meshNodes = nodesByMesh.get(mesh.id) ?? [];
+                if (
+                  activeView === "work" &&
+                  (query || filter !== "all") &&
+                  !meshNodes.length
+                )
+                  return null;
+                return (
+                  <section key={mesh.id} style={{ marginBottom: 4 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        padding: "10px 12px 6px",
+                        gap: 8,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          color: "var(--text-faint)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.05em",
+                          flex: 1,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {mesh.name}
+                      </span>
+                      <button
+                        onClick={() => setPickerMeshId(mesh.id)}
+                        aria-label={`New node in ${mesh.name}`}
+                        data-testid={`new-node-${mesh.id}`}
+                        className="chip-btn"
+                        style={{
+                          width: 38,
+                          padding: "8px 0",
+                          textAlign: "center",
+                          fontSize: 16,
+                          lineHeight: 1,
+                        }}
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setMeshActions(mesh)}
+                        aria-label={`More actions for ${mesh.name}`}
+                        data-testid={`mesh-actions-${mesh.id}`}
+                        className="chip-btn"
+                        style={{
+                          width: 38,
+                          padding: "8px 0",
+                          textAlign: "center",
+                          fontSize: 14,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ⋯
+                      </button>
+                    </div>
 
-                {creating === mesh.id ? (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      fontSize: 12,
-                      color: "var(--accent)",
-                      padding: "8px 12px 12px",
-                    }}
-                  >
-                    <PulseDots /> Creating node…
-                  </div>
-                ) : meshNodes.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: "var(--text-faint)",
-                      padding: "8px 12px 12px",
-                      fontStyle: "italic",
-                    }}
-                  >
-                    No nodes — tap + to start an agent
-                  </div>
-                ) : (
-                  meshNodes.map((node) => (
-                    <NodeRow
-                      key={node.id}
-                      node={node}
-                      onClick={() => onOpenNode(node)}
-                      providers={providers}
-                    />
-                  ))
-                )}
-              </section>
-            );
-          })}
-        </div>
+                    <div className="mesh-shortcuts">
+                      <button
+                        className="chip-btn"
+                        onClick={() => onOpenIssues(mesh)}
+                      >
+                        Issues
+                      </button>
+                      <button
+                        className="chip-btn"
+                        onClick={() => onOpenAgentNodes(mesh)}
+                      >
+                        Archive
+                      </button>
+                    </div>
+                    {creating === mesh.id ? (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          fontSize: 12,
+                          color: "var(--accent)",
+                          padding: "8px 12px 12px",
+                        }}
+                      >
+                        <PulseDots /> Creating node…
+                      </div>
+                    ) : meshNodes.length === 0 ? (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "var(--text-faint)",
+                          padding: "8px 12px 12px",
+                          fontStyle: "italic",
+                        }}
+                      >
+                        No other agents in this mesh — tap + to start one
+                      </div>
+                    ) : (
+                      meshNodes.map((node) => (
+                        <NodeRow
+                          key={node.id}
+                          node={node}
+                          meshName={mesh.name}
+                          onClick={() =>
+                            onOpenNode(node, lastPrompts.get(node.id))
+                          }
+                          providers={providers}
+                        />
+                      ))
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
-
+      <nav className="mobile-nav" aria-label="Main navigation">
+        {(
+          [
+            ["overview", "Overview", "◉"],
+            ["work", "Work", "▤"],
+            ["capture", "Capture", "+"],
+          ] as const
+        ).map(([key, label, icon]) => (
+          <button
+            key={key}
+            disabled={captureBusy}
+            aria-current={activeView === key ? "page" : undefined}
+            onClick={() => changeView(key)}
+          >
+            <span aria-hidden="true">{icon}</span>
+            {label}
+          </button>
+        ))}
+      </nav>
       {pickerMeshId !== null && (
         <ProviderPicker
           providers={providers}
-          onChanged={() => { void listProviders().then(setProviders).catch((e: unknown) => setError(String(e))); }}
-          onPick={(providerId, configurationId) => handleCreate(pickerMeshId, providerId, configurationId)}
+          onChanged={() => {
+            void listProviders()
+              .then(setProviders)
+              .catch((e: unknown) => setError(String(e)));
+          }}
+          onPick={(providerId, configurationId) =>
+            handleCreate(pickerMeshId, providerId, configurationId)
+          }
           onCancel={() => setPickerMeshId(null)}
         />
       )}
@@ -568,7 +824,13 @@ function SectionHeading({
   color: string;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", padding: "10px 12px 6px" }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        padding: "10px 12px 6px",
+      }}
+    >
       <span
         style={{
           fontSize: 10,
@@ -644,7 +906,9 @@ function SheetButton({
       className="card"
       style={{ display: "block", background: "var(--surface-2)" }}
     >
-      <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text)" }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text)" }}>
+        {label}
+      </div>
       <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
         {hint}
       </div>
@@ -694,8 +958,11 @@ function AttentionCard({
   // Same live-provider lookup contract as `NodeRow` (issue #328): the label
   // and chip colour come from the fetched `listProviders()` payload, with a
   // deterministic raw-id fallback before it resolves.
-  const providerMeta = providers?.find((p) => p.id === (node.launch_configuration?.id ?? node.provider));
-  const providerLabel = node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
+  const providerMeta = providers?.find(
+    (p) => p.id === (node.launch_configuration?.id ?? node.provider),
+  );
+  const providerLabel =
+    node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
   // BOTH chips disable when an action was taken (or is in flight) on this
   // card — see the state machine comment above. `sent` (enum) gives us the
   // strict superset that the previous boolean `sent` couldn't: the
@@ -720,7 +987,7 @@ function AttentionCard({
         type="button"
         className="deck-body"
         data-testid={`node-${node.id}`}
-        aria-label={`Open ${node.name} terminal`}
+        aria-label={`Open ${node.name} details`}
         onClick={onFocus}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -760,8 +1027,11 @@ function AttentionCard({
             textAlign: "left",
           }}
         >
-          {meshName ?? "…"}
-          {node.branch ? ` · ⎇ ${node.branch}` : ""} · {providerLabel}
+          Mesh: {meshName ?? "Unknown"}
+        </div>
+        <div className="node-attention-meta">
+          {node.branch ? `⎇ ${node.branch}` : "No branch reported"} ·{" "}
+          {providerLabel}
         </div>
         <div
           data-testid={`attn-prompt-${node.id}`}
@@ -808,10 +1078,12 @@ export function NodeRow({
   node,
   onClick,
   providers,
+  meshName,
 }: {
   node: AgentNode;
   onClick: () => void;
   providers?: Provider[];
+  meshName?: string;
 }) {
   // getStatusConfig (src/lib/status.ts) is total over the SessionStatus union
   // — `archived` included (#788) — and safely falls back to idle on unknown
@@ -826,8 +1098,11 @@ export function NodeRow({
   //     row's left edge still has consistent rhythm.
   // `providerMeta` carries color + icon for the chip and the same `.label`
   // drives the row subtitle — keeps the badge and the label in lockstep.
-  const providerMeta = providers?.find((p) => p.id === (node.launch_configuration?.id ?? node.provider));
-  const providerLabel = node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
+  const providerMeta = providers?.find(
+    (p) => p.id === (node.launch_configuration?.id ?? node.provider),
+  );
+  const providerLabel =
+    node.launch_configuration?.name ?? providerMeta?.label ?? node.provider;
   return (
     <button
       onClick={onClick}
@@ -867,6 +1142,7 @@ export function NodeRow({
         >
           {node.name}
         </div>
+        <div className="node-mesh-name">Mesh: {meshName ?? "Unknown"}</div>
         <div
           style={{
             fontSize: 11,
@@ -926,14 +1202,32 @@ function ProviderPicker({
   );
 
   const configurationsFor = (providerLabel: string, group: Provider[]) => {
-    const recipes = group.filter((row) => row.configuration).map((row) => ({ row, configuration: row.configuration! }));
+    const recipes = group
+      .filter((row) => row.configuration)
+      .map((row) => ({ row, configuration: row.configuration! }));
     return recipes.length ? (
       <details style={{ marginLeft: 18, marginBottom: 8 }}>
-        <summary style={{ padding: 10, color: "var(--text-dim)", fontSize: 13 }}>{providerLabel} configurations</summary>
+        <summary
+          style={{ padding: 10, color: "var(--text-dim)", fontSize: 13 }}
+        >
+          {providerLabel} configurations
+        </summary>
         {recipes.map(({ row, configuration }) => (
-          <button type="button" className="card" key={configuration.id} disabled={Boolean(row.unavailable_reason)}
-            onClick={() => onPick(configuration.spawn_option_id, configuration.id)}>
-            {configuration.name}{row.unavailable_reason && <small style={{ display: 'block' }}>{row.unavailable_reason}</small>}
+          <button
+            type="button"
+            className="card"
+            key={configuration.id}
+            disabled={Boolean(row.unavailable_reason)}
+            onClick={() =>
+              onPick(configuration.spawn_option_id, configuration.id)
+            }
+          >
+            {configuration.name}
+            {row.unavailable_reason && (
+              <small style={{ display: "block" }}>
+                {row.unavailable_reason}
+              </small>
+            )}
           </button>
         ))}
       </details>
@@ -953,43 +1247,78 @@ function ProviderPicker({
       >
         New Agent Node
       </h3>
-      <button className="card" onClick={() => setManaging((value) => !value)}>{managing ? 'Back to launch choices' : 'Manage Launch Configurations'}</button>
-      {managing && <LaunchConfigurations api={launchConfigurationApi} onChanged={onChanged} />}
-      {!managing && <>
-      {groups.map(([harnessId, group]) => {
-        const native = group.find((row) => !row.is_proxied && !row.configuration);
-        const harnessLabel = native?.label ?? group.find((row) => row.configuration)?.configuration?.harness_id ?? harnessId;
-        return (
-          <div key={harnessId} data-testid={`spawn-group-${harnessId}`} style={{ marginBottom: 8 }}>
-            {native ? <button
-              type="button"
-              onClick={() => onPick(native.id)}
-              disabled={Boolean(native.unavailable_reason)}
-              data-testid={`provider-${native.id}`}
-              className="card"
-              style={{ background: "var(--surface-2)" }}
-            >
-              <ProviderIcon
-                // `fallbackGlyph` feeds the row's own wire letter in for a
-                // harness profile with no brand mark (issue #1086), the same
-                // way `NodeRow` does for a custom Proxied account (#948).
-                // Here the row IS the live `listProviders()` record, so
-                // `native.icon` is the value `NodeRow` has to look up — and
-                // it keeps the chip's glyph on the same source as its colour.
-                providerId={native.provider_id ?? native.harness_id}
-                withBackground
-                backgroundColor={native.color}
-                fallbackGlyph={native.icon}
-                chipTestId={`picker-avatar-${native.id}`}
-                title={native.label}
-                className="h-4 w-4"
-              />
-              <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}{native.unavailable_reason && <small style={{ display: 'block' }}>{native.unavailable_reason}</small>}</span>
-            </button> : <p role="heading" aria-level={4} className="card">{harnessLabel}</p>}
-            {configurationsFor(harnessLabel, group)}
-          </div>
-        );
-      })}</>}
+      <button className="card" onClick={() => setManaging((value) => !value)}>
+        {managing ? "Back to launch choices" : "Manage Launch Configurations"}
+      </button>
+      {managing && (
+        <LaunchConfigurations
+          api={launchConfigurationApi}
+          onChanged={onChanged}
+        />
+      )}
+      {!managing && (
+        <>
+          {groups.map(([harnessId, group]) => {
+            const native = group.find(
+              (row) => !row.is_proxied && !row.configuration,
+            );
+            const harnessLabel =
+              native?.label ??
+              group.find((row) => row.configuration)?.configuration
+                ?.harness_id ??
+              harnessId;
+            return (
+              <div
+                key={harnessId}
+                data-testid={`spawn-group-${harnessId}`}
+                style={{ marginBottom: 8 }}
+              >
+                {native ? (
+                  <button
+                    type="button"
+                    onClick={() => onPick(native.id)}
+                    disabled={Boolean(native.unavailable_reason)}
+                    data-testid={`provider-${native.id}`}
+                    className="card"
+                    style={{ background: "var(--surface-2)" }}
+                  >
+                    <ProviderIcon
+                      // `fallbackGlyph` feeds the row's own wire letter in for a
+                      // harness profile with no brand mark (issue #1086), the same
+                      // way `NodeRow` does for a custom Proxied account (#948).
+                      // Here the row IS the live `listProviders()` record, so
+                      // `native.icon` is the value `NodeRow` has to look up — and
+                      // it keeps the chip's glyph on the same source as its colour.
+                      providerId={native.provider_id ?? native.harness_id}
+                      withBackground
+                      backgroundColor={native.color}
+                      fallbackGlyph={native.icon}
+                      chipTestId={`picker-avatar-${native.id}`}
+                      title={native.label}
+                      className="h-4 w-4"
+                    />
+                    <span
+                      style={{ flex: 1, fontSize: 15, color: "var(--text)" }}
+                    >
+                      {native.label}
+                      {native.unavailable_reason && (
+                        <small style={{ display: "block" }}>
+                          {native.unavailable_reason}
+                        </small>
+                      )}
+                    </span>
+                  </button>
+                ) : (
+                  <p role="heading" aria-level={4} className="card">
+                    {harnessLabel}
+                  </p>
+                )}
+                {configurationsFor(harnessLabel, group)}
+              </div>
+            );
+          })}
+        </>
+      )}
     </Sheet>
   );
 }

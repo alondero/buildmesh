@@ -122,6 +122,20 @@ describe("useVisibilityPolling", () => {
     restoreDocumentHidden();
   });
 
+  it("does not restart polling when a pending refresh settles after unmount", async () => {
+    setDocumentHidden(false);
+    let resolve!: () => void;
+    const refresh = vi.fn((_isLatest: () => boolean) => new Promise<void>(r => { resolve = r; }));
+    function Pending() { useVisibilityPolling(refresh, 1000); return null; }
+    const mounted = render(<Pending />);
+    const isLatest = refresh.mock.calls[0]?.[0] as unknown as (() => boolean) | undefined;
+    mounted.unmount();
+    await act(async () => { resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(isLatest?.()).toBe(false);
+  });
+
   it("calls refresh on mount when document is visible", async () => {
     setDocumentHidden(false);
     const refresh = vi.fn().mockResolvedValue(undefined);

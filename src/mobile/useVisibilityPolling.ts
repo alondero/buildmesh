@@ -66,6 +66,7 @@ export function useVisibilityPolling(
   onErrorRef.current = onError;
 
   useEffect(() => {
+    let active = true;
     let timeoutId: number | null = null;
     let currentToken = 0;
 
@@ -75,7 +76,7 @@ export function useVisibilityPolling(
       let result: Promise<void> | void;
       try {
         // refresh may be sync or async; we wrap to normalise both.
-        result = refreshRef.current(() => myToken === currentToken);
+        result = refreshRef.current(() => active && myToken === currentToken);
       } catch (error) {
         // Synchronous throw from refresh — route to onError and keep
         // the loop alive (a single bad tick shouldn't brick polling).
@@ -88,14 +89,14 @@ export function useVisibilityPolling(
           armNextTick();
         },
         (error) => {
-          onErrorRef.current?.(error);
+          if (active) onErrorRef.current?.(error);
           armNextTick();
         },
       );
     };
 
     const armNextTick = () => {
-      if (timeoutId !== null) return;
+      if (!active || document.hidden || timeoutId !== null) return;
       timeoutId = window.setTimeout(() => {
         timeoutId = null;
         runOne();
@@ -140,6 +141,7 @@ export function useVisibilityPolling(
     }
 
     return () => {
+      active = false;
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId);
         timeoutId = null;

@@ -8,6 +8,7 @@ const appState = vi.hoisted(() => ({
   connect: null as (() => void) | null,
   openIssues: null as (() => void) | null,
   lateSpawn: null as (() => void) | null,
+  replyCompletion: null as (() => void) | null,
   connectRenders: vi.fn(),
 }));
 
@@ -38,7 +39,7 @@ vi.mock("../../src/mobile/screens/Connect", () => ({
 vi.mock("../../src/mobile/screens/NodeList", () => ({
   default: (props: {
     onAuthFailed: () => void;
-    onOpenNode: (nextNode: typeof node) => void;
+    onOpenNode: (nextNode: typeof node, prompt?: string) => void;
     onOpenIssues: (mesh: typeof mesh) => void;
   }) => {
     appState.authFailed = props.onAuthFailed;
@@ -48,7 +49,10 @@ vi.mock("../../src/mobile/screens/NodeList", () => ({
       { "data-testid": "mock-node-list" },
       createElement(
         "button",
-        { "data-testid": "open-terminal", onClick: () => props.onOpenNode(node) },
+        {
+          "data-testid": "open-terminal",
+          onClick: () => props.onOpenNode(node, "Check the preview deploy."),
+        },
         "open terminal",
       ),
     );
@@ -64,21 +68,96 @@ const mesh = {
   sandbox: false,
 };
 
+vi.mock("../../src/mobile/screens/NodeOverview", () => ({
+  default: (props: {
+    prompt?: string;
+    draft?: string;
+    replySending?: boolean;
+    replyNotice?: string;
+    onDraftChange: (draft: string) => void;
+    onReplySendingChange: (sending: boolean) => void;
+    onReplyNoticeChange: (notice: string) => void;
+    onChanges: () => void;
+    onTerminal: () => void;
+  }) => {
+    appState.replyCompletion = () => {
+      props.onDraftChange("");
+      props.onReplyNoticeChange("Reply delivered to the terminal.");
+      props.onReplySendingChange(false);
+    };
+    return createElement(
+      "div",
+      null,
+      createElement("p", { "data-testid": "agent-request" }, props.prompt),
+      createElement("p", { "data-testid": "reply-draft" }, props.draft),
+      createElement(
+        "p",
+        { "data-testid": "reply-sending" },
+        String(props.replySending ?? false),
+      ),
+      createElement("p", { "data-testid": "reply-notice" }, props.replyNotice),
+      createElement(
+        "button",
+        {
+          "data-testid": "edit-reply",
+          onClick: () => props.onDraftChange("I will check the build logs."),
+        },
+        "Edit reply",
+      ),
+      createElement(
+        "button",
+        {
+          "data-testid": "start-reply",
+          onClick: () => props.onReplySendingChange(true),
+        },
+        "Start reply",
+      ),
+      createElement(
+        "button",
+        { "data-testid": "open-changes", onClick: props.onChanges },
+        "Review changes",
+      ),
+      createElement(
+        "button",
+        { "data-testid": "overview-terminal", onClick: props.onTerminal },
+        "Open terminal",
+      ),
+    );
+  },
+}));
+
 vi.mock("../../src/mobile/screens/TerminalScreen", () => ({
   default: (props: { onOpenChanges?: () => void }) =>
     createElement(
-      "button",
-      { "data-testid": "open-changes", onClick: props.onOpenChanges },
-      "open changes",
+      "div",
+      null,
+      createElement("p", { "data-testid": "mock-terminal" }, "Terminal"),
+      createElement(
+        "button",
+        { "data-testid": "terminal-open-changes", onClick: props.onOpenChanges },
+        "open changes",
+      ),
     ),
 }));
 
 vi.mock("../../src/mobile/screens/ChangesScreen", () => ({
-  default: (props: { onOpenPr: (branch: string) => void }) =>
+  default: (props: {
+    onOpenPr: (branch: string) => void;
+    onBack: () => void;
+  }) =>
     createElement(
-      "button",
-      { "data-testid": "open-pr", onClick: () => props.onOpenPr("main") },
-      "open PR",
+      "div",
+      null,
+      createElement(
+        "button",
+        { "data-testid": "open-pr", onClick: () => props.onOpenPr("main") },
+        "open PR",
+      ),
+      createElement(
+        "button",
+        { "data-testid": "changes-back", onClick: props.onBack },
+        "back",
+      ),
     ),
 }));
 
@@ -111,6 +190,7 @@ describe("mobile App auth recovery", () => {
     appState.connect = null;
     appState.openIssues = null;
     appState.lateSpawn = null;
+    appState.replyCompletion = null;
     appState.connectRenders.mockClear();
     window.history.replaceState(null, "", "/");
   });
@@ -134,6 +214,71 @@ describe("mobile App auth recovery", () => {
 
     expect(await screen.findByTestId("connect-screen")).toBeTruthy();
     expect(screen.queryByTestId("create-pr-sheet")).toBeNull();
+  });
+
+  it("keeps request text and an unsent reply across details, terminal, and changes", async () => {
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    expect(screen.getByTestId("agent-request").textContent).toBe(
+      "Check the preview deploy.",
+    );
+    await act(async () => screen.getByTestId("edit-reply").click());
+
+    await act(async () => screen.getByTestId("overview-terminal").click());
+    expect(screen.getByTestId("mock-terminal")).toBeTruthy();
+    await act(async () =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
+    expect(screen.getByTestId("agent-request").textContent).toBe(
+      "Check the preview deploy.",
+    );
+    expect(screen.getByTestId("reply-draft").textContent).toBe(
+      "I will check the build logs.",
+    );
+
+    await act(async () => screen.getByTestId("open-changes").click());
+    expect(screen.getByTestId("open-pr")).toBeTruthy();
+    await act(async () =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
+    expect(screen.getByTestId("agent-request").textContent).toBe(
+      "Check the preview deploy.",
+    );
+    expect(screen.getByTestId("reply-draft").textContent).toBe(
+      "I will check the build logs.",
+    );
+  });
+
+  it("settles a pending reply after navigating to changes", async () => {
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("edit-reply").click());
+    await act(async () => screen.getByTestId("start-reply").click());
+    expect(screen.getByTestId("reply-sending").textContent).toBe("true");
+
+    await act(async () => screen.getByTestId("overview-terminal").click());
+    expect(screen.getByTestId("mock-terminal")).toBeTruthy();
+    expect(appState.replyCompletion).toBeTruthy();
+    await act(async () =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
+    expect(screen.getByTestId("reply-sending").textContent).toBe("true");
+
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => appState.replyCompletion?.());
+    await act(async () =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
+    expect(screen.getByTestId("agent-request").textContent).toBe(
+      "Check the preview deploy.",
+    );
+    expect(screen.getByTestId("reply-draft").textContent).toBe("");
+    expect(screen.getByTestId("reply-sending").textContent).toBe("false");
+    expect(screen.getByTestId("reply-notice").textContent).toBe(
+      "Reply delivered to the terminal.",
+    );
   });
 
   it("clears the token and transitions to Connect only once for duplicate failures", async () => {

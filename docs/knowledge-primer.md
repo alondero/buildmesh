@@ -638,3 +638,14 @@ Preserve each file's encoding and line endings when editing; do not assume a rep
 ### Saved Spawn Configurations
 
 `preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
+
+## Mobile task navigation and idea capture
+
+The mobile shell owns screen history and the selected home tab. NodeList owns
+Overview/Work polling and attention events; NodeOverview polls the selected
+node and sends short replies through the acknowledged HTTP input route.
+CaptureIdea retains a browser-local draft until creation succeeds. Its prompt
+crosses the generated CreateNodeRequest boundary into SpawnIntent::Prompt,
+so the existing spawn orchestrator owns initial prompt delivery. The create
+route validates text size and prompt capability before creating a node;
+mobile never races terminal startup by injecting the idea as keystrokes.

@@ -72,3 +72,46 @@ describe("parentOf", () => {
     expect(seen).toEqual(["diff", "changes", "terminal", "list"]);
   });
 });
+
+
+it("returns from direct changes to details, and through terminal when opened there", () => {
+  const direct: Screen = { kind: "diff", node, filePath: "a.ts", fromOverview: true };
+  expect(parentOf(parentOf(direct))).toEqual({ kind: "overview", node });
+  const viaTerminal: Screen = { kind: "diff", node, filePath: "a.ts", terminalFromOverview: true };
+  expect(parentOf(parentOf(viaTerminal))).toEqual({ kind: "terminal", node, fromOverview: true });
+  expect(parentOf(parentOf(parentOf(viaTerminal)))).toEqual({ kind: "overview", node });
+});
+
+it("preserves the agent request and reply draft while backing out of work screens", () => {
+  const detail = {
+    kind: "overview",
+    node,
+    prompt: "Please fix the preview deploy.",
+    draft: "I will check the build logs.",
+    replySending: true,
+    replyNotice: "",
+  } satisfies Screen;
+  const directDiff: Screen = {
+    kind: "diff",
+    node,
+    filePath: "src/deploy.ts",
+    fromOverview: true,
+    prompt: detail.prompt,
+    draft: detail.draft,
+    replySending: detail.replySending,
+    replyNotice: detail.replyNotice,
+  };
+  expect(parentOf(parentOf(directDiff))).toEqual(detail);
+
+  const terminalDiff: Screen = {
+    kind: "diff",
+    node,
+    filePath: "src/deploy.ts",
+    terminalFromOverview: true,
+    prompt: detail.prompt,
+    draft: detail.draft,
+    replySending: detail.replySending,
+    replyNotice: detail.replyNotice,
+  };
+  expect(parentOf(parentOf(parentOf(terminalDiff)))).toEqual(detail);
+});
