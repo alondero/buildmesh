@@ -33,6 +33,10 @@ pub(crate) struct HookState {
 }
 
 impl HookState {
+    pub(crate) fn matches_turn(&self, incoming: Option<&str>) -> bool {
+        self.turn.as_deref().zip(incoming).is_some_and(|(known, incoming)| known == incoming)
+    }
+
     pub(crate) fn accepts(&mut self, turn: Option<&str>, starts_turn: bool) -> bool {
         if starts_turn {
             self.turn = turn.map(str::to_owned);

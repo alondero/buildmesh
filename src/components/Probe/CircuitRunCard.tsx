@@ -31,6 +31,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
@@ -168,7 +169,7 @@ export function CircuitRunCard({
   const retried = steps.filter((s) => s.attempt > 1);
   // The run row carries no error column; the ledger's first errored step
   // is the run's failure reason.
-  const firstError = steps.find((s) => s.status !== 'blocked' && s.error_message !== null && s.error_message !== '') ?? null;
+  const firstError = steps.find((s) => s.status !== 'blocked' && s.status !== 'unverified' && s.error_message !== null && s.error_message !== '') ?? null;
   // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
   // memoised: the duration clock re-renders a live card every second and must
   // not re-parse the blob each tick.
@@ -365,7 +366,8 @@ export function CircuitRunCard({
       )}
 
       {expanded && (
-        <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
+          <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
+            <CircuitEvidenceHistory key={run.id} runId={run.id} updatedAt={run.updated_at} />
           {/* Provenance behind the disclosure: trigger identity (dedupe key)
               and progress. Neither answers "what happened / why", so neither
               costs a headline line. */}
@@ -489,7 +491,7 @@ export function CircuitRunCard({
                       // Per-step log surface. #1219 will widen this to
                       // successful steps' captured output; the wrapping
                       // and colour it needs are already here.
-                      <pre className={`mt-0.5 whitespace-pre-wrap break-words font-mono ${s.status === 'blocked' ? 'text-status-warning' : 'text-status-error'}`}>
+                      <pre className={`mt-0.5 whitespace-pre-wrap break-words font-mono ${s.status === 'blocked' || s.status === 'unverified' ? 'text-status-warning' : 'text-status-error'}`}>
                         {s.error_message}
                       </pre>
                     )}

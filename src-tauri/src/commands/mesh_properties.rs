@@ -311,6 +311,12 @@ pub fn update_mesh_worktree_directory(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn circuit_cutover_rejects_both_legacy_enable_commands_before_dispatch() {
+        assert!(super::set_mesh_autopilot_enabled(999_999, true).unwrap_err().contains("retired"));
+        assert!(super::update_mesh_autopilot(999_999, true, None, 2, None, None).unwrap_err().contains("retired"));
+    }
+
     use super::WORKTREE_DIR_CHANGED_EVENT;
 
     #[test]
@@ -423,6 +429,10 @@ pub fn update_mesh_autopilot(
     provider: Option<String>,
     action_on_success: Option<String>,
 ) -> Result<(), String> {
+    if enabled && crate::services::autopilot::legacy_retired() {
+        return Err("Legacy Autopilot is retired. Configure a Circuit manually; retained legacy work will not restart.".into());
+    }
+
     if !(1..=8).contains(&concurrency_limit) {
         return Err(format!(
             "invalid autopilot concurrency limit {}: must be 1..=8",
@@ -529,6 +539,10 @@ fn format_reasons(reasons: &[crate::autopilot::compatibility::AutopilotCompatibi
 /// an error rather than a silent success.
 #[tauri::command]
 pub fn set_mesh_autopilot_enabled(mesh_id: i64, enabled: bool) -> Result<(), String> {
+    if enabled && crate::services::autopilot::legacy_retired() {
+        return Err("Legacy Autopilot is retired. Configure a Circuit manually; retained legacy work will not restart.".into());
+    }
+
     // Issue #1152 — read-side check before the narrow write. Reject the
     // enable when the resolved Spawn Option is incompatible (same
     // verdict the Probe UI displays). Disabling is always allowed.

@@ -895,6 +895,7 @@ export function statusTextClass(status: string): string {
     case 'running':
       return 'text-accent-cyan';
     case 'blocked':
+    case 'unverified':
     case 'paused':
       return 'text-status-warning';
     case 'failed':

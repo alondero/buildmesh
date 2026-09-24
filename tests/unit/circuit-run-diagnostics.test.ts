@@ -42,6 +42,17 @@ import type { CircuitWithRuns } from '../../src/types/generated/CircuitWithRuns'
  * the copy is testable without mounting the panel.
  */
 describe('run diagnostics', () => {
+  it('labels unresolved evidence separately from approval and failure', () => {
+    expect(stepStatusLabel('unverified')).toBe('Unverified Checkpoint');
+    expect(stepStatusLabel('blocked')).toBe('Needs approval');
+    expect(runNeedsAttention({
+      run: { id: 1, circuit_id: 1, mesh_id: 1, state: 'running', trigger_identity: 'manual:1',
+        context_json: '{}', source_agent_node_id: null, created_at: '', updated_at: '' },
+      steps: [{ id: 1, run_id: 1, node_id: 'comment', status: 'unverified', attempt: 1,
+        agent_node_id: null, outcome: null, error_message: 'Inspect the external action.',
+        started_at: null, completed_at: null }],
+    })).toBe(true);
+  });
   const st = (node_id: string, status: string) => ({ node_id, status, error_message: null });
   const detail = (id: number, state: string, updated_at = '2026-08-22 10:00:00') => ({
     run: { id, circuit_id: 1, mesh_id: 1, state, trigger_identity: `run:${id}`, context_json: '{}',

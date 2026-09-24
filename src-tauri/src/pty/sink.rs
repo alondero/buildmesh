@@ -190,6 +190,18 @@ mod tests {
     }
 
     #[test]
+    fn circuit_buffered_colour_queries_do_not_inject_late_input() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.send_owned(b"before\x1b]10;?".to_vec());
+        sink.send_owned(b"\x1b\\middle\x1b]11;?\x07after\x1b[31mred\x1b[0m".to_vec());
+        sink.set(collecting_channel(&received));
+        assert_eq!(&*received.lock().unwrap(),b"beforemiddleafter\x1b[31mred\x1b[0m");
+        sink.send_owned(b"\x1b]10;?\x1b\\".to_vec());
+        assert!(received.lock().unwrap().ends_with(b"\x1b]10;?\x1b\\"),"live terminal queries must still reach xterm");
+    }
+
+    #[test]
     fn send_before_subscribe_flushes_in_order_on_register() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = OutputSink::new();

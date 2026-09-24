@@ -247,7 +247,7 @@ mod tests {
         let node = conn.last_insert_rowid();
         if piloted {
             let circuit =
-                db::create_autopilot_circuit_inner(conn, mesh.id, "c", "", 2, "{}").unwrap();
+                db::create_autopilot_circuit_inner(conn, mesh.id, "c", "", 2, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
             let run = db::create_circuit_run_locked(
                 conn,
                 circuit.id,
@@ -256,6 +256,7 @@ mod tests {
                 "{}",
             )
             .unwrap();
+            conn.execute("UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1", [run]).unwrap();
             conn.execute(
                 "INSERT INTO autopilot_circuit_run_steps (run_id, node_id, agent_node_id, status) \
                  VALUES (?1, 'worker', ?2, 'running')",
@@ -274,7 +275,7 @@ mod tests {
     /// threshold is a zombie: it is scanned, then transitioned to terminal
     /// `Lost`.
     #[test]
-    fn stale_sessionless_piloted_node_is_reaped() {
+    fn stale_sessionless_node_with_terminal_owner_is_reaped() {
         let mut conn = isolated_conn();
         let node = seed_node(
             &mut conn,
@@ -291,6 +292,21 @@ mod tests {
         let flipped = db::reap_zombie_agents_inner(&mut conn, &candidates).unwrap();
         assert_eq!(flipped, vec![node]);
         assert_eq!(status_of(&conn, node), SessionStatus::Lost);
+    }
+
+    #[test]
+    fn active_circuit_uncertainty_is_never_reaped_as_confirmed_loss() {
+        let mut conn = isolated_conn();
+        let node = seed_node(&mut conn, "uncertain", "running", now_ms() - THRESHOLD - 60_000, None, true);
+        let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
+        assert_eq!(candidates, vec![node]);
+        for state in ["pending", "running", "paused"] {
+            conn.execute("UPDATE autopilot_circuit_runs SET state=?1", [state]).unwrap();
+            assert!(db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap().is_empty());
+            assert!(db::reap_zombie_agents_inner(&mut conn, &candidates).unwrap().is_empty(),
+                "the writer must recheck live ownership after the scan");
+            assert_eq!(status_of(&conn, node), SessionStatus::Running);
+        }
     }
 
     /// A node that entered `running` recently is not observation-quiet yet.

@@ -127,6 +127,8 @@ pub(crate) use warm_pool::{
     batch_delete_warm_worktrees_by_id,
 };
 
+pub(crate) mod legacy_retirement;
+
 #[cfg(test)]
 mod migration_tests;
 
@@ -704,6 +706,13 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS legacy_autopilot_retirements (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            prior_state TEXT NOT NULL,
+            session_started_at INTEGER,
+            retired_at TEXT NOT NULL DEFAULT (datetime('now')),
+            stopped_at TEXT
+        );
         -- Autopilot Circuits (spec #1205 / walking skeleton #1206, schema
         -- v34/v38). The three ledger tables plus a durable run-agent lease
         -- table. Canonical indexes are installed after schema evolution:
@@ -772,6 +781,29 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             completed_at TEXT,
             UNIQUE (run_id, node_id)
         );
+        CREATE TABLE IF NOT EXISTS circuit_effects (
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('intent','possible_dispatch','acknowledged','uncertain','not_performed','attested_completed')),
+            PRIMARY KEY (run_id, node_id, attempt, kind)
+        );
+        CREATE TABLE IF NOT EXISTS circuit_run_snapshots (
+            run_id INTEGER PRIMARY KEY REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            graph_json TEXT NOT NULL,
+            behavior_revision INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS circuit_run_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            node_id TEXT,
+            attempt INTEGER,
+            kind TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_circuit_history_run ON circuit_run_history(run_id, id);
         "
     )?;
 

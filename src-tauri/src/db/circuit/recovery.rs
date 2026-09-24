@@ -10,6 +10,47 @@ pub(crate) struct ReviewRecovery {
     pub source_id: i64,
     pub graph: CircuitGraph,
     pub name: String,
+    pub frozen_launches: Vec<(String, String)>,
+}
+
+pub(crate) enum ContinuationTarget {
+    Existing(i64),
+    Failed(i64),
+}
+
+/// Follow recorded generations under the caller's connection. Repeated
+/// requests for an older failure must never create a sibling review.
+pub(crate) fn continuation_target_inner(db: &Connection, run_id: i64) -> Result<ContinuationTarget, String> {
+    let original = super::ledger::get_circuit_run_inner(db, run_id).map_err(|e| e.to_string())?
+        .ok_or("This run no longer exists.")?;
+    if original.state != "failed" {
+        return Err("Only failed reviews can be continued. Cancelled reviews require a fresh review.".into());
+    }
+    let mut current = run_id;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) { return Err("Review lineage is inconsistent. Start a fresh review.".into()); }
+        let next: Option<(i64,String)> = db.query_row(
+            "SELECT id,state FROM autopilot_circuit_runs
+             WHERE json_extract(CASE WHEN json_valid(context_json) THEN context_json ELSE '{}' END, '$.\"recovery.from_run_id\"')=?1
+             ORDER BY id LIMIT 1", [current.to_string()], |row| Ok((row.get(0)?,row.get(1)?)))
+            .optional().map_err(|e| e.to_string())?;
+        match next {
+            None => return Ok(ContinuationTarget::Failed(current)),
+            Some((id,state)) if state == "failed" => current = id,
+            Some((id,state)) if matches!(state.as_str(), "pending" | "running" | "paused" | "completed") =>
+                return Ok(ContinuationTarget::Existing(id)),
+            Some(_) => return Err("The continued review was cancelled. Start a fresh review.".into()),
+        }
+    }
+}
+
+pub fn existing_review_successor(run_id: i64) -> Result<Option<i64>, String> {
+    let db = crate::db::read_conn();
+    Ok(match continuation_target_inner(&db, run_id)? {
+        ContinuationTarget::Existing(id) => Some(id),
+        ContinuationTarget::Failed(_) => None,
+    })
 }
 
 pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -> Result<ReviewRecovery, String> {
@@ -21,12 +62,10 @@ pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -
     if run.state != "failed" {
         return Err("Only failed reviews can be continued. Open the active run to resume or cancel it.".into());
     }
-    let circuit = super::ledger::get_autopilot_circuit_inner(db, run.circuit_id).map_err(|e| e.to_string())?
-        .ok_or("This circuit no longer exists.")?;
     let context = CircuitContext::from_json(&run.context_json)?;
-    let original = CircuitGraph::from_json(&circuit.graph_json)?;
+    let original = super::evidence::run_graph(db, run_id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
-    let local = context.get("source.review_preset") == Some("1") || context.get("recovery.from_run_id").is_some();
+    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
     if !local && !original.is_issue_driven_autopilot_review() {
         return Err("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.".into());
     }
@@ -74,12 +113,17 @@ pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -
         return Err("The review feedback step has changed. Open the implementation agent to recover this custom circuit.".into());
     }
     graph.validate()?;
-    Ok(ReviewRecovery { run_id, source_id, graph, name: "Continued review".into() })
+    let frozen_launches = context.get("review.launch.reviewer").map(|value| vec![("review.launch.reviewer".into(), value.into())]).unwrap_or_default();
+    Ok(ReviewRecovery { run_id, source_id, graph, name: "Continued review".into(), frozen_launches })
 }
 
 pub fn review_recovery_source(run_id: i64, rounds: i32) -> Result<i64, String> {
     let db = crate::db::read_conn();
-    Ok(review_recovery_inner(&db, run_id, rounds)?.source_id)
+    let parent = match continuation_target_inner(&db, run_id)? {
+        ContinuationTarget::Failed(id) => id,
+        ContinuationTarget::Existing(_) => run_id,
+    };
+    Ok(review_recovery_inner(&db, parent, rounds)?.source_id)
 }
 
 pub fn continue_failed_review(run_id: i64, rounds: i32) -> Result<i64, String> {

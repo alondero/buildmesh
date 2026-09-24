@@ -1,13 +1,10 @@
 //! GitHub effects for the circuit worker (issue #1660).
 //! A new GitHub action kind is added here, not in the observe-step-commit loop.
 
-use tauri::AppHandle;
-
 use crate::autopilot::circuit::model::CircuitNodeKind;
-use crate::autopilot::circuit::stepper::{advance, CircuitEvent, RunView};
+use crate::autopilot::circuit::stepper::{CircuitEvent, RunView};
 use crate::db;
 
-use super::{execute_effects, prepare_turn_boundaries};
 
 /// Determine the target (issue vs PR number) for a GitHub action.
 /// If the action is CloseIssue, it explicitly requires an issue trigger.
@@ -138,14 +135,13 @@ pub(super) fn ensure_open_pr(
 /// the stepper with the result so context updates (e.g. `pr.*`) commit atomically
 /// before downstream nodes cascade.
 pub(super) fn call_github_effect(
-    app: &AppHandle,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
     node_id: &str,
     action: crate::autopilot::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
-) -> Result<(), String> {
+) -> Result<CircuitEvent, String> {
     use crate::autopilot::circuit::model::GithubActionKind;
     use crate::services::github::GitHubClient;
 
@@ -294,6 +290,11 @@ pub(super) fn call_github_effect(
 
     let event = match action_res {
         Ok(ev) => ev,
+        Err(err) if !open_pr_policy.is_some_and(|policy| policy.requires_existing()) => CircuitEvent::EffectUncertain {
+            node_id: node_id.to_string(),
+            attempt: view.step(node_id).map_or(1, |s| s.attempt),
+            reason: format!("External action result is unknown: {err}. Inspect GitHub before recording an outcome or deliberately retrying."),
+        },
         Err(err) => CircuitEvent::GithubActionResult {
             node_id: node_id.to_string(),
             success: false,
@@ -305,47 +306,6 @@ pub(super) fn call_github_effect(
         },
     };
 
-    let transition = advance(view, &event);
-    // GitHub actions can cascade directly into a wrap-up correction prompt.
-    // Capture that prompt's pre-turn report in this same transition commit;
-    // otherwise the recursive effect path would bypass the normal drive loop.
-    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
-    if !transition.step_writes.is_empty()
-        || transition.run_state_changed
-        || transition.context_changed
-        || turn_boundary_changed
-    {
-        let ops = transition
-            .step_writes
-            .iter()
-            .map(|w| db::CircuitStepOp {
-                node_id: w.node_id.clone(),
-                status: w.status.as_db_str().to_string(),
-                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
-                error: w.error.clone(),
-                agent_node_id: None,
-                attempt: w.attempt,
-                fresh_attempt: w.fresh_attempt,
-            })
-            .collect::<Vec<_>>();
-        let run_state = if transition.run_state_changed {
-            Some(view.state.as_db_str())
-        } else {
-            None
-        };
-        db::commit_circuit_advance(
-            active.run.id,
-            run_state,
-            Some(&view.context.to_json()?),
-            &ops,
-        )
-        .map_err(|e| format!("commit failed: {}", e))?;
-    }
-
-    if !transition.effects.is_empty() {
-        execute_effects(app, active, view, &transition.effects)?;
-    }
-
     tracing::info!(
         "circuits: run {} executed GitHub {:?} on {}/{}",
         active.run.id,
@@ -353,5 +313,5 @@ pub(super) fn call_github_effect(
         owner,
         repo
     );
-    Ok(())
+    Ok(event)
 }

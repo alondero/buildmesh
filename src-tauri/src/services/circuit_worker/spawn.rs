@@ -100,6 +100,13 @@ pub(super) fn resolve_review_spawn_inputs(
         return (provider, explicit);
     }
 
+    if let Some(configuration) = frozen_review_configuration(view, node_id) {
+        explicit.model = configuration.model;
+        explicit.effort = configuration.effort;
+        explicit.extra_args = configuration.extra_args;
+        return (Some(configuration.id), explicit);
+    }
+
     let source_provider = view
         .context
         .get("source.provider")
@@ -150,6 +157,11 @@ pub(super) fn resolve_review_spawn_inputs(
         explicit.effort = explicit.effort.or(source_effort);
     }
     (provider, explicit)
+}
+
+fn frozen_review_configuration(view: &RunView, node_id: &str) -> Option<crate::preferences::spawn_configurations::SpawnConfiguration> {
+    view.context.get(&format!("review.launch.{node_id}"))
+        .and_then(|value| serde_json::from_str(value).ok())
 }
 
 pub(super) struct ReviewSpawnResolution {
@@ -406,16 +418,12 @@ pub(super) fn attach_spawned_agent(
     agent_node_id: i64,
     parent_agent_node_id: Option<i64>,
 ) -> Result<(), String> {
-    if !db::set_circuit_step_agent_node_with_parent(
-        run_id,
-        node_id,
-        agent_node_id,
-        parent_agent_node_id,
-    )
-    .map_err(|error| format!("could not attach agent to step: {}", error))?
-    {
-        return Err("could not attach agent to step: step row no longer exists".to_string());
-    }
+    let attempt = view.step(node_id).ok_or("Spawn step no longer exists")?.attempt;
+    let revision = db::circuit::evidence::acknowledge_spawn_attachment(
+        run_id, node_id, attempt, agent_node_id, parent_agent_node_id, view.step(node_id).and_then(|step| step.agent_node_id),
+    ).map_err(|error| format!("could not attach agent to step: {error}"))?
+        .ok_or("Spawn attachment lost its run, attempt or agent identity fence")?;
+    view.context.set("evidence.revision", revision.to_string());
     view.attach_agent_node(node_id, agent_node_id);
     Ok(())
 }
@@ -429,6 +437,13 @@ pub(super) fn spawn_step_agent(
 ) -> Result<(), String> {
     use crate::agent::spawn::WorktreePolicy;
 
+    if let Some(value) = view.context.get(&format!("review.launch.{node_id}")) {
+        let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(value)
+            .map_err(|_| "The frozen reviewer configuration is unreadable. Start a fresh review.".to_string())?;
+        if configuration.resolved.is_none() {
+            return Err("The frozen reviewer configuration is incomplete. Start a fresh review.".into());
+        }
+    }
     let kind = view
         .graph
         .node(node_id)
@@ -491,11 +506,11 @@ pub(super) fn spawn_step_agent(
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
-    let inherited_configuration = parent_agent_node_id.and_then(|id| db::get_agent_node_by_id(id).ok())
+    let inherited_configuration = frozen_review_configuration(view, node_id).or_else(|| parent_agent_node_id.and_then(|id| db::get_agent_node_by_id(id).ok())
         .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)
         .or_else(|| view.step(node_id).and_then(|s| s.agent_node_id)
             .and_then(|id| db::get_agent_node_by_id(id).ok())
-            .and_then(|node| node.launch_configuration).filter(|c| c.id == provider));
+            .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)));
     let launch_harness = inherited_configuration.as_ref().and_then(|c| c.resolved.as_ref())
         .map_or(provider.as_str(), |plan| plan.harness.harness.as_str());
     let prompt_delivery =
@@ -548,6 +563,7 @@ pub(super) fn spawn_step_agent(
                 app,
             )
             .map_err(|e| format!("PTY write failed on retry: {}", e))?;
+            attach_spawned_agent(run_id, view, node_id, existing_agent_id, parent_agent_node_id)?;
             return Ok(());
         }
 
@@ -569,7 +585,7 @@ pub(super) fn spawn_step_agent(
                 source_issue,
                 name.as_deref(),
                 use_worktree_override,
-                old_node.launch_configuration.as_ref().filter(|c| c.id == provider).or(inherited_configuration.as_ref()),
+                inherited_configuration.as_ref().or_else(|| old_node.launch_configuration.as_ref().filter(|c| c.id == provider)),
             )
             .map_err(|e| e.to_string())?;
 

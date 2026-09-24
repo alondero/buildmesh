@@ -284,6 +284,9 @@ pub fn run() {
                 tracing::error!("failed to start external crash watchdog: {error}");
             }
 
+            // Commit legacy cancellation before crash recovery can offer auto-resume.
+            services::autopilot::retire_legacy_automation()?;
+
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
             // Lives inside SessionLifecycle (issue #132) — the lifecycle
@@ -569,6 +572,7 @@ pub fn run() {
             commands::circuit::list_circuit_queue,
             commands::circuit::list_circuit_probe,
             commands::circuit::create_circuit,
+            commands::circuit::copy_review_blueprint,
             commands::circuit::set_circuit_enabled,
             commands::circuit::update_circuit_graph,
             commands::circuit::update_circuit_concurrency_limit,
@@ -580,6 +584,8 @@ pub fn run() {
             commands::circuit::trigger_circuit_now,
             commands::circuit::trigger_circuit_from_node,
             commands::circuit::list_circuit_runs,
+            commands::circuit::circuit_run_history,
+            commands::circuit::record_circuit_outcome,
             commands::circuit::pause_circuit_run,
             commands::circuit::resume_circuit_run,
             commands::circuit::continue_circuit_review,

@@ -48,12 +48,10 @@ fn base_flags() -> Vec<String> {
     ]
 }
 
-/// Codex already launches hook commands through `cmd.exe /C` (Windows) or
-/// `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot.
-/// Nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never expands and never
-/// sees stdin. Bake the loopback callback URL and let Codex's own shell run
-/// curl. `-o` discards the empty 200 body: Codex Stop treats non-JSON stdout
-/// as a hook failure.
+/// Bake the loopback URL because the hook environment is a session snapshot.
+/// Quote curl's stdin marker: interactive Codex can use PowerShell, where bare
+/// `@-` is a parser error. The quoted argument also works under cmd.exe.
+/// Discard the empty response body because Stop expects JSON or empty stdout.
 fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let url = format!("http://localhost:{port}/api/attention/{node_id}");
@@ -63,7 +61,7 @@ fn attention_hook_handler(node_id: i64) -> serde_json::Value {
             "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}; fi"
         ) } else { format!("curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url}") },
         "commandWindows": crate::env::windows_attention_command(Some(&url)).unwrap_or_else(|| format!(
-            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url}"
+            "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary \"@-\" {url}"
         )),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
@@ -2051,6 +2049,40 @@ web_search = true
     /// snapshot. A nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never
     /// expands, never sees stdin, and never POSTs — which leaves
     /// `cli_session_id` empty so restart resume is skipped.
+    #[cfg(windows)]
+    #[test]
+    fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
+        use std::io::Read;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        for shell in ["powershell.exe", "cmd.exe"] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/api/attention/42", server.server_addr());
+            let handler = attention_hook_handler(42);
+            let original_url = format!("http://localhost:{}/api/attention/42",crate::http_server::current_http_port());
+            let command = handler["commandWindows"].as_str().unwrap().replace(&original_url,&endpoint);
+            let receiver = std::thread::spawn(move || {
+                let mut request = server.recv_timeout(std::time::Duration::from_secs(5)).unwrap()?;
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let path = request.url().to_owned();
+                request.respond(tiny_http::Response::empty(200)).unwrap();
+                Some((path,body))
+            });
+            let mut process = Command::new(shell);
+            if shell == "powershell.exe" { process.args(["-NoProfile","-NonInteractive","-Command"]); }
+            else { process.args(["/D","/C"]); }
+            let mut child = process.arg(command).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000).spawn().unwrap();
+            let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
+            child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+            let output = child.wait_with_output().unwrap();
+            let received = receiver.join().unwrap();
+            assert!(output.status.success(),"{shell}: {}",String::from_utf8_lossy(&output.stderr));
+            assert_eq!(received,Some(("/api/attention/42".into(),payload.into())),"{shell}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+
     #[test]
     fn windows_hook_is_not_double_wrapped_and_does_not_rely_on_process_env() {
         let temp = TempDir::new().unwrap();
@@ -2072,7 +2104,7 @@ web_search = true
             );
             assert!(
                 !windows.contains("cmd.exe"),
-                "{event} commandWindows must not nest cmd.exe; Codex already runs cmd /C: {windows}"
+                "{event} commandWindows must not nest cmd.exe; the Codex hook runner owns shell execution: {windows}"
             );
             assert!(
                 !command.contains("BUILDMESH_PORT")

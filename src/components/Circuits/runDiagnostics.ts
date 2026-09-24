@@ -120,7 +120,7 @@ export function canContinueReview(detail: CircuitRunDetail, reviewCircuit: Revie
 /** A run needs a user's attention before the circuit can make progress. */
 export function runNeedsAttention(detail: CircuitRunDetail, reviewCircuit: ReviewCircuitMetadata | null = null): boolean {
   return detail.run.state === 'failed' || detail.run.state === 'paused' || reviewResult(detail, reviewCircuit)?.needsAttention === true ||
-    detail.steps.some((step) => step.status === 'blocked');
+    detail.steps.some((step) => step.status === 'blocked' || step.status === 'unverified');
 }
 
 /**
@@ -408,6 +408,7 @@ export function countActiveRuns(
 export type RunActivityKind =
   | 'running'
   | 'awaiting_approval'
+  | 'unverified'
   | 'queued'
   | 'terminal'
   | 'idle';
@@ -485,6 +486,11 @@ export function runActivity(
       nodeId: blocked.node_id,
       detail: 'A collaborator gate is parked until you approve it.',
     };
+  }
+  const unverified = firstWith('unverified');
+  if (unverified !== null) {
+    return { kind: 'unverified', label: 'Unverified Checkpoint', nodeId: unverified.node_id,
+      detail: unverified.error_message ?? 'Evidence is incomplete. Inspect the latest observations before continuing.' };
   }
   if (running !== null) {
     return { kind: 'running', label: 'Running', nodeId: running.node_id, detail: null };
@@ -611,6 +617,8 @@ export function activityStatusToken(kind: RunActivityKind, runState: string): st
       return 'running';
     case 'awaiting_approval':
       return 'blocked';
+    case 'unverified':
+      return 'unverified';
     case 'queued':
       return STEP_STATUS_QUEUED;
     case 'terminal':

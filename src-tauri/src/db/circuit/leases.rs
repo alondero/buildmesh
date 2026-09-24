@@ -237,6 +237,7 @@ pub fn claim_agent_spawn(node_id: i64) -> SqlResult<Option<String>> {
 
 pub(crate) fn claim_agent_spawn_inner(conn: &Connection, node_id: i64) -> SqlResult<Option<String>> {
     let tx = conn.unchecked_transaction()?;
+    if crate::db::legacy_retirement::pending_inner(&tx, node_id)? { return Ok(None); }
     import_legacy_cleanup_requests(&tx)?;
     expire_lifecycle_leases(&tx)?;
     tx.execute(
@@ -563,6 +564,16 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     conn: &Connection,
     days: i64,
 ) -> SqlResult<(usize, usize)> {
+    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshots"] {
+        conn.execute(&format!("DELETE FROM {table} WHERE run_id IN ({SWEEPABLE_RUNS})"), params![days])?;
+        conn.execute(&format!("DELETE FROM {table} WHERE run_id IN (
+            SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ('completed','failed')
+            AND r.updated_at < datetime('now', '-' || ?1 || ' days')
+            AND r.trigger_identity NOT LIKE 'interval:%' AND r.trigger_identity NOT LIKE 'manual:%'
+            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
+                JOIN agent_node_lifecycle_leases l ON l.node_id=s.agent_node_id
+                WHERE s.run_id=r.id AND l.cleanup_requested=1))"), params![days])?;
+    }
     // Steps first: the schema declares ON DELETE CASCADE, but enforcement rides
     // on the connection's `foreign_keys` pragma — on for the bundled SQLite,
     // off by default for a system-libsqlite link. The same defensive ordering

@@ -191,7 +191,41 @@ fn lock_planner_set<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'stati
 /// with no signal why. The lock-recovery side of #1235 is covered by
 /// [`lock_planner_set`] (issue #1224); this worker just needs the panic
 /// boundary.
+pub(crate) fn legacy_retired() -> bool { true }
+
+pub(crate) fn retire_legacy_automation() -> Result<(), String> {
+    let pending = db::legacy_retirement::retire().map_err(|error| error.to_string())?;
+    for node_id in pending {
+        let process_generation = crate::agent::process::PROCESS_REGISTRY.get(&node_id).map(|process| process.generation);
+        if !db::legacy_retirement::owns_stop(node_id).map_err(|error| error.to_string())? {
+            db::legacy_retirement::acknowledge_stop(node_id).map_err(|error| error.to_string())?;
+            continue;
+        }
+        if process_generation.is_some_and(|generation| !crate::agent::process::PROCESS_REGISTRY.kill_session_if_generation(node_id, generation)) {
+            db::legacy_retirement::acknowledge_stop(node_id).map_err(|error| error.to_string())?;
+            continue;
+        }
+        crate::autopilot::evaluator::unregister(node_id);
+        if let Err(error) = db::legacy_retirement::complete_stop(node_id) {
+            tracing::warn!("Legacy automation retired; node {node_id} stop acknowledgement pending: {error}");
+        }
+    }
+    Ok(())
+}
+
 pub fn start_autopilot_worker(app: AppHandle) {
+    if legacy_retired() {
+        std::thread::spawn(move || loop {
+            run_worker_pass("legacy_retirement", || {
+                if let Err(error) = retire_legacy_automation() {
+                    tracing::warn!("Legacy automation retirement retry failed: {error}");
+                }
+            });
+            std::thread::sleep(POLL_INTERVAL);
+        });
+        return;
+    }
+
     std::thread::spawn(move || {
         // Hydrate the evaluator's piloted-node registry from the ledger so
         // runs that were mid-pipeline before a restart keep evaluating once

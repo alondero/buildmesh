@@ -198,6 +198,15 @@ beforeEach(() => {
 });
 
 describe('CircuitsProbeTab', () => {
+  it('exposes the built-in Review Blueprint before it has any runs', async () => {
+    mockBackend({ circuits: [{ ...CIRCUIT, is_preset: true, enabled: false }], runs: [] });
+    openProbeDestination('circuits');
+    const inspect = await screen.findByRole('button', { name: 'Inspect Review Blueprint' });
+    fireEvent.click(inspect);
+    expect(useUIStore.getState().activeCircuitEditorId).toBe(CIRCUIT.id);
+    expect(screen.queryByLabelText(`Enable ${CIRCUIT.name}`)).toBeNull();
+  });
+
   it('continues a failed review for one round and focuses the admitted follow-up', async () => {
     const graph = { version: 3, nodes: [{ id: 'verdict', type: { type: 'review_verdict', target_node_id: 'reviewer' } }], edges: [] };
     const failed = { run: { ...RUN_DONE.run, state: 'failed', source_agent_node_id: 42, context_json: '{"source.review_preset":"1"}' },
@@ -788,6 +797,19 @@ describe('CircuitsProbeTab', () => {
   });
 
   // -- human-in-the-loop (#1207) ------------------------------------------------
+
+  it('shows unresolved evidence as a warning without approval or failure controls', async () => {
+    mockBackend({ runs:[{
+      run:{...RUN_DONE.run,id:15,state:'running'},
+      steps:[{...RUN_DONE.steps[0],id:3,run_id:15,node_id:'spawn',status:'unverified',outcome:null,
+        error_message:'Owned work completion is unavailable.',completed_at:null}],
+    }] });
+    openProbeDestination('circuits');
+    expect((await screen.findByTestId('run-step-15-spawn')).textContent).toContain('Unverified Checkpoint');
+    expect(screen.queryByTestId('run-error-15')).toBeNull();
+    expect(screen.queryByTestId('approve-15-spawn')).toBeNull();
+    expect(screen.getByTestId('run-step-15-spawn').querySelector('pre')?.className).toContain('text-status-warning');
+  });
 
   it('shows the blocked badge with an Approve button for parked gates', async () => {
     const RUN_BLOCKED: CircuitRunDetail = {

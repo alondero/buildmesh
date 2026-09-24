@@ -832,6 +832,29 @@ pub fn set_cli_session_id_if_missing(id: i64, cli_id: &str) -> SqlResult<bool> {
     set_cli_session_id_if_missing_inner(&db, id, cli_id)
 }
 
+/// Coherent status and lifecycle timestamp for a reduced-confidence Circuit
+/// projection. Poll time must never make an old status look newer than a reply.
+pub(crate) struct AgentStatusObservation {
+    pub status: SessionStatus,
+    pub session_incarnation: Option<String>,
+    pub session_id: Option<String>,
+    pub observed_at_ms: i64,
+    pub source_revision: String,
+}
+
+pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservation> {
+    read_conn().query_row("SELECT status,session_started_at,cli_session_id,status_changed_at FROM agent_nodes WHERE id=?1", [id], |row| {
+        let status: String = row.get(0)?;
+        let incarnation: Option<i64> = row.get(1)?;
+        let session_id: Option<String> = row.get(2)?;
+        let changed: Option<String> = row.get(3)?;
+        Ok(AgentStatusObservation { status:SessionStatus::from_db_str(&status),
+            session_incarnation:incarnation.map(|value| value.to_string()), session_id:session_id.clone(),
+            observed_at_ms:changed.as_deref().and_then(parse_status_changed_ms).unwrap_or(0),
+            source_revision:format!("{status}:{incarnation:?}:{session_id:?}:{changed:?}") })
+    })
+}
+
 /// Identity of the process and its last lifecycle transition. Continuations
 /// observed before user input/regeneration must not write into the new turn.
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
@@ -919,7 +942,7 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
 
 pub(crate) fn list_suspended_nodes_inner(db: &Connection) -> SqlResult<Vec<AgentNode>> {
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended'", AGENT_NODE_COLUMNS)
+        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended' AND NOT EXISTS (SELECT 1 FROM legacy_autopilot_retirements r WHERE r.node_id=agent_nodes.id)", AGENT_NODE_COLUMNS)
     )?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
@@ -1014,7 +1037,10 @@ pub(crate) fn list_zombie_candidates_inner(
          WHERE a.status = 'running' \
            AND (a.cli_session_id IS NULL OR TRIM(a.cli_session_id) = '') \
            AND EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
-                       WHERE s.agent_node_id = a.id)",
+                       WHERE s.agent_node_id = a.id) \
+           AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs r \
+               WHERE r.state IN ('pending','running','paused') AND (r.source_agent_node_id=a.id \
+                   OR EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s WHERE s.run_id=r.id AND s.agent_node_id=a.id)))",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
@@ -1052,7 +1078,10 @@ pub(crate) fn reap_zombie_agents_inner(conn: &mut Connection, ids: &[i64]) -> Sq
         let changed = tx.execute(
             "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 \
              WHERE id = ?3 AND status = 'running' \
-               AND (cli_session_id IS NULL OR TRIM(cli_session_id) = '')",
+               AND (cli_session_id IS NULL OR TRIM(cli_session_id) = '') \
+               AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs r \
+                   WHERE r.state IN ('pending','running','paused') AND (r.source_agent_node_id=?3 \
+                       OR EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s WHERE s.run_id=r.id AND s.agent_node_id=?3)))",
             params![lost, now, id],
         )?;
         if changed > 0 {

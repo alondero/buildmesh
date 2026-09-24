@@ -449,7 +449,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         data-testid="circuit-inspector"
         className="w-64 shrink-0 border-l border-border-subtle bg-bg-surface p-3 text-xs text-text-muted"
       >
-        Select a node to edit its configuration.
+        Select a node to inspect its configuration.
       </aside>
     );
   }

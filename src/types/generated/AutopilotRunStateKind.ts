@@ -9,4 +9,4 @@
  * after deterministic wrap-up passes while the optional second-turn
  * `loop_suffix_prompt` runs on the same node.
  */
-export type AutopilotRunState = "implementing" | "finishing" | "suffix_pending" | "completed" | "failed" | "merged";
+export type AutopilotRunState = "implementing" | "finishing" | "suffix_pending" | "cancelled" | "completed" | "failed" | "merged";
