@@ -48,11 +48,10 @@ use std::sync::OnceLock;
 ///
 /// Each Buildmesh runtime mints its own token lazily when its first
 /// Grok agent spawns ([`grok::provision_attention_hooks`]); subsequent
-/// Grok hook URLs in this process carry
-/// `?token=$BUILDMESH_HOOK_TOKEN` and the attention route verifies
-/// the presented value against the value stored here. A non-Buildmesh
-/// Grok session cannot guess the token, and a different Buildmesh
-/// runtime's token mismatches. Until the runtime spawns its first
+/// Grok hook commands in this process carry the token in the callback
+/// request, and the attention route verifies it against the value stored
+/// here. A non-Buildmesh Grok session cannot guess the token, and a different
+/// Buildmesh runtime's token mismatches. Until the runtime spawns its first
 /// Grok agent, this returns `None` and the route gate is permissive
 /// for Claude / Codex / AGY callbacks that don't carry a token.
 static RUNTIME_HOOK_TOKEN: OnceLock<String> = OnceLock::new();

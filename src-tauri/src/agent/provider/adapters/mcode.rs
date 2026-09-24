@@ -257,7 +257,7 @@ fn resolve_plugin_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Optio
 /// claims a working hook. Refuse provisioning with an actionable message
 /// instead — the spawn still proceeds, it just surfaces as
 /// `SignalHealth::Unavailable` rather than a silent black hole, exactly as
-/// `grok.rs:393-399` does for its HTTP hooks.
+/// `grok.rs` does for its command callbacks.
 ///
 /// Only the guest direction needs the check. `WindowsInterop` (Buildmesh in
 /// the WSL host, mcode the Windows binary) relays through
