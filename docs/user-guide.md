@@ -254,6 +254,36 @@ use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
 Do not share QR codes, pairing invitations, cookies, certificates, or logs.
 
+### Using Buildmesh on your phone
+
+The phone opens on **Overview**, with counts for agents needing attention,
+running agents, and all active agents. Errors and degraded status reporting
+appear first, followed by agents waiting for input. Each agent card shows its
+mesh name. Status reporting warnings mean the agent's activity may be out of
+date; inspect its terminal to check.
+
+Use the bottom navigation to switch between **Overview**, **Work**, and
+**Capture**. Work searches agent names, meshes, providers, and branches, with
+filters for attention, running, and idle agents. Each mesh has direct links
+to GitHub Issues and its Archive, plus a button to start an empty agent.
+
+**Capture** saves an idea draft on this phone as you type. Choose a mesh and
+an available agent (your choices are remembered on this phone), then select **Start working on this**. The idea becomes
+the new agent's initial prompt. Saved launch configurations are available;
+only agents supporting initial prompts are offered. A failed launch retains
+the draft. If the connection drops during launch, check Work before retrying:
+the desktop may have accepted the request. Drafts are local to the browser,
+are not a desktop backlog, and disappear when site data is cleared.
+
+Tapping an agent opens **Work details**, with current status, base reference,
+**Review changes**, **Open terminal**, and a reply field. Replies send text
+and Enter to an idle or waiting agent; delivery confirmation means the text
+reached the terminal, not that the agent completed the request. Inspect the
+agent's actual request before answering it. Longer replies belong in the
+terminal. Changes still supports file diffs and pull request creation. The
+request and unsent reply remain available while you inspect changes or the
+terminal. Back returns through the screen you came from.
+
 The **Coordinator Read API** is a separate, read-only surface for an external
 coordinator. It is off by default and uses its own capability-scoped token; it
 is not the phone pairing credential. Use your own authenticated tunnel for
