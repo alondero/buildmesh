@@ -5,8 +5,9 @@
 //!
 //! - [`issues`] — issue listing, Blocked-by parsing, trigger-label flags.
 //! - [`prs`] — pull-request listing, merge strategy, contributor data.
-//! - [`sync`] — host token, HTTP timeouts, rate-limit errors, and the shared
-//!   fetch policy (TTL, in-flight coalescing, live result over cache).
+//! - [`sync`] — host token, HTTP timeouts, and rate-limit errors. TTL and
+//!   live-over-cache helpers live here as tested policy for a future
+//!   snapshot store; live list methods fetch every time.
 
 pub mod issues;
 pub mod prs;

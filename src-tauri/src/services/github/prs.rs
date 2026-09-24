@@ -7,8 +7,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
 use super::sync::{
-    commit_live_probe, graphql_repository_or_error, rest_failure, GitHubClient, GitHubError,
-    HTTP_WRITE_REQUEST_TIMEOUT,
+    graphql_repository_or_error, rest_failure, GitHubClient, GitHubError, HTTP_WRITE_REQUEST_TIMEOUT,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -840,7 +839,7 @@ impl GitHubClient {
             }
         }
         all.truncate(PR_SUMMARY_CAP);
-        commit_live_probe(Ok(all))
+        Ok(all)
     }
 }
 

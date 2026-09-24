@@ -3,10 +3,9 @@
 //! Host-owned: the token and HTTP client live here. Mesh-owned owner/repo
 //! pairs are arguments on the resource methods, not state in this module.
 //!
-//! The fetch decision ([`refresh_decision`], [`combine_live_and_cache`]) is
-//! the one TTL, in-flight coalescing rule, and live-over-cache rule both
-//! probes use. A missing or stale snapshot never replaces a live read that
-//! already succeeded.
+//! [`refresh_decision`] and [`combine_live_and_cache`] are the shared TTL,
+//! in-flight coalescing, and live-over-cache rules both probes must use if
+//! a snapshot store is added. Live list methods fetch every time today.
 
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -385,9 +384,13 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 /// so they cannot drift into two cadences. Recency is in-memory only: a
 /// process start is always stale, the same rule as the spawn-time fetch
 /// TTL (a restart must not trust a snapshot from a previous run).
+///
+/// Live list methods do not consult this yet; they fetch every time.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const PROBE_FETCH_TTL: Duration = Duration::from_secs(60);
 
 /// Whether a probe refresh should hit the network.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshDecision {
     /// Last success is still inside [`PROBE_FETCH_TTL`].
@@ -403,6 +406,7 @@ pub enum RefreshDecision {
 /// when some other refresh is in flight — an in-flight call must not hide
 /// a read that already succeeded. Once the snapshot is stale, an in-flight
 /// refresh coalesces further callers onto that one request.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn refresh_decision(age: Option<Duration>, refresh_in_flight: bool) -> RefreshDecision {
     if matches!(age, Some(age) if age < PROBE_FETCH_TTL) {
         return RefreshDecision::ServeCached;
@@ -414,6 +418,7 @@ pub fn refresh_decision(age: Option<Duration>, refresh_in_flight: bool) -> Refre
 }
 
 /// What a probe should show after a live attempt and an optional snapshot.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRead<T, E> {
     /// The live fetch succeeded. Show this, not the cache.
@@ -431,6 +436,7 @@ pub enum ProbeRead<T, E> {
 /// the live fetch fails, and a missing cache then surfaces that failure
 /// rather than an empty success. That is the #1073 rule: a fallback must
 /// not discard a live result that already succeeded.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn combine_live_and_cache<T, E>(live: Result<T, E>, cache: Option<T>) -> ProbeRead<T, E> {
     match live {
         Ok(value) => ProbeRead::Live(value),
@@ -438,20 +444,6 @@ pub fn combine_live_and_cache<T, E>(live: Result<T, E>, cache: Option<T>) -> Pro
             Some(cached) => ProbeRead::Cached(cached),
             None => ProbeRead::Unavailable(err),
         },
-    }
-}
-
-/// Run one Issues or Pull Requests list through the shared policy.
-///
-/// These reads do not keep a snapshot, so the gate is "never fetched" and
-/// there is nothing to fall back to. A successful live value is returned
-/// unchanged. The call is the place a later snapshot has to go: it cannot
-/// replace a live success, and it is used only when the live read fails.
-pub(super) fn commit_live_probe<T, E>(live: Result<T, E>) -> Result<T, E> {
-    let _gate = refresh_decision(None, false);
-    match combine_live_and_cache(live, None) {
-        ProbeRead::Live(value) | ProbeRead::Cached(value) => Ok(value),
-        ProbeRead::Unavailable(err) => Err(err),
     }
 }
 

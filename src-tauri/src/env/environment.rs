@@ -220,6 +220,11 @@ pub fn current_env() -> Environment {
 /// account name or the repository's directory (which can be a mounted drive).
 pub(crate) fn wsl_home() -> Option<PathBuf> {
     if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
+    // A memoized miss from distro detection cannot become Some later.
+    // Entering the retry loop would only sleep 500ms to re-read None.
+    if get_default_wsl_distro().is_none() {
+        return None;
+    }
     static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| probe_until_some(3, probe_wsl_home_once));
     GUEST_HOME.clone()
 }
@@ -265,6 +270,34 @@ fn probe_until_some<T>(attempts: u32, mut probe: impl FnMut() -> Option<T>) -> O
         }
     }
     last
+}
+
+#[cfg(test)]
+mod wsl_probe_retry_tests {
+    use super::probe_until_some;
+    use std::cell::Cell;
+
+    #[test]
+    fn first_success_does_not_retry() {
+        let calls = Cell::new(0);
+        let got = probe_until_some(3, || {
+            calls.set(calls.get() + 1);
+            Some(7)
+        });
+        assert_eq!(got, Some(7));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn exhausted_retries_call_the_probe_once_per_attempt() {
+        let calls = Cell::new(0);
+        let got: Option<i32> = probe_until_some(3, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert_eq!(got, None);
+        assert_eq!(calls.get(), 3);
+    }
 }
 
 pub(super) fn parse_wsl_home_output(output: &[u8]) -> Option<PathBuf> {

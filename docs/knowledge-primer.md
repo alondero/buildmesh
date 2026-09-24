@@ -258,13 +258,15 @@ affordance, so the closed-render discipline stands.
 The Issues and Pull Requests probes are both Mesh-owned GitHub feeds. Their
 backend is split by resource under `services::github`: `issues` owns issue
 listing, Blocked-by parsing, and trigger-label flags; `prs` owns pull-request
-listing, merge strategy, and contributor data; `sync` owns the host token and
-the shared fetch policy (one freshness TTL, in-flight refresh coalescing,
-rate-limit errors left as API errors, and the rule that a missing or stale
-cache never replaces a successful live read). `services::github` re-exports
-the command-facing types, so handlers keep calling `services::github::...`.
-Do not put issue-only parsing in `prs` or pull-request merge logic in
-`issues`, and do not give either probe its own TTL.
+listing, merge strategy, and contributor data; `sync` owns the host token,
+HTTP timeouts, and rate-limit classification (a rate-limit body stays an API
+error, not a missing repository). `refresh_decision` and
+`combine_live_and_cache` live in `sync` as the shared TTL, coalescing, and
+live-over-cache rules both probes must use if a snapshot store is added;
+live list methods fetch every time today. `services::github` re-exports the
+command-facing types, so handlers keep calling `services::github::...`.
+Issue-only parsing stays in `issues`; pull-request merge logic stays in
+`prs`.
 
 ### Probe Panel shell (scroll ownership + narrow width)
 `ProbePanel.tsx` wraps every tab in `flex-1 overflow-y-auto` (`:359`) around an `h-full flex flex-col` keyed div (`:360-365`). A tab root must therefore be **layout-only** (`flex flex-col h-full min-h-0`) with **one** inner `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` body — the shared `<ProbeTabBody>` primitive exists to provide exactly that. Because the root is `h-full`, the panel's outer scroller has content precisely its own height and stays inert, so the inner body is the single *effective* scroll owner; adding `overflow-y-auto` to the root as well stacks two scrollers (the #1468 defect in `CircuitsProbeTab`). Two further traps: `overflow-y-auto` **alone computes `overflow-x: auto`** (CSS forbids one axis being `visible` while the other scrolls), so wide content can scroll the tab sideways unless you state `overflow-x-hidden`; and the dock's **240px minimum** (`PROBE_PANEL_BOUNDS`) means unbounded text (errors, identifiers, node ids) must wrap — `truncate` there hides the tail that carries the diagnosis, and `truncate` combined with `flex-wrap` on one row is self-contradictory. Note `ProbePanel.tsx` also declares a *local* `function ProbeTabBody` that is only the tab router — same name as the shared primitive, different component. Full checklist: `docs/development/probe-ui-checklist.md` (umbrella issue #1464).

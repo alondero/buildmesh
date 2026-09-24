@@ -8,7 +8,7 @@ use regex::Regex;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
-use super::sync::{commit_live_probe, rest_failure, GitHubClient, GitHubError};
+use super::sync::{rest_failure, GitHubClient, GitHubError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
@@ -361,7 +361,7 @@ impl GitHubClient {
         }
 
         let result: SearchResult = resp.json()?;
-        commit_live_probe(Ok(result.items))
+        Ok(result.items)
     }
 
     /// List open issues (excluding pull requests) carrying `label`. The
