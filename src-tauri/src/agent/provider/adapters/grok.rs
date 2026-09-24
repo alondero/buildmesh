@@ -27,16 +27,18 @@
 //!
 //! **Attention hooks** (issue #1282). Grok's hook surface
 //! (`~/.grok/docs/user-guide/10-hooks.md`) exposes both `Notification`
-//! (idle_prompt / permission_prompt / task_complete) and `Stop` events
-//! with a native HTTP handler — no curl wrapper. We inject a single
-//! global hook file at `~/.grok/hooks/buildmesh-attention.json`,
+//! (idle_prompt / permission_prompt / task_complete) and `Stop` events.
+//! Buildmesh uses command hooks that forward the event JSON with curl:
+//! Grok's native HTTP-hook SSRF guard rejects the local `http://` callback,
+//! while Buildmesh's loopback listener intentionally serves plain HTTP. We
+//! inject a single global hook file at `~/.grok/hooks/buildmesh-attention.json`,
 //! always trusted. Project-local `.grok/hooks/` requires folder trust
 //! (`/hooks-trust` or `--trust`); `--trust` is documented but **not**
 //! in `grok --help` 1.0.5, so there is no flag we can pass at spawn to
-//! unblock the project path. The URL expands `$BUILDMESH_PORT` and
+//! unblock the project path. The command expands `$BUILDMESH_PORT` and
 //! `$BUILDMESH_SESSION_ID` at hook runner time (set per-agent by
 //! `spawn_environment`), so the file is reusable across nodes — every
-//! runner carries the session id and port from its own environment.
+//! runner carries the session id, port, and hook token from its own environment.
 //!
 //! **Effort override** uses the documented `--effort` alias of
 //! `--reasoning-effort <level>` (`grok --help`). Grok accepts the seven
@@ -67,7 +69,7 @@ pub static GROK: GrokAdapter = GrokAdapter;
 /// validated against (issue #1366). The detailed event contract
 /// (`Notification` with `notificationType` =
 /// `permission_prompt` / `idle_prompt` / `task_complete`, `Stop`
-/// with `reason`, `$VAR` expansion in `url`) is documented in the
+/// with `reason`, `$VAR` expansion in `command` and `url`) is documented in the
 /// bundled `~/.grok/docs/user-guide/10-hooks.md` reference shipped
 /// with 1.0.5 but is *not* fully exposed on the public xAI docs.
 /// Pinned here so the `AttentionCapability` descriptor advertises
@@ -84,22 +86,28 @@ pub static GROK: GrokAdapter = GrokAdapter;
 /// version drift as a documented upgrade story rather than a gate.
 pub const GROK_MIN_HOOK_VERSION: &str = "1.0.5";
 
-/// The HTTP URL the Grok hook runner POSTs the event envelope to. The
-/// `$BUILDMESH_PORT`, `$BUILDMESH_SESSION_ID`, and `$BUILDMESH_HOOK_TOKEN`
-/// tokens expand at hook-run time (set per-agent by
-/// `spawn_environment`) — the file is therefore reusable across nodes
-/// without rewriting the literal values. The Grok docs
-/// (`~/.grok/docs/user-guide/10-hooks.md`, "Using variables in
-/// `command` and `url` fields") explicitly state that both `command`
-/// and `url` support `${VAR}` and `$VAR` expansion.
-///
-/// The trailing `?token=$BUILDMESH_HOOK_TOKEN` carries the
-/// runtime-scoped token (issue #1366) so the attention route can
-/// reject non-Buildmesh callbacks even on a same-box collision. The
-/// marker predicate in `is_buildmesh_handler` matches on the
-/// canonical `/api/attention/` + `BUILDMESH_PORT` anchors, so this
-/// URL change does not disturb the additive merge.
-const HOOK_URL: &str = "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN";
+/// The command hook forwards its stdin event envelope to Buildmesh's
+/// loopback endpoint. Grok expands the three `$BUILDMESH_*` references at
+/// hook-run time (they are set per agent by `spawn_environment`), so this
+/// global file remains reusable across nodes. The runtime-scoped token
+/// (issue #1366) lets the attention route reject non-Buildmesh callbacks
+/// even on a same-box collision. Native HTTP hooks cannot be used here:
+/// Grok's SSRF guard requires HTTPS, and Buildmesh intentionally serves
+/// loopback callbacks over plain HTTP.
+const HOOK_COMMAND_UNIX: &str = "curl -sf --noproxy '*' --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary @- \"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN\" >/dev/null 2>&1 || true";
+const HOOK_COMMAND_WINDOWS: &str = "curl.exe -sf --noproxy '*' --connect-timeout 1 --max-time 2 -X POST -H 'Content-Type: application/json' --data-binary '@-' \"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID?token=$BUILDMESH_HOOK_TOKEN\" > NUL 2>&1; exit 0";
+
+/// Grok runs command hooks through the shell belonging to the CLI runtime:
+/// PowerShell for native Windows Grok, POSIX sh for WSL/Linux/macOS Grok.
+/// `WindowsInterop` means the Grok process is Windows even when Buildmesh
+/// itself is running inside WSL.
+fn hook_command(env_type: EnvType) -> &'static str {
+    if env_type == EnvType::WindowsInterop || (cfg!(windows) && env_type != EnvType::Wsl) {
+        HOOK_COMMAND_WINDOWS
+    } else {
+        HOOK_COMMAND_UNIX
+    }
+}
 
 /// File name we own under `~/.grok/hooks/`. Namespaced so a user's
 /// existing hooks (and any future Buildmesh hook with a different
@@ -154,18 +162,19 @@ fn settings_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Marker predicate: a Grok HTTP handler is Buildmesh-owned when its
-/// `url` carries both anchors. URL-anchored rather than on a custom
-/// `statusMessage` field because Grok's parser tolerance for unknown
-/// handler fields is undocumented; the `url` is guaranteed preserved
-/// byte-for-byte. Substring match (not strict equality) so future
-/// refactors (adding a `?token=` query param, etc.) keep the merge
-/// stable — only the canonical anchors matter.
+/// Marker predicate: a Grok handler is Buildmesh-owned when its `url` or
+/// `command` carries both canonical anchors. Checking both fields lets the
+/// next spawn replace older generated HTTP handlers in place after moving to
+/// command hooks; unrelated user-authored handlers remain untouched.
 fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-    handler
-        .get("url")
-        .and_then(|v| v.as_str())
-        .is_some_and(|url| url.contains("/api/attention/") && url.contains("BUILDMESH_PORT"))
+    ["url", "command"].iter().any(|field| {
+        handler
+            .get(*field)
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| {
+                value.contains("/api/attention/") && value.contains("BUILDMESH_PORT")
+            })
+    })
 }
 
 /// Add or update the Buildmesh-owned handler in a single event's
@@ -214,16 +223,17 @@ fn merge_question_handler(groups: &mut Vec<serde_json::Value>, handler: &serde_j
 /// `persist`), and only rewrites when the Buildmesh entry actually
 /// changes (so re-running over a fresh write is a no-op on mtime and
 /// bytes — the spawn-path idempotency invariant from issue #886).
-/// Uses Grok's native HTTP handler type — the runner POSTs the event
-/// envelope directly as JSON (camelCase: `hookEventName`,
-/// `sessionId`, …), no curl wrapper.
+/// Uses a command handler because Grok rejects plain-HTTP URLs in native
+/// HTTP hooks. The runner sends the event envelope on stdin; curl forwards
+/// it unchanged to the loopback endpoint, and callback failures are
+/// best-effort so they never block a prompt or stop event.
 ///
 /// `Notification` is wired with no matcher field at all (Grok docs
 /// match-all behaviour); the matcher-group array is the array of
 /// matcher groups, each `{"hooks":[handler]}` shaped. `Stop` has no
 /// matcher either — Grok's docs warn "A matcher on `Stop` or
 /// `UserPromptSubmit` is ignored with a warning".
-fn ensure_hooks_json(path: &Path) -> Result<(), String> {
+fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     // If the file already exists, refuse to overwrite a malformed
     // user-authored payload (trailing comma, partial edit, …) — the
     // Codex pattern (`codex.rs:938`) treats parse failure as an
@@ -255,8 +265,8 @@ fn ensure_hooks_json(path: &Path) -> Result<(), String> {
     }
 
     let new_handler = serde_json::json!({
-        "type": "http",
-        "url": HOOK_URL,
+        "type": "command",
+        "command": command,
     });
 
     let settings_obj = settings
@@ -372,7 +382,7 @@ impl AgentProvider for GrokAdapter {
     /// `--trust`, and `--trust` is **not** in `grok --help` 1.0.5 —
     /// there is no spawn flag we can use to bypass the gate.
     ///
-    /// The HTTP handler POSTs the event envelope to the attention
+    /// The command handler POSTs the event envelope to the attention
     /// endpoint with `$BUILDMESH_PORT` and `$BUILDMESH_SESSION_ID`
     /// expanded at runner time (set per-agent by `spawn_environment`).
     /// The resolved project path is intentionally unused because the global
@@ -388,14 +398,14 @@ impl AgentProvider for GrokAdapter {
             command.arg("--networking-mode");
             let mirrored = crate::process_util::run_command_with_timeout(command, "WSL networking mode", std::time::Duration::from_secs(5))
                 .is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "mirrored");
-            if !mirrored { return Err("Grok's Windows HTTP callbacks require mirrored WSL networking; the interactive harness can still run.".into()); }
+            if !mirrored { return Err("Grok's Windows attention callbacks require mirrored WSL networking; the interactive harness can still run.".into()); }
         }
         if cfg!(windows) && resolved.env_type == EnvType::Wsl {
             let mut command = crate::process_util::command_no_window("wsl.exe");
             command.args(["--", "wslinfo", "--networking-mode"]);
             let mirrored = crate::process_util::run_command_with_timeout(command, "WSL networking mode", std::time::Duration::from_secs(5))
                 .is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "mirrored");
-            if !mirrored { return Err("Grok's native HTTP attention hooks require WSL mirrored networking; the interactive harness can still run.".into()); }
+            if !mirrored { return Err("Grok's WSL attention callbacks require mirrored WSL networking; the interactive harness can still run.".into()); }
         }
         // Issue #1366 — mint the process-wide hook token **here**, not
         // in `spawn_environment::wrap` (which fires for every agent
@@ -409,11 +419,11 @@ impl AgentProvider for GrokAdapter {
         // The call is idempotent: first invocation mints; subsequent
         // spawns in the same runtime see the same value, so all
         // Grok hooks in this process share one token. The token
-        // itself never appears in the JSON file — the URL template
+        // itself never appears in the JSON file — the command template
         // stores `$BUILDMESH_HOOK_TOKEN` as a literal and the Grok
-        // runner expands `$VAR` at hook-run time (the docs the
-        // issue links pin this; the same mechanism is documented
-        // for `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`).
+        // runner expands `$VAR` at hook-run time (the docs the issue
+        // links pin this; the same mechanism is documented for
+        // `BUILDMESH_PORT` / `BUILDMESH_SESSION_ID`).
         let token = crate::agent::mint_runtime_hook_token();
         tracing::info!(
             "grok provision_attention_hooks: minted runtime hook token {token}"
@@ -424,7 +434,7 @@ impl AgentProvider for GrokAdapter {
         } else { grok_home()? };
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create .grok/hooks dir: {e}"))?;
-        ensure_hooks_json(&dir.join(HOOK_FILE))
+        ensure_hooks_json(&dir.join(HOOK_FILE), hook_command(resolved.env_type))
     }
 
     fn supports_model_override(&self) -> bool {
@@ -481,14 +491,24 @@ mod tests {
 
     #[test]
     fn question_matcher_migration_preserves_user_handlers_in_mixed_group() {
-        let owned = serde_json::json!({"type":"http", "url":HOOK_URL});
+        let legacy_owned = serde_json::json!({
+            "type":"http",
+            "url":"http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID"
+        });
+        let owned = serde_json::json!({"type":"command", "command":HOOK_COMMAND_UNIX});
         let user = serde_json::json!({"type":"command", "command":"user-policy"});
-        let mut groups = vec![serde_json::json!({"matcher":"Bash", "hooks":[owned.clone(), user.clone()]})];
+        let mut groups = vec![serde_json::json!({
+            "matcher":"Bash",
+            "hooks":[legacy_owned, user.clone()]
+        })];
         assert!(merge_question_handler(&mut groups, &owned));
-        assert_eq!(groups, vec![
-            serde_json::json!({"matcher":"Bash", "hooks":[user]}),
-            serde_json::json!({"matcher":"^ask_user_question$", "hooks":[owned.clone()]})
-        ]);
+        assert_eq!(
+            groups,
+            vec![
+                serde_json::json!({"matcher":"Bash", "hooks":[user]}),
+                serde_json::json!({"matcher":"^ask_user_question$", "hooks":[owned.clone()]})
+            ]
+        );
         assert!(!merge_question_handler(&mut groups, &owned));
     }
 
@@ -953,35 +973,59 @@ mod tests {
     #[test]
     fn inject_writes_notification_and_stop_hooks() {
         let temp = with_user_home_redirect();
+        let path = temp
+            .path()
+            .join(".grok")
+            .join("hooks")
+            .join("buildmesh-attention.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy_handler = serde_json::json!({
+            "type": "http",
+            "url": "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID",
+        });
+        let legacy_settings = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [{ "hooks": [legacy_handler] }]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy_settings).unwrap()).unwrap();
         provision_grok(Path::new("/any"));
 
-        let path = temp.path().join(".grok").join("hooks").join("buildmesh-attention.json");
         let content = std::fs::read_to_string(&path).expect("hook file not written");
         let value: serde_json::Value =
             serde_json::from_str(&content).expect("hook file is not valid JSON");
         let hooks = value.get("hooks").expect("hooks key missing");
 
         for event in ["Notification", "Stop"] {
-            let url = hooks[event][0]["hooks"][0]["url"]
+            let command = hooks[event][0]["hooks"][0]["command"]
                 .as_str()
-                .unwrap_or_else(|| panic!("{event} hook missing or wrong shape: {value:#}"));
+                .unwrap_or_else(|| {
+                    panic!("{event} command hook missing or wrong shape: {value:#}")
+                });
             assert!(
-                url.contains("$BUILDMESH_PORT"),
-                "{event} url must expand BUILDMESH_PORT at runner time: {url}"
+                command.contains("$BUILDMESH_PORT"),
+                "{event} command must expand BUILDMESH_PORT at runner time: {command}"
             );
             assert!(
-                url.contains("$BUILDMESH_SESSION_ID"),
-                "{event} url must expand BUILDMESH_SESSION_ID at runner time: {url}"
+                command.contains("$BUILDMESH_SESSION_ID"),
+                "{event} command must expand BUILDMESH_SESSION_ID at runner time: {command}"
             );
             assert!(
-                url.contains("/api/attention/"),
-                "{event} url must POST to the attention endpoint: {url}"
+                command.contains("/api/attention/"),
+                "{event} command must POST to the attention endpoint: {command}"
             );
             assert!(
-                hooks[event][0]["hooks"][0]["type"].as_str() == Some("http"),
-                "{event} must use the native http handler (no curl wrapper): {value:#}"
+                hooks[event][0]["hooks"][0]["type"].as_str() == Some("command"),
+                "{event} must use a command handler to avoid Grok's HTTP URL restriction: {value:#}"
             );
         }
+
+        let user_prompt = &hooks["UserPromptSubmit"][0]["hooks"][0];
+        assert_eq!(user_prompt["type"].as_str(), Some("command"));
+        assert!(
+            user_prompt.get("url").is_none(),
+            "legacy HTTP URL must be removed: {user_prompt:#}"
+        );
     }
 
     /// Re-running injection is a no-op once the file matches the
@@ -1031,34 +1075,42 @@ mod tests {
         assert!(value["hooks"]["Stop"].is_array());
     }
 
-    /// The URL template is the single source of truth for the
-    /// attention endpoint — both events reference the same one, and
-    /// all three env vars (port + session id + hook token) appear so
-    /// the runner expands them per agent. Issue #1366 added the
-    /// `?token=$BUILDMESH_HOOK_TOKEN` query for the runtime-scoped
-    /// token gate; without it a non-Buildmesh Grok session could
-    /// POST to a Buildmesh node on a box collision.
+    /// Pin both platform command templates to the loopback endpoint,
+    /// runtime-scoped token, and stdin-forwarding contract. Command hooks
+    /// avoid Grok's HTTPS-only native HTTP URL validation.
     #[test]
-    fn hook_url_targets_attention_endpoint_with_env_expansion() {
-        assert!(HOOK_URL.starts_with("http://localhost:$BUILDMESH_PORT/"));
-        assert!(HOOK_URL.contains("/api/attention/$BUILDMESH_SESSION_ID"));
-        assert!(
-            !HOOK_URL.contains("127.0.0.1"),
-            "use `localhost` so the loopback-only peer check accepts the runner: {HOOK_URL}"
-        );
-        // Issue #1366: the runtime-scoped token template. Pin the
-        // exact `?token=$BUILDMESH_HOOK_TOKEN` query so a refactor
-        // that drops the token trips here before reaching the wire.
-        assert!(
-            HOOK_URL.contains("?token=$BUILDMESH_HOOK_TOKEN"),
-            "hook URL must carry the runtime-scoped token template: {HOOK_URL}"
-        );
-        // Pin the canonical anchors the marker predicate matches on
-        // — additive merge looks for these to recognise the
-        // Buildmesh-owned handler. If either anchor changes, the
-        // marker fails to find its own handler and starts appending
-        // duplicates on every re-run.
-        assert!(HOOK_URL.contains("/api/attention/") && HOOK_URL.contains("BUILDMESH_PORT"));
+    fn hook_commands_forward_stdin_to_the_tokenized_attention_endpoint() {
+        for command in [HOOK_COMMAND_UNIX, HOOK_COMMAND_WINDOWS] {
+            assert!(
+                command.contains("--data-binary"),
+                "event stdin must be forwarded: {command}"
+            );
+            assert!(
+                command.contains("http://localhost:$BUILDMESH_PORT/"),
+                "callback must use loopback: {command}"
+            );
+            assert!(
+                command.contains("/api/attention/$BUILDMESH_SESSION_ID"),
+                "callback must target its node: {command}"
+            );
+            assert!(
+                command.contains("?token=$BUILDMESH_HOOK_TOKEN"),
+                "runtime token must be sent: {command}"
+            );
+            assert!(
+                command.contains("Content-Type: application/json"),
+                "attention route expects JSON: {command}"
+            );
+            assert!(command.contains("curl"), "command hook must use curl: {command}");
+        }
+        assert_eq!(hook_command(EnvType::WindowsInterop), HOOK_COMMAND_WINDOWS);
+        if cfg!(windows) {
+            assert_eq!(hook_command(EnvType::Windows), HOOK_COMMAND_WINDOWS);
+            assert_eq!(hook_command(EnvType::Wsl), HOOK_COMMAND_UNIX);
+        } else {
+            assert_eq!(hook_command(EnvType::Windows), HOOK_COMMAND_UNIX);
+            assert_eq!(hook_command(EnvType::Wsl), HOOK_COMMAND_UNIX);
+        }
     }
 
     /// The hook file lives in the user's home Grok hooks dir, not in
@@ -1103,36 +1155,27 @@ mod tests {
     // user-authored matcher groups, sibling handlers, and unrelated
     // events on every re-run. The fix mirrors Codex's per-event
     // additive merge (codex.rs:931-996): iterate over the event
-    // list, locate a Buildmesh-owned handler via a URL-anchored
+    // list, locate a Buildmesh-owned handler via URL/command markers
     // match, update it in place; otherwise append a new matcher
     // group — leaving every user-authored entry untouched.
     //
-    // The marker is anchored on the handler's documented `url`
-    // field (Grok's parser tolerance for unknown handler fields
-    // like `statusMessage` is undocumented; the URL is guaranteed
-    // preserved byte-for-byte). A handler is "Buildmesh-owned"
-    // when its `url` carries both `/api/attention/` and the
-    // `BUILDMESH_PORT` expansion token — the canonical anchors of
-    // every Buildmesh attention webhook.
+    // The marker accepts both the old generated `url` and the current
+    // generated `command`, so provisioning upgrades old hook files instead
+    // of appending duplicates. Either field must carry `/api/attention/`
+    // and the `BUILDMESH_PORT` expansion token.
     // -----------------------------------------------------------------
 
-    /// Marker predicate: a Grok HTTP handler is Buildmesh-owned
-    /// when its `url` carries both anchors. Substring match (not
-    /// strict equality) so future URL refactors (adding a query
-    /// param, swapping `localhost` for `127.0.0.1`, etc.) keep the
-    /// merge stable — only the canonical anchors matter.
-    fn is_buildmesh_handler(handler: &serde_json::Value) -> bool {
-        handler
-            .get("url")
-            .and_then(|v| v.as_str())
-            .is_some_and(|url| url.contains("/api/attention/") && url.contains("BUILDMESH_PORT"))
-    }
-
     #[test]
-    fn marker_predicate_matches_canonical_buildmesh_url() {
-        let buildmesh = serde_json::json!({
+    fn marker_predicate_matches_legacy_urls_and_generated_commands() {
+        let legacy = serde_json::json!({
             "type": "http",
-            "url": HOOK_URL,
+            "url": "http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID",
+        });
+        assert!(is_buildmesh_handler(&legacy));
+
+        let buildmesh = serde_json::json!({
+            "type": "command",
+            "command": HOOK_COMMAND_UNIX,
         });
         assert!(is_buildmesh_handler(&buildmesh));
 
@@ -1200,12 +1243,13 @@ mod tests {
             Some("https://hooks.example.com/user-event")
         );
         // Buildmesh matcher group appended (index 1).
-        let buildmesh_url = notification[1]["hooks"][0]["url"]
+        let buildmesh_command = notification[1]["hooks"][0]["command"]
             .as_str()
             .expect("buildmesh handler appended");
         assert!(
-            buildmesh_url.contains("/api/attention/") && buildmesh_url.contains("BUILDMESH_PORT"),
-            "buildmesh matcher group must carry the canonical URL anchors: {buildmesh_url}"
+            buildmesh_command.contains("/api/attention/")
+                && buildmesh_command.contains("BUILDMESH_PORT"),
+            "buildmesh matcher group must carry the canonical command anchors: {buildmesh_command}"
         );
     }
 

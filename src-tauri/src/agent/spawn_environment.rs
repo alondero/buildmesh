@@ -197,8 +197,8 @@ pub fn wrap(
     // BEFORE `wrap()` runs (the orchestrator orders: provision →
     // spawn). If the token has been minted AND we are spawning a
     // descendant of that runtime, propagate it as
-    // `BUILDMESH_HOOK_TOKEN` so the Grok runner can URL-expand
-    // `?token=$BUILDMESH_HOOK_TOKEN` to the right value. Gated on
+    // `BUILDMESH_HOOK_TOKEN` so the Grok command hook can expand it
+    // into the callback request. Gated on
     // `Some(token)` so non-Grok agents never see the variable
     // (preserves the round-1 fix: Claude / Codex / AGY POST URLs
     // carry no `?token=` and the route's per-provider gate
