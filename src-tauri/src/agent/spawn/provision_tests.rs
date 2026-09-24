@@ -1078,3 +1078,66 @@ fn provision_workspace_propagates_err_without_spawn_failed_side_effects() {
         "provision_workspace must not write session-lifecycle Error"
     );
 }
+
+/// Issue #1752: provider routing is resolved CONCURRENTLY with the git
+/// provisioning block (auto-sync fetch → worktree create/adopt → sanitize →
+/// Muse context), not appended after it. Routing reads only the resolved
+/// paths plus the preferences/DB snapshot, so starting it before the git work
+/// hides its cost (a cold preferences walk, or a Codex pairing verification)
+/// behind the checkout.
+///
+/// This is a structural pin: the overlap is a timing property, invisible to
+/// any behavioural assertion a fixture could make, so the ordering is checked
+/// against the source the same way the sibling
+/// `provision_workspace_propagates_err_without_spawn_failed_side_effects`
+/// pins its contract. A refactor that reverts to the old serial
+/// "provision, then route" shape fails here.
+#[test]
+fn provision_workspace_resolves_routing_concurrently_with_git_work() {
+    let src = include_str!("provision.rs");
+    let start = src
+        .find("pub(super) async fn provision_workspace")
+        .expect("provision_workspace must exist");
+    let body = &src[start..];
+
+    let routing_start = body
+        .find("let routing_task = tauri::async_runtime::spawn_blocking")
+        .expect("provision_workspace must start the routing task concurrently");
+    let fetch = body
+        .find("crate::git::sync::locked_fetch_origin")
+        .expect("provision_workspace must still fetch the mesh base ref");
+    let routing_join = body
+        .find("let routing = match routing_task.await")
+        .expect("provision_workspace must join the routing task");
+    let provider_provisioning = body
+        .find("run_provider_provisioning(")
+        .expect("provision_workspace must run provider provisioning");
+
+    assert!(
+        routing_start < fetch,
+        "routing resolution must start before the auto-sync fetch so the two overlap"
+    );
+    assert!(
+        fetch < routing_join,
+        "the routing join must come after the git work it is meant to overlap"
+    );
+    assert!(
+        routing_join < provider_provisioning,
+        "routing must be joined before provider provisioning / launch consume it"
+    );
+
+    // The overlap is only sound because the concurrent closure never reads the
+    // worktree the git block is still materialising — otherwise it would be a
+    // data dependency, not an independent step. Scope the check to the closure
+    // itself (up to the checkpoint that follows it), not the whole function.
+    let routing_end = routing_start
+        + body[routing_start..]
+            .find("timer.checkpoint(\"routing_started\")")
+            .expect("the routing task start must be followed by a routing_started checkpoint");
+    let closure = &body[routing_start..routing_end];
+    assert!(
+        !closure.contains("host_path"),
+        "the concurrent routing closure must not read the worktree path — it would \
+         introduce a dependency on the git provisioning it is meant to overlap"
+    );
+}
