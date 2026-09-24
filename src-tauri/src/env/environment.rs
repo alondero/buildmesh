@@ -222,9 +222,7 @@ pub(crate) fn wsl_home() -> Option<PathBuf> {
     if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
     // A memoized miss from distro detection cannot become Some later.
     // Entering the retry loop would only sleep 500ms to re-read None.
-    if get_default_wsl_distro().is_none() {
-        return None;
-    }
+    get_default_wsl_distro()?;
     static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| probe_until_some(3, probe_wsl_home_once));
     GUEST_HOME.clone()
 }
