@@ -139,13 +139,25 @@ pub(crate) fn resolve_clone_destination(
     }
     let dest = parent.join(repo);
     let existed = dest.exists();
-    let occupied = dest
-        .read_dir()
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
-    if occupied {
+
+    if dest.is_dir() {
+        // git clones into an existing *empty* directory; a populated one is a
+        // collision. `is_dir` (not `read_dir().is_ok()`) is what keeps an
+        // existing regular file from slipping through: `read_dir` on a file
+        // returns `Err(ENOTDIR)`, which would otherwise read as "empty".
+        let occupied = dest
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if occupied {
+            return Err(format!(
+                "A folder already exists at {} — choose a different parent folder.",
+                dest.display()
+            ));
+        }
+    } else if existed {
         return Err(format!(
-            "A folder already exists at {} — choose a different parent folder.",
+            "A file already exists at {} — choose a different parent folder.",
             dest.display()
         ));
     }
@@ -181,15 +193,8 @@ pub(crate) fn first_error_line(stderr: &str) -> Option<&str> {
         .copied()
 }
 
-/// Clone a GitHub repository into `<parent_dir>/<repo>` and register the result
-/// as a Mesh, in one step.
-///
-/// The clone runs with the machine's own git auth (SSH agent, credential
-/// manager, or `gh auth setup-git`) through
-/// [`crate::process_util::git_command`] — the URL is used as given and no token
-/// is injected, so nothing secret is written into the new repo's `.git/config`.
-/// `GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never` make a credentials-needing
-/// clone fail fast instead of hanging on a prompt no GUI can answer.
+/// Parse user input and clone that repository into `<parent_dir>/<repo>`,
+/// registering the result as a Mesh in one step.
 pub(crate) fn clone_mesh_repo_blocking(
     url: &str,
     parent_dir: &str,
@@ -198,7 +203,28 @@ pub(crate) fn clone_mesh_repo_blocking(
     let target = services::github::parse_clone_input(url).ok_or_else(|| {
         "Enter a GitHub repository as `owner/repo` or a full github.com URL.".to_string()
     })?;
+    clone_target_into_mesh(&target, parent_dir, color)
+}
 
+/// Clone an already-resolved target into `<parent_dir>/<repo>` and register the
+/// resulting Mesh: destination guard -> `git clone` -> default-branch resolution
+/// -> mesh row -> colour + attention hook.
+///
+/// Split from [`clone_mesh_repo_blocking`] so a test can drive the whole
+/// orchestration against a local fixture repository — the parser only admits
+/// github.com URLs, which no offline test can reach.
+///
+/// The clone runs with the machine's own git auth (SSH agent, credential
+/// manager, or `gh auth setup-git`) through
+/// [`crate::process_util::git_command`]. No token is injected, so nothing secret
+/// is written into the new repo's `.git/config`, and
+/// `GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never` make a credentials-needing
+/// clone fail fast instead of hanging on a prompt no GUI can answer.
+pub(crate) fn clone_target_into_mesh(
+    target: &services::github::CloneTarget,
+    parent_dir: &str,
+    color: Option<String>,
+) -> Result<Mesh, String> {
     // Clone into a new `<parent>/<repo>` subfolder so we never clone into a
     // directory the user didn't intend to become the repo root.
     let (dest, dest_existed) = resolve_clone_destination(parent_dir, &target.repo)?;

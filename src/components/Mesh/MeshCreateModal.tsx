@@ -1,8 +1,9 @@
 import { formatError } from '../../lib/errorUtils';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
 import { useMeshStore } from '../../stores/meshStore';
+import { addToast } from '../../stores/toastStore';
 import { pickMeshFolder } from '../../lib/tauri';
 import { defaultMeshColor } from '../../lib/meshColors';
 import { joinDisplayPath, repoNameFromInput } from '../../lib/githubRepo';
@@ -64,6 +65,14 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const primaryButtonRef = useRef<HTMLButtonElement>(null);
+  // A clone outlives the dialog when it is dismissed: the backend runs it to
+  // completion on the blocking pool. Tracking mount state lets the awaited
+  // completion *report* its outcome instead of driving a form the user can no
+  // longer see (and instead of silently registering a mesh or dropping an error).
+  const stillMounted = useRef(true);
+  useEffect(() => () => {
+    stillMounted.current = false;
+  }, []);
 
   const repoName = repoNameFromInput(repoInput);
   const destination =
@@ -109,6 +118,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
     setBusy(true);
     setError(null);
     const mesh = await createMesh(folder.name, folder.path, color);
+    if (!stillMounted.current) return;
     setBusy(false);
     if (mesh) {
       selectMesh(mesh.id);
@@ -120,9 +130,25 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
 
   const handleClone = async () => {
     if (!parent || !repoName || busy) return;
+    // Capture the submitted target up front so the clone is pinned to exactly
+    // what the user confirmed.
+    const repo = repoInput.trim();
+    const parentPath = parent.path;
     setBusy(true);
     setError(null);
-    const result = await cloneMesh(repoInput.trim(), parent.path, color);
+    const result = await cloneMesh(repo, parentPath, color);
+    if (!stillMounted.current) {
+      // Dismissed mid-clone. The mesh row is already committed and the store has
+      // appended it, so report the outcome rather than updating a form the user
+      // can no longer see: a silent success would leave an unexplained mesh in
+      // the sidebar, and a silent failure would be lost entirely.
+      if ('mesh' in result) {
+        addToast('Clone', `Cloned ${repo} into ${parentPath}`, 'success');
+      } else {
+        addToast('Clone', result.error, 'error');
+      }
+      return;
+    }
     setBusy(false);
     if ('mesh' in result) {
       selectMesh(result.mesh.id);
@@ -157,7 +183,8 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
           type="button"
           aria-pressed={source === 'open'}
           onClick={() => switchSource('open')}
-          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+          disabled={busy}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
             source === 'open'
               ? 'bg-accent-cyan/15 text-accent-cyan'
               : 'text-text-secondary hover:text-text-primary'
@@ -169,7 +196,8 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
           type="button"
           aria-pressed={source === 'clone'}
           onClick={() => switchSource('clone')}
-          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+          disabled={busy}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
             source === 'clone'
               ? 'bg-accent-cyan/15 text-accent-cyan'
               : 'text-text-secondary hover:text-text-primary'
@@ -187,7 +215,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
             <button
               type="button"
               onClick={handleChooseFolder}
-              disabled={picking}
+              disabled={picking || busy}
               className={PICKER_BUTTON}
             >
               {picking ? 'Choosing…' : folder ? 'Change folder…' : 'Choose folder…'}
@@ -210,10 +238,20 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
               type="text"
               value={repoInput}
               onChange={(e) => setRepoInput(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter submits, matching the desktop-modal convention (the
+                // omnibar does the same). `handleClone` self-guards on an
+                // incomplete form and on `busy`.
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleClone();
+                }
+              }}
+              disabled={busy}
               placeholder="owner/repo or https://github.com/owner/repo"
               spellCheck={false}
               autoComplete="off"
-              className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan transition-colors"
+              className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan transition-colors disabled:opacity-50"
             />
           </div>
 
@@ -224,7 +262,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
               <button
                 type="button"
                 onClick={handleChooseFolder}
-                disabled={picking}
+                disabled={picking || busy}
                 className={PICKER_BUTTON}
               >
                 {picking ? 'Choosing…' : parent ? 'Change folder…' : 'Choose parent folder…'}
@@ -264,6 +302,11 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       {error && <p className="mb-3 text-xs text-status-error break-words">{error}</p>}
 
       <div className="flex justify-end gap-2">
+        {/* Cancel stays enabled during a clone on purpose. Dismissal is made safe
+            by the mount guard above (the completion reports via toast instead of
+            writing into an unmounted form), and trapping the user inside the
+            modal for up to the 10-minute clone timeout would be worse than
+            letting them leave an operation they already started. */}
         <button
           type="button"
           onClick={onClose}

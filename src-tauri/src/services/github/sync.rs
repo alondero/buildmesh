@@ -403,8 +403,11 @@ fn parse_github_owner_repo(input: &str) -> Option<(String, String)> {
 /// A GitHub repository resolved from user input in the "clone" flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloneTarget {
-    /// URL handed to `git clone`. SSH forms are kept verbatim so the ssh user
-    /// the user typed is preserved; everything else is normalised to HTTPS.
+    /// Canonical URL handed to `git clone`, rebuilt from the parsed owner/repo.
+    /// The user's input is never forwarded verbatim: a pasted subpath
+    /// (`…/owner/repo/tree/main`, `owner/repo/extra`) would otherwise reach
+    /// `git clone` and fail at runtime. The SSH flavour the user typed
+    /// (`git@…` vs `ssh://…`) is preserved.
     pub url: String,
     /// Repository name, `.git` suffix stripped. Also the destination folder
     /// name and the default mesh name.
@@ -427,8 +430,12 @@ pub fn parse_clone_input(input: &str) -> Option<CloneTarget> {
         if !is_valid_repo_name(&repo) {
             return None;
         }
-        let url = if trimmed.starts_with("git@") || trimmed.starts_with("ssh://") {
-            trimmed.to_string()
+        // Rebuild the URL from the parsed pair for every form, so all three
+        // accepted grammars behave identically and no unparsed tail reaches git.
+        let url = if trimmed.starts_with("ssh://") {
+            format!("ssh://git@github.com/{owner}/{repo}.git")
+        } else if trimmed.starts_with("git@") {
+            format!("git@github.com:{owner}/{repo}.git")
         } else {
             format!("https://github.com/{owner}/{repo}.git")
         };
@@ -710,13 +717,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_clone_input_keeps_ssh_forms_verbatim() {
+    fn parse_clone_input_normalises_ssh_forms_and_keeps_their_flavour() {
         let scp = parse_clone_input("git@github.com:alondero/buildmesh.git").unwrap();
         assert_eq!(scp.url, "git@github.com:alondero/buildmesh.git");
         assert_eq!(scp.repo, "buildmesh");
 
+        // The `ssh://` flavour the user typed is preserved, but normalised to a
+        // canonical `<owner>/<repo>.git` (the input above already carried it).
         let ssh = parse_clone_input("ssh://git@github.com/alondero/buildmesh").unwrap();
-        assert_eq!(ssh.url, "ssh://git@github.com/alondero/buildmesh");
+        assert_eq!(ssh.url, "ssh://git@github.com/alondero/buildmesh.git");
+        assert_eq!(ssh.repo, "buildmesh");
+    }
+
+    /// A pasted subpath must be stripped, not forwarded. The SSH path used to
+    /// pass the user's string through verbatim, which handed `git clone` a URL
+    /// it cannot resolve (`git@github.com:owner/repo/extra`).
+    #[test]
+    fn parse_clone_input_strips_subpaths_from_every_url_form() {
+        let https = parse_clone_input("https://github.com/alondero/buildmesh/tree/main").unwrap();
+        assert_eq!(https.url, "https://github.com/alondero/buildmesh.git");
+        assert_eq!(https.repo, "buildmesh");
+
+        let scp = parse_clone_input("git@github.com:alondero/buildmesh/extra").unwrap();
+        assert_eq!(scp.url, "git@github.com:alondero/buildmesh.git");
+        assert_eq!(scp.repo, "buildmesh");
+
+        let ssh = parse_clone_input("ssh://git@github.com/alondero/buildmesh/tree/main").unwrap();
+        assert_eq!(ssh.url, "ssh://git@github.com/alondero/buildmesh.git");
         assert_eq!(ssh.repo, "buildmesh");
     }
 

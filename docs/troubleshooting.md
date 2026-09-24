@@ -139,12 +139,12 @@ machine's own Git authentication, and reports Git's own error in the dialog.
   Git credential manager, or `gh auth login` followed by `gh auth setup-git` for
   HTTPS. Buildmesh never stores a GitHub token in the new repository, so an
   unauthenticated clone fails immediately instead of prompting.
-- **`A folder already exists at …`** — the chosen parent already contains a
-  folder named after the repository. Pick a different parent, or move the
-  existing folder aside.
-- **The dialog hangs on "Cloning…"** — a very large repository over a slow link
-  can outlast the clone timeout; clone it from a terminal, then use **Open
-  folder** on the result.
+- **`A folder already exists at …` / `A file already exists at …`** — the chosen
+  parent already holds an entry named after the repository. Pick a different
+  parent, or move the existing entry aside.
+- **The dialog stays on "Cloning…" and then fails** — a very large repository over
+  a slow link can outlast the clone timeout (10 minutes). Clone it from a
+  terminal, then use **Open folder** on the result.
 
 ## Build or Run fails
 
