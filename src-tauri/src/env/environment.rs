@@ -28,8 +28,13 @@ use crate::models::EnvType;
 
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
-/// The default WSL distro name (e.g., "Ubuntu"), cached after first detection
-static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(detect_default_wsl_distro);
+/// The default WSL distro name (e.g., "Ubuntu"), cached after first detection.
+/// A miss is cached only after a few tries: the full test suite starts many
+/// `wsl.exe` processes at once, and the first listing can fail while the
+/// service is busy. Caching that miss made every later guest-path check
+/// fail for the rest of the process.
+static DETECTED_DISTRO: Lazy<Option<String>> =
+    Lazy::new(|| probe_until_some(3, detect_default_wsl_distro));
 
 /// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
 /// Returns the distro marked as (default) or the first one if none marked.
@@ -215,14 +220,51 @@ pub fn current_env() -> Environment {
 /// account name or the repository's directory (which can be a mounted drive).
 pub(crate) fn wsl_home() -> Option<PathBuf> {
     if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
-    static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| {
-        let mut command = command_no_window("wsl.exe");
-        command.args(["-d", &get_default_wsl_distro()?, "--cd", "~", "--exec", "sh", "-lc", "printf '__BUILDMESH_WSL_HOME__%s\\n' \"$HOME\""]);
-        let output = crate::process_util::run_command_with_timeout(command, "WSL home", std::time::Duration::from_secs(10)).ok()?;
-        if !output.status.success() { return None; }
-        parse_wsl_home_output(&output.stdout)
-    });
+    static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| probe_until_some(3, probe_wsl_home_once));
     GUEST_HOME.clone()
+}
+
+/// One guest-home probe. `None` covers a missing distro, a non-zero exit,
+/// a timeout, and an unparsable banner. Callers retry before caching.
+fn probe_wsl_home_once() -> Option<PathBuf> {
+    let mut command = command_no_window("wsl.exe");
+    command.args([
+        "-d",
+        &get_default_wsl_distro()?,
+        "--cd",
+        "~",
+        "--exec",
+        "sh",
+        "-lc",
+        "printf '__BUILDMESH_WSL_HOME__%s\\n' \"$HOME\"",
+    ]);
+    let output = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL home",
+        std::time::Duration::from_secs(10),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_wsl_home_output(&output.stdout)
+}
+
+/// Run `probe` up to `attempts` times, pausing briefly between misses so a
+/// busy `wsl.exe` can answer. A success is returned immediately. The last
+/// miss is what a `Lazy` caches, so a machine with no WSL still settles.
+fn probe_until_some<T>(attempts: u32, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let mut last = None;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        last = probe();
+        if last.is_some() {
+            return last;
+        }
+    }
+    last
 }
 
 pub(super) fn parse_wsl_home_output(output: &[u8]) -> Option<PathBuf> {

@@ -1,6 +1,6 @@
 # Fake-GitHub request-counter tests (no new deps)
 
-Learned while pinning issue #1529's O(pages) contract in `src-tauri/src/services/github.rs`.
+Learned while pinning issue #1529's O(pages) contract in `src-tauri/src/services/github/prs.rs`.
 
 To assert HTTP cost (not just mapping), spin a raw `std::net::TcpListener`
 on `127.0.0.1:0` in the test, count requests with
