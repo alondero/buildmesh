@@ -186,7 +186,7 @@ pub struct PrMergeabilityEntry {
 }
 
 /// One file in a pull request — wire shape of `get_pr_files` (issue #421).
-/// Mirrors `services::github::PrFile`; the panel's Center Diff Overlay
+/// Mirrors `services::github::prs::PrFile`; the panel's Center Diff Overlay
 /// (`source: 'pr'`) renders the `patch` text line-by-line rather than
 /// reconstructing our own hunk structure (GitHub's patches are non-standard —
 /// missing context lines, inline `rename from`/`rename to` — so a structural

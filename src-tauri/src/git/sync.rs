@@ -571,7 +571,7 @@ const MANUAL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 /// spawn) so 5 minutes is far too long — a wedged spawn-time fetch would
 /// hold the per-Mesh `sync_lock` for the entire window with no UI
 /// feedback. 30s matches the HTTP-client read timeout in
-/// `services::github::HTTP_REQUEST_TIMEOUT` so a half-open connection
+/// `services::github::sync` so a half-open connection
 /// aborts at the same threshold from both directions (issue #762 review).
 pub(crate) const SPAWN_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
