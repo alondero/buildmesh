@@ -7,6 +7,7 @@ import { useWsEvents } from "../useWsEvents";
 
 export default function NodeOverview({
   node: initial,
+  visitId,
   prompt,
   draft: savedDraft,
   replySending: savedReplySending,
@@ -21,6 +22,7 @@ export default function NodeOverview({
   onAuthFailed,
 }: {
   node: AgentNode;
+  visitId: number;
   onBack: () => void;
   onTerminal: () => void;
   onChanges: () => void;
@@ -29,10 +31,22 @@ export default function NodeOverview({
   draft?: string;
   replySending?: boolean;
   replyNotice?: string;
-  onPromptChange?: (prompt: string | undefined, nodeId: number) => void;
-  onDraftChange?: (draft: string, nodeId: number) => void;
-  onReplySendingChange?: (sending: boolean, nodeId: number) => void;
-  onReplyNoticeChange?: (notice: string, nodeId: number) => void;
+  onPromptChange?: (
+    prompt: string | undefined,
+    nodeId: number,
+    visitId: number,
+  ) => void;
+  onDraftChange?: (draft: string, nodeId: number, visitId: number) => void;
+  onReplySendingChange?: (
+    sending: boolean,
+    nodeId: number,
+    visitId: number,
+  ) => void;
+  onReplyNoticeChange?: (
+    notice: string,
+    nodeId: number,
+    visitId: number,
+  ) => void;
 }) {
   const [node, setNode] = useState(initial);
   const [localDraft, setLocalDraft] = useState("");
@@ -45,23 +59,25 @@ export default function NodeOverview({
   const [missing, setMissing] = useState(false);
   const [context, setContext] = useState(prompt);
   const updateDraft = (next: string) => {
-    if (onDraftChange) onDraftChange(next, initial.id);
+    if (onDraftChange) onDraftChange(next, initial.id, visitId);
     else if (active.current) setLocalDraft(next);
   };
   const updateReplySending = (next: boolean) => {
-    if (onReplySendingChange) onReplySendingChange(next, initial.id);
-    else if (active.current) setLocalBusy(next);
+    if (onReplySendingChange) {
+      onReplySendingChange(next, initial.id, visitId);
+    } else if (active.current) setLocalBusy(next);
   };
   const updateNotice = (next: string) => {
-    if (onReplyNoticeChange) onReplyNoticeChange(next, initial.id);
-    else if (active.current) setLocalNotice(next);
+    if (onReplyNoticeChange) {
+      onReplyNoticeChange(next, initial.id, visitId);
+    } else if (active.current) setLocalNotice(next);
   };
   const updateContext = useCallback(
     (next: string | undefined) => {
       setContext(next);
-      onPromptChange?.(next, initial.id);
+      onPromptChange?.(next, initial.id, visitId);
     },
-    [initial.id, onPromptChange],
+    [initial.id, onPromptChange, visitId],
   );
   const active = useRef(true);
   const sending = useRef(false);

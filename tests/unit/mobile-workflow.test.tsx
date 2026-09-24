@@ -145,6 +145,7 @@ describe("mobile work details", () => {
     render(
       <NodeOverview
         node={node}
+        visitId={1}
         onBack={vi.fn()}
         onTerminal={onTerminal}
         onChanges={vi.fn()}
@@ -178,6 +179,7 @@ describe("mobile work details", () => {
     render(
       <NodeOverview
         node={node}
+        visitId={1}
         onBack={vi.fn()}
         onTerminal={vi.fn()}
         onChanges={vi.fn()}
@@ -208,6 +210,7 @@ describe("mobile work details", () => {
     const view = render(
       <NodeOverview
         node={node}
+        visitId={1}
         draft="Check the deployment logs"
         replySending={false}
         replyNotice=""
@@ -222,18 +225,19 @@ describe("mobile work details", () => {
     );
     fireEvent.click(screen.getByText("Send reply"));
     await waitFor(() =>
-      expect(onReplySendingChange).toHaveBeenCalledWith(true, node.id),
+      expect(onReplySendingChange).toHaveBeenCalledWith(true, node.id, 1),
     );
     view.unmount();
 
     await act(async () => resolveInput(response({ ok: true })));
 
-    expect(onDraftChange).toHaveBeenLastCalledWith("", node.id);
+    expect(onDraftChange).toHaveBeenLastCalledWith("", node.id, 1);
     expect(onReplyNoticeChange).toHaveBeenLastCalledWith(
       "Reply delivered to the terminal.",
       node.id,
+      1,
     );
-    expect(onReplySendingChange).toHaveBeenLastCalledWith(false, node.id);
+    expect(onReplySendingChange).toHaveBeenLastCalledWith(false, node.id, 1);
   });
 });
 

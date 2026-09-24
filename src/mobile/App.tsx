@@ -24,6 +24,7 @@ const ArchivedNodesScreen = lazy(() => import("./screens/ArchivedNodesScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
 type WorkState = {
+  visitId: number;
   prompt?: string;
   draft?: string;
   replySending?: boolean;
@@ -67,6 +68,7 @@ function isWorkScreen(screen: Screen): screen is WorkScreen {
 
 function preserveWorkState(screen: WorkScreen): WorkState {
   return {
+    visitId: screen.visitId,
     prompt: screen.prompt,
     draft: screen.draft,
     replySending: screen.replySending,
@@ -77,9 +79,15 @@ function preserveWorkState(screen: WorkScreen): WorkState {
 function patchWorkScreen(
   current: Screen,
   nodeId: number,
+  visitId: number,
   patch: Partial<WorkState>,
 ): Screen {
-  if (!isWorkScreen(current) || current.node.id !== nodeId) return current;
+  if (
+    !isWorkScreen(current) ||
+    current.node.id !== nodeId ||
+    current.visitId !== visitId
+  )
+    return current;
   const unchanged = Object.entries(patch).every(
     ([key, value]) => current[key as keyof WorkState] === value,
   );
@@ -120,7 +128,7 @@ export function parentOf(s: Screen): Screen {
               fromOverview: true,
               ...preserveWorkState(s),
             }
-          : { kind: "terminal", node: s.node };
+          : { kind: "terminal", node: s.node, ...preserveWorkState(s) };
     case "diff":
       return s.fromOverview
         ? {
@@ -136,7 +144,7 @@ export function parentOf(s: Screen): Screen {
               terminalFromOverview: true,
               ...preserveWorkState(s),
             }
-          : { kind: "changes", node: s.node };
+          : { kind: "changes", node: s.node, ...preserveWorkState(s) };
     default:
       return s;
   }
@@ -144,6 +152,7 @@ export function parentOf(s: Screen): Screen {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ kind: "connect" });
+  const workVisitIdRef = useRef(0);
   const pairingOnLoad = useRef(
     new URLSearchParams(window.location.hash.slice(1)).has("pair"),
   );
@@ -182,6 +191,7 @@ export default function App() {
     branch: string;
   } | null>(null);
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
+  const nextWorkVisitId = useCallback(() => ++workVisitIdRef.current, []);
 
   const prSheetRef = useRef(prSheet);
   prSheetRef.current = prSheet;
@@ -277,24 +287,34 @@ export default function App() {
     setAuthNotice(null);
     setScreen({ kind: "list" });
   }, []);
-  const updateWorkPrompt = useCallback((prompt: string | undefined, nodeId: number) => {
-    setScreen((current) => patchWorkScreen(current, nodeId, { prompt }));
-  }, []);
-  const updateWorkDraft = useCallback((draft: string, nodeId: number) => {
-    setScreen((current) => patchWorkScreen(current, nodeId, { draft }));
-  }, []);
-  const updateReplySending = useCallback(
-    (replySending: boolean, nodeId: number) => {
+  const updateWorkPrompt = useCallback(
+    (prompt: string | undefined, nodeId: number, visitId: number) => {
       setScreen((current) =>
-        patchWorkScreen(current, nodeId, { replySending }),
+        patchWorkScreen(current, nodeId, visitId, { prompt }),
+      );
+    },
+    [],
+  );
+  const updateWorkDraft = useCallback(
+    (draft: string, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { draft }),
+      );
+    },
+    [],
+  );
+  const updateReplySending = useCallback(
+    (replySending: boolean, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { replySending }),
       );
     },
     [],
   );
   const updateReplyNotice = useCallback(
-    (replyNotice: string, nodeId: number) => {
+    (replyNotice: string, nodeId: number, visitId: number) => {
       setScreen((current) =>
-        patchWorkScreen(current, nodeId, { replyNotice }),
+        patchWorkScreen(current, nodeId, visitId, { replyNotice }),
       );
     },
     [],
@@ -314,7 +334,12 @@ export default function App() {
           onViewChange={setHomeView}
           onOpenNode={(node, prompt) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-            navigate({ kind: "overview", node, prompt });
+            navigate({
+              kind: "overview",
+              node,
+              prompt,
+              visitId: nextWorkVisitId(),
+            });
           }}
           onOpenAgentNodes={(mesh) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
@@ -333,19 +358,24 @@ export default function App() {
       )}
       {screen.kind === "overview" && (
         <NodeOverview
-          key={screen.node.id}
+          key={`${screen.node.id}:${screen.visitId}`}
           node={screen.node}
+          visitId={screen.visitId}
           prompt={screen.prompt}
           draft={screen.draft}
           replySending={screen.replySending}
           replyNotice={screen.replyNotice}
-          onPromptChange={(prompt) => updateWorkPrompt(prompt, screen.node.id)}
-          onDraftChange={(draft) => updateWorkDraft(draft, screen.node.id)}
-          onReplySendingChange={(sending) =>
-            updateReplySending(sending, screen.node.id)
+          onPromptChange={(prompt, nodeId, visitId) =>
+            updateWorkPrompt(prompt, nodeId, visitId)
           }
-          onReplyNoticeChange={(notice) =>
-            updateReplyNotice(notice, screen.node.id)
+          onDraftChange={(draft, nodeId, visitId) =>
+            updateWorkDraft(draft, nodeId, visitId)
+          }
+          onReplySendingChange={(sending, nodeId, visitId) =>
+            updateReplySending(sending, nodeId, visitId)
+          }
+          onReplyNoticeChange={(notice, nodeId, visitId) =>
+            updateReplyNotice(notice, nodeId, visitId)
           }
           onBack={goBack}
           onAuthFailed={handleAuthFailedForActiveScreen}
@@ -433,7 +463,11 @@ export default function App() {
             onBack={goBack}
             onResumed={(node) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({ kind: "overview", node });
+              setScreen({
+                kind: "overview",
+                node,
+                visitId: nextWorkVisitId(),
+              });
             }}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />
@@ -446,7 +480,11 @@ export default function App() {
             onBack={goBack}
             onSpawned={(node) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({ kind: "overview", node });
+              setScreen({
+                kind: "overview",
+                node,
+                visitId: nextWorkVisitId(),
+              });
             }}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />

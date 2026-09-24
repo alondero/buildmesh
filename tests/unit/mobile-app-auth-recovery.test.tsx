@@ -70,20 +70,33 @@ const mesh = {
 
 vi.mock("../../src/mobile/screens/NodeOverview", () => ({
   default: (props: {
+    visitId: number;
     prompt?: string;
     draft?: string;
     replySending?: boolean;
     replyNotice?: string;
-    onDraftChange: (draft: string) => void;
-    onReplySendingChange: (sending: boolean) => void;
-    onReplyNoticeChange: (notice: string) => void;
+    onDraftChange: (draft: string, nodeId: number, visitId: number) => void;
+    onReplySendingChange: (
+      sending: boolean,
+      nodeId: number,
+      visitId: number,
+    ) => void;
+    onReplyNoticeChange: (
+      notice: string,
+      nodeId: number,
+      visitId: number,
+    ) => void;
     onChanges: () => void;
     onTerminal: () => void;
   }) => {
     appState.replyCompletion = () => {
-      props.onDraftChange("");
-      props.onReplyNoticeChange("Reply delivered to the terminal.");
-      props.onReplySendingChange(false);
+      props.onDraftChange("", node.id, props.visitId);
+      props.onReplyNoticeChange(
+        "Reply delivered to the terminal.",
+        node.id,
+        props.visitId,
+      );
+      props.onReplySendingChange(false, node.id, props.visitId);
     };
     return createElement(
       "div",
@@ -100,7 +113,12 @@ vi.mock("../../src/mobile/screens/NodeOverview", () => ({
         "button",
         {
           "data-testid": "edit-reply",
-          onClick: () => props.onDraftChange("I will check the build logs."),
+          onClick: () =>
+            props.onDraftChange(
+              "I will check the build logs.",
+              node.id,
+              props.visitId,
+            ),
         },
         "Edit reply",
       ),
@@ -108,7 +126,8 @@ vi.mock("../../src/mobile/screens/NodeOverview", () => ({
         "button",
         {
           "data-testid": "start-reply",
-          onClick: () => props.onReplySendingChange(true),
+          onClick: () =>
+            props.onReplySendingChange(true, node.id, props.visitId),
         },
         "Start reply",
       ),
@@ -279,6 +298,33 @@ describe("mobile App auth recovery", () => {
     expect(screen.getByTestId("reply-notice").textContent).toBe(
       "Reply delivered to the terminal.",
     );
+  });
+
+  it("ignores a reply completion from a previous visit to the same agent", async () => {
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("edit-reply").click());
+    await act(async () => screen.getByTestId("start-reply").click());
+    const oldCompletion = appState.replyCompletion;
+    expect(oldCompletion).toBeTruthy();
+
+    await act(async () => window.dispatchEvent(new PopStateEvent("popstate")));
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("edit-reply").click());
+    expect(screen.getByTestId("reply-draft").textContent).toBe(
+      "I will check the build logs.",
+    );
+    await act(async () => screen.getByTestId("start-reply").click());
+    expect(screen.getByTestId("reply-sending").textContent).toBe("true");
+
+    await act(async () => oldCompletion?.());
+
+    expect(screen.getByTestId("reply-draft").textContent).toBe(
+      "I will check the build logs.",
+    );
+    expect(screen.getByTestId("reply-sending").textContent).toBe("true");
+    expect(screen.getByTestId("reply-notice").textContent).toBe("");
   });
 
   it("clears the token and transitions to Connect only once for duplicate failures", async () => {
