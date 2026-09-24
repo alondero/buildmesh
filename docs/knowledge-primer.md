@@ -194,6 +194,10 @@ Startup identity recovery (#1555) lives in `services/session_recovery.rs`. List 
 ### Command Code keyboard (Ink 7)
 Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracketed-paste wrapper, or when the CLI's kitty-keyboard probe races ConPTY. Agent terminals for the `commandcode` harness set xterm.js `ignoreBracketedPasteMode`; other harnesses keep bracketed paste so a multi-line paste stays one prompt. Spawn sets `TERM_PROGRAM=vscode` so Command Code skips the probe. Every agent PTY is a real terminal: `wrap()` drops inherited `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR=0` and sets `TERM=xterm-256color`, `COLORTERM=truecolor`, and `FORCE_COLOR=3` (and puts those keys on `WSLENV`).
 
+### PTY input
+
+Each `write_to_agent` call enqueues one buffer. The per-agent writer thread drains that buffer with a single `write_all`. xterm's paste is one data event, so a large or multi-line paste stays one write, including its bracketed-paste markers. Do not split or pace that write to work around a slow provider. The multi-second stall on a large Windows paste is the provider reading console input one record at a time; evidence and the upstream reader change are in [Large paste latency](learning/large-paste-latency.md).
+
 ### PTY output streaming (issue #1385 / #1393)
 
 Windows builds ship a pinned Microsoft ConPTY DLL and its matching native console
