@@ -68,7 +68,7 @@ post-fix artifact has not yet been produced. The failed attempt is recorded at
 
 | Check / revision | Result | Attribution / scope |
 | --- | --- | --- |
-| `npm run test:ci -- --project=verify-smoke` on the reviewed PR revision | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
+| `npm run test:ci -- --project=verify-smoke` on commit `4ab71692` | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
 | Focused UsageTab test on merge-base `91118ebc` | Passed: 1 passed, 23 skipped. | The reviewed PR failure did not reproduce when run alone on the base. |
 | Full Vitest unit/integration suite on merge-base `91118ebc` | 3,574 passed, 1 skipped, 3 failed: ui-shot timed out at 60 seconds, mobile ProviderPicker timed out at 5 seconds, and ProbePanel could not find `Changed Files`. The UsageTab timer test passed. | No matching UsageTab failure reproduced on the base; attribution of the PR-run failure remains unverified. Playwright was not run on the base. |
 | `cargo test --locked --lib http::routes::attention -- --test-threads=1` after review fixes | Passed: 87 tests. | Includes route-gate coverage for durable stale receipt, `StaleDropped`, and skipped accepted-hook projection. |
