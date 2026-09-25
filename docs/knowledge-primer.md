@@ -459,7 +459,10 @@ only; a later `Notification` with `source_kind=background_task` and a terminal
 permission events are tracked by request id (with a conservative single-
 request fallback), and child sessions cannot overwrite their parent. Codex has
 no permission-result hook, so its tool result or identified terminal `Stop`
-resolves the approval marker. Native hooks are
+resolves the attention route's approval marker. Circuit evidence applies a
+stricter request identity contract: a permission callback without a request ID
+retains an unresolved permission wait, and neither a generic Stop nor an
+unrelated tool result resolves it. Native hooks are
 provisioned only where the installed harness contract is verified; Terminal,
 Freebuff, and unvalidated DeepSeek profiles retain explicit capability gaps
 rather than guessing from PTY output. MiniMax's Agent-Plugin attention hook is

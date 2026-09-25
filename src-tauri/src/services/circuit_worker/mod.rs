@@ -56,6 +56,8 @@ use crate::autopilot::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod github;
+#[cfg(test)]
+mod github_recovery_tests;
 mod codex_observer;
 pub(crate) mod observer_policy;
 pub(crate) mod native_hooks;
@@ -2476,46 +2478,12 @@ pub(super) fn execute_effects(
             Effect::CallGithub { node_id, action, label, comment } => {
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
                 if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
-                    view.context.set(&format!("node.{node_id}.recheck_only"), "0");
                     if *action == crate::autopilot::circuit::model::GithubActionKind::OpenPr {
-                        let result = github::reconcile_open_pr_effect(active, view, node_id);
-                        if let Ok(CircuitEvent::GithubActionResult {
-                            success: true,
-                            pr_number: Some(number),
-                            pr_url: Some(url),
-                            pr_head_ref: Some(head),
-                            ..
-                        }) = &result
-                        {
-                            view.context.set(
-                                &format!("node.{node_id}.effect_reconciled_attempt"),
-                                attempt.to_string(),
-                            );
-                            view.context.set(
-                                &format!("node.{node_id}.effect_reconciled_detail"),
-                                format!(
-                                    "Read-only GitHub lookup found open pull request #{number} ({url}) on branch {head}."
-                                ),
-                            );
-                        } else if matches!(
-                            &result,
-                            Ok(CircuitEvent::GithubActionResult { success: true, .. })
-                        ) {
-                            tracing::warn!(
-                                "circuit {} OpenPr recheck returned success without a pull-request identity",
-                                active.run.id
-                            );
-                        }
-                        outcome_events.push(result.unwrap_or_else(|reason| {
-                            CircuitEvent::EffectUncertain {
-                                node_id: node_id.clone(),
-                                attempt,
-                                reason: format!(
-                                    "Read-only pull-request recheck could not establish the result: {reason}"
-                                ),
-                            }
-                        }));
+                        outcome_events.push(github::reconcile_open_pr_effect_for_worker(
+                            active, view, node_id,
+                        ));
                     } else {
+                        view.context.set(&format!("node.{node_id}.recheck_only"), "0");
                         outcome_events.push(CircuitEvent::EffectUncertain {
                             node_id: node_id.clone(),
                             attempt,

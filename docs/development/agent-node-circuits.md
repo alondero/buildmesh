@@ -212,6 +212,10 @@ timeout. Status projections retain their lifecycle-transition time so a delayed
 snapshot cannot recreate a request already answered by newer native evidence.
 Paused and terminal runs show retained waits as history, without active-wait actions.
 
+Codex permission callbacks that omit a request ID retain an uncorrelated permission
+wait. An unrelated tool result cannot resolve that wait. Inspect the harness's
+permission state and the recorded evidence; generic activity is not approval.
+
 
 ### Evidence reconciliation history
 

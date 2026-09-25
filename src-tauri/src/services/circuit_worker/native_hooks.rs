@@ -26,7 +26,13 @@ impl NativeHook {
         let value: serde_json::Value = serde_json::from_slice(body).ok()?;
         let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
         let human_fact = human_fact(&value);
-        if provider == "codex" && human_fact.is_none() { return None; }
+        // Codex's PermissionRequest contract has no stable request id. Keep
+        // the event as an uncorrelated permission wait instead of dropping
+        // it or inventing a correlation token.
+        let uncorrelated_codex_permission = provider == "codex"
+            && event == "PermissionRequest"
+            && human_fact.is_none();
+        if provider == "codex" && human_fact.is_none() && !uncorrelated_codex_permission { return None; }
         if human_fact.is_none() && !matches!(
             event,
             "UserPromptSubmit"
@@ -329,7 +335,13 @@ fn normalize(
         .enumerate()
         .map(|(index, fact)| CircuitObservation {
             identity: identity.clone(),
-            source: if receipt.hook.human_fact.is_some() { format!("{}_request_hook", receipt.hook.provider.as_deref().unwrap_or("claude")) } else { "claude_native_hook".into() },
+            source: if receipt.hook.human_fact.is_some() {
+                format!("{}_request_hook", receipt.hook.provider.as_deref().unwrap_or("claude"))
+            } else if receipt.hook.provider.as_deref() == Some("codex") {
+                "codex_native_hook".into()
+            } else {
+                "claude_native_hook".into()
+            },
             source_id: Some(format!("{}:{index}", receipt.source_id)),
             observed_at_ms: receipt.received_at_ms,
             authoritative,
@@ -384,6 +396,112 @@ mod tests {
         assert!(NativeHook::parse("codex", br#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#).is_none(), "tool name alone is not a request identity");
         let question = NativeHook::parse("codex", br#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"q-1"}"#).unwrap();
         assert!(matches!(question.human_fact, Some(Fact::HumanWaitRequested { wait_kind: Kind::Question, .. })));
+    }
+
+    #[test]
+    fn codex_permission_without_request_id_is_retained_as_unresolved_permission() {
+        use crate::autopilot::circuit::observation::{
+            CircuitObservation, HumanWaitKind, ObservationDisposition, ObservedWorkFact as Fact,
+            WorkEvidence,
+        };
+
+        // Codex PermissionRequest's documented payload has no tool_use_id.
+        let hook = NativeHook::parse(
+            "codex",
+            br#"{"hook_event_name":"PermissionRequest","session_id":"session","turn_id":"turn","tool_name":"Bash","tool_input":{"command":"git status"}}"#,
+        )
+        .expect("retain the no-ID permission event");
+        assert!(hook.human_fact.is_none(), "do not fabricate a request ID");
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("1".into()),
+            source_id: "permission-without-id".into(),
+            received_at_ms: 10,
+            turn_fenced: true,
+            submission_correlated: false,
+            hook,
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 1,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            observed_at: String::new(),
+        };
+        let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(
+            42, entry, receipt, Some("session".into()), Some("1".into()), Some("input-1".into()),
+        ) else { panic!("native batch") };
+        assert!(!stale);
+        assert_eq!(observations.len(), 1);
+        assert!(!observations[0].authoritative, "missing submission correlation cannot prove a current turn fact");
+        assert_eq!(observations[0].source, "codex_native_hook");
+        assert_eq!(observations[0].fact, Fact::PermissionRequested);
+
+        let mut evidence = WorkEvidence::default();
+        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert_eq!(evidence.human_waits.len(), 1);
+        assert_eq!(evidence.human_waits[0].wait_kind, HumanWaitKind::Permission);
+        assert!(evidence.human_waits[0].request_id.is_none());
+        assert!(evidence.has_human_wait());
+        assert!(!evidence.completion_verified());
+
+        // An unrelated identified tool result and an aggregate status update
+        // cannot answer this uncorrelated wait.
+        let reply = NativeHook::parse(
+            "codex",
+            br#"{"hook_event_name":"PostToolUse","session_id":"session","turn_id":"turn","tool_use_id":"different-tool","tool_name":"Bash"}"#,
+        ).unwrap();
+        let reply_receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("1".into()),
+            source_id: "unrelated-tool-result".into(),
+            received_at_ms: 11,
+            turn_fenced: true,
+            submission_correlated: false,
+            hook: reply,
+        };
+        let reply_entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 2, node_id: Some("work".into()), attempt: Some(1), kind: "native_hook_received".into(),
+            detail: String::new(), observed_at: String::new(),
+        };
+        let super::super::CircuitEvent::ObservationBatch { observations: reply_observations, .. } = normalize(
+            42, reply_entry, reply_receipt, Some("session".into()), Some("1".into()), Some("input-1".into()),
+        ) else { panic!("native batch") };
+        assert_eq!(evidence.observe(&expected, &reply_observations[0]), ObservationDisposition::Rejected);
+
+        let mut stale_identity = expected.clone();
+        stale_identity.session_id = Some("different-session".into());
+        let stale_response = CircuitObservation {
+            identity: stale_identity, source: "codex_request_hook".into(), source_id: Some("stale-response".into()),
+            observed_at_ms: 12, authoritative: true,
+            fact: Fact::ToolResponse { wait_kind: HumanWaitKind::Permission, request_id: "different-tool".into() },
+        };
+        assert_eq!(evidence.observe(&expected, &stale_response), ObservationDisposition::Rejected);
+        evidence = serde_json::from_str(&serde_json::to_string(&evidence).unwrap()).unwrap();
+        assert_eq!(evidence.human_waits.len(), 1, "restart preserves the typed wait without inventing identity");
+
+        let projection = CircuitObservation {
+            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("awaiting".into()),
+            observed_at_ms: 12, authoritative: false, fact: Fact::NeedsInput,
+        };
+        evidence.observe(&expected, &projection);
+        let ready_projection = CircuitObservation {
+            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("ready".into()),
+            observed_at_ms: 13, authoritative: false, fact: Fact::Yielded,
+        };
+        evidence.observe(&expected, &ready_projection);
+        let working_projection = CircuitObservation {
+            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("working".into()),
+            observed_at_ms: 14, authoritative: false, fact: Fact::Working,
+        };
+        evidence.observe(&expected, &working_projection);
+        assert_eq!(evidence.human_waits.len(), 2, "status may add a generic aggregate wait but cannot replace the permission request");
+        assert!(evidence.human_waits.iter().any(|wait| wait.wait_kind == HumanWaitKind::Permission && wait.request_id.is_none()));
+        assert!(evidence.has_human_wait(), "status projections cannot clear the permission wait");
+        assert!(!evidence.completion_verified());
     }
 
     #[test]

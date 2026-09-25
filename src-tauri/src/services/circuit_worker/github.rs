@@ -176,27 +176,41 @@ fn recheck_open_pr_target(
     Ok(pull_request)
 }
 
-pub(super) fn reconcile_open_pr_effect(
+pub(super) fn reconcile_open_pr_effect_for_worker(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+) -> CircuitEvent {
+    use crate::services::github::GitHubClient;
+
+    reconcile_open_pr_for_worker(active, view, node_id, |owner, repo, head| {
+        GitHubClient::new()
+            .map_err(|error| error.to_string())?
+            .find_open_pr_for_branch(owner, repo, head)
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Resolve the saved OpenPr target through the read-only lookup and produce
+/// the worker outcome. The injected lookup is the same boundary used by the
+/// production GitHub client, so tests can exercise the complete handoff
+/// without making a live request or creating a pull request.
+fn reconcile_open_pr_effect_with_lookup(
     active: &db::ActiveCircuitRun,
     view: &RunView,
     node_id: &str,
+    find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
 ) -> Result<CircuitEvent, String> {
-    use crate::services::github::GitHubClient;
-
     let attempt = view.step(node_id).map_or(1, |step| step.attempt);
     let detail = db::circuit::evidence::latest_effect_target(active.run.id, node_id, attempt)?
         .ok_or_else(|| {
             "No durable OpenPr target is recorded for this attempt; no GitHub request was made."
                 .to_string()
         })?;
-    let target: OpenPrEffectTarget = serde_json::from_str(&detail)
-        .map_err(|_| "The saved OpenPr target cannot be read; no GitHub request was made.".to_string())?;
-    let client = GitHubClient::new().map_err(|error| error.to_string())?;
-    let pull_request = recheck_open_pr_target(&target, |owner, repo, head| {
-        client
-            .find_open_pr_for_branch(owner, repo, head)
-            .map_err(|error| error.to_string())
+    let target: OpenPrEffectTarget = serde_json::from_str(&detail).map_err(|_| {
+        "The saved OpenPr target cannot be read; no GitHub request was made.".to_string()
     })?;
+    let pull_request = recheck_open_pr_target(&target, find)?;
     let title = pull_request.title.trim();
     Ok(CircuitEvent::GithubActionResult {
         node_id: node_id.to_string(),
@@ -210,6 +224,43 @@ pub(super) fn reconcile_open_pr_effect(
         }),
         pr_title: (!title.is_empty()).then(|| title.to_string()),
         error: None,
+    })
+}
+
+/// Worker handoff shared by the production GitHub call and its deterministic
+/// integration coverage. Only a matching read-only result marks the existing
+/// attempt reconciled; missing, mismatched, or failed lookups stay uncertain.
+pub(super) fn reconcile_open_pr_for_worker(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+    find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
+) -> CircuitEvent {
+    let attempt = view.step(node_id).map_or(1, |step| step.attempt);
+    view.context
+        .set(&format!("node.{node_id}.recheck_only"), "0");
+    let result = reconcile_open_pr_effect_with_lookup(active, view, node_id, find);
+    if let Ok(CircuitEvent::GithubActionResult {
+        success: true,
+        pr_number: Some(number),
+        pr_url: Some(url),
+        pr_head_ref: Some(head),
+        ..
+    }) = &result
+    {
+        view.context.set(
+            &format!("node.{node_id}.effect_reconciled_attempt"),
+            attempt.to_string(),
+        );
+        view.context.set(
+                &format!("node.{node_id}.effect_reconciled_detail"),
+                format!("Read-only GitHub lookup found open pull request #{number} ({url}) on branch {head}."),
+            );
+    }
+    result.unwrap_or_else(|reason| CircuitEvent::EffectUncertain {
+        node_id: node_id.to_string(),
+        attempt,
+        reason: format!("Read-only pull-request recheck could not establish the result: {reason}"),
     })
 }
 

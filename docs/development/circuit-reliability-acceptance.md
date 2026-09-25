@@ -10,7 +10,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live response checks pending |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Current app process restart and identity-proven Codex reattachment remain untested |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | No live GitHub lookup was made. Other effect kinds and continuation still need a complete typed journal audit |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
@@ -18,6 +18,108 @@ Source inspection, deterministic automated checks, and live delivery are separat
 
 
 Every supported observation strategy needs recorded capabilities, source, freshness bounds, child/background coverage, degraded cases, harness version, platform and launch/trust configuration. Fixture parsing alone cannot establish live delivery. Unsupported or untested combinations remain unverified.
+
+## Continued acceptance: 2026-09-25
+
+Continuation baseline: `25308d3326f69855bd8a73cadeef8be34276d397`.
+The clean checkout and GitHub state were checked before this work: PR #1893 was
+open, draft and mergeable; issue #1889 was open. The earlier implementation and
+full Windows gate remain approved. Historical checkpoints below describe their
+own snapshots; the results here describe additional work, not full acceptance.
+
+### Live OpenPr recovery
+
+`npm run tauri:build:dev`, with `CARGO_TARGET_DIR` set to
+`src-tauri/target/release-dev`, passed on Windows. The resulting dev binary was
+launched with WebView2 CDP on port 9223. The stable app was not stopped.
+
+The controlled fixture seeded a durable uncertain OpenPr effect with saved target
+`alondero/buildmesh`, branch `tingly-watered-lynx`. No original create request was
+dispatched. Real Tauri IPC `record_circuit_outcome` requested Recheck; the real
+worker and GitHub client performed the read-only lookup and committed its result.
+
+| Command / controlled scenario | Observed result | Evidence boundary |
+| --- | --- | --- |
+| `node scripts/ui-shot.mjs --out .tmp/1889-continued-openpr.png --steps .tmp/1889-continued-openpr.mjs` | Passed: Run 47 / Circuit 47, PR 1893, attempt 1, completed run and step, acknowledged effect, 10 history entries | Live GitHub lookup through worker and durable commit; initial uncertainty was seeded |
+| Same command with `BUILDMESH_ACCEPTANCE_NOT_PERFORMED=1` and output `1889-continued-openpr-attested.png` | Passed: Run 48 / Circuit 48, PR 1893, attempt 1, acknowledged effect, 12 history entries; NotPerformed attestation retained | Actual operator IPC followed by live lookup; no deliberate retry or create |
+
+Both runs asserted zero new `effect_possible_dispatch` entries and retained the
+exact PR number and branch in durable context. Scratch JSON evidence is in
+`.tmp/1889-continued-openpr-evidence.json` and
+`.tmp/1889-continued-openpr-attested-evidence.json`. This establishes the recovery
+lookup-to-worker handoff. It does not establish a real crash during PR creation,
+a live cancellation race, or the Codex stale-completion race.
+
+### Permission callbacks without request identity
+
+The Codex native adapter now retains a `PermissionRequest` without a request ID
+as a reduced-confidence, uncorrelated permission wait. Previously it discarded
+the callback and could expose only a generic status-derived input wait. No
+request ID is invented, and an unrelated tool result cannot resolve the wait.
+The regression covers normalization, unrelated and wrong-session replies,
+serialized evidence restoration, and subsequent input/ready/working projections.
+This deterministic evidence is not a live permission request/reply result.
+
+### Current Windows Codex foreground observation
+
+Codex CLI 0.157.0 / `gpt-6-luna`, native Windows PowerShell, ran a fresh
+synthetic no-tools prompt through the real dev app (Mesh 45, Circuit 49,
+Run 49, Agent Node 128). Project hooks were enabled; the adapter launched
+with approval `never`, sandbox `danger-full-access`, and hook-trust bypass.
+This configuration does not establish approval-prompt delivery.
+
+The exact session `01a0d80f-8139-7861-b94a-30f8aa468f78` and turn
+`01a0d80f-85a7-73e3-a2a8-7da1482ae336` supplied authoritative foreground
+termination through `codex_rollout_task_complete`. The same batch recorded
+owned-work coverage as unavailable. The step remained Unverified at attempt 1.
+Real IPC Recheck recorded the existing facts as duplicates; the rollout still
+contained exactly one task start, one task completion and one controlled prompt.
+No prompt or spawn replay was observed. There were no human-request native
+receipts; this run proves rollout observation, not human-hook delivery.
+
+Commands used `node scripts/ui-shot.mjs --steps` with
+`.tmp/1889-continued-start.mjs` and `.tmp/1889-continued-recheck.mjs`, followed by
+`node .tmp/1889-continued-counts.mjs`. Durable state, session identity and rollout
+counts are recorded in `.tmp/1889-continued-result.json`.
+
+### Additional automated evidence
+
+| Command | Executed result | Scope / limitation |
+| --- | --- | --- |
+| `scripts\check.ps1 all -SerialRust` (final rerun) | Passed: 3,508 unit tests / 1 skipped; 69 TypeScript integration tests; 3,856 Rust library tests / 24 ignored; 18 Rust integration tests | Full Windows gate also passed agent/readme/lint-fixture checks, docs, desktop/mobile builds, lint and bundle budget. One Rust doc-test remains ignored. Log: `.tmp/1889-continued-full-gate-final.log` |
+| From `src-tauri`: `cargo test --locked --manifest-path Cargo.toml services::circuit_worker::github_recovery_tests -- --test-threads=1` | 3 passed, 0 failed, 3,877 filtered | Injected lookup through production worker outcome preparation and commit: successful reconciliation, missing/mismatched lookup, blocked lookup cancelled before commit; fresh DB connection reads and no second effect claim. This is not a process restart or live GitHub race |
+| From `src-tauri`: `cargo clippy --locked --all-targets` | Exit 0; 2 library warnings and 28 library-test warnings (1 duplicate); no warning in files changed by this continuation | Warning attribution outside the touched files was not rechecked at the baseline; this is not a warning-free whole-repository result |
+| `npm run check:agent -- --base 524a65278d6cc8edaac0e71c5fec33a4f755cbde` | Passed | Correct branch merge base; includes approved prior work and continuation changes |
+| `npm run check:docs` | Passed, 120 Markdown files | Documentation contract |
+
+The first redirected gate invocation stopped on PowerShell treating Node's
+`NO_COLOR`/`FORCE_COLOR` stderr warning as an error, before test execution. The
+next `scripts\check.ps1 all -SerialRust` invocation reached every gate: Rust
+passed 3,856 library tests (24 ignored) and 18 integration tests; TypeScript
+integration passed 69. Its unit suite failed one Project Files panel text wait
+(3,507 passed, 1 failed, 1 skipped). The isolated
+`npx vitest run tests/unit/probe-panel.test.tsx --pool=threads` rerun passed all
+20 tests with `NODE_ENV=test`; this alone does not turn the failed full gate green.
+No frontend source or test was changed in response to that failure.
+The subsequent full rerun passed, including all 20 tests in the affected file;
+the earlier failure remains recorded above. The initial focused permission test
+attempt hit a shared-executable linker lock and executed no tests; the final
+full Rust suite executed and passed the new permission regression.
+
+### Platform and strategy limits
+
+| Boundary inspected | Actual environment / source | Acceptance status |
+| --- | --- | --- |
+| Native Windows Codex rollout pull | CLI 0.157.0, ChatGPT login, Luna; Run 49 above | Foreground and non-replaying recheck observed; complete ownership Unverified |
+| Native Windows Codex request hooks | Configured PreToolUse/PostToolUse and PermissionRequest callbacks | No question/permission round trip established by the no-tools run; uncorrelated permissions cannot imply approval |
+| Windows host / Ubuntu WSL2 | Linux 6.6.87.2-microsoft-standard-WSL2 x86_64; `/usr/bin/codex` 0.49.0 | Below the adapter's 0.154.0 hook minimum; current hook contract Unverified. Ordinary startup rejects configured effort `xhigh`; `codex -c model_reasoning_effort=low login status` confirms ChatGPT login without changing configuration. No WSL model was launched |
+| Claude native receipts | Windows CLI 2.1.282; user has no Claude account | Live delivery Unverified; authoritative submission correlation remains unavailable |
+| Other installed Windows harnesses | OpenCode 1.18.3, Kimi 0.27.0, Agy 1.2.11, Cline 3.0.62, Grok 1.0.41 | Installation does not establish a Circuit lifecycle/ownership adapter. Current observer policy marks these unsupported; no completion claim |
+| Native Linux and macOS | No corresponding host exercised | Unverified |
+
+Inventory used `wsl --list --quiet`, command/version probes and login-status
+commands only. Authentication material was not read or recorded. Unsupported
+boundaries are gaps, not passed completion scenarios.
 
 ## Implementation checkpoint: 2026-09-24
 
