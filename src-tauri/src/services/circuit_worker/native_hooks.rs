@@ -270,9 +270,9 @@ fn normalize(
     let stale = !child_terminal
         && (receipt.explicit_turn_mismatch
             || current_input
-            .as_ref()
-            .zip(receipt.input_stamp.as_ref())
-            .is_some_and(|(a, b)| a != b));
+                .as_ref()
+                .zip(receipt.input_stamp.as_ref())
+                .is_some_and(|(a, b)| a != b));
     let identity = ObservationIdentity {
         run_id,
         step_id: entry.node_id.unwrap_or_default(),

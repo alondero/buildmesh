@@ -303,7 +303,9 @@ async function scenarioMissingStopAndDuplicateStart() {
   console.log(`Run ${runId} attached Agent Node ${nodeId}; waiting for the omitted Stop recheck.`);
 
   const start = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'UserPromptSubmit');
-  const duplicateForward = await waitFor('both duplicate UserPromptSubmit forwards', () => start.forwardCount === 2, 15_000);
+  await waitFor('both duplicate UserPromptSubmit forwards', () => start.forwardCount === 2, 15_000);
+  const duplicateCallbackForwardCount = start.forwardCount;
+  if (duplicateCallbackForwardCount !== 2) throw new Error('Expected to record both duplicate UserPromptSubmit forwards');
   const stopped = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'Stop', 150_000);
   if (stopped.action !== 'drop' || stopped.forwardCount !== 0) throw new Error('The selected Stop callback was not omitted by the relay');
 
@@ -325,7 +327,7 @@ async function scenarioMissingStopAndDuplicateStart() {
     sessionId: start.sessionId,
     turnId: start.turnId,
     promptSubmissions: uniqueTurnIds(relay.events, nodeId).length,
-    duplicateCallbackForwardCount: duplicateForward.forwardCount,
+    duplicateCallbackForwardCount,
     durableUserPromptSubmitReceipts: starts.length,
     omittedStop: { event: stopped.event, action: stopped.action, forwarded: stopped.forwardCount === 0 },
     rolloutRecheck: recovered.evidence.entries.some((entry) => entry.kind === 'observation'
