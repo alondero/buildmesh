@@ -43,7 +43,10 @@ mod wire;
 
 pub use engine::{buffers_size_bytes, cleanup, on_output, on_turn, reset_buffers};
 pub(crate) use engine::{naming_backend_env, NamingLaunch, ANSI_ESCAPE};
-pub use slug::{is_default_name, issue_node_name, on_spawn, pr_node_name};
+pub use slug::{
+    disambiguate_node_name, is_default_name, issue_node_name, on_spawn, pr_node_name,
+    pr_reviewer_node_name,
+};
 pub use wire::{NamingBackendFailedPayload, NodeRenamedPayload};
 
 #[cfg(test)]

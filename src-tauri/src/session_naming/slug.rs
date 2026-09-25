@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rand::seq::IndexedRandom;
 use super::words::{ADJECTIVES, NOUNS};
 
@@ -52,6 +54,60 @@ pub fn issue_node_name(issue_number: i64, title: &str) -> String {
 /// issue-spawned `gh{N}-` ones in the sidebar.
 pub fn pr_node_name(pr_number: i64, title: &str) -> String {
     prefixed_node_name("pr", pr_number, title)
+}
+
+/// Build the initial node name for the **reviewer sibling** of a PR spawn.
+///
+/// The PR pill's "Spawn reviewer agent" path uses this instead of
+/// [`pr_node_name`] so the reviewer gets a different name — and therefore a
+/// different worktree directory — than the implementation node it reviews.
+/// Without the distinction both nodes derive the same `pr{N}-{slug}` name,
+/// which lands them in one shared worktree (see `provision_for_spawn`'s
+/// path-exists short-circuit). The `review` token keeps the PR association
+/// readable, e.g. PR #123 "add pr chip" → `pr123-review-add-pr-chip`.
+///
+/// Callers must still disambiguate against the mesh's existing names (see
+/// [`disambiguate_node_name`]) — repeat reviewer spawns would otherwise reuse
+/// the previous reviewer's name.
+pub fn pr_reviewer_node_name(pr_number: i64, title: &str) -> String {
+    prefixed_node_name("pr", pr_number, &format!("review {title}"))
+}
+
+/// Cap on `base-2`, `base-3`, … attempts before falling back to a random
+/// default. A mesh with this many same-named nodes is pathological; the
+/// fallback guarantees a usable, in-cap name rather than looping.
+const MAX_DISAMBIGUATION_ATTEMPTS: u32 = 50;
+
+/// Return `base` when free, else `base-2`, `base-3`, … until an unused name is
+/// found (or a random default after [`MAX_DISAMBIGUATION_ATTEMPTS`]).
+///
+/// `taken` is the set of names already in use — callers pass the target mesh's
+/// `worktree_name`s, since that is what determines the on-disk worktree path.
+/// The result always satisfies `SLUG_REGEX` and the 50-char cap: the suffix is
+/// carved out of `base` rather than appended past the limit.
+pub fn disambiguate_node_name(base: &str, taken: &HashSet<String>) -> String {
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for n in 2..=MAX_DISAMBIGUATION_ATTEMPTS {
+        let candidate = suffixed(base, n);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    on_spawn()
+}
+
+/// `base` + `-{n}`, keeping the total within the 50-char slug cap by trimming
+/// the base (and any hyphen the cut exposes) before appending the suffix.
+fn suffixed(base: &str, n: u32) -> String {
+    let suffix = format!("-{n}");
+    if base.len() + suffix.len() <= 50 {
+        return format!("{base}{suffix}");
+    }
+    let keep = 50 - suffix.len();
+    let trimmed = base.get(..keep).unwrap_or(base).trim_end_matches('-');
+    format!("{trimmed}{suffix}")
 }
 
 /// Shared core for `issue_node_name` / `pr_node_name` — both flows just

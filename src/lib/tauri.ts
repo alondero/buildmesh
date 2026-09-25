@@ -729,6 +729,12 @@ export const createPrNode = (
   headRepoOwner?: string,
   headRepoCloneUrl?: string,
   configurationId?: string,
+  // `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
+  // reviewer agent" row). Same intent and head pinning as the probe spawn, but
+  // the backend names the node distinctly (`pr{N}-review-{slug}`, disambiguated)
+  // so it cuts its own worktree instead of adopting the implementation node's.
+  // Omit/`false` for the Pull Requests probe's `+` behaviour.
+  reviewer?: boolean,
 ) =>
   _invoke<IssueNodeDraft>('create_pr_node', {
     meshId,
@@ -740,6 +746,7 @@ export const createPrNode = (
     headRepoOwner,
     headRepoCloneUrl,
     configurationId,
+    reviewer,
   });
 
 // AI context portability

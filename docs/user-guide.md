@@ -77,6 +77,12 @@ in the lower centre to **Swap** positions. The highlighted half previews the
 action. Side edges below the title still insert before or after the target.
 Dragging is disabled in Pinned and Single views and with other sort orders.
 
+The PR pill can group a node for you: click the **PR #N** chip in an agent's
+title and pick **Spawn reviewer agent…**, then a harness. Buildmesh launches an
+agent on that pull request's head commit with its own worktree and groups it as
+another tab on the node you clicked — the same spawn the Pull Requests probe's
+**+** performs.
+
 A group shares one viewport, with named tabs for its agents. Review and
 Build/Run/Terminal tabs stay with their owning agent. Dragging a grouped card
 moves the whole group, and dropping it onto another group combines their tabs.
