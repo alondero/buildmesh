@@ -58,20 +58,25 @@ Linux, WSL, and macOS callback delivery remain unverified.
 
 The review found that the duplicate-forward wait returned a boolean and the
 smoke then read `forwardCount` from that boolean. The runner now snapshots
-`start.forwardCount` after the wait and asserts the recorded count is two. A
-post-fix live attempt at commit `4ab71692` timed out waiting for the first
-Codex hook after 30 seconds; it captured no relay events, cancelled the run,
-deleted the disposable Mesh, and shut down the isolated app. The successful
-live evidence above predates this capture correction, so a successful
-post-fix artifact has not yet been produced. The failed attempt is recorded at
-`.tmp/codex-hook-recovery-2026-09-25T21-53-22-218Z/evidence.json`.
+`start.forwardCount` after the wait and asserts the recorded count is two. The
+first-hook waits now allow 150 seconds for Codex startup and its first token.
+An initial attempt at commit `4ab71692` timed out after 30 seconds with no
+relay events; it cancelled the run, deleted the disposable Mesh, and shut down
+the isolated app. After extending both waits, the smoke passed at pushed commit
+`af4d05f1`: duplicate delivery recorded two forwards and one durable receipt,
+the dropped Stop reached actionable Unverified with Recheck, and the delayed
+prior-turn Stop was rejected while the attempt stayed Unverified. The successful
+artifact is `.tmp/codex-hook-recovery-2026-09-25T22-35-17-219Z/evidence.json`;
+both runs were cancelled, the disposable Mesh was deleted, and the isolated app
+and profile were cleaned up.
 
 | Check / revision | Result | Attribution / scope |
 | --- | --- | --- |
 | `npm run test:ci -- --project=verify-smoke` on commit `4ab71692` | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
 | Focused UsageTab test on merge-base `91118ebc` | Passed: 1 passed, 23 skipped. | The reviewed PR failure did not reproduce when run alone on the base. |
 | Full Vitest unit/integration suite on merge-base `91118ebc` | 3,574 passed, 1 skipped, 3 failed: ui-shot timed out at 60 seconds, mobile ProviderPicker timed out at 5 seconds, and ProbePanel could not find `Changed Files`. The UsageTab timer test passed. | No matching UsageTab failure reproduced on the base; attribution of the PR-run failure remains unverified. Playwright was not run on the base. |
-| `cargo test --locked --lib http::routes::attention -- --test-threads=1` after review fixes | Passed: 87 tests. | Includes route-gate coverage for durable stale receipt, `StaleDropped`, and skipped accepted-hook projection. |
+| `npm run tauri:build:dev:codex-hook-smoke`; `npm run smoke:codex-hook-recovery` on commit `af4d05f1` | Passed: two live Codex scenarios. Duplicate callback forward count 2; one durable prompt receipt; dropped Stop remained actionable Unverified; delayed old-turn Stop was rejected. | Windows, Codex CLI 0.157.0 / `gpt-6-luna`; no `codex_rollout_task_complete` observation, so completion reconciliation remains unverified. Artifact: `.tmp/codex-hook-recovery-2026-09-25T22-35-17-219Z/evidence.json`. |
+| `cargo test --locked --lib http::routes::attention -- --test-threads=1` after review fixes | Passed: 87 tests. | Includes route-gate coverage for stale receipt persistence and skipped projection, plus a matching current-turn Stop that reaches the accepted path and persists `turn_fenced=true`, `explicit_turn_mismatch=false`. |
 | `node --test tests/agent-infra/codex-hook-relay.test.mjs`; `node --check` on both smoke scripts | Passed: relay test 1/1; both scripts parse. | Relay forwarding behavior and smoke script syntax. |
 
 ### Live OpenPr recovery
