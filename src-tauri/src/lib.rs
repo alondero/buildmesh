@@ -450,6 +450,7 @@ pub fn run() {
             commands::mesh::add_mesh,
             commands::mesh::pick_mesh_folder,
             commands::mesh::create_mesh,
+            commands::mesh::clone_mesh_repo,
             commands::mesh::update_mesh_color,
             commands::mesh::create_test_mesh,
             commands::mesh::list_meshes,

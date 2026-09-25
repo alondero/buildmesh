@@ -31,6 +31,27 @@ fn folder_display_name(folder_path: &tauri_plugin_dialog::FilePath, path: &str) 
     }
 }
 
+/// Shared tail for every mesh-creation entrypoint (`add_mesh`, `create_mesh`,
+/// `clone_mesh_repo`): apply the optional accent colour, inject the attention
+/// hook, and re-read the row so the returned `Mesh` carries the colour we just
+/// wrote. One owner so the three callers can't drift.
+fn finalize_new_mesh(
+    mesh: Mesh,
+    color: Option<&str>,
+    path: &std::path::Path,
+) -> Result<Mesh, String> {
+    if let Some(color) = color.filter(|c| !c.is_empty()) {
+        db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
+    }
+    if let Err(e) = inject_attention_hook(path) {
+        tracing::warn!(
+            "attention hook injection failed for {}: {e}",
+            path.display()
+        );
+    }
+    db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+}
+
 /// Open the native folder picker and return the chosen path + derived name,
 /// WITHOUT creating a mesh. The "New mesh" modal (location + colour) calls
 /// this so it can show the selection and let the user pick a colour before
@@ -75,10 +96,7 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
             tracing::error!("create_mesh failed: {}", e);
             e.to_string()
         })?;
-        if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
-            tracing::warn!("add_mesh: attention hook injection failed: {e}");
-        }
-        Ok(mesh)
+        finalize_new_mesh(mesh, None, std::path::Path::new(&path))
     })
     .await
 }
@@ -94,14 +112,174 @@ pub async fn create_mesh(
 ) -> Result<Mesh, String> {
     crate::commands::run_blocking("create_mesh", move || {
         let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
-        if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
-            db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
+        finalize_new_mesh(mesh, color.as_deref(), std::path::Path::new(&path))
+    })
+    .await
+}
+
+/// Wall-clock budget for the clone shell-out. Generous: a large repo over a
+/// slow link can legitimately take minutes while the user watches an
+/// indeterminate "Cloning…" state.
+const CLONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Resolve and validate the clone destination `<parent_dir>/<repo>`.
+///
+/// Returns the destination plus whether it already existed — the caller needs
+/// that to decide what to clean up after a failure. Rejects a missing parent
+/// and an already-occupied destination so `git clone` is never pointed at a
+/// non-empty tree; a pre-existing *empty* directory is allowed, because git
+/// clones into one happily.
+pub(crate) fn resolve_clone_destination(
+    parent_dir: &str,
+    repo: &str,
+) -> Result<(std::path::PathBuf, bool), String> {
+    let parent = std::path::Path::new(parent_dir);
+    if !parent.is_dir() {
+        return Err(format!("Destination folder does not exist: {parent_dir}"));
+    }
+    let dest = parent.join(repo);
+    let existed = dest.exists();
+
+    if dest.is_dir() {
+        // git clones into an existing *empty* directory; a populated one is a
+        // collision. `is_dir` (not `read_dir().is_ok()`) is what keeps an
+        // existing regular file from slipping through: `read_dir` on a file
+        // returns `Err(ENOTDIR)`, which would otherwise read as "empty".
+        let occupied = dest
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if occupied {
+            return Err(format!(
+                "A folder already exists at {} — choose a different parent folder.",
+                dest.display()
+            ));
         }
-        if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
-            tracing::warn!("create_mesh: attention hook injection failed: {e}");
+    } else if existed {
+        return Err(format!(
+            "A file already exists at {} — choose a different parent folder.",
+            dest.display()
+        ));
+    }
+    Ok((dest, existed))
+}
+
+/// Drop the partial tree a failed or timed-out clone may have left, so the
+/// obvious retry (same parent, same repo) isn't blocked by the collision guard.
+/// Only a directory we created is removed — a destination the user already had
+/// is left as they had it.
+fn remove_partial_clone(dest: &std::path::Path, dest_existed: bool) {
+    if !dest_existed {
+        let _ = std::fs::remove_dir_all(dest);
+    }
+}
+
+/// The stderr line worth showing the user.
+///
+/// `git clone` writes progress chatter (`Cloning into 'x'…`) to stderr *before*
+/// it fails, so the first line is the least informative one. Prefer git's own
+/// `fatal:` / `error:` line, then fall back to the last non-empty line; `None`
+/// when git said nothing at all.
+pub(crate) fn first_error_line(stderr: &str) -> Option<&str> {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+        .or_else(|| lines.last())
+        .copied()
+}
+
+/// Parse user input and clone that repository into `<parent_dir>/<repo>`,
+/// registering the result as a Mesh in one step.
+pub(crate) fn clone_mesh_repo_blocking(
+    url: &str,
+    parent_dir: &str,
+    color: Option<String>,
+) -> Result<Mesh, String> {
+    let target = services::github::parse_clone_input(url).ok_or_else(|| {
+        "Enter a GitHub repository as `owner/repo` or a full github.com URL.".to_string()
+    })?;
+    clone_target_into_mesh(&target, parent_dir, color)
+}
+
+/// Clone an already-resolved target into `<parent_dir>/<repo>` and register the
+/// resulting Mesh: destination guard -> `git clone` -> default-branch resolution
+/// -> mesh row -> colour + attention hook.
+///
+/// Split from [`clone_mesh_repo_blocking`] so a test can drive the whole
+/// orchestration against a local fixture repository — the parser only admits
+/// github.com URLs, which no offline test can reach.
+///
+/// The clone runs with the machine's own git auth (SSH agent, credential
+/// manager, or `gh auth setup-git`) through
+/// [`crate::process_util::git_command`]. No token is injected, so nothing secret
+/// is written into the new repo's `.git/config`, and
+/// `GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never` make a credentials-needing
+/// clone fail fast instead of hanging on a prompt no GUI can answer.
+pub(crate) fn clone_target_into_mesh(
+    target: &services::github::CloneTarget,
+    parent_dir: &str,
+    color: Option<String>,
+) -> Result<Mesh, String> {
+    // Clone into a new `<parent>/<repo>` subfolder so we never clone into a
+    // directory the user didn't intend to become the repo root.
+    let (dest, dest_existed) = resolve_clone_destination(parent_dir, &target.repo)?;
+
+    let mut cmd = crate::process_util::git_command();
+    cmd.arg("clone").arg(&target.url).arg(&dest);
+    let output = match crate::process_util::run_command_with_timeout(cmd, "git clone", CLONE_TIMEOUT)
+    {
+        Ok(output) => output,
+        Err(e) => {
+            // A timed-out clone is killed and reaped by the runner, but may
+            // have left a partial tree.
+            remove_partial_clone(&dest, dest_existed);
+            return Err(e);
         }
-        // Re-read so the returned mesh carries the colour we just wrote.
-        db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+    };
+
+    if !output.status.success() {
+        remove_partial_clone(&dest, dest_existed);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(match first_error_line(&stderr) {
+            Some(line) => format!("git clone failed: {line}"),
+            None => "git clone failed (git produced no diagnostic output)".to_string(),
+        });
+    }
+
+    let dest_str = dest.to_string_lossy().to_string();
+
+    // Cut worktrees from the cloned repo's real default branch rather than the
+    // `origin/main` literal `create_mesh` writes — otherwise a repo whose
+    // default is `master` lands as a **drifted root**.
+    let base_ref = crate::git::primitives::open_from_host_path(&dest_str)
+        .map(|repo| {
+            format!(
+                "origin/{}",
+                crate::commands::git::default_branch_from_repo(&repo)
+            )
+        })
+        .unwrap_or_else(|_| "origin/main".to_string());
+
+    let mesh = db::create_mesh_with_base_ref(&target.repo, &dest_str, &base_ref)
+        .map_err(|e| e.to_string())?;
+    finalize_new_mesh(mesh, color.as_deref(), dest.as_path())
+}
+
+/// Clone a GitHub repo into `<parent_dir>/<repo>` and create a mesh from it.
+/// See [`clone_mesh_repo_blocking`] for the clone/auth rules.
+#[command]
+pub async fn clone_mesh_repo(
+    url: String,
+    parent_dir: String,
+    color: Option<String>,
+) -> Result<Mesh, String> {
+    crate::commands::run_blocking("clone_mesh_repo", move || {
+        clone_mesh_repo_blocking(&url, &parent_dir, color)
     })
     .await
 }

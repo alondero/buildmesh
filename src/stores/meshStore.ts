@@ -58,6 +58,16 @@ interface MeshState {
   addMesh: () => Promise<void>;
   addTestMesh: (name: string) => Promise<Mesh | null>;
   createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
+  // Clone a GitHub repo into `<parentDir>/<repo>` and register it as a mesh.
+  // Returns the created mesh or the backend's error text: clone failures are
+  // user-actionable (repo not found, auth, destination already exists), so the
+  // caller needs the real message rather than the generic `Mesh | null`
+  // fallback that buries it in `state.error`.
+  cloneMesh: (
+    url: string,
+    parentDir: string,
+    color?: string | null
+  ) => Promise<{ mesh: Mesh } | { error: string }>;
   // Issue #1247 — returns `true` on successful delete + cleanup so callers
   // can gate their own follow-up (Probe close, navigation, toast) on the
   // real outcome instead of catching an error `deleteMesh` never throws.
@@ -127,6 +137,21 @@ export const useMeshStore = create<MeshState>((set) => ({
     } catch (e) {
       set({ error: formatError(e) });
       return null;
+    }
+  },
+
+  cloneMesh: async (url, parentDir, color) => {
+    try {
+      const mesh = await api.cloneMeshRepo(url, parentDir, color);
+      set((state) => ({
+        meshes: [...state.meshes, mesh],
+        meshesById: new Map([...state.meshesById, [mesh.id, mesh]]),
+      }));
+      return { mesh };
+    } catch (e) {
+      const error = formatError(e);
+      set({ error });
+      return { error };
     }
   },
 

@@ -15,7 +15,7 @@ pub mod sync;
 
 pub use issues::{parse_blocked_by, Issue};
 pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest};
-pub use sync::{parse_owner_repo, GitHubClient, GitHubError};
+pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};
 
 /// Fake GitHub server used by command-layer tests. The implementation lives
 /// with the pull-request client; this re-export keeps `services::github::tests`
