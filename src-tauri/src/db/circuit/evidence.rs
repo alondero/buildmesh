@@ -1711,6 +1711,83 @@ mod tests {
             }] if node_id == "open_pr"
         ));
         assert_eq!(view.steps[0].status, StepStatus::Running);
+
+        // Commit the scheduled recheck before the worker performs its remote
+        // lookup. The existing uncertain create attempt must stay unchanged.
+        let writes = transition.step_writes.iter().map(|write| super::super::CircuitStepOp {
+            node_id: write.node_id.clone(),
+            status: write.status.as_db_str().into(),
+            attempt: write.attempt,
+            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
+            error: write.error.clone(),
+            agent_node_id: None,
+            fresh_attempt: write.fresh_attempt,
+        }).collect::<Vec<_>>();
+        commit_transition_locked(
+            &mut db,
+            1,
+            None,
+            &view.context.to_json().unwrap(),
+            &writes,
+            EvidenceWrite { expected: transition.expected.as_ref(), ..Default::default() },
+        ).unwrap();
+
+        // A matching read-only lookup finishes after the operator cancels.
+        // Its stepper result must not overwrite the terminal run or reconcile
+        // the uncertain effect when the stale worker tries to commit it.
+        let event = CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
+            pr_head_ref: Some("feature/circuit".into()),
+            pr_title: Some("Implementation".into()),
+            error: None,
+        };
+        view.context.set("node.open_pr.recheck_only", "0");
+        view.context.set("node.open_pr.effect_reconciled_attempt", "1");
+        let result = advance(&mut view, &event);
+        assert_eq!(view.steps[0].status, StepStatus::Completed);
+        assert_eq!(view.context.get("pr.number"), Some("314"));
+        super::super::ledger::cancel_circuit_run_locked(&mut db, 1).unwrap();
+        let completion = result.step_writes.iter().map(|write| super::super::CircuitStepOp {
+            node_id: write.node_id.clone(),
+            status: write.status.as_db_str().into(),
+            attempt: write.attempt,
+            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
+            error: write.error.clone(),
+            agent_node_id: None,
+            fresh_attempt: write.fresh_attempt,
+        }).collect::<Vec<_>>();
+        let reconciled = ReconciledEffect {
+            intent: EffectIntent { node_id: "open_pr".into(), attempt: 1, kind: "github".into() },
+            detail: "Read-only GitHub lookup found open pull request #314.".into(),
+        };
+        assert!(commit_transition_locked(
+            &mut db,
+            1,
+            result.run_state_changed.then_some(view.state.as_db_str()),
+            &view.context.to_json().unwrap(),
+            &completion,
+            EvidenceWrite {
+                expected: result.expected.as_ref(),
+                reconciled_effects: std::slice::from_ref(&reconciled),
+                ..Default::default()
+            },
+        ).is_err());
+        assert_eq!(super::super::ledger::get_circuit_run_inner(&db, 1).unwrap().unwrap().state, "cancelled");
+        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap().remove(0);
+        assert_eq!((step.status.as_str(), step.attempt), ("cancelled", 1));
+        assert_eq!(db.query_row("SELECT state FROM circuit_effects WHERE run_id=1 AND node_id='open_pr' AND attempt=1", [], |row| row.get::<_, String>(0)).unwrap(), "uncertain");
+        assert!(!history_inner(&db, 1).unwrap().iter().any(|entry| entry.kind == "effect_reconciled"));
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let context = crate::autopilot::circuit::context::CircuitContext::from_json(
+            &stored.context_json,
+        )
+        .unwrap();
+        assert_eq!(context.get("pr.number"), None);
     }
 
     #[test]
@@ -2022,6 +2099,9 @@ mod tests {
         use crate::autopilot::circuit::model::{
             CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
         };
+        use crate::autopilot::circuit::stepper::{
+            advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
+        };
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -2048,15 +2128,38 @@ mod tests {
             [graph.to_json().unwrap()],
         )
         .unwrap();
-        let op = super::super::CircuitStepOp {
-            node_id: "open_pr".into(),
-            status: "completed".into(),
-            attempt: 1,
-            outcome: Some(Some("completed".into())),
-            error: None,
-            agent_node_id: None,
-            fresh_attempt: false,
+        let mut view = RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph,
+            context: crate::autopilot::circuit::context::CircuitContext::default(),
+            steps: vec![StepView {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+            }],
         };
+        let result = advance(&mut view, &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
+            pr_head_ref: Some("feature/circuit".into()),
+            pr_title: Some("Implementation".into()),
+            error: None,
+        });
+        let writes = result.step_writes.iter().map(|write| super::super::CircuitStepOp {
+            node_id: write.node_id.clone(),
+            status: write.status.as_db_str().into(),
+            attempt: write.attempt,
+            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
+            error: write.error.clone(),
+            agent_node_id: None,
+            fresh_attempt: write.fresh_attempt,
+        }).collect::<Vec<_>>();
         let reconciled = ReconciledEffect {
             intent: EffectIntent {
                 node_id: "open_pr".into(),
@@ -2068,15 +2171,22 @@ mod tests {
         commit_transition_locked(
             &mut db,
             1,
-            None,
-            "{}",
-            &[op],
+            result.run_state_changed.then_some(view.state.as_db_str()),
+            &view.context.to_json().unwrap(),
+            &writes,
             EvidenceWrite {
                 reconciled_effects: std::slice::from_ref(&reconciled),
+                expected: result.expected.as_ref(),
                 ..Default::default()
             },
         )
         .unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1).unwrap().unwrap();
+        let context = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+        assert_eq!(stored.state, "completed");
+        assert_eq!(context.get("pr.number"), Some("314"));
+        assert_eq!(context.get("pr.head_ref"), Some("feature/circuit"));
+        assert_eq!(super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap()[0].status, "completed");
         assert_eq!(
             db.query_row("SELECT state FROM circuit_effects", [], |row| row.get::<_, String>(0)).unwrap(),
             "acknowledged",
