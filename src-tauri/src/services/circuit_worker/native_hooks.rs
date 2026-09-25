@@ -12,6 +12,11 @@ pub(crate) struct NativeHook {
     pub child_id: Option<String>,
     pub active_work: Option<BTreeSet<String>>,
     pub final_report: Option<String>,
+    /// Antigravity `Stop` with `fullyIdle: false`: the turn yielded while
+    /// harness-owned background work is still in flight (issue #1901).
+    /// Never set by the Claude/Codex parsers below.
+    #[serde(default)]
+    pub background_busy: bool,
     #[serde(default)]
     pub human_fact: Option<crate::autopilot::circuit::observation::ObservedWorkFact>,
     #[serde(default)]
@@ -20,6 +25,9 @@ pub(crate) struct NativeHook {
 
 impl NativeHook {
     pub(crate) fn parse(provider: &str, body: &[u8]) -> Option<Self> {
+        if provider == "agy" {
+            return parse_agy(body);
+        }
         if !matches!(provider, "claude" | "claude_code" | "anthropic" | "codex") {
             return None;
         }
@@ -72,6 +80,7 @@ impl NativeHook {
             event: event.into(),
             child_id: token("agent_id"),
             human_fact,
+            background_busy: false,
             provider: Some(provider.into()),
             active_work,
             final_report: if event == "Stop" {
@@ -82,6 +91,87 @@ impl NativeHook {
             },
         })
     }
+}
+
+/// Antigravity (`agy`) `Stop` receipts (issue #1901).
+///
+/// Validated against agy 1.2.11 on Windows interactive sessions (`-p`
+/// print mode emits no `Stop` hook, so hook evidence covers only
+/// Buildmesh-launched PTY sessions): the provisioned `.agents/hooks.json`
+/// `Stop` hook pipes `{conversationId, executionNum, fullyIdle,
+/// terminationReason, error, workspacePaths, transcriptPath,
+/// artifactDirectoryPath, modelName}` (1.2.x also sends
+/// `hookEventName: "Stop"`) to the attention route. What the shape
+/// provably lacks decides the adapter:
+/// - No per-turn token (`executionNum` is an opaque 0-based step counter,
+///   not identity) → `turn_id` stays `None`; receipts are session-fenced
+///   but never turn-fenced, hence never authoritative.
+/// - No child/background registry → `active_work` stays `None`; every
+///   `Stop` carries `OwnershipUnavailable` so a settled foreground turn
+///   can never verify owned work.
+/// - No inline report text → `final_report` stays `None`.
+/// - Subagent `Stop`s carry their own `conversationId`, so they fence as
+///   a different session downstream and can never complete the parent.
+///
+/// Only `Stop` is accepted; under `--dangerously-skip-permissions` AGY
+/// installs no `PreToolUse` gate, so no other event is validated.
+fn parse_agy(body: &[u8]) -> Option<NativeHook> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let named = value
+        .get("hook_event_name")
+        .or_else(|| value.get("hookEventName"))
+        .or_else(|| value.get("hookName"))
+        .and_then(|name| name.as_str());
+    let conversation = value
+        .get("conversationId")
+        .or_else(|| value.get("conversation_id"))
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.trim().is_empty());
+    // AGY always ships its conversation id on `Stop`; a `Stop` without one
+    // is malformed, never turn evidence for whichever node it reached.
+    conversation?;
+    let event = match named {
+        Some(name) if name.eq_ignore_ascii_case("stop") => "Stop",
+        Some(_) => return None,
+        None => {
+            // Shape-keyed `Stop`: pre-`hookEventName` payloads carry no
+            // event key, so require the AGY `Stop` markers alongside the
+            // conversation id rather than treating any JSON as a turn end.
+            let marked = [
+                "fullyIdle",
+                "fully_idle",
+                "terminationReason",
+                "termination_reason",
+                "transcriptPath",
+                "transcript_path",
+                "executionNum",
+                "execution_num",
+            ]
+            .iter()
+            .any(|key| value.get(key).is_some());
+            if marked {
+                "Stop"
+            } else {
+                return None;
+            }
+        }
+    };
+    let background_busy = value
+        .get("fullyIdle")
+        .or_else(|| value.get("fully_idle"))
+        .and_then(|idle| idle.as_bool())
+        == Some(false);
+    Some(NativeHook {
+        session_id: conversation.map(str::to_owned),
+        turn_id: None,
+        event: event.into(),
+        child_id: None,
+        active_work: None,
+        final_report: None,
+        human_fact: None,
+        background_busy,
+        provider: Some("agy".into()),
+    })
 }
 
 // This is the Claude/Codex hook request contract already accepted by the
@@ -300,7 +390,14 @@ fn normalize(
     if let Some(fact) = human_fact { facts.push(fact); }
     match receipt.hook.event.as_str() {
         "UserPromptSubmit" => facts.push(Fact::Working),
-        "Stop" => facts.push(Fact::ForegroundTerminated),
+        // `background_busy` is only ever set by the AGY parser above; the
+        // harness signalled the turn yielded while owned background work is
+        // still in flight, so this is yield evidence, not a settled turn.
+        "Stop" => facts.push(if receipt.hook.background_busy {
+            Fact::Yielded
+        } else {
+            Fact::ForegroundTerminated
+        }),
         "PermissionRequest" if receipt.hook.human_fact.is_none() => facts.push(Fact::PermissionRequested),
         "StopFailure" => facts.push(Fact::Unavailable),
         "SubagentStart" => {
@@ -326,6 +423,13 @@ fn normalize(
             facts.push(Fact::OwnershipSnapshot {
                 active_work: active_work.into_iter().collect(),
             });
+        } else if receipt.hook.provider.as_deref() == Some("agy") {
+            // Validated absence (issue #1901): Antigravity exposes no
+            // child/background registry, so a settled foreground turn must
+            // park the step Unverified instead of implying no owned work.
+            facts.push(Fact::OwnershipUnavailable {
+                reason: "Antigravity exposes no child/background registry; a settled foreground turn cannot verify owned work. Inspect the agent and Recheck evidence.".into(),
+            });
         } else {
             facts.push(Fact::Unavailable);
         }
@@ -339,6 +443,8 @@ fn normalize(
                 format!("{}_request_hook", receipt.hook.provider.as_deref().unwrap_or("claude"))
             } else if receipt.hook.provider.as_deref() == Some("codex") {
                 "codex_native_hook".into()
+            } else if receipt.hook.provider.as_deref() == Some("agy") {
+                "agy_native_hook".into()
             } else {
                 "claude_native_hook".into()
             },
@@ -729,5 +835,162 @@ mod tests {
         )
         .is_none());
         assert!(NativeHook::parse("claude", br#"{"hook_event_name":"TaskCompleted"}"#).is_none());
+    }
+
+    #[test]
+    fn agy_stop_shapes_parse_with_session_identity_and_no_turn_token() {
+        // Issue #1901: pre-`hookEventName` shape from the attention-route
+        // fixtures (`conversationId`, `executionNum`, `fullyIdle`,
+        // `terminationReason`, …).
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":true,"workspacePaths":["F:\\src\\repo"],"transcriptPath":"C:\\x\\transcript.jsonl","artifactDirectoryPath":"C:\\x","modelName":"gemini-3.7-flash"}"#).unwrap();
+        assert_eq!(hook.event, "Stop");
+        assert_eq!(hook.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(hook.turn_id, None, "executionNum is telemetry, not a turn fence");
+        assert!(!hook.background_busy);
+        assert_eq!(hook.active_work, None, "no child/background registry exists");
+        assert_eq!(hook.final_report, None, "Stop carries no inline report");
+        assert_eq!(hook.human_fact, None);
+        assert_eq!(hook.provider.as_deref(), Some("agy"));
+        // 1.2.x shape carrying `hookEventName` parses to the same receipt.
+        let named = NativeHook::parse("agy", br#"{"hookEventName":"Stop","conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true,"terminationReason":"NO_TOOL_CALL"}"#).unwrap();
+        assert_eq!(named, hook);
+        // `fullyIdle: false` is the harness's background-busy signal.
+        let busy = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
+        assert!(busy.background_busy);
+        assert_eq!(busy.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        // snake_case spellings parse identically.
+        let snake = NativeHook::parse("agy", br#"{"hook_event_name":"stop","conversation_id":"550e8400-e29b-41d4-a716-446655440000","fully_idle":false}"#).unwrap();
+        assert_eq!(snake, busy);
+        // Serde round-trip keeps the receipt (durable history rows persist it).
+        assert_eq!(serde_json::from_str::<NativeHook>(&serde_json::to_string(&hook).unwrap()).unwrap(), hook);
+    }
+
+    #[test]
+    fn agy_rejects_unvalidated_events_malformed_bodies_and_foreign_harnesses() {
+        for body in [
+            "{}",
+            r#"{"conversationId":""}"#,
+            r#"{"conversationId":"abc"}"#,
+            r#"{"hookEventName":"Stop"}"#,
+            r#"{"hookEventName":"PreToolUse","conversationId":"abc","toolCall":{"name":"Bash"}}"#,
+            r#"{"hookEventName":"PostToolUse","conversationId":"abc"}"#,
+            r#"{"hookEventName":"TaskCompleted","conversationId":"abc"}"#,
+            r#"{"hook_event_name":"Stop","session_id":"session"}"#,
+            "not json",
+        ] {
+            assert!(NativeHook::parse("agy", body.as_bytes()).is_none(), "{body}");
+        }
+        // Provider scoping: agy bytes never parse under a harness id that
+        // owns no AGY adapter, and Claude request bytes are not AGY evidence.
+        let stop = br#"{"conversationId":"abc","fullyIdle":true}"#;
+        for provider in ["opencode", "terminal", "cursor", "grok", "mcode"] {
+            assert!(NativeHook::parse(provider, stop).is_none(), "{provider}");
+        }
+        assert!(NativeHook::parse("agy", br#"{"hook_event_name":"PermissionRequest","session_id":"s","tool_use_id":"t","tool_name":"Bash"}"#).is_none());
+    }
+
+    #[test]
+    fn agy_settled_stop_records_fenced_evidence_but_never_completion() {
+        use crate::autopilot::circuit::observation::{
+            ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
+        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
+            source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 1, node_id: Some("work".into()),
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+        let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
+            normalize(42, entry, receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+        else { panic!("native batch") };
+        assert!(!stale);
+        assert!(input_guard.is_none(), "no turn token means no authoritative guard");
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|o| !o.authoritative));
+        assert!(observations.iter().all(|o| o.source == "agy_native_hook"));
+        assert!(matches!(&observations[0].fact, Fact::ForegroundTerminated));
+        assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { reason } if reason.contains("no child/background registry")));
+        let mut evidence = WorkEvidence::default();
+        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Unavailable);
+        assert!(evidence.lifecycle_invalidated);
+        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert!(!evidence.foreground_terminated, "unfenced foreground evidence must not flip lifecycle state");
+        assert!(!evidence.completion_verified(), "unknown owned work never becomes completion");
+        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::Duplicate);
+        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Duplicate);
+        evidence = serde_json::from_str(&serde_json::to_string(&evidence).unwrap()).unwrap();
+        assert!(evidence.lifecycle_invalidated, "restart preserves the ownership limit");
+        assert!(!evidence.completion_verified());
+    }
+
+    #[test]
+    fn agy_background_busy_stop_is_yield_evidence_not_a_settled_turn() {
+        use crate::autopilot::circuit::observation::{
+            ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":false}"#).unwrap();
+        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
+            source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 2, node_id: Some("work".into()),
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+        let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
+            normalize(42, entry, receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+        else { panic!("native batch") };
+        assert_eq!(observations.len(), 2);
+        assert!(matches!(&observations[0].fact, Fact::Yielded));
+        assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { .. }));
+        let mut evidence = WorkEvidence::default();
+        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Unavailable);
+        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert!(!evidence.foreground_terminated);
+        assert!(!evidence.completion_verified());
+    }
+
+    #[test]
+    fn agy_receipts_from_replaced_sessions_stale_inputs_and_deleted_agents_cannot_advance_the_run() {
+        use crate::autopilot::circuit::observation::{
+            ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":true}"#).unwrap();
+        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
+            source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
+        let entry = || crate::db::circuit::evidence::CircuitHistoryEntry { id: 3, node_id: Some("work".into()),
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+        // A prompt injected after the hook overtook it: the receipt is stale.
+        let super::super::CircuitEvent::ObservationBatch { stale, observations: stale_observations, .. } =
+            normalize(42, entry(), receipt.clone(), Some("session".into()), Some("7".into()), Some("input-2".into()))
+        else { panic!("native batch") };
+        assert!(stale);
+        assert!(stale_observations.iter().all(|o| !o.authoritative));
+        // A replaced session (restart under a new conversation) is rejected.
+        let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
+            normalize(42, entry(), receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+        else { panic!("native batch") };
+        let mut evidence = WorkEvidence::default();
+        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        let mut restarted = observations[0].clone();
+        restarted.identity.session_id = Some("replacement-session".into());
+        assert_eq!(evidence.observe(&expected, &restarted), ObservationDisposition::Rejected);
+        // A subagent `Stop` carries its own conversation id, so it fences as
+        // a different session and can never complete the parent's turn.
+        let subagent = NativeHook::parse("agy", br#"{"conversationId":"subagent-session","fullyIdle":true}"#).unwrap();
+        let subagent_receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
+            source_id: "agy-subagent".into(), received_at_ms: 11, turn_fenced: false, submission_correlated: false, hook: subagent };
+        let super::super::CircuitEvent::ObservationBatch { observations: subagent_observations, .. } =
+            normalize(42, entry(), subagent_receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+        else { panic!("native batch") };
+        assert!(matches!(&subagent_observations[0].fact, Fact::ForegroundTerminated));
+        assert_eq!(evidence.observe(&expected, &subagent_observations[0]), ObservationDisposition::Rejected);
+        assert!(!evidence.completion_verified());
+        // A deleted node consumes its receipt without lifecycle effect.
+        let deleted_hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":true}"#).unwrap();
+        let deleted = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
+            source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, submission_correlated: false, hook: deleted_hook };
+        let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 4, node_id: Some("work".into()),
+            attempt: Some(1), kind: "native_hook_received".into(), detail: serde_json::to_string(&deleted).unwrap(), observed_at: String::new() };
+        let event = resolve_receipt(42, deleted_entry, |_| Err(rusqlite::Error::QueryReturnedNoRows)).unwrap();
+        let super::super::CircuitEvent::ObservationBatch { observations: deleted_observations, .. } = event else { panic!("native batch") };
+        assert_eq!(deleted_observations.len(), 1);
+        assert_eq!(deleted_observations[0].source, "native_receipt_agent_deleted");
+        assert!(matches!(&deleted_observations[0].fact, Fact::Unavailable));
     }
 }

@@ -37,6 +37,16 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
             "Bounded native rollout pull with session, turn, input and timestamp fences",
             60_000,
         ),
+        // Validated against agy 1.2.11 on Windows interactive sessions
+        // (issue #1901). `-p` print mode emits no `Stop` hook, so hook
+        // evidence covers only Buildmesh-launched PTY sessions.
+        "agy" => (
+            "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
+            "Unavailable: Antigravity exposes no child/background registry; settled turns cannot verify owned work",
+            "Transcript or PTY text may inform interpretation; complete native report unavailable",
+            "Durable Stop receipt replay with session, incarnation and input fences; freshness recheck parks Unverified",
+            30_000,
+        ),
         _ => (
             "Unavailable: no authoritative Circuit lifecycle adapter is wired",
             "Unavailable: no authoritative Circuit ownership adapter is wired",
@@ -63,11 +73,27 @@ mod tests {
             let policy = for_provider(id);
             assert_eq!(policy.harness, id);
             assert!(policy.yielded_budget_ms > 0 && policy.yielded_budget_ms <= 90_000);
-            if !matches!(id, "anthropic" | "codex") {
+            if !matches!(id, "anthropic" | "codex" | "agy") {
                 assert_eq!(policy.foreground, "Unavailable: no authoritative Circuit lifecycle adapter is wired");
                 assert_eq!(policy.owned_work, "Unavailable: no authoritative Circuit ownership adapter is wired");
             }
         }
         assert!(for_provider("codex").owned_work.starts_with("Unavailable:"));
+    }
+
+    #[test]
+    fn circuit_policy_records_validated_agy_contract_without_claiming_completion() {
+        // Issue #1901: the AGY adapter wires Stop-hook evidence only. The
+        // policy must advertise the validated foreground source while
+        // keeping ownership visibly unavailable so a settled turn can never
+        // read as assigned-work completion.
+        let policy = for_provider("agy");
+        assert_eq!(policy.harness, "agy");
+        assert!(policy.foreground.contains("Stop-hook"), "foreground names the validated hook source");
+        assert!(policy.foreground.contains("never authoritative"), "foreground disclaims completion authority");
+        assert!(policy.owned_work.starts_with("Unavailable:"), "ownership stays unavailable");
+        assert!(policy.owned_work.contains("no child/background registry"));
+        assert_eq!(policy.yielded_budget_ms, 30_000, "no validated basis to change the default budget");
+        assert_eq!(policy.active_budget_ms, super::super::ACTIVE_WAIT_MS as u32);
     }
 }
