@@ -227,6 +227,30 @@ Closest siblings: **Kimi** (`-S` / `--session`, self-assign, model yes) plus **m
 
 ---
 
+## Circuit lifecycle and ownership (issue #1899)
+
+Validated against OpenCode **1.18.3** on Windows (native `.cmd` via
+`cmd.exe /c`; Linux/macOS spawn direct). No controlled live Circuit run
+has been performed for this provider, so Circuit execution stays
+visibly **unsupported/Unverified** — the observer policy records this
+explicitly (`services::circuit_worker::observer_policy`, `opencode`
+arm) rather than falling through to the generic fallback.
+
+| Fact | Verdict |
+|---|---|
+| Supported version / platform | 1.18.3, Windows native; Linux/macOS direct spawn unexercised for Circuits |
+| Hook source | Project plugin (`session.idle`, `question.asked`, `permission.asked`, reply/busy/error events, capture-only `session.created`). No event carries a turn id, input stamp, or submission correlation |
+| Pull source | `opencode.db` SQLite transcript/report only (`TranscriptFormat::OpenCode`); there is no native turn-completion pull (`completed_turn` is unimplemented, the file locator returns `None`) |
+| Freshness / recheck bounds | Yielded 30 s via the observer policy; active 2 h. No adapter-owned recheck is wired — a missing hook parks Unverified until the watchdog budget expires |
+| Foreground lifecycle | No validated adapter: `session.idle` is attention-route input (UI `Ready`), never an authoritative `ForegroundTerminated` Circuit observation |
+| Child / background coverage | None: OpenCode exposes no complete child/background registry to Buildmesh. Unknown child/background work never becomes completion (`WorkEvidence` requires `ownership_covered`, which no OpenCode source sets) |
+| Final report | Assistant text from `opencode.db` may inform interpretation (scrubbed, partial/unavailable labelled); it cannot prove lifecycle termination or ownership |
+
+Malformed OpenCode payloads (including every plugin event name above)
+never parse as native Circuit hook receipts under any provider id
+(`NativeHook::parse` gate + regression test), so they cannot alter
+another harness's lifecycle.
+
 ## Remaining follow-ups
 
 - Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run. — **DONE issue #1295 (PR #1559).**
