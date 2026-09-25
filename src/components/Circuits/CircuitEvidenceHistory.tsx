@@ -13,6 +13,7 @@ const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
+  effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
   operator_attestation: 'Operator-recorded outcome (attestation)',
   observation: 'Observed evidence', evidence_recheck: 'Evidence recheck requested',
   native_hook_received: 'Native evidence received', classification: 'Report interpretation',

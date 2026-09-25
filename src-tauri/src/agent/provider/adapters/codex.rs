@@ -2044,41 +2044,71 @@ web_search = true
         assert_eq!(trust_project_path(&resolved), "/home/alice/repo");
     }
 
-    /// Codex already wraps hook commands in `cmd.exe /C` (Windows) or
-    /// `$SHELL -lc` (Unix) and then `env_clear()`s down to a Core inherit
-    /// snapshot. A nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never
-    /// expands, never sees stdin, and never POSTs — which leaves
-    /// `cli_session_id` empty so restart resume is skipped.
+    /// Codex runs Windows hook commands through PowerShell. The quoted curl
+    /// stdin marker must survive that parser and still reach curl as `@-`.
     #[cfg(windows)]
     #[test]
     fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
-        use std::io::Read;
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         for shell in ["powershell.exe", "cmd.exe"] {
             let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
             let endpoint = format!("http://{}/api/attention/42", server.server_addr());
             let handler = attention_hook_handler(42);
-            let original_url = format!("http://localhost:{}/api/attention/42",crate::http_server::current_http_port());
-            let command = handler["commandWindows"].as_str().unwrap().replace(&original_url,&endpoint);
+            let original_url = format!(
+                "http://localhost:{}/api/attention/42",
+                crate::http_server::current_http_port()
+            );
+            let command = handler["commandWindows"]
+                .as_str()
+                .unwrap()
+                .replace(&original_url, &endpoint);
             let receiver = std::thread::spawn(move || {
-                let mut request = server.recv_timeout(std::time::Duration::from_secs(5)).unwrap()?;
+                let mut request = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()?;
                 let mut body = String::new();
                 request.as_reader().read_to_string(&mut body).unwrap();
                 let path = request.url().to_owned();
                 request.respond(tiny_http::Response::empty(200)).unwrap();
-                Some((path,body))
+                Some((path, body))
             });
             let mut process = Command::new(shell);
-            if shell == "powershell.exe" { process.args(["-NoProfile","-NonInteractive","-Command"]); }
-            else { process.args(["/D","/C"]); }
-            let mut child = process.arg(command).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000).spawn().unwrap();
+            if shell == "powershell.exe" {
+                process.args(["-NoProfile", "-NonInteractive", "-Command"]);
+                process.arg(&command);
+            } else {
+                process.args(["/D", "/C"]);
+                // `/C` consumes a shell command line. Passing it through
+                // `arg()` adds Windows quoting that changes cmd's parse.
+                process.raw_arg(format!(" {command}"));
+            }
+            let mut child = process
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .creation_flags(0x08000000)
+                .spawn()
+                .unwrap();
             let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
-            child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
             let output = child.wait_with_output().unwrap();
             let received = receiver.join().unwrap();
-            assert!(output.status.success(),"{shell}: {}",String::from_utf8_lossy(&output.stderr));
-            assert_eq!(received,Some(("/api/attention/42".into(),payload.into())),"{shell}");
+            assert!(
+                output.status.success(),
+                "{shell} command {command:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                received,
+                Some(("/api/attention/42".into(), payload.into())),
+                "{shell}"
+            );
             assert!(output.stdout.is_empty());
         }
     }

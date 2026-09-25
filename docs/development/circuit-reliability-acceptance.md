@@ -6,14 +6,14 @@ Source inspection, deterministic automated checks, and live delivery are separat
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull recorded below | Claude production submission correlation unavailable; other harness strategies remain explicitly unsupported. Current build live checks pending |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Current Codex 0.156.1 / Luna live pull recorded below | This live Codex run received no native hook receipts. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live response checks pending |
-| Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations | Current build live restart check pending |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced | Other effect kinds and continuation need a complete typed journal audit. OpenPr completed reconciliation remains restricted |
-| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised | Wait/capacity/configuration history completeness and current build narrow live UI checks pending |
+| Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Current app process restart and identity-proven Codex reattachment remain untested |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests include `NotPerformed` then a matching PR result | No live GitHub lookup was made. Other effect kinds and continuation still need a complete typed journal audit |
+| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
-| Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Independent ownership review found no further defect. Retained-settings UI tests pass | Current build live cutover and cleanup retry checks pending |
+| Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
 
 
@@ -214,5 +214,67 @@ these are not successful hook-delivery evidence. The real app's generated Window
 callback succeeds when invoked directly against the live fixture, narrowing the
 remaining investigation to the harness execution boundary. Claude was not retried.
 
-Current live fixtures and screenshots are temporary verification artifacts. The
-latest source changes still require a rebuilt-app run, full suites and final review.
+Current live fixtures and screenshots are temporary verification artifacts.
+
+
+### Rebuilt Windows verification: 2026-09-25
+
+The acceptance snapshot was rebuilt with `scripts\run-dev.ps1 -CdpPort 9223` into the
+isolated `release-dev` target. No stable Buildmesh process was stopped. Real
+WebView2 and Tauri IPC verification used Codex CLI 0.156.1, `gpt-6-luna`,
+Windows PowerShell, and a synthetic no-tools prompt on Mesh 44 / Circuit 45.
+
+- Run 45 / Agent Node 126 recorded one Codex task start, one task completion,
+  one smoke prompt, and no OSC 10/11 user input. The history contains the exact
+  session's authoritative foreground termination and separately records that
+  Codex rollout cannot establish owned child/background work. The UI showed
+  that limitation as Unverified with Recheck available.
+- Real IPC Recheck kept attempt one, returned to Unverified, and did not add a
+  prompt or OSC input. Cancellation then left the run and step terminal with
+  attempt one and 24 history entries. Run 44 from the first attempt was also
+  cancelled after it exposed a missing-current-evidence recheck path; the
+  adapter now returns an explicit unresolved event when an explicit Codex
+  recheck cannot obtain current input/session evidence. Its regression passes.
+- The rebuilt app provisioned the Windows Codex callback with quoted
+  `--data-binary "@-"`. The callback was exercised through PowerShell and cmd
+  against a local HTTP receiver in the Rust regression, but this live Codex run
+  recorded **zero native hook receipts**. Live hook delivery therefore remains
+  unverified; the TUI rollout pull supplied the foreground evidence.
+- The current-source legacy retirement smoke confirmed retained cancelled
+  history and Suspended node 122 across UI reload, no automatic Circuit
+  conversion or legacy restart, the read-only retained-settings view, and
+  independent capacity at 240 CSS pixels. The default Review Blueprint was
+  present; it is excluded from the count of user Circuits. Mesh 44's temporary
+  capacity change was restored to its fixture baseline afterward.
+- The OpenPr action now stores owner/repository/head before lookup or create.
+  Its explicit recheck performs only an exact saved-target lookup, never
+  creates a PR, and can reconcile a match after either an unknown or
+  `NotPerformed` attestation without erasing the attestation history. Rust
+  service/database tests cover the lookup and transition; no live GitHub
+  request or mutation was made.
+
+This live evidence predates the commit-fence follow-up below and is limited to
+Windows and Codex's foreground observation path.
+Owned child/background work, live native-hook delivery, human question/permission
+round trips, process restart and reattachment, and Claude, WSL, Linux, and macOS
+remain unverified. No full #1889 acceptance claim is made.
+
+The follow-up closes the stale-completion wedge found in standards review. If a
+newer prompt or session change rejects a Codex completion at commit, the worker
+restores the pre-observation snapshot and commits that same attempt as Unverified
+through the normal run/step fence. The rejected report and lifecycle facts are
+not persisted. The regression exercises the observation/persistence boundary;
+the newly added path has not been repeated in the live app.
+
+#### Latest automated checks
+
+| Check | Result | Scope / limitation |
+|---|---|---|
+| Full Rust library suite | 3,813 passed, 24 ignored | Serial current-source run; 3,837 discovered |
+| Focused recheck/freshness regressions | Passed | 13 recheck tests, the Codex stale-completion boundary regression, freshness-error classification, and transcript-change rejection |
+| Full Vitest | 3,542 passed, 1 failed, 1 skipped | Sole failure is the radius audit at `AppSettings/UsageRender.tsx:308`, reproduced at the recorded base |
+| Focused history UI | 9 passed | OpenPr safe recheck action and history presentation |
+| TypeScript / source ESLint | Passed | UI source build completed TypeScript and desktop/mobile Vite builds; lint reported no warnings. Rust commit-fence follow-up was covered by the full Rust suite, not a rebuilt live app |
+| Clippy | Passed, exit 0 | Two existing warnings remain in `environment.rs` and `harness_catalog.rs`; neither file was changed |
+| Documentation gates | Passed | `npm run test:docs`: 19 passed; `npm run check:docs`: 119 Markdown files |
+| Agent diff gate | Passed | `npm run check:agent -- --base d8e3a1a780599cbdcece4710df2b603860065e7a` covered the committed diff before push |

@@ -3,6 +3,19 @@
 use crate::db::SqlResult;
 use rusqlite::{params, Connection, OptionalExtension};
 
+const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
+
+pub(crate) fn is_observation_freshness_rejection(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::InvalidParameterName(message)
+        if message.starts_with(OBSERVATION_FRESHNESS_REJECTION_PREFIX))
+}
+
+fn observation_freshness_rejection(reason: &str) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(format!(
+        "{OBSERVATION_FRESHNESS_REJECTION_PREFIX} {reason}"
+    ))
+}
+
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitHistoryEntry.ts")]
 pub struct CircuitHistoryEntry {
@@ -99,13 +112,19 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                     let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
                         params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
                     let mut actions = vec![CheckpointAction::NotPerformed];
-                    if !matches!(
+                    if matches!(
                         kind,
                         CircuitNodeKind::GithubAction {
                             action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
                             ..
                         }
                     ) {
+                        let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
+                            .map_err(|error| error.to_string())?;
+                        if has_target {
+                            actions.insert(0, CheckpointAction::Recheck);
+                        }
+                    } else {
                         actions.insert(0, CheckpointAction::Completed);
                     }
                     if not_performed {
@@ -338,15 +357,30 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     // An attestation cannot authorize tool use or supply a review verdict.
     use crate::autopilot::circuit::model::CircuitNodeKind;
     if matches!(request.action, CheckpointAction::Recheck) {
-        if !matches!(
-            graph.node(&request.node_id).map(|n| &n.kind),
+        let kind = graph.node(&request.node_id).map(|n| &n.kind);
+        let open_pr = matches!(
+            kind,
+            Some(CircuitNodeKind::GithubAction {
+                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+                ..
+            })
+        );
+        let has_open_pr_target = if open_pr {
+            has_effect_target(&tx, request.run_id, &request.node_id, request.attempt)
+                .map_err(|error| error.to_string())?
+        } else {
+            false
+        };
+        let observed_recheck = matches!(
+            kind,
             Some(
                 CircuitNodeKind::LlmTurnClassifier { .. }
                     | CircuitNodeKind::ReviewVerdict { .. }
                     | CircuitNodeKind::AwaitAgentTurn { .. }
                     | CircuitNodeKind::SpawnAgentNode { .. }
             )
-        ) {
+        );
+        if !(observed_recheck || (open_pr && has_open_pr_target)) {
             return Err("This action has no authoritative automatic evidence recheck. Inspect the external result.".into());
         }
         let mut context =
@@ -360,7 +394,11 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         context.set(&format!("node.{}.recheck_only", step.node_id), "1");
         let op = super::CircuitStepOp {
             node_id: step.node_id,
-            status: "running".into(),
+            status: if open_pr {
+                "pending_slot".into()
+            } else {
+                "running".into()
+            },
             attempt: step.attempt,
             outcome: None,
             error: Some(None),
@@ -386,6 +424,9 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         .map_err(|e| e.to_string())?;
         return tx.commit().map_err(|e| e.to_string());
     }
+    let mut context =
+        crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json)?;
+    context.set(&format!("node.{}.recheck_only", request.node_id), "0");
     let effect_kind = match graph.node(&request.node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::GithubAction { .. }) => "github",
         Some(CircuitNodeKind::InjectPty { .. }) => "prompt",
@@ -481,7 +522,13 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         agent_node_id: None,
         fresh_attempt: attempt != step.attempt,
     };
-    super::ledger::commit_circuit_advance_inner(&tx, request.run_id, None, None, &[op])
+    super::ledger::commit_circuit_advance_inner(
+        &tx,
+        request.run_id,
+        None,
+        Some(&context.to_json()?),
+        &[op],
+    )
         .map_err(|e| e.to_string())?;
     append_history(
         &tx,
@@ -500,6 +547,12 @@ pub struct EffectIntent {
     pub node_id: String,
     pub attempt: i32,
     pub kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconciledEffect {
+    pub intent: EffectIntent,
+    pub detail: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -659,26 +712,39 @@ pub fn commit_transition(
     // Filesystem validation belongs before acquiring the DB writer. Retain the
     // original pull fingerprint so activity since observation invalidates it.
     if evidence.input_guard.and_then(|guard|guard.transcript_guard.as_ref()).is_some_and(|snapshot|!snapshot.is_current()) {
-        return Err(rusqlite::Error::InvalidParameterName("Native transcript changed before evidence commit; recheck required".into()));
+        return Err(observation_freshness_rejection(
+            "Native transcript changed before evidence commit; recheck required",
+        ));
     }
     let mut db = crate::db::write_conn();
     let result = if let Some(guard) = evidence.input_guard {
         let mut revision = None;
-        crate::agent::process::PROCESS_REGISTRY
-            .commit_recovered_turn(
+        let mut commit_error = None;
+        let accepted = crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(
                 guard.agent_node_id,
                 &guard.input_stamp,
                 guard.observed_at_ms,
                 || {
-                    revision = Some(
-                        commit_transition_locked(&mut db, run_id, state, context, steps, evidence)
-                            .map_err(|e| e.to_string())?,
-                    );
-                    Ok(true)
+                    match commit_transition_locked(&mut db, run_id, state, context, steps, evidence) {
+                        Ok(committed_revision) => {
+                            revision = Some(committed_revision);
+                            Ok(true)
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            commit_error = Some(error);
+                            Err(message)
+                        }
+                    }
                 },
-            )
-            .map_err(rusqlite::Error::InvalidParameterName)?;
-        revision.ok_or(rusqlite::Error::InvalidQuery)
+            );
+        if let Some(error) = commit_error {
+            Err(error)
+        } else if !accepted.map_err(rusqlite::Error::InvalidParameterName)? {
+            Err(observation_freshness_rejection("agent input or session changed before evidence commit"))
+        } else {
+            revision.ok_or(rusqlite::Error::InvalidQuery)
+        }
     } else {
         commit_transition_locked(&mut db, run_id, state, context, steps, evidence)
     };
@@ -695,6 +761,7 @@ pub fn commit_transition(
 pub struct EvidenceWrite<'a> {
     pub input_guard: Option<&'a crate::autopilot::circuit::stepper::ObservationInputFence>,
     pub intents: &'a [EffectIntent],
+    pub reconciled_effects: &'a [ReconciledEffect],
     pub observations: &'a [crate::autopilot::circuit::observation::RecordedObservation],
     pub classifications: &'a [crate::autopilot::circuit::observation::RecordedClassification],
     pub expected: Option<&'a crate::autopilot::circuit::stepper::TransitionFence>,
@@ -721,7 +788,9 @@ fn commit_transition_locked(
             |r| r.get(0),
         )?;
         if !current {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(observation_freshness_rejection(
+                "agent session incarnation changed before evidence commit",
+            ));
         }
     }
     if let Some(expected) = evidence.expected {
@@ -765,6 +834,47 @@ fn commit_transition_locked(
     for classification in evidence.classifications {
         let detail = serde_json::to_string(classification).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         append_history(&tx, run_id, Some(&classification.step_id), Some(classification.attempt), "classification", &detail)?;
+    }
+    for effect in evidence.reconciled_effects {
+        let completed = steps.iter().any(|step| {
+            step.node_id == effect.intent.node_id
+                && step.attempt == effect.intent.attempt
+                && step.status == "completed"
+        });
+        let graph = run_graph(&tx, run_id).map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
+        let is_open_pr = matches!(
+            graph.node(&effect.intent.node_id).map(|node| &node.kind),
+            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+                ..
+            })
+        );
+        if !completed || effect.intent.kind != "github" || !is_open_pr {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let changed = tx.execute(
+            "UPDATE circuit_effects SET state='acknowledged'
+             WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='github'
+               AND state IN ('uncertain','not_performed')",
+            params![run_id, effect.intent.node_id, effect.intent.attempt],
+        )?;
+        if changed == 1 {
+            append_history(
+                &tx,
+                run_id,
+                Some(&effect.intent.node_id),
+                Some(effect.intent.attempt),
+                "effect_reconciled",
+                &effect.detail,
+            )?;
+        } else {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
     for intent in evidence.intents {
         let inserted = tx.execute("INSERT OR IGNORE INTO circuit_effects (run_id,node_id,attempt,kind,state)
@@ -827,6 +937,101 @@ pub fn claim_effect(run_id: i64, intent: &EffectIntent) -> SqlResult<Option<i64>
     claim_effect_locked(&mut db, run_id, intent)
 }
 
+pub(crate) fn record_effect_target(
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    detail: &str,
+) -> Result<i64, String> {
+    let mut db = crate::db::write_conn();
+    record_effect_target_locked(&mut db, run_id, node_id, attempt, detail)
+}
+
+fn record_effect_target_locked(
+    db: &mut Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    detail: &str,
+) -> Result<i64, String> {
+    let tx = db.transaction().map_err(|error| error.to_string())?;
+    let graph = run_graph(&tx, run_id)?;
+    if !matches!(
+        graph.node(node_id).map(|node| &node.kind),
+        Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+            action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+            ..
+        })
+    ) {
+        return Err("Effect target is only supported for an OpenPr step.".into());
+    }
+    let dispatch_claimed: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM circuit_effects e
+             JOIN autopilot_circuit_runs r ON r.id=e.run_id
+             JOIN autopilot_circuit_run_steps s ON s.run_id=e.run_id AND s.node_id=e.node_id
+             WHERE e.run_id=?1 AND e.node_id=?2 AND e.attempt=?3 AND e.kind='github'
+               AND e.state='possible_dispatch' AND r.state='running'
+               AND s.attempt=?3 AND s.status='running')",
+            params![run_id, node_id, attempt],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !dispatch_claimed {
+        return Err("OpenPr dispatch claim changed before its target was recorded.".into());
+    }
+    append_history(
+        &tx,
+        run_id,
+        Some(node_id),
+        Some(attempt),
+        "effect_target",
+        detail,
+    )
+    .map_err(|error| error.to_string())?;
+    let revision = revision_inner(&tx, run_id).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(revision)
+}
+
+pub(crate) fn latest_effect_target(
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> Result<Option<String>, String> {
+    let db = crate::db::read_conn();
+    latest_effect_target_inner(&db, run_id, node_id, attempt).map_err(|error| error.to_string())
+}
+
+fn latest_effect_target_inner(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> SqlResult<Option<String>> {
+    db.query_row(
+        "SELECT detail FROM circuit_run_history
+         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='effect_target'
+         ORDER BY id DESC LIMIT 1",
+        params![run_id, node_id, attempt],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn has_effect_target(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> SqlResult<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM circuit_run_history WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='effect_target')",
+        params![run_id, node_id, attempt],
+        |row| row.get(0),
+    )
+}
+
 fn claim_effect_locked(
     db: &mut Connection,
     run_id: i64,
@@ -856,6 +1061,19 @@ fn claim_effect_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_freshness_rejections_are_distinct_from_transition_conflicts() {
+        assert!(is_observation_freshness_rejection(&observation_freshness_rejection(
+            "a newer input was submitted",
+        )));
+        assert!(!is_observation_freshness_rejection(
+            &rusqlite::Error::InvalidQuery,
+        ));
+        assert!(!is_observation_freshness_rejection(
+            &rusqlite::Error::InvalidParameterName("unrelated failure".into()),
+        ));
+    }
 
     #[test]
     fn circuit_continuation_history_retains_dispatch_uncertainty_without_replay() {
@@ -1236,6 +1454,7 @@ mod tests {
                 EvidenceWrite {
                     input_guard: Some(&guard),
                     intents: &[],
+                    reconciled_effects: &[],
                     observations: &[],
                     classifications: &[],
                     expected: None,
@@ -1262,6 +1481,7 @@ mod tests {
             EvidenceWrite {
                 input_guard: Some(&guard),
                 intents: &[],
+                reconciled_effects: &[],
                 observations: &[],
                 classifications: &[],
                 expected: None,
@@ -1324,6 +1544,7 @@ mod tests {
         let write = || EvidenceWrite {
             input_guard: None,
             intents: std::slice::from_ref(&intent),
+            reconciled_effects: &[],
             observations: std::slice::from_ref(&observation),
             classifications: &[],
             expected: None,
@@ -1380,6 +1601,116 @@ mod tests {
                 .unwrap(),
             "intent"
         );
+    }
+
+    #[test]
+    fn unknown_open_pr_checkpoint_offers_read_only_recheck_for_same_attempt() {
+        use crate::autopilot::circuit::model::{
+            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
+        };
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'open_pr',1,'unverified');
+            INSERT INTO circuit_effects VALUES(1,'open_pr',1,'github','uncertain');
+            INSERT INTO circuit_run_history(run_id,node_id,attempt,kind,detail) VALUES(1,'open_pr',1,'effect_possible_dispatch','github');
+            INSERT INTO circuit_run_history(run_id,node_id,attempt,kind,detail) VALUES(1,'open_pr',1,'effect_target','{}');").unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "open_pr".into(),
+                kind: CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::OpenPr,
+                    open_pr_policy: None,
+                    label: None,
+                    comment: None,
+                },
+            }],
+            edges: vec![],
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let evidence = evidence_view_inner(&db, 1).unwrap();
+        assert!(evidence.checkpoints[0]
+            .actions
+            .iter()
+            .any(|action| matches!(action, CheckpointAction::Recheck)));
+        let request = CheckpointRequest {
+            run_id: 1,
+            node_id: "open_pr".into(),
+            attempt: 1,
+            expected_revision: evidence.entries.last().unwrap().id,
+            action: CheckpointAction::Recheck,
+            reason: "Look for the pull request created by the interrupted request".into(),
+        };
+        record_outcome_locked(&mut db, &request).unwrap();
+
+        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1)
+            .unwrap()
+            .remove(0);
+        assert_eq!((step.status.as_str(), step.attempt), ("pending_slot", 1));
+        let run = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let context = crate::autopilot::circuit::context::CircuitContext::from_json(
+            &run.context_json,
+        )
+        .unwrap();
+        assert_eq!(context.get("node.open_pr.recheck_only"), Some("1"));
+        assert_eq!(
+            db.query_row(
+                "SELECT state FROM circuit_effects WHERE run_id=1 AND node_id='open_pr' AND attempt=1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "uncertain",
+            "a read-only recheck does not claim or replay the create effect"
+        );
+        assert_eq!(
+            history_inner(&db, 1).unwrap().last().unwrap().kind,
+            "evidence_recheck"
+        );
+        use crate::autopilot::circuit::stepper::{
+            advance, Capacity, CircuitEvent, Effect, RunState, StepStatus, StepView,
+        };
+        let mut view = crate::autopilot::circuit::stepper::RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph,
+            context,
+            steps: vec![StepView {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                status: StepStatus::Queued,
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+            }],
+        };
+        let transition = advance(
+            &mut view,
+            &CircuitEvent::Tick(Capacity {
+                circuit_free_slots: 1,
+                agent_free_slots: 1,
+            }),
+        );
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [Effect::CallGithub {
+                node_id,
+                action: GithubActionKind::OpenPr,
+                ..
+            }] if node_id == "open_pr"
+        ));
+        assert_eq!(view.steps[0].status, StepStatus::Running);
     }
 
     #[test]
@@ -1632,5 +1963,232 @@ mod tests {
             );
             assert_eq!(reopened.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_possible_dispatch'", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
         }
+    }
+
+    #[test]
+    fn open_pr_target_is_saved_only_after_claim_and_survives_reopen() {
+        use crate::autopilot::circuit::model::{
+            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'open_pr',1,'running');
+            INSERT INTO circuit_effects VALUES(1,'open_pr',1,'github','intent');").unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "open_pr".into(),
+                kind: CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::OpenPr,
+                    open_pr_policy: None,
+                    label: None,
+                    comment: None,
+                },
+            }],
+            edges: vec![],
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let target = r#"{"owner":"example","repo":"buildmesh","head":"feature/circuit"}"#;
+        assert!(record_effect_target_locked(&mut db, 1, "open_pr", 1, target).is_err());
+        db.execute(
+            "UPDATE circuit_effects SET state='possible_dispatch' WHERE run_id=1 AND node_id='open_pr'",
+            [],
+        )
+        .unwrap();
+        let revision = record_effect_target_locked(&mut db, 1, "open_pr", 1, target).unwrap();
+        assert_eq!(revision, history_inner(&db, 1).unwrap().last().unwrap().id);
+        assert_eq!(latest_effect_target_inner(&db, 1, "open_pr", 1).unwrap().as_deref(), Some(target));
+        drop(db);
+
+        let reopened = Connection::open(file.path()).unwrap();
+        assert_eq!(latest_effect_target_inner(&reopened, 1, "open_pr", 1).unwrap().as_deref(), Some(target));
+        assert_eq!(
+            reopened.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_target'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn open_pr_recheck_completion_reconciles_the_unknown_effect() {
+        use crate::autopilot::circuit::model::{
+            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
+        };
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'open_pr',1,'running');
+            INSERT INTO circuit_effects VALUES(1,'open_pr',1,'github','uncertain');").unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "open_pr".into(),
+                kind: CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::OpenPr,
+                    open_pr_policy: None,
+                    label: None,
+                    comment: None,
+                },
+            }],
+            edges: vec![],
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let op = super::super::CircuitStepOp {
+            node_id: "open_pr".into(),
+            status: "completed".into(),
+            attempt: 1,
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: None,
+            fresh_attempt: false,
+        };
+        let reconciled = ReconciledEffect {
+            intent: EffectIntent {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                kind: "github".into(),
+            },
+            detail: "Read-only GitHub lookup found open pull request #314.".into(),
+        };
+        commit_transition_locked(
+            &mut db,
+            1,
+            None,
+            "{}",
+            &[op],
+            EvidenceWrite {
+                reconciled_effects: std::slice::from_ref(&reconciled),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("SELECT state FROM circuit_effects", [], |row| row.get::<_, String>(0)).unwrap(),
+            "acknowledged",
+            "a matching read-only PR observation reconciles the prior uncertain dispatch"
+        );
+        assert_eq!(
+            history_inner(&db, 1).unwrap().last().unwrap().kind,
+            "effect_reconciled"
+        );
+        assert!(history_inner(&db, 1)
+            .unwrap()
+            .last()
+            .unwrap()
+            .detail
+            .contains("#314"));
+    }
+
+    #[test]
+    fn open_pr_recheck_after_not_performed_reconciles_without_losing_attestation() {
+        use crate::autopilot::circuit::model::{
+            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
+        };
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'open_pr',1,'unverified');
+            INSERT INTO circuit_effects VALUES(1,'open_pr',1,'github','uncertain');
+            INSERT INTO circuit_run_history(run_id,node_id,attempt,kind,detail) VALUES(1,'open_pr',1,'effect_possible_dispatch','github');
+            INSERT INTO circuit_run_history(run_id,node_id,attempt,kind,detail) VALUES(1,'open_pr',1,'effect_target','{\"owner\":\"example\",\"repo\":\"buildmesh\",\"head\":\"feature/circuit\"}');").unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "open_pr".into(),
+                kind: CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::OpenPr,
+                    open_pr_policy: None,
+                    label: None,
+                    comment: None,
+                },
+            }],
+            edges: vec![],
+        };
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let initial = evidence_view_inner(&db, 1).unwrap();
+        let mut request = CheckpointRequest {
+            run_id: 1,
+            node_id: "open_pr".into(),
+            attempt: 1,
+            expected_revision: initial.entries.last().unwrap().id,
+            action: CheckpointAction::NotPerformed,
+            reason: "GitHub confirmed no matching pull request existed".into(),
+        };
+        record_outcome_locked(&mut db, &request).unwrap();
+
+        let attested = evidence_view_inner(&db, 1).unwrap();
+        assert!(attested.checkpoints[0]
+            .actions
+            .iter()
+            .any(|action| matches!(action, CheckpointAction::Recheck)));
+        request.expected_revision = attested.entries.last().unwrap().id;
+        request.action = CheckpointAction::Recheck;
+        request.reason = "Verify the saved repository branch without creating a pull request".into();
+        record_outcome_locked(&mut db, &request).unwrap();
+
+        let completion = super::super::CircuitStepOp {
+            node_id: "open_pr".into(),
+            status: "completed".into(),
+            attempt: 1,
+            outcome: Some(Some("completed".into())),
+            error: None,
+            agent_node_id: None,
+            fresh_attempt: false,
+        };
+        let reconciled = ReconciledEffect {
+            intent: EffectIntent {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                kind: "github".into(),
+            },
+            detail: "Read-only GitHub lookup found open pull request #314.".into(),
+        };
+        commit_transition_locked(
+            &mut db,
+            1,
+            None,
+            "{}",
+            &[completion],
+            EvidenceWrite {
+                reconciled_effects: std::slice::from_ref(&reconciled),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.query_row("SELECT state FROM circuit_effects", [], |row| row.get::<_, String>(0)).unwrap(),
+            "acknowledged"
+        );
+        let history = history_inner(&db, 1).unwrap();
+        assert!(history.iter().any(|entry| {
+            entry.kind == "operator_attestation"
+                && entry.detail.contains("NotPerformed")
+                && entry.detail.contains("GitHub confirmed no matching pull request existed")
+        }));
+        assert_eq!(history.last().unwrap().kind, "effect_reconciled");
     }
 }

@@ -777,13 +777,15 @@ fn drive_run(
     recover_run_observers(app, &view);
 
     for event in observe(app, active, &view) {
-        let transition = advance(&mut view, &event);
+        let (transition, turn_boundary_changed) = advance_and_persist_observed_event(
+            &mut view,
+            &event,
+            |view, transition| persist_transition_checked(active.run.id, view, transition),
+        )?;
         // Capture the pre-prompt transcript revision in the same transaction
         // as the pure transition. This keeps the durable turn boundary on the
         // normal commit path; effect execution only performs the in-memory
         // PTY boundary immediately before writing bytes.
-        let turn_boundary_changed = persist_transition(active.run.id, &mut view, &transition)?;
-
         // Commit FIRST (atomically), then execute effects — a crash
         // after the commit is repaired by observation next pass. The
         // (possibly run_id-topped-up) context rides along with every
@@ -912,7 +914,30 @@ fn drive_run(
 /// Persist exactly one pure stepper transition. All durable run/context/step
 /// writes, including post-effect delivery outcomes, pass through this seam.
 pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
-    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
+    persist_transition_checked(run_id, view, transition).map_err(TransitionPersistFailure::into_message)
+}
+
+#[derive(Debug)]
+enum TransitionPersistFailure {
+    FreshnessRejected(String),
+    Other(String),
+}
+
+impl TransitionPersistFailure {
+    fn into_message(self) -> String {
+        match self {
+            Self::FreshnessRejected(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+fn persist_transition_checked(
+    run_id: i64,
+    view: &mut RunView,
+    transition: &Transition,
+) -> Result<bool, TransitionPersistFailure> {
+    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)
+        .map_err(TransitionPersistFailure::Other)?;
     if !transition.step_writes.is_empty()
         || !transition.observations.is_empty()
         || transition.run_state_changed
@@ -930,9 +955,41 @@ pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &T
                 agent_node_id: None,
                 attempt: w.attempt,
                 fresh_attempt: w.fresh_attempt,
+        })
+        .collect::<Vec<_>>();
+        let run_state = transition.run_state_changed.then_some(view.state.as_db_str());
+        let reconciled_effects = transition
+            .step_writes
+            .iter()
+            .filter_map(|write| {
+                let key = format!("node.{}.effect_reconciled_attempt", write.node_id);
+                (write.status == crate::autopilot::circuit::stepper::StepStatus::Completed
+                    && view.context.get(&key).and_then(|attempt| attempt.parse::<i32>().ok())
+                        == Some(write.attempt))
+                .then(|| db::circuit::evidence::ReconciledEffect {
+                    intent: db::circuit::evidence::EffectIntent {
+                        node_id: write.node_id.clone(),
+                        attempt: write.attempt,
+                        kind: "github".into(),
+                    },
+                    detail: view
+                        .context
+                        .get(&format!("node.{}.effect_reconciled_detail", write.node_id))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "Read-only OpenPr recheck succeeded.".into()),
+                })
             })
             .collect::<Vec<_>>();
-        let run_state = transition.run_state_changed.then_some(view.state.as_db_str());
+        for effect in &reconciled_effects {
+            view.context.set(
+                &format!("node.{}.effect_reconciled_attempt", effect.intent.node_id),
+                "0",
+            );
+            view.context.set(
+                &format!("node.{}.effect_reconciled_detail", effect.intent.node_id),
+                "0",
+            );
+        }
         let intents = transition.effects.iter().filter_map(|effect| match effect {
             crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } => Some(db::circuit::evidence::EffectIntent {
                 node_id: node_id.clone(), attempt: view.step(node_id).map_or(1, |s| s.attempt), kind: "spawn".into(),
@@ -948,20 +1005,57 @@ pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &T
         let revision = db::circuit::evidence::commit_transition(
             run_id,
             run_state,
-            &view.context.to_json()?,
+            &view.context.to_json().map_err(|error| TransitionPersistFailure::Other(error.to_string()))?,
             &ops,
             db::circuit::evidence::EvidenceWrite {
                 input_guard: transition.input_guard.as_ref(),
                 intents: &intents,
+                reconciled_effects: &reconciled_effects,
                 observations: &transition.observations,
                 classifications: &transition.classifications,
                 expected: transition.expected.as_ref(),
             },
         )
-        .map_err(|e| format!("commit failed: {e}"))?;
+        .map_err(|error| {
+            let message = format!("commit failed: {error}");
+            if db::circuit::evidence::is_observation_freshness_rejection(&error) {
+                TransitionPersistFailure::FreshnessRejected(message)
+            } else {
+                TransitionPersistFailure::Other(message)
+            }
+        })?;
         view.context.set("evidence.revision", revision.to_string());
     }
     Ok(turn_boundary_changed)
+}
+
+fn advance_and_persist_observed_event(
+    view: &mut RunView,
+    event: &CircuitEvent,
+    mut persist: impl FnMut(&mut RunView, &Transition) -> Result<bool, TransitionPersistFailure>,
+) -> Result<(Transition, bool), String> {
+    let before_observation = view.clone();
+    let transition = advance(view, event);
+    match persist(view, &transition) {
+        Ok(turn_boundary_changed) => Ok((transition, turn_boundary_changed)),
+        Err(TransitionPersistFailure::FreshnessRejected(error)) => {
+            let Some(fallback_event) =
+                codex_observer::freshness_rejection_recheck(&before_observation, event)
+            else {
+                return Err(error);
+            };
+            *view = before_observation;
+            tracing::info!(
+                "circuits: run {} Codex recheck rejected by freshness fence; retaining Unverified state",
+                view.run_id
+            );
+            let fallback_transition = advance(view, &fallback_event);
+            let turn_boundary_changed = persist(view, &fallback_transition)
+                .map_err(TransitionPersistFailure::into_message)?;
+            Ok((fallback_transition, turn_boundary_changed))
+        }
+        Err(TransitionPersistFailure::Other(error)) => Err(error),
+    }
 }
 
 /// Retire every agent attached to a failed circuit run. The operation is
@@ -2381,6 +2475,55 @@ pub(super) fn execute_effects(
             }
             Effect::CallGithub { node_id, action, label, comment } => {
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+                if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
+                    view.context.set(&format!("node.{node_id}.recheck_only"), "0");
+                    if *action == crate::autopilot::circuit::model::GithubActionKind::OpenPr {
+                        let result = github::reconcile_open_pr_effect(active, view, node_id);
+                        if let Ok(CircuitEvent::GithubActionResult {
+                            success: true,
+                            pr_number: Some(number),
+                            pr_url: Some(url),
+                            pr_head_ref: Some(head),
+                            ..
+                        }) = &result
+                        {
+                            view.context.set(
+                                &format!("node.{node_id}.effect_reconciled_attempt"),
+                                attempt.to_string(),
+                            );
+                            view.context.set(
+                                &format!("node.{node_id}.effect_reconciled_detail"),
+                                format!(
+                                    "Read-only GitHub lookup found open pull request #{number} ({url}) on branch {head}."
+                                ),
+                            );
+                        } else if matches!(
+                            &result,
+                            Ok(CircuitEvent::GithubActionResult { success: true, .. })
+                        ) {
+                            tracing::warn!(
+                                "circuit {} OpenPr recheck returned success without a pull-request identity",
+                                active.run.id
+                            );
+                        }
+                        outcome_events.push(result.unwrap_or_else(|reason| {
+                            CircuitEvent::EffectUncertain {
+                                node_id: node_id.clone(),
+                                attempt,
+                                reason: format!(
+                                    "Read-only pull-request recheck could not establish the result: {reason}"
+                                ),
+                            }
+                        }));
+                    } else {
+                        outcome_events.push(CircuitEvent::EffectUncertain {
+                            node_id: node_id.clone(),
+                            attempt,
+                            reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
+                        });
+                    }
+                    continue;
+                }
                 let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: "github".into() };
                 let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
                     continue;
@@ -2911,6 +3054,103 @@ mod tests {
     use crate::agent::spawn::ExplicitSpawnOverrides;
     use crate::autopilot::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
     use rusqlite::Connection;
+
+    #[test]
+    fn codex_recheck_input_fence_rejection_commits_unverified_without_stale_evidence() {
+        use crate::autopilot::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
+        use crate::autopilot::circuit::stepper::{ObservationInputFence, StepView};
+
+        let identity = ObservationIdentity {
+            run_id: 42,
+            step_id: "spawn".into(),
+            attempt: 1,
+            agent_node_id: 9,
+            session_incarnation: Some("1000".into()),
+            session_id: Some("session".into()),
+            turn_id: Some("turn-1".into()),
+            report_revision: None,
+        };
+        let mut view = RunView {
+            run_id: 42,
+            state: RunState::Running,
+            graph: CircuitGraph::walking_skeleton("synthetic"),
+            context: CircuitContext::default(),
+            steps: vec![StepView {
+                node_id: "spawn".into(),
+                attempt: 1,
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: Some(9),
+            }],
+        };
+        view.context.set("node.spawn.recheck_only", "1");
+        let observations = [
+            ObservedWorkFact::ForegroundTerminated,
+            ObservedWorkFact::OwnershipUnavailable {
+                reason: "Codex cannot enumerate owned work".into(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, fact)| CircuitObservation {
+            identity: identity.clone(),
+            source: "codex_rollout_task_complete".into(),
+            source_id: Some(format!("turn-1:{index}")),
+            observed_at_ms: 2_000,
+            authoritative: true,
+            fact,
+        })
+        .collect();
+        let event = CircuitEvent::ObservationBatch {
+            receipt_id: 0,
+            expected: identity,
+            observations,
+            stale: false,
+            input_guard: Some(ObservationInputFence {
+                transcript_guard: None,
+                agent_node_id: 9,
+                input_stamp: "1:2".into(),
+                observed_at_ms: 2_000,
+                session_id: "session".into(),
+                session_incarnation: "1000".into(),
+            }),
+        };
+
+        let mut persist_calls = 0;
+        let mut committed_step = None;
+        let (transition, turn_boundary_changed) = advance_and_persist_observed_event(
+            &mut view,
+            &event,
+            |view, transition| {
+                persist_calls += 1;
+                if persist_calls == 1 {
+                    assert!(transition.input_guard.is_some());
+                    return Err(TransitionPersistFailure::FreshnessRejected(
+                        "commit failed: submitted input is newer than the Codex completion".into(),
+                    ));
+                }
+                assert!(transition.input_guard.is_none());
+                assert!(transition.observations.is_empty());
+                assert!(transition.effects.is_empty());
+                committed_step = Some(view.steps[0].clone());
+                Ok(false)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(persist_calls, 2);
+        assert!(!turn_boundary_changed);
+        assert_eq!(transition.step_writes.len(), 1);
+        assert_eq!(transition.step_writes[0].status, StepStatus::Unverified);
+        assert_eq!(transition.step_writes[0].attempt, 1);
+        assert_eq!(committed_step.unwrap().status, StepStatus::Unverified);
+        assert_eq!(view.steps[0].status, StepStatus::Unverified);
+        assert_eq!(view.steps[0].attempt, 1);
+        assert!(view.steps[0].error.as_deref().unwrap().contains("freshness fence"));
+        assert!(view.context.get("node.spawn.evidence.1").is_none(), "rejected observations must not be retained");
+        assert_eq!(view.context.get("node.spawn.recheck_only"), Some("1"));
+    }
 
     #[test]
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
@@ -5020,6 +5260,46 @@ mod tests {
         assert_eq!(run.context.get("pr.number"), Some("314"));
         assert_eq!(run.context.get("pr.url"), Some("https://github.com/example/repo/pull/314"));
         assert_eq!(run.context.get("pr.head_ref"), Some("renamed-implementation"));
+    }
+
+    #[test]
+    fn open_pr_target_is_recorded_before_lookup_or_create() {
+        let run = open_pr_run();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let event = github::ensure_open_pr_with_target(
+            &run,
+            "open_pr",
+            None,
+            pushed_implementation,
+            |head| {
+                assert_eq!(head, "renamed-implementation");
+                calls.borrow_mut().push("target");
+                Ok(())
+            },
+            |head| {
+                assert_eq!(head, "renamed-implementation");
+                assert_eq!(&*calls.borrow(), &["target"]);
+                calls.borrow_mut().push("find");
+                Ok(None)
+            },
+            |head, title| {
+                assert_eq!(head, "renamed-implementation");
+                assert_eq!(title, "Circuit run");
+                assert_eq!(&*calls.borrow(), &["target", "find"]);
+                calls.borrow_mut().push("create");
+                Ok(implementation_pr())
+            },
+        )
+        .unwrap();
+        assert_eq!(&*calls.borrow(), &["target", "find", "create"]);
+        assert!(matches!(
+            event,
+            CircuitEvent::GithubActionResult {
+                success: true,
+                pr_number: Some(314),
+                ..
+            }
+        ));
     }
 
     #[test]

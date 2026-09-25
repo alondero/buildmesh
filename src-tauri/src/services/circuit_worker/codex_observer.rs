@@ -30,18 +30,24 @@ pub(super) fn observe(
         ) => {}
         _ => return None,
     }
-    let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(node.id)?;
-    let incarnation = crate::db::agent_turn_stamp(node.id)
+    let unavailable = |reason| recheck_unavailable(view, step, reason);
+    let Some(input) = crate::agent::process::PROCESS_REGISTRY.input_stamp(node.id) else {
+        return unavailable("Codex input is changing or cannot be fenced; no current completion was established.");
+    };
+    let Some(incarnation) = crate::db::agent_turn_stamp(node.id)
         .ok()
-        .flatten()?
-        .split_once(':')?
-        .0
-        .to_owned();
-    let snapshot = crate::coordinator::enrichment::native_turn_completion(node)?;
-    if snapshot.completion.completed_at_ms < incarnation.parse::<i64>().ok()?
-        || !snapshot.is_current()
-    {
-        return None;
+        .flatten()
+        .and_then(|stamp| stamp.split_once(':').map(|(incarnation, _)| incarnation.to_owned())) else {
+        return unavailable("Codex session incarnation is unavailable; no current completion was established.");
+    };
+    let Some(snapshot) = crate::coordinator::enrichment::native_turn_completion(node) else {
+        return unavailable("No current Codex foreground completion could be re-established.");
+    };
+    let Some(incarnation_ms) = incarnation.parse::<i64>().ok() else {
+        return unavailable("Codex session incarnation cannot be interpreted; no current completion was established.");
+    };
+    if snapshot.completion.completed_at_ms < incarnation_ms || !snapshot.is_current() {
+        return unavailable("The Codex completion no longer matches the current session input.");
     }
     let identity = ObservationIdentity {
         run_id: view.run_id,
@@ -67,6 +73,56 @@ pub(super) fn observe(
         guard.transcript_guard = Some(snapshot);
     }
     Some(event)
+}
+
+fn recheck_unavailable(view: &RunView, step: &StepView, reason: &str) -> Option<CircuitEvent> {
+    (step.status == crate::autopilot::circuit::stepper::StepStatus::Running
+        && view.context.get(&format!("node.{}.recheck_only", step.node_id)) == Some("1"))
+    .then(|| CircuitEvent::EffectUncertain {
+        node_id: step.node_id.clone(),
+        attempt: step.attempt,
+        reason: format!("Codex evidence recheck remains Unverified: {reason}"),
+    })
+}
+
+pub(super) fn freshness_rejection_recheck(
+    view: &RunView,
+    event: &CircuitEvent,
+) -> Option<CircuitEvent> {
+    let CircuitEvent::ObservationBatch {
+        expected,
+        observations,
+        stale: false,
+        input_guard: Some(guard),
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let step = view.step(&expected.step_id)?;
+    let is_codex_completion = observations
+        .iter()
+        .any(|observation| observation.source == "codex_rollout_task_complete");
+    (is_codex_completion
+        && view.context.get(&format!("node.{}.recheck_only", expected.step_id)) == Some("1")
+        && expected.run_id == view.run_id
+        && expected.attempt == step.attempt
+        && step.status == crate::autopilot::circuit::stepper::StepStatus::Running
+        && step
+            .agent_node_id
+            .or_else(|| view.resolve_target_agent(&expected.step_id))
+            == Some(expected.agent_node_id)
+        && guard.agent_node_id == expected.agent_node_id
+        && guard.session_id == expected.session_id.as_deref().unwrap_or_default()
+        && guard.session_incarnation == expected.session_incarnation.as_deref().unwrap_or_default())
+    .then(|| {
+        recheck_unavailable(
+            view,
+            step,
+            "the completion was rejected by the current input or session freshness fence; no current completion was established.",
+        )
+    })
+    .flatten()
 }
 
 fn append_foreground_reconciliation(
@@ -261,5 +317,40 @@ mod tests {
         assert_eq!(run.steps[0].status, StepStatus::Unverified);
         assert!(classified.effects.is_empty());
         assert_eq!(run.steps[0].attempt, 1);
+    }
+
+    #[test]
+    fn codex_recheck_without_current_completion_returns_to_unverified_same_attempt() {
+        use crate::autopilot::circuit::{
+            model::CircuitGraph,
+            stepper::{advance, RunState, StepStatus, StepView},
+        };
+        let mut view = RunView {
+            run_id: 42,
+            state: RunState::Running,
+            graph: CircuitGraph::walking_skeleton("work"),
+            context: CircuitContext::default(),
+            steps: vec![StepView {
+                node_id: "spawn".into(),
+                attempt: 1,
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: Some(9),
+            }],
+        };
+        view.context.set("node.spawn.recheck_only", "1");
+        let event = recheck_unavailable(&view, &view.steps[0], "no current turn")
+            .expect("a pending explicit recheck must produce an outcome");
+
+        let transition = advance(&mut view, &event);
+        assert_eq!(view.steps[0].status, StepStatus::Unverified);
+        assert_eq!(view.steps[0].attempt, 1);
+        assert!(view.steps[0].error.as_deref().unwrap().contains("no current turn"));
+        assert!(transition.effects.is_empty());
+
+        view.steps[0].status = StepStatus::Running;
+        view.context.set("node.spawn.recheck_only", "0");
+        assert!(recheck_unavailable(&view, &view.steps[0], "no current turn").is_none());
     }
 }

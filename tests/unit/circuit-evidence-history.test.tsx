@@ -65,6 +65,30 @@ it('shows ordered evidence and sends a reasoned outcome against the displayed re
   expect(screen.getByText(/does not grant permission or review approval/)).toBeTruthy();
 });
 
+it('offers read-only evidence recheck for a recorded OpenPr target', async () => {
+  const targetEntry = { ...entry, id: 8, node_id: 'open_pr', kind: 'effect_target', detail: '{"owner":"example","repo":"buildmesh","head":"feature/circuit"}' };
+  vi.mocked(circuitRunHistory).mockResolvedValue({
+    entries: [entry, targetEntry], coverage: [],
+    checkpoints: [{ node_id: 'open_pr', attempt: 1, actions: ['recheck', 'not_performed'] }],
+  });
+  vi.mocked(recordCircuitOutcome).mockResolvedValue(undefined);
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText('Action target recorded')).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Reason and supporting evidence'), {
+    target: { value: 'Check only the saved repository branch; do not create a pull request.' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Recheck evidence' }));
+  await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({
+    run_id: 3,
+    node_id: 'open_pr',
+    attempt: 1,
+    expected_revision: 8,
+    action: 'recheck',
+    reason: 'Check only the saved repository branch; do not create a pull request.',
+  }));
+});
+
 it('ignores an older run history arriving after the selected run changes', async () => {
   let resolveOld!: (value: CircuitEvidenceView) => void;
   vi.mocked(circuitRunHistory).mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
