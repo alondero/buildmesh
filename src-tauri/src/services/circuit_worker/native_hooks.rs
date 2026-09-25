@@ -17,6 +17,18 @@ pub(crate) struct NativeHook {
     /// Never set by the Claude/Codex parsers below.
     #[serde(default)]
     pub background_busy: bool,
+    /// Antigravity `executionNum`: an opaque 0-based step counter, not a
+    /// turn identity token. Retained so consecutive settled turns from one
+    /// session hash to distinct receipt source ids instead of colliding
+    /// into the history deduplicator (issue #1901 review). Never set by
+    /// the Claude/Codex parsers below.
+    #[serde(default)]
+    pub execution_num: Option<i64>,
+    /// Antigravity `terminationReason` (e.g. `model_stop`,
+    /// `NO_TOOL_CALL`): opaque triage telemetry, never a decision input.
+    /// Never set by the Claude/Codex parsers below.
+    #[serde(default)]
+    pub termination_reason: Option<String>,
     #[serde(default)]
     pub human_fact: Option<crate::autopilot::circuit::observation::ObservedWorkFact>,
     #[serde(default)]
@@ -81,6 +93,8 @@ impl NativeHook {
             child_id: token("agent_id"),
             human_fact,
             background_busy: false,
+            execution_num: None,
+            termination_reason: None,
             provider: Some(provider.into()),
             active_work,
             final_report: if event == "Stop" {
@@ -105,7 +119,9 @@ impl NativeHook {
 /// provably lacks decides the adapter:
 /// - No per-turn token (`executionNum` is an opaque 0-based step counter,
 ///   not identity) → `turn_id` stays `None`; receipts are session-fenced
-///   but never turn-fenced, hence never authoritative.
+///   but never turn-fenced, hence never authoritative. The counter is still
+///   retained as `execution_num` so consecutive turns hash to distinct
+///   receipt source ids instead of colliding in history deduplication.
 /// - No child/background registry → `active_work` stays `None`; every
 ///   `Stop` carries `OwnershipUnavailable` so a settled foreground turn
 ///   can never verify owned work.
@@ -122,14 +138,20 @@ fn parse_agy(body: &[u8]) -> Option<NativeHook> {
         .or_else(|| value.get("hookEventName"))
         .or_else(|| value.get("hookName"))
         .and_then(|name| name.as_str());
-    let conversation = value
+    // Canonicalize through the same UUID gate the attention route uses
+    // before writing `cli_session_id`: downstream identity comparison is
+    // exact, so an uppercase or mixed-case `conversationId` must fence as
+    // the same session (issue #1901 review). A non-UUID value is malformed.
+    let conversation: Option<String> = value
         .get("conversationId")
         .or_else(|| value.get("conversation_id"))
         .and_then(|id| id.as_str())
-        .filter(|id| !id.trim().is_empty());
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| crate::http::request::parse_session_id_for_provider("agy", id));
     // AGY always ships its conversation id on `Stop`; a `Stop` without one
     // is malformed, never turn evidence for whichever node it reached.
-    conversation?;
+    let conversation = conversation?;
     let event = match named {
         Some(name) if name.eq_ignore_ascii_case("stop") => "Stop",
         Some(_) => return None,
@@ -161,8 +183,18 @@ fn parse_agy(body: &[u8]) -> Option<NativeHook> {
         .or_else(|| value.get("fully_idle"))
         .and_then(|idle| idle.as_bool())
         == Some(false);
+    let execution_num = value
+        .get("executionNum")
+        .or_else(|| value.get("execution_num"))
+        .and_then(|num| num.as_i64());
+    let termination_reason = value
+        .get("terminationReason")
+        .or_else(|| value.get("termination_reason"))
+        .and_then(|reason| reason.as_str())
+        .filter(|reason| !reason.trim().is_empty())
+        .map(str::to_owned);
     Some(NativeHook {
-        session_id: conversation.map(str::to_owned),
+        session_id: Some(conversation),
         turn_id: None,
         event: event.into(),
         child_id: None,
@@ -170,8 +202,27 @@ fn parse_agy(body: &[u8]) -> Option<NativeHook> {
         final_report: None,
         human_fact: None,
         background_busy,
+        execution_num,
+        termination_reason,
         provider: Some("agy".into()),
     })
+}
+
+/// Stable deduplication identity for a hook receipt: the hook payload plus
+/// the session incarnation it arrived under. Callers must produce the id
+/// through this helper so persistence, replay, and tests agree on what
+/// counts as the same delivery (issue #1901 review).
+pub(crate) fn receipt_source_id(
+    hook: &NativeHook,
+    session_incarnation: &Option<String>,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(hook, session_incarnation)).map_err(|e| e.to_string())?
+        )
+    ))
 }
 
 // This is the Claude/Codex hook request contract already accepted by the
@@ -216,7 +267,6 @@ pub(crate) fn receive(
     hook: NativeHook,
     turn_fenced: bool,
 ) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
     let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
     let session_incarnation = crate::db::agent_turn_stamp(agent_node_id)
         .map_err(|e| e.to_string())?
@@ -225,13 +275,7 @@ pub(crate) fn receive(
                 .split_once(':')
                 .map(|(generation, _)| generation.to_owned())
         });
-    let source_id = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(&hook, &session_incarnation))
-                .map_err(|e| e.to_string())?
-        )
-    );
+    let source_id = receipt_source_id(&hook, &session_incarnation)?;
     let receipt = NativeReceipt {
         agent_node_id,
         input_stamp,
@@ -847,20 +891,31 @@ mod tests {
         assert_eq!(hook.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         assert_eq!(hook.turn_id, None, "executionNum is telemetry, not a turn fence");
         assert!(!hook.background_busy);
+        assert_eq!(hook.execution_num, Some(1), "the counter is retained for receipt disambiguation");
+        assert_eq!(hook.termination_reason.as_deref(), Some("model_stop"));
         assert_eq!(hook.active_work, None, "no child/background registry exists");
         assert_eq!(hook.final_report, None, "Stop carries no inline report");
         assert_eq!(hook.human_fact, None);
         assert_eq!(hook.provider.as_deref(), Some("agy"));
-        // 1.2.x shape carrying `hookEventName` parses to the same receipt.
+        // 1.2.x shape carrying `hookEventName` parses the same way.
         let named = NativeHook::parse("agy", br#"{"hookEventName":"Stop","conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true,"terminationReason":"NO_TOOL_CALL"}"#).unwrap();
-        assert_eq!(named, hook);
+        assert_eq!(named.event, "Stop");
+        assert_eq!(named.session_id, hook.session_id);
+        assert_eq!(named.execution_num, Some(0));
+        assert_eq!(named.termination_reason.as_deref(), Some("NO_TOOL_CALL"));
         // `fullyIdle: false` is the harness's background-busy signal.
         let busy = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
         assert!(busy.background_busy);
         assert_eq!(busy.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(busy.execution_num, None, "absent counter stays absent");
         // snake_case spellings parse identically.
         let snake = NativeHook::parse("agy", br#"{"hook_event_name":"stop","conversation_id":"550e8400-e29b-41d4-a716-446655440000","fully_idle":false}"#).unwrap();
         assert_eq!(snake, busy);
+        // Session comparison downstream is exact, so the conversation id is
+        // canonicalized to the lowercase UUID the attention route stores.
+        let upper = NativeHook::parse("agy", br#"{"conversationId":"550E8400-E29B-41D4-A716-446655440000","fullyIdle":true}"#).unwrap();
+        assert_eq!(upper.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(NativeHook::parse("agy", br#"{"conversationId":"not-a-uuid","fullyIdle":true}"#).is_none());
         // Serde round-trip keeps the receipt (durable history rows persist it).
         assert_eq!(serde_json::from_str::<NativeHook>(&serde_json::to_string(&hook).unwrap()).unwrap(), hook);
     }
@@ -894,13 +949,13 @@ mod tests {
         use crate::autopilot::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 1, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
-            normalize(42, entry, receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+            normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
         assert!(!stale);
         assert!(input_guard.is_none(), "no turn token means no authoritative guard");
@@ -927,13 +982,13 @@ mod tests {
         use crate::autopilot::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":false}"#).unwrap();
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 2, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
-            normalize(42, entry, receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+            normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
         assert_eq!(observations.len(), 2);
         assert!(matches!(&observations[0].fact, Fact::Yielded));
@@ -946,24 +1001,110 @@ mod tests {
     }
 
     #[test]
-    fn agy_receipts_from_replaced_sessions_stale_inputs_and_deleted_agents_cannot_advance_the_run() {
+    fn agy_successive_turns_hash_to_distinct_source_ids() {
+        // Issue #1901 review: without the retained `execution_num`, two
+        // settled turns from one session hash byte-identically and the
+        // history deduplicator permanently drops the second turn.
+        let incarnation = Some("7".into());
+        let id = |body: &[u8]| {
+            receipt_source_id(&NativeHook::parse("agy", body).unwrap(), &incarnation).unwrap()
+        };
+        let turn0 = id(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true}"#);
+        let turn1 = id(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"fullyIdle":true}"#);
+        assert_ne!(turn0, turn1, "consecutive turns must not dedupe each other");
+        assert_eq!(turn0, id(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true}"#),
+            "a byte-identical redelivery still dedupes");
+    }
+
+    #[test]
+    fn agy_receipts_persist_without_input_fence_and_keep_successive_turns() {
         use crate::autopilot::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        let hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":true}"#).unwrap();
+        // Real persistence boundary: an in-memory DB with a running run and
+        // a step bound to agent 9, driven through receive_native_hook_locked
+        // exactly as production stores receipts.
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        let graph = serde_json::to_string(
+            &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work"),
+        )
+        .unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,agent_node_id,status,attempt) VALUES(1,'work',9,'running',1);")
+            .unwrap();
+        // Bound parameter: the serialized graph is full of braces that
+        // `format!` would misread as placeholders.
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1 WHERE id=1", [&graph])
+            .unwrap();
+        let receipt = |body: &[u8], at_ms: i64| {
+            let hook = NativeHook::parse("agy", body).unwrap();
+            let session_incarnation = Some("7".into());
+            // `receive()` reads the input stamp from the process registry;
+            // persistence strips it again below without a UserPromptSubmit
+            // turn-start binding, which is exactly what this test pins.
+            let source_id = receipt_source_id(&hook, &session_incarnation).unwrap();
+            NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()),
+                session_incarnation, source_id, received_at_ms: at_ms,
+                turn_fenced: false, submission_correlated: false, hook }
+        };
+        let turn0 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true,"terminationReason":"model_stop"}"#, 10);
+        let turn1 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"fullyIdle":true,"terminationReason":"model_stop"}"#, 11);
+        crate::db::circuit::evidence::receive_native_hook_locked(&mut db, &turn0).unwrap();
+        crate::db::circuit::evidence::receive_native_hook_locked(&mut db, &turn1).unwrap();
+        crate::db::circuit::evidence::receive_native_hook_locked(&mut db, &turn0).unwrap();
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = db.prepare("SELECT id, detail FROM circuit_run_history WHERE run_id=1 AND kind='native_hook_received' ORDER BY id").unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(rows.len(), 2, "both turns are kept; the redelivery dedupes");
+        let mut evidence = WorkEvidence::default();
+        for (id, detail) in &rows {
+            let stored: serde_json::Value = serde_json::from_str(detail).unwrap();
+            assert!(stored.get("input_stamp").is_none_or(|stamp| stamp.is_null()),
+                "persistence strips the input stamp without a turn-start binding: no input fence exists for AGY");
+            let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: *id, node_id: Some("work".into()),
+                attempt: Some(1), kind: "native_hook_received".into(), detail: detail.clone(), observed_at: String::new() };
+            let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
+                resolve_receipt(1, entry, |_| Ok((Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))))
+                    .unwrap()
+            else { panic!("native batch") };
+            // Honest staleness: with no persisted input stamp the receipt can
+            // never be stale-marked; session/incarnation fencing is the only
+            // freshness boundary, and these observations stay non-authoritative.
+            assert!(!stale);
+            assert!(input_guard.is_none());
+            assert_eq!(observations.len(), 2);
+            assert!(observations.iter().all(|o| !o.authoritative && o.source == "agy_native_hook"));
+            assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { .. }));
+            let ownership = evidence.observe(&expected, &observations[1]);
+            let foreground = evidence.observe(&expected, &observations[0]);
+            assert!(matches!(ownership, ObservationDisposition::Unavailable | ObservationDisposition::Duplicate));
+            assert!(matches!(foreground, ObservationDisposition::ReducedConfidence | ObservationDisposition::Duplicate));
+        }
+        let stored_ids: Vec<String> = rows.iter().map(|(_, detail)| {
+            serde_json::from_str::<serde_json::Value>(detail).unwrap()["source_id"].as_str().unwrap().to_owned()
+        }).collect();
+        assert_ne!(stored_ids[0], stored_ids[1], "successive turns persist under distinct source ids");
+        assert!(evidence.lifecycle_invalidated);
+        assert!(!evidence.completion_verified(), "unknown owned work never becomes completion");
+    }
+
+    #[test]
+    fn agy_receipts_from_replaced_sessions_and_deleted_agents_cannot_advance_the_run() {
+        use crate::autopilot::circuit::observation::{
+            ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, submission_correlated: false, hook };
         let entry = || crate::db::circuit::evidence::CircuitHistoryEntry { id: 3, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
-        // A prompt injected after the hook overtook it: the receipt is stale.
-        let super::super::CircuitEvent::ObservationBatch { stale, observations: stale_observations, .. } =
-            normalize(42, entry(), receipt.clone(), Some("session".into()), Some("7".into()), Some("input-2".into()))
-        else { panic!("native batch") };
-        assert!(stale);
-        assert!(stale_observations.iter().all(|o| !o.authoritative));
         // A replaced session (restart under a new conversation) is rejected.
         let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
-            normalize(42, entry(), receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+            normalize(42, entry(), receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
         let mut evidence = WorkEvidence::default();
         assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
@@ -972,17 +1113,17 @@ mod tests {
         assert_eq!(evidence.observe(&expected, &restarted), ObservationDisposition::Rejected);
         // A subagent `Stop` carries its own conversation id, so it fences as
         // a different session and can never complete the parent's turn.
-        let subagent = NativeHook::parse("agy", br#"{"conversationId":"subagent-session","fullyIdle":true}"#).unwrap();
+        let subagent = NativeHook::parse("agy", br#"{"conversationId":"660e8400-e29b-41d4-a716-446655440001","fullyIdle":true}"#).unwrap();
         let subagent_receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-subagent".into(), received_at_ms: 11, turn_fenced: false, submission_correlated: false, hook: subagent };
         let super::super::CircuitEvent::ObservationBatch { observations: subagent_observations, .. } =
-            normalize(42, entry(), subagent_receipt, Some("session".into()), Some("7".into()), Some("input-1".into()))
+            normalize(42, entry(), subagent_receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
         assert!(matches!(&subagent_observations[0].fact, Fact::ForegroundTerminated));
         assert_eq!(evidence.observe(&expected, &subagent_observations[0]), ObservationDisposition::Rejected);
         assert!(!evidence.completion_verified());
         // A deleted node consumes its receipt without lifecycle effect.
-        let deleted_hook = NativeHook::parse("agy", br#"{"conversationId":"session","fullyIdle":true}"#).unwrap();
+        let deleted_hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
         let deleted = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, submission_correlated: false, hook: deleted_hook };
         let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 4, node_id: Some("work".into()),

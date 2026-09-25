@@ -44,7 +44,7 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
             "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
             "Unavailable: Antigravity exposes no child/background registry; settled turns cannot verify owned work",
             "Transcript or PTY text may inform interpretation; complete native report unavailable",
-            "Durable Stop receipt replay with session, incarnation and input fences; freshness recheck parks Unverified",
+            "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
             30_000,
         ),
         _ => (

@@ -121,8 +121,9 @@ establish for Antigravity Circuit execution:
 |---|---|---|
 | Supported version / platform | `agy 1.2.11`, Windows interactive PTY session | Validated |
 | Turn settled vs background-busy | `Stop` hook `fullyIdle: true` vs `false` | Validated (hook source) |
-| Session identity | `conversationId` (UUID) fenced against the node's stored session, incarnation, and input stamp | Validated |
-| Per-turn token | None — `executionNum` is an opaque 0-based step counter, not identity | Unavailable by design |
+| Session identity | `conversationId` (UUID, lowercase-canonicalized) fenced against the node's stored session and incarnation | Validated with stated limits |
+| Input-stamp fence | None — without a `UserPromptSubmit` turn-start binding, persistence strips the input stamp, so receipts are never stale-marked | Unavailable by design |
+| Per-turn token | None — `executionNum` is an opaque 0-based step counter, not identity (retained only so consecutive turns hash to distinct receipt source ids) | Unavailable by design |
 | Child/background registry | None — the payload carries no task/cron lists | Unavailable |
 | Inline final report | None — `Stop` carries no assistant text | Unavailable |
 | Human waits (permission/question) | No hook installed under `--dangerously-skip-permissions` | Unavailable |
@@ -132,17 +133,21 @@ Consequences for Circuit execution (`services::circuit_worker::native_hooks`,
 
 1. Every `Stop` receipt normalizes to `ForegroundTerminated` (or `Yielded`
    when `fullyIdle: false`) plus `OwnershipUnavailable`. Receipts are
-   session-fenced but never turn-fenced, hence never authoritative: they are
-   visible evidence in run history and can never complete a step. Owned-work
-   coverage stays `Unverified`.
-2. Freshness bounds are unchanged from the default (30s yielded budget):
-   stale input stamps mark the receipt stale, a replaced conversation is
-   rejected, duplicate deliveries dedupe by source identity, and a deleted
-   node consumes its receipt without effect.
+   session/incarnation-fenced but never turn-fenced and never input-fenced,
+   hence never authoritative: they are visible evidence in run history and
+   can never complete a step. Owned-work coverage stays `Unverified`.
+2. Freshness bounds are unchanged from the default (30s yielded budget). A
+   replaced conversation is rejected on session mismatch; byte-identical
+   redeliveries dedupe by source identity while consecutive turns stay
+   distinct via the retained `executionNum`; and a deleted node consumes its
+   receipt without effect. Stale-marking on input overtake does not apply:
+   with no persisted input stamp the receipt can never be stale-marked.
 3. Subagent `Stop`s carry their own `conversationId`, so they fence as a
    different session and can never complete the parent's turn. Malformed
-   payloads and non-`Stop` events parse to nothing under the `agy` provider,
-   and `agy` bytes parse to nothing under harnesses that own no AGY adapter.
+   payloads (including non-UUID conversation ids) and non-`Stop` events
+   parse to nothing under the `agy` provider, and `agy` bytes parse to
+   nothing under harnesses that own no AGY adapter. `terminationReason` is
+   retained on the receipt as triage telemetry only.
 4. Boundary: `-p` / `--print` headless runs emit **no** `Stop` hook (two
    controlled runs with a live catcher, zero deliveries), so hook evidence
    covers only Buildmesh-launched interactive sessions. A `hooks.json`
