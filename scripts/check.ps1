@@ -15,7 +15,8 @@
       `prefill_stays_argv_for_wsl` test.
     * Runs vitest with --pool=threads — the default forks pool silently times out
       every worker in a worktree and reports PASS(0) FAIL(0) exit 0 (false green).
-    * Pins cargo to src-tauri/Cargo.toml — Bash-tool CWD doesn't persist reliably.
+    * Runs cargo from src-tauri so Cargo loads its local config and ts-rs keeps
+      generated bindings under src/types/generated.
 
   Situational escalations NOT applied by default (add the flag if you hit them):
     -CleanRust         cargo clean -p buildmesh first (incremental stale binary:
@@ -222,8 +223,10 @@ function Invoke-Rust {
   Write-Host '== rust (cargo test) ==' -ForegroundColor Cyan
   # Clear the leaked env var for this process only.
   $env:BUILDMESH_PREFILL = $null
-  $manifest = Join-Path $repo 'src-tauri\Cargo.toml'
-  Push-Location $repo
+  # Run inside src-tauri so Cargo loads its .cargo/config.toml. In particular,
+  # this keeps ts-rs output in src/types/generated instead of creating a
+  # root-level bindings/ directory when cargo test is launched from the repo.
+  Push-Location (Join-Path $repo 'src-tauri')
   # Same PowerShell-5.1 NativeCommandError trap as Invoke-Unit: cargo's
   # "   Compiling …" progress lines arrive on stderr and would otherwise
   # become terminating errors under the script-wide `Stop` preference.
@@ -233,9 +236,9 @@ function Invoke-Rust {
   try {
     $ErrorActionPreference = 'Continue'
     if ($CleanRust) {
-      & cargo clean -p buildmesh --manifest-path $manifest
+      & cargo clean -p buildmesh
     }
-    $cargoArgs = @('test', '--locked', '--manifest-path', $manifest)
+    $cargoArgs = @('test', '--locked')
     if ($SerialRust) { $cargoArgs += @('--', '--test-threads=1') }
     & cargo @cargoArgs
   } finally {
