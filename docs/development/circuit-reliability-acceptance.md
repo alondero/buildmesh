@@ -2,11 +2,11 @@
 
 Implementation evidence for [#1889](https://github.com/alondero/buildmesh/issues/1889), governed by [#1850](https://github.com/alondero/buildmesh/issues/1850). This is a working acceptance record, not a claim that the specification is implemented. Baseline: `d8e3a1a780599cbdcece4710df2b603860065e7a`.
 
-Source inspection, deterministic automated checks, and live delivery are separate evidence tiers. No aggregate reliability percentage is asserted. Unless recorded otherwise below, platform evidence is Windows, development configuration; harness versions and live delivery remain unverified.
+Source inspection, deterministic automated checks, and live delivery are separate evidence tiers. No aggregate reliability percentage is asserted. Unless recorded otherwise below, platform evidence is Windows, development configuration; harness versions and live delivery are recorded per scenario.
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Current Codex 0.156.1 / Luna live pull recorded below | This live Codex run received no native hook receipts. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live request/permission receipts and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live response checks pending |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Current app process restart and identity-proven Codex reattachment remain untested |
@@ -237,9 +237,11 @@ Windows PowerShell, and a synthetic no-tools prompt on Mesh 44 / Circuit 45.
   recheck cannot obtain current input/session evidence. Its regression passes.
 - The rebuilt app provisioned the Windows Codex callback with quoted
   `--data-binary "@-"`. The callback was exercised through PowerShell and cmd
-  against a local HTTP receiver in the Rust regression, but this live Codex run
-  recorded **zero native hook receipts**. Live hook delivery therefore remains
-  unverified; the TUI rollout pull supplied the foreground evidence.
+  against a local HTTP receiver in the Rust regression. Run 45 recorded zero
+  native hook receipts. Codex's native receipt adapter deliberately retains
+  only request-correlated human waits, so this no-tools run could not establish
+  whether ordinary lifecycle callbacks were delivered. The TUI rollout pull
+  supplied the foreground evidence.
 - The current-source legacy retirement smoke confirmed retained cancelled
   history and Suspended node 122 across UI reload, no automatic Circuit
   conversion or legacy restart, the read-only retained-settings view, and
@@ -257,11 +259,25 @@ Windows PowerShell, and a synthetic no-tools prompt on Mesh 44 / Circuit 45.
   together. The GitHub lookup and worker result are still tested at separate
   seams; no live GitHub request or mutation was made.
 
-This live evidence predates the commit-fence follow-up below and is limited to
-Windows and Codex's foreground observation path.
-Owned child/background work, live native-hook delivery, human question/permission
-round trips, process restart and reattachment, and Claude, WSL, Linux, and macOS
-remain unverified. No full #1889 acceptance claim is made.
+Run 46 repeated the synthetic no-tools prompt in the rebuilt Windows app with
+the project `hooks = true` setting, Codex's hook-trust bypass launch flag, and
+an additional fixture-only diagnostic hook. The exact rollout recorded one
+task start and one completion on `gpt-6-luna`. The local receiver captured
+`SessionStart`, `UserPromptSubmit`, and `Stop` with the same Codex session ID.
+The Buildmesh log independently recorded lifecycle-neutral session start,
+turn resume, and clean turn completion for Agent Node 127. Run 46 remained
+Unverified for unavailable owned-work coverage and was cancelled at attempt
+one; the diagnostic hook was removed afterward. The exact event/session/log
+and durable cancellation record is `.tmp/evidence-1889-live-hooks.json`.
+This verifies live callback transport and Buildmesh's ordinary lifecycle
+handling on Windows Codex 0.156.1. The zero native receipt count is expected
+for this no-tools prompt and does not test a human wait.
+
+Run 45's observation evidence predates the commit-fence follow-up below. Run 46
+verified hook delivery, not the newer stale-completion commit path. Owned
+child/background work, live human question/permission round trips, process
+restart and reattachment, and Claude, WSL, Linux, and macOS remain unverified.
+No full #1889 acceptance claim is made.
 
 The follow-up closes the stale-completion wedge found in standards review. If a
 newer prompt or session change rejects a Codex completion at commit, the worker
