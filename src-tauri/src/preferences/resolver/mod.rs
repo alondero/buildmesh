@@ -11,7 +11,7 @@
 //! | [`pairings`]       | Pairing resolution — stored-pairing lookups, attach-form defaults, ordering |
 //! | [`pairing_compat`] | Pairing compatibility matching — descriptor extractor, decision, predicate |
 //! | [`default_provider`] | Default-provider precedence resolver |
-//! | [`cascade`]        | Shared per-harness cascade (`explicit > mesh_override > mesh_legacy > application`) + capability mask — single source of truth for the resolver that the spawn path AND the IPC `get_resolved_harness_view` (issue #1656) both call |
+//! | [`cascade`]        | Shared per-harness cascade (`explicit > mesh_legacy > application`) + capability mask — single source of truth for the resolver that the spawn path AND the IPC `get_resolved_harness_view` (issue #1656) both call |
 //!
 //! See the [module-level docs](super) for what concerns each top-level
 //! `preferences` submodule owns.

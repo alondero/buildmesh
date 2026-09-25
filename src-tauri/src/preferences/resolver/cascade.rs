@@ -1,8 +1,8 @@
 //! Shared cascade helper for the per-harness defaults resolution (issue #1656).
 //!
-//! The cascade order `explicit > mesh_override > mesh_legacy > application >
-//! native` is the single source of truth for how a spawn picks up model /
-//! effort values. It is consumed by two callers that must agree:
+//! The cascade order `explicit > mesh_legacy > application > native` is the
+//! single source of truth for how a spawn picks up model / effort values. It
+//! is consumed by two callers that must agree:
 //!
 //! 1. The spawn pipeline (`agent::capabilities::resolve_agent_config`) — runs
 //!    at process launch and produces the [`crate::agent::capabilities::ResolvedAgentConfig`]
@@ -13,7 +13,7 @@
 //!
 //! Centralising the per-field collapse in this module means the helper-level
 //! unit tests in `agent::capabilities::tests` (specifically
-//! `resolver_cascade_prefers_explicit_over_mesh_override_over_mesh_over_application`
+//! `resolver_cascade_prefers_explicit_over_mesh_over_application`
 //! and `resolver_cascade_falls_through_whitespace_layers`) protect both
 //! callers — any drift between the spawn path and the IPC path breaks them.
 //!
@@ -30,10 +30,8 @@ use crate::agent::capabilities::{EffortControlKind, FieldInputs};
 
 /// Whitespace-normalised first-non-empty-layer picker for one field. Every
 /// layer is trimmed; a layer that is empty or whitespace-only collapses to
-/// absent so the cascade falls through to the next layer. Cascade order
-/// mirrors the issue #1148 cascade (slice 2 settles the per-Mesh override
-/// layer between explicit and the legacy Mesh row):
-///   explicit > mesh_override > mesh (legacy) > application
+/// absent so the cascade falls through to the next layer. Cascade order:
+///   explicit > mesh (legacy) > application
 ///
 /// This is the single source of truth for the cascade; the spawn pipeline
 /// (`agent::capabilities::resolve_agent_config`) and the IPC resolver view
@@ -42,7 +40,6 @@ pub fn resolve_field(field: FieldInputs<'_>) -> Option<String> {
     field
         .explicit
         .and_then(normalize_non_empty)
-        .or_else(|| field.mesh_override.and_then(normalize_non_empty))
         .or_else(|| field.mesh.and_then(normalize_non_empty))
         .or_else(|| field.application.and_then(normalize_non_empty))
 }
@@ -71,9 +68,6 @@ pub struct ResolvedCascadeLayer {
     /// The explicit layer (Agent Node spawn argument).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explicit: Option<String>,
-    /// The mesh-override layer (per-Mesh `harness_overrides` map).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mesh_override: Option<String>,
     /// The mesh-legacy layer (`meshes.model` / `meshes.effort` columns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<String>,
@@ -110,22 +104,19 @@ pub struct ResolvedCascadeView {
 
 impl ResolvedCascadeView {
     /// Compute the cascade view for one field (`model` or `effort`) across
-    /// the four precedence layers. Pure — same shape as
+    /// the precedence layers. Pure — same shape as
     /// [`resolve_field`] plus the per-layer breakdown the UI needs.
     pub fn for_field(field: FieldInputs<'_>) -> Self {
         let explicit = field.explicit.and_then(normalize_non_empty);
-        let mesh_override = field.mesh_override.and_then(normalize_non_empty);
         let mesh = field.mesh.and_then(normalize_non_empty);
         let application = field.application.and_then(normalize_non_empty);
         let resolved = explicit
             .clone()
-            .or_else(|| mesh_override.clone())
             .or_else(|| mesh.clone())
             .or_else(|| application.clone());
         Self {
             layers: ResolvedCascadeLayer {
                 explicit,
-                mesh_override,
                 mesh,
                 application,
             },
@@ -190,18 +181,16 @@ fn effort_mask_allows(control: &EffortControlKind, value: Option<&str>) -> bool 
     allowed.iter().any(|a| a == value)
 }
 
-/// Helper for building a `FieldInputs` from the four `&Option<String>`-shaped
+/// Helper for building a `FieldInputs` from the `&Option<String>`-shaped
 /// sources the IPC command has on hand. Pure — no I/O, no allocation beyond
 /// the borrowed references.
 pub fn field_inputs<'a>(
     explicit: Option<&'a str>,
-    mesh_override: Option<&'a str>,
     mesh: Option<&'a str>,
     application: Option<&'a str>,
 ) -> FieldInputs<'a> {
     FieldInputs {
         explicit,
-        mesh_override,
         mesh,
         application,
     }
@@ -220,7 +209,7 @@ pub fn harness_config_str(value: &HarnessConfigValue, field: HarnessConfigField)
 }
 
 /// Identifier for which field of [`HarnessConfigValue`] a cascade input
-/// reads. Used by [`harness_config_str`] and the IPC builder so the four
+/// reads. Used by [`harness_config_str`] and the IPC builder so the
 /// layers don't have to repeat `match field { Model => ..., Effort => ... }`
 /// at every call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,13 +226,11 @@ mod tests {
     fn cascade_view_for_field_collapses_in_order() {
         let view = ResolvedCascadeView::for_field(field_inputs(
             Some("explicit-model"),
-            Some("override-model"),
             Some("mesh-model"),
             Some("app-model"),
         ));
         assert_eq!(view.resolved.as_deref(), Some("explicit-model"));
         assert_eq!(view.layers.explicit.as_deref(), Some("explicit-model"));
-        assert_eq!(view.layers.mesh_override.as_deref(), Some("override-model"));
         assert_eq!(view.layers.mesh.as_deref(), Some("mesh-model"));
         assert_eq!(view.layers.application.as_deref(), Some("app-model"));
     }
@@ -252,27 +239,25 @@ mod tests {
     fn cascade_view_falls_through_whitespace_layers() {
         let view = ResolvedCascadeView::for_field(field_inputs(
             Some("   "),
-            Some("  \t  "),
             Some(""),
             Some("opus-4"),
         ));
         assert_eq!(view.resolved.as_deref(), Some("opus-4"));
         assert!(view.layers.explicit.is_none());
-        assert!(view.layers.mesh_override.is_none());
         assert!(view.layers.mesh.is_none());
         assert_eq!(view.layers.application.as_deref(), Some("opus-4"));
     }
 
     #[test]
     fn cascade_view_with_all_layers_absent_is_none() {
-        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None, None));
+        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None));
         assert_eq!(view.resolved, None);
         assert_eq!(view.layers, ResolvedCascadeLayer::default());
     }
 
     #[test]
     fn capability_mask_drops_model_when_unsupported() {
-        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None, Some("opus-4")));
+        let view = ResolvedCascadeView::for_field(field_inputs(None, None, Some("opus-4")));
         let caps = CapabilityMaskForResolver {
             supports_model_override: false,
             effort_control: EffortControlKind::None,
@@ -291,7 +276,7 @@ mod tests {
 
     #[test]
     fn capability_mask_keeps_effort_when_in_vocabulary() {
-        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None, Some("high")));
+        let view = ResolvedCascadeView::for_field(field_inputs(None, None, Some("high")));
         let caps = CapabilityMaskForResolver {
             supports_model_override: true,
             effort_control: EffortControlKind::Closed {
@@ -304,7 +289,7 @@ mod tests {
 
     #[test]
     fn capability_mask_drops_effort_when_not_in_vocabulary() {
-        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None, Some("ultra")));
+        let view = ResolvedCascadeView::for_field(field_inputs(None, None, Some("ultra")));
         let caps = CapabilityMaskForResolver {
             supports_model_override: true,
             effort_control: EffortControlKind::Closed {
@@ -320,7 +305,7 @@ mod tests {
 
     #[test]
     fn capability_mask_drops_effort_for_none_kind() {
-        let view = ResolvedCascadeView::for_field(field_inputs(None, None, None, Some("high")));
+        let view = ResolvedCascadeView::for_field(field_inputs(None, None, Some("high")));
         let caps = CapabilityMaskForResolver {
             supports_model_override: true,
             effort_control: EffortControlKind::None,

@@ -223,13 +223,11 @@ mod tests {
             crate::agent::capabilities::AgentConfigInputs {
                 model: crate::agent::capabilities::FieldInputs {
                     explicit: model,
-                    mesh_override: None,
                     mesh: None,
                     application: None,
                 },
                 effort: crate::agent::capabilities::FieldInputs {
                     explicit: effort,
-                    mesh_override: None,
                     mesh: None,
                     application: None,
                 },

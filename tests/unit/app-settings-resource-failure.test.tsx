@@ -22,8 +22,6 @@ import { openSettingsPane } from '../utils/settings-panes';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ProviderInfo } from '../../src/lib/tauri';
 
-const NO_OVERRIDE_VALUE = '__no_override__';
-
 function provider(id: string, label: string): ProviderInfo {
   return {
     id,
@@ -132,13 +130,13 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
 
     render(<AppSettingsModal onClose={() => {}} />);
 
-    // Wait for the modal to settle: the default provider dropdown
+    // Wait for the modal to settle: the default provider picker
     // reads from `preferences`, which loaded successfully — the
-    // selected option text must reflect the real `'anthropic'` value
-    // rather than the `NO_OVERRIDE` placeholder default.
-    const defaultProvider = await screen.findByLabelText<HTMLSelectElement>('Default provider');
+    // trigger label must reflect the real provider rather than the
+    // `NO_OVERRIDE` placeholder default.
+    const defaultProvider = await screen.findByLabelText('Default provider');
     await waitFor(() => {
-      expect(defaultProvider.value).toBe('anthropic');
+      expect(defaultProvider.textContent).toContain('Anthropic');
     });
 
     // Switch to Remote Access pane; the network resource has failed
@@ -180,15 +178,15 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
 
     render(<AppSettingsModal onClose={() => {}} />);
 
-    // The default provider select must render but its value stays at
-    // the placeholder `NO_OVERRIDE` — a failed preferences load means
-    // we genuinely don't know the persisted value, so the control is
-    // disabled rather than showing a fabricated default.
-    const defaultProvider = await screen.findByLabelText<HTMLSelectElement>('Default provider');
+    // The default provider picker must render but stay on the unset
+    // placeholder — a failed preferences load means we genuinely don't know
+    // the persisted value, so the control is disabled rather than showing a
+    // fabricated default.
+    const defaultProvider = await screen.findByLabelText('Default provider');
     await waitFor(() => {
       expect(defaultProvider.hasAttribute('disabled')).toBe(true);
     });
-    expect(defaultProvider.value).toBe(NO_OVERRIDE_VALUE);
+    expect(defaultProvider.textContent).toContain('Anthropic (built-in default)');
 
     // The other preference-backed controls also disable.
     expect(screen.getByLabelText('Autopilot pool size').hasAttribute('disabled')).toBe(true);
@@ -359,10 +357,10 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     const retryButtons = screen.getAllByTestId('resource-load-providers-retry');
     expect(retryButtons[0].getAttribute('aria-label')).toMatch(/retry loading providers/i);
 
-    // Default provider select is disabled (it depends on providers
-    // AND preferences; here providers is failed so the dropdown is
+    // Default provider picker is disabled (it depends on providers
+    // AND preferences; here providers is failed so the picker is
     // not selectable).
-    const defaultProvider = screen.getByLabelText<HTMLSelectElement>('Default provider');
+    const defaultProvider = screen.getByLabelText('Default provider');
     expect(defaultProvider.hasAttribute('disabled')).toBe(true);
   });
 

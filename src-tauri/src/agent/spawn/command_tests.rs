@@ -300,13 +300,11 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
         Some("haiku-4"),
         Some("low"),
         Some(&app_default),
-        None,
     );
     assert_eq!(
         inputs.model,
         FieldInputs {
             explicit: Some("sonnet-4"),
-            mesh_override: None,
             mesh: Some("haiku-4"),
             application: Some("opus-4-1"),
         },
@@ -316,7 +314,6 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
         inputs.effort,
         FieldInputs {
             explicit: Some("medium"),
-            mesh_override: None,
             mesh: Some("low"),
             application: Some("high"),
         },
@@ -341,7 +338,6 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
         Some("haiku-4"),
         Some("low"),
         Some(&app_default),
-        None,
     );
     assert_eq!(
         inputs.model.explicit, None,
@@ -364,7 +360,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
 /// `"opus"` regardless of which side trimmed it.
 #[test]
 fn cascade_inputs_for_trims_explicit_values() {
-    let inputs = cascade_inputs_for(Some("  opus  "), Some(" high\t"), None, None, None, None);
+    let inputs = cascade_inputs_for(Some("  opus  "), Some(" high\t"), None, None, None);
     assert_eq!(inputs.model.explicit, Some("opus"));
     assert_eq!(inputs.effort.explicit, Some("high"));
 }
@@ -382,13 +378,13 @@ fn cascade_inputs_for_independent_fields() {
 
     // Explicit model only — effort falls through to the app default.
     let model_only =
-        cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default), None);
+        cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
     assert_eq!(model_only.model.explicit, Some("sonnet-4"));
     assert_eq!(model_only.effort.explicit, None);
     assert_eq!(model_only.effort.application, Some("high"));
 
     // Explicit effort only — model falls through to the app default.
-    let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default), None);
+    let effort_only = cascade_inputs_for(None, Some("low"), None, None, Some(&app_default));
     assert_eq!(effort_only.model.explicit, None);
     assert_eq!(effort_only.model.application, Some("opus-4-1"));
     assert_eq!(effort_only.effort.explicit, Some("low"));
@@ -413,7 +409,6 @@ fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
         Some("haiku-4"),
         Some("medium"),
         Some(&app_default),
-        None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
     assert_eq!(
@@ -449,7 +444,6 @@ fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
         Some("haiku-4"),
         Some("medium"),
         Some(&app_default),
-        None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
     // Explicit collapsed → mesh wins over application.
@@ -473,61 +467,10 @@ fn cascade_inputs_for_explicit_wins_over_mesh_when_application_empty() {
         Some("haiku-4"),
         Some("low"),
         None,
-        None,
     );
     let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
     assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
     assert_eq!(resolved.effort.as_deref(), Some("medium"));
-}
-
-/// Per-Mesh harness override wiring at the spawn seam (issue #1151).
-/// The `mesh_override` slot sits between explicit and the legacy mesh
-/// layer (cascade: explicit > mesh_override > mesh > application > native).
-/// A populated mesh override wins over the application default and
-/// falls below explicit.
-#[test]
-fn cascade_inputs_for_mesh_override_wins_over_application() {
-    let app_default = HarnessConfigValue {
-        model: Some("opus-4-1".into()),
-        effort: Some("high".into()),
-    };
-    let mesh_override = HarnessConfigValue {
-        model: Some("opus-4-1".into()),
-        effort: Some("medium".into()),
-    };
-    let inputs = cascade_inputs_for(
-        None,
-        None,
-        None,
-        None,
-        Some(&app_default),
-        Some(&mesh_override),
-    );
-    let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
-    assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
-    assert_eq!(resolved.effort.as_deref(), Some("medium"));
-}
-
-/// Mesh override is masked per-field by the harness's capability
-/// contract: OpenCode accepts model (`--model provider/model`) but
-/// has no effort control, so effort drops and model passes.
-#[test]
-fn cascade_inputs_for_mesh_override_drops_effort_for_opencode() {
-    let mesh_override = HarnessConfigValue {
-        model: Some("some-model".into()),
-        effort: Some("high".into()),
-    };
-    let inputs = cascade_inputs_for(None, None, None, None, None, Some(&mesh_override));
-
-    let resolved = crate::agent::capabilities::resolve_agent_config(
-        &crate::agent::capabilities::capabilities_for(&crate::agent::provider::adapters::OPENCODE),
-        inputs,
-        None,
-    );
-    // OpenCode accepts `--model provider/model` and has no effort
-    // control. The mesh override model must pass; effort must drop.
-    assert_eq!(resolved.model.as_deref(), Some("some-model"));
-    assert_eq!(resolved.effort, None);
 }
 
 // -----------------------------------------------------------------------
@@ -576,7 +519,6 @@ fn spawn_request_explicit_wins_at_resolver() {
         req.explicit.effort.as_deref(),
         req.explicit.extra_args.as_deref(),
         Some(&app_default),
-        None,
     );
     assert_eq!(
             resolved.model.as_deref(),
@@ -614,10 +556,6 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
             timeout_seconds: None,
         },
     );
-    let mesh_override = HarnessConfigValue {
-        model: Some("haiku-4".into()),
-        effort: Some("medium".into()),
-    };
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
@@ -627,15 +565,11 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
         req.explicit.model.as_deref(),
         req.explicit.effort.as_deref(),
         req.explicit.extra_args.as_deref(),
-        // Legacy mesh columns are no longer read as active config
-        // (issue #1151 AC #6) — the v33 migration copied any
-        // non-empty legacy values into the mesh override map.
         Some(&app_default),
-        Some(&mesh_override),
     );
-    // Explicit collapsed → mesh_override wins over application.
-    assert_eq!(resolved.model.as_deref(), Some("haiku-4"));
-    assert_eq!(resolved.effort.as_deref(), Some("medium"));
+    // Explicit collapsed → application wins.
+    assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
+    assert_eq!(resolved.effort.as_deref(), Some("high"));
 }
 
 /// Issue #1358 end-to-end pin: the `SpawnRequest → SpawnOptions →
@@ -661,7 +595,6 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
         req_interactive.explicit.effort.as_deref(),
         req_interactive.explicit.extra_args.as_deref(),
         None,
-        None,
     );
     assert_eq!(
         resolved_anthropic.extra_args.as_deref(),
@@ -682,7 +615,6 @@ fn spawn_request_extra_args_capability_mask_at_resolver() {
         req_terminal.explicit.model.as_deref(),
         req_terminal.explicit.effort.as_deref(),
         req_terminal.explicit.extra_args.as_deref(),
-        None,
         None,
     );
     assert!(

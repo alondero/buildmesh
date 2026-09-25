@@ -553,7 +553,7 @@ pub(crate) struct NamingLaunch {
 pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String> {
     let prefs = crate::preferences::load()?;
     let plan = crate::preferences::launch_configurations::resolve(
-        &prefs, provider, &Default::default(), &Default::default())?;
+        &prefs, provider, &Default::default())?;
     if crate::models::Provider::from_db_str(&plan.harness.harness) != crate::models::Provider::Anthropic {
         return Err("This background task requires a Claude Code Launch Configuration".into());
     }

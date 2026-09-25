@@ -22,10 +22,7 @@ pub fn migrate_launch_history() -> Result<(), String> {
             snapshot_prefs.spawn_configurations.push(configuration.clone());
             configuration.id.as_str()
         } else { node.provider.as_str() };
-        let harness = crate::agent::provider::SpawnOptionId::from(node.provider.as_str()).harness_id;
-        let mesh = db::get_mesh_harness_overrides(node.mesh_id).map_err(|e| e.to_string())?
-            .and_then(|values| values.get(&harness).cloned()).unwrap_or_default();
-        match crate::preferences::launch_configurations::capture_legacy(&snapshot_prefs, selection, &mesh) {
+        match crate::preferences::launch_configurations::capture_legacy(&snapshot_prefs, selection) {
             Ok(plan) => db::set_node_launch_snapshot(node.id, &crate::preferences::launch_configurations::snapshot(plan))?,
             Err(error) => tracing::warn!(node_id = node.id, "Legacy launch snapshot unavailable: {error}"),
         }
@@ -204,14 +201,9 @@ pub fn create_with_source_pr_fork_configured(
         prefs.spawn_configurations.push(value.clone());
     }
     let selected = configuration.map_or(selection.as_str(), |c| c.id.as_str());
-    let option = prefs.spawn_configurations.iter().find(|c| c.id == selected)
-        .map_or(selected, |c| c.spawn_option_id.as_str());
-    let harness_id = crate::agent::provider::SpawnOptionId::from(option).harness_id;
-    let mesh_values = db::get_mesh_harness_overrides(mesh_id).map_err(AgentNodeError::Db)?
-        .and_then(|values| values.get(&harness_id).cloned()).unwrap_or_default();
     let plan = if let Some(plan) = configuration.and_then(|c| c.resolved.clone()) { plan } else {
         crate::preferences::launch_configurations::resolve(&prefs, selected,
-            &Default::default(), &mesh_values).map_err(AgentNodeError::InvalidConfiguration)?
+            &Default::default()).map_err(AgentNodeError::InvalidConfiguration)?
     };
     let runtime = plan.harness.runtime;
     let provider_id = plan.spawn_option_id.clone();
@@ -991,12 +983,7 @@ pub fn regenerate_apply_blocking(
 ) -> Result<bool, AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
     let prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
-    let option = prefs.spawn_configurations.iter().find(|c| c.id == new_provider)
-        .map_or(new_provider, |c| c.spawn_option_id.as_str());
-    let harness_id = SpawnOptionId::from(option).harness_id;
-    let mesh = db::get_mesh_harness_overrides(node.mesh_id)?
-        .and_then(|values| values.get(&harness_id).cloned()).unwrap_or_default();
-    let plan = crate::preferences::launch_configurations::resolve(&prefs, new_provider, &Default::default(), &mesh)
+    let plan = crate::preferences::launch_configurations::resolve(&prefs, new_provider, &Default::default())
         .map_err(AgentNodeError::InvalidConfiguration)?;
     let resume = decide_resume(old_provider, &plan.spawn_option_id, node.cli_session_id.as_deref()).is_some();
     let runtime = plan.harness.runtime.unwrap_or_else(|| crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type);

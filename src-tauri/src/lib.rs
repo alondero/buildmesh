@@ -634,17 +634,6 @@ pub fn run() {
             // Sibling to `set_mesh_autopilot_enabled` so adjusting the run
             // cap can't clobber the legacy autopilot policy atomic write.
             commands::mesh_properties::update_mesh_circuit_run_capacity,
-            // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
-            // The sparse harness-override map is the layer that sits
-            // between explicit Agent Node spawn arguments and the
-            // application-level harness defaults. The IPC surface
-            // re-uses the shared `HarnessConfigValue` + capability-derived
-            // validation from `preferences::validate_harness_default` so
-            // unknown ids / out-of-vocab effort values are rejected at
-            // the write boundary (issue #1148 AC #5).
-            commands::mesh_properties::upsert_mesh_harness_override,
-            commands::mesh_properties::remove_mesh_harness_override,
-            commands::mesh_properties::clear_mesh_harness_overrides,
             // Configurable Worktree Node directories (issue #1519): per-Mesh
             // override with same-environment validation for absolute paths.
             commands::mesh_properties::update_mesh_worktree_directory,

@@ -34,14 +34,11 @@ pub(super) struct LaunchParams {
     /// re-deriving from the AST).
     pub explicit_timeout_seconds: Option<u32>,
     /// Composite spawn-option id (`node.provider`) typed once at the
-    /// entry seam (issue #1659 item 1). The application-defaults map and
-    /// the per-Mesh override map are both keyed by the harness half
-    /// (`spawn_option_id.harness_id()`) so a Proxied row like
-    /// `"claude:minimax"` looks up the same default as its native
-    /// `"claude"` row.
+    /// entry seam (issue #1659 item 1). The application-defaults map is
+    /// keyed by the harness half (`spawn_option_id.harness_id()`) so a
+    /// Proxied row like `"claude:minimax"` looks up the same default as
+    /// its native `"claude"` row.
     pub spawn_option_id: SpawnOptionId,
-    /// `AgentNode.mesh_id` — lookup key for `get_mesh_harness_overrides`.
-    pub node_mesh_id: i64,
     /// Mesh id resolved from the node path, stored on the process
     /// registry for per-mesh activity tracking.
     pub registry_mesh_id: i64,
@@ -88,7 +85,6 @@ pub(super) async fn launch_process(
         explicit_extra_args,
         explicit_timeout_seconds,
         spawn_option_id,
-        node_mesh_id,
         registry_mesh_id,
         session_id_mode,
         sandbox,
@@ -119,31 +115,26 @@ pub(super) async fn launch_process(
     }
 
     // Resolve configuration values through the per-field cascade (issue
-    // #1149 prefactor; #1150 fills the application slot; #1151 fills the
-    // per-Mesh override slot). The resolver applies the capability mask,
-    // so `build_spawn_command` receives values the harness actually accepts
-    // — unsupported values never reach the harness process regardless of
-    // which layer supplied them. The application slot reads the latest
-    // in-process preferences cache (no disk read on the spawn hot path);
-    // the validator already removed any value the harness couldn't accept
-    // at save time, so the resolver's mask here is the second-and-final gate.
+    // #1149 prefactor; #1150 fills the application slot). The resolver
+    // applies the capability mask, so `build_spawn_command` receives values
+    // the harness actually accepts — unsupported values never reach the
+    // harness process regardless of which layer supplied them. The
+    // application slot reads the latest in-process preferences cache (no
+    // disk read on the spawn hot path); the validator already removed any
+    // value the harness couldn't accept at save time, so the resolver's
+    // mask here is the second-and-final gate.
     //
     // `spawn_option_id` for a Proxied Provider row is the composite id
     // `"<harness>:<provider>"` (e.g. `"claude:minimax"`, `"codex:minimax"`).
-    // The per-Mesh override map and the application-defaults map are both
-    // keyed by the harness *profile* id (the half before the first `:`),
-    // so a raw lookup would miss every Proxied spawn — failing AC #12
-    // ("Native and Proxied Provider Spawn Options consume the same
-    // application-default layer"). Read the harness half off the typed
-    // `SpawnOptionId` (parsed once at the entry seam, issue #1659 item 1)
-    // so native and Proxied rows hit the same map key.
+    // The application-defaults map is keyed by the harness *profile* id (the
+    // half before the first `:`), so a raw lookup would miss every Proxied
+    // spawn — failing AC #12 ("Native and Proxied Provider Spawn Options
+    // consume the same application-default layer"). Read the harness half off
+    // the typed `SpawnOptionId` (parsed once at the entry seam, issue #1659
+    // item 1) so native and Proxied rows hit the same map key.
     let harness_id_for_default = spawn_option_id.harness_id();
     let frozen = crate::db::node_spawn_configuration(session_id, &spawn_option_id.to_string())?
         .is_some_and(|c| c.resolved.is_some());
-    let mesh_override = crate::db::get_mesh_harness_overrides(node_mesh_id)
-        .ok()
-        .flatten()
-        .and_then(|m| m.get(harness_id_for_default).cloned());
     let app_default = match crate::preferences::load() {
         Ok(prefs) => crate::preferences::harness_default_for(&prefs, harness_id_for_default),
         Err(e) => {
@@ -162,14 +153,7 @@ pub(super) async fn launch_process(
         // `non_empty_trim` collapse happens inside `resolve_agent_config`
         // / `resolve_extra_args` so whitespace-only inputs cascade-fall.
         explicit_extra_args.as_deref(),
-        // Legacy `meshes.model` / `meshes.effort` columns are physically
-        // present for positional row compatibility but are no longer
-        // read as active spawn configuration — the v33 one-shot
-        // migration copied any non-empty legacy values into the
-        // `claude` override entry of the new map (issue #1151 acceptance
-        // criteria 6). On a healthy v33+ DB this slot is always `None`.
         app_default.as_ref().filter(|_| !frozen),
-        mesh_override.as_ref().filter(|_| !frozen),
     );
     timer.checkpoint("before_command_build");
     let cmd = build_spawn_command_prepared(

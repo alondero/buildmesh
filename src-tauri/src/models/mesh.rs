@@ -2,10 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use ts_rs::TS;
-
-use super::HarnessConfigValue;
 
 /// Discriminator the v30 autopilot poller reads to decide which spawn
 /// strategy to use (wayfinder #990 / ticket #991). Persisted as TEXT on
@@ -209,26 +206,6 @@ pub struct Mesh {
     /// `meshes.loop_consecutive_failures INTEGER NOT NULL DEFAULT 0`
     /// (schema v30).
     pub loop_consecutive_failures: i32,
-    /// **Per-Mesh harness overrides** (issue #1151 / slice 2 of #1148) —
-    /// a sparse map keyed by stable harness profile id (the same id the
-    /// Spawn Menu uses, e.g. `"claude"`, `"codex"`, `"agy"`, plus any
-    /// user-defined custom profile id). A present entry supplies a
-    /// per-harness model and/or effort value that overrides the
-    /// application-level default for that harness only on this Mesh;
-    /// resolving per field follows the cascade order
-    /// (explicit > mesh override > application > native). A missing key
-    /// means "this Mesh inherits the application default for that
-    /// harness". The map is **sparse**: an entry whose every field
-    /// collapses to absent is removed entirely by the CRUD command, so
-    /// a stored key is never `{model: null, effort: null}`.
-    ///
-    /// Persisted as `meshes.harness_overrides TEXT NOT NULL DEFAULT '{}'`
-    /// (schema v33), serialised as a JSON object. The legacy
-    /// `meshes.model` / `meshes.effort` columns remain physically present
-    /// for positional row compatibility but are no longer read as active
-    /// configuration; the v33 one-shot migration copies non-empty
-    /// legacy values into a `claude` override entry.
-    pub harness_overrides: HashMap<String, HarnessConfigValue>,
     /// Per-mesh cap on **concurrent admitted circuit runs** (issue #1467).
     /// One slot per admitted run regardless of how many agent nodes the
     /// run's blueprint fans out to — fixes the two-run overlap
@@ -350,12 +327,6 @@ pub struct MeshRow {
     pub loop_max_iterations: Option<i32>,
     pub loop_interval_seconds: i32,
     pub loop_consecutive_failures: i32,
-    /// **Per-Mesh harness overrides** (issue #1151 / slice 2 of #1148) —
-    /// see the matching [`Mesh`] field. Surface for the Mesh Properties
-    /// "Per-harness overrides" experience; the legacy `model` / `effort`
-    /// fields stay here so a pre-v33 reading client doesn't crash, but
-    /// the new UI ignores them.
-    pub harness_overrides: HashMap<String, HarnessConfigValue>,
     /// Per-mesh cap on **concurrent admitted circuit runs** (issue #1467)
     /// — see the matching [`Mesh`] field. Surface for the dedicated
     /// Autopilot Probe tab so the legacy `autopilot_concurrency_limit`
@@ -396,7 +367,6 @@ impl From<&Mesh> for MeshRow {
             loop_max_iterations: mesh.loop_max_iterations,
             loop_interval_seconds: mesh.loop_interval_seconds,
             loop_consecutive_failures: mesh.loop_consecutive_failures,
-            harness_overrides: mesh.harness_overrides.clone(),
             circuit_run_capacity: mesh.circuit_run_capacity,
             worktree_directory: mesh.worktree_directory.clone(),
         }

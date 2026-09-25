@@ -592,7 +592,7 @@ pub fn clear_harness_default(profile_id: String) -> Result<(), String> {
 // already passed the same capability mask the spawn path enforces.
 
 /// Per-harness cascade view returned by [`get_resolved_harness_view`].
-/// Carries the harness profile + the four-layer breakdown for both `model`
+/// Carries the harness profile + the per-layer breakdown for both `model`
 /// and `effort` + the capability-masked resolved value.
 ///
 /// **Generated** to `src/types/generated/ResolvedHarnessView.ts`. The IPC
@@ -606,10 +606,9 @@ pub struct ResolvedHarnessView {
     /// leaking stale state.
     pub harness_id: String,
     /// Optional mesh id the view was computed against. `None` when the
-    /// caller asked for the application-level only view (no mesh override
-    /// layer). The settings modal passes `None`; the Mesh Properties tab
-    /// passes the active mesh id so the mesh_override + mesh_legacy layers
-    /// participate.
+    /// caller asked for the application-level only view (no mesh layer).
+    /// The settings modal passes `None`; the Mesh Properties tab passes the
+    /// active mesh id so the mesh_legacy layer participates.
     ///
     /// `#[ts(as = "Option<i32>")]` mirrors the project convention (CLAUDE.md
     /// hard rule: 64-bit ints need the annotation so TS sees `number`, not
@@ -641,18 +640,12 @@ pub struct ResolvedHarnessView {
     /// sparse map only carries an entry when the user explicitly set a
     /// default; otherwise the layer is empty and the cascade falls through.
     pub application_default: HarnessConfigValue,
-    /// Per-Mesh override from `meshes.harness_overrides[harness_id]`.
-    /// `None` when no mesh id was passed OR when the mesh has no override
-    /// for this harness (the sparse-map invariant).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mesh_override: Option<HarnessConfigValue>,
     /// Per-Mesh legacy `meshes.model` / `meshes.effort` columns. `None` on
-    /// a healthy v33+ DB (the migration copied non-empty legacy values
-    /// into `mesh_override["claude"]`). Surfaced so a pre-v33 read shape
-    /// still resolves through the same IPC.
+    /// a healthy DB. Surfaced so a legacy read shape still resolves through
+    /// the same IPC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_legacy: Option<HarnessConfigValue>,
-    /// Cascade breakdown for the `model` field. Includes all four layers
+    /// Cascade breakdown for the `model` field. Includes every layer
     /// plus the capability-masked resolved value.
     pub model: ResolvedCascadeView,
     /// Cascade breakdown for the `effort` field. Same shape as `model`.
@@ -661,10 +654,10 @@ pub struct ResolvedHarnessView {
 
 /// Compute the resolved harness view for one profile id (issue #1656).
 /// Pure of side effects — reads `AppPreferences` + the optional mesh's
-/// `harness_overrides` + the optional mesh's legacy `model`/`effort`
-/// columns + the harness profile / capability catalog.
+/// legacy `model`/`effort` columns + the harness profile / capability
+/// catalog.
 ///
-/// `mesh_id == None` skips the per-Mesh layers so the IPC can be called
+/// `mesh_id == None` skips the per-Mesh layer so the IPC can be called
 /// from the App Settings modal without an active mesh context.
 #[command]
 pub fn get_resolved_harness_view(
@@ -685,10 +678,10 @@ pub fn get_resolved_harness_view(
         .cloned()
         .unwrap_or_default();
 
-    // Per-Mesh layers — only fetched when a mesh_id was supplied.
-    let (mesh_override, mesh_legacy) = match mesh_id {
-        Some(id) => read_mesh_layers(id, &harness_id)?,
-        None => (None, None),
+    // Per-Mesh layer — only fetched when a mesh_id was supplied.
+    let mesh_legacy = match mesh_id {
+        Some(id) => read_mesh_legacy(id)?,
+        None => None,
     };
 
     // Harness profile + capabilities + executor (canonical resolver path).
@@ -723,7 +716,6 @@ pub fn get_resolved_harness_view(
     let model = build_cascade_view(
         HarnessConfigField::Model,
         None,
-        mesh_override.as_ref(),
         mesh_legacy.as_ref(),
         &application_default,
         mask_descriptor.as_ref(),
@@ -731,7 +723,6 @@ pub fn get_resolved_harness_view(
     let effort = build_cascade_view(
         HarnessConfigField::Effort,
         None,
-        mesh_override.as_ref(),
         mesh_legacy.as_ref(),
         &application_default,
         mask_descriptor.as_ref(),
@@ -744,49 +735,37 @@ pub fn get_resolved_harness_view(
         resolved_executor,
         capabilities: mask_descriptor,
         application_default,
-        mesh_override,
         mesh_legacy,
         model,
         effort,
     })
 }
 
-/// Read the two per-Mesh layers (override map entry + legacy
-/// `meshes.model`/`meshes.effort` columns). Both are `None` for a fresh
-/// Mesh that has never set an override; legacy columns are `None` on a
-/// healthy v33+ DB.
-fn read_mesh_layers(
-    mesh_id: i64,
-    harness_id: &str,
-) -> Result<(Option<HarnessConfigValue>, Option<HarnessConfigValue>), String> {
+/// Read the per-Mesh legacy layer (`meshes.model` / `meshes.effort`
+/// columns). `None` for a fresh Mesh; the legacy columns are `None` on a
+/// healthy modern DB.
+fn read_mesh_legacy(mesh_id: i64) -> Result<Option<HarnessConfigValue>, String> {
     let row = match crate::db::get_mesh_by_id(mesh_id) {
         Ok(r) => r,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok((None, None)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(format!("failed to load mesh {mesh_id}: {e}")),
     };
-    let mesh_override = row.harness_overrides.get(harness_id).cloned();
-    // Legacy columns are inert post-v33 (the migration copied non-empty
-    // values into `mesh_override["claude"]`). Surface them only when the
-    // migration hasn't run on this row, so a stale read shape still
-    // produces a correct cascade.
     let legacy = HarnessConfigValue {
         model: row.model.clone(),
         effort: row.effort.clone(),
     };
-    let mesh_legacy = if legacy.model.is_some() || legacy.effort.is_some() {
+    Ok(if legacy.model.is_some() || legacy.effort.is_some() {
         Some(legacy)
     } else {
         None
-    };
-    Ok((mesh_override, mesh_legacy))
+    })
 }
 
-/// Build one cascade view (model or effort) from the four layers + apply
-/// the capability mask. Pulled out so the two fields share one code path.
+/// Build one cascade view (model or effort) from the layers + apply the
+/// capability mask. Pulled out so the two fields share one code path.
 fn build_cascade_view(
     field: HarnessConfigField,
     explicit: Option<&HarnessConfigValue>,
-    mesh_override: Option<&HarnessConfigValue>,
     mesh_legacy: Option<&HarnessConfigValue>,
     application: &HarnessConfigValue,
     mask: Option<&CapabilityMaskForResolver>,
@@ -798,7 +777,6 @@ fn build_cascade_view(
         explicit
             .and_then(|v| harness_config_str(v, field))
             .as_deref(),
-        layer_str(mesh_override).as_deref(),
         layer_str(mesh_legacy).as_deref(),
         harness_config_str(application, field).as_deref(),
     ));
@@ -831,7 +809,7 @@ mod resolved_view_tests {
     //! tests in `agent::capabilities::tests` already gate both call sites.
     //! The tests below pin the IPC-specific shape:
     //!
-    //! * `mesh_override > application` precedence (issue #1151 layer 2).
+    //! * `mesh_legacy > application` precedence.
     //! * Capability mask drops unsupported fields on the resolved value.
     //! * Unknown harness id returns `resolved_profile = None` rather than
     //!   silently falling back through the resolver (issue #1148 AC #5).
@@ -844,31 +822,12 @@ mod resolved_view_tests {
     };
 
     #[test]
-    fn application_default_wins_when_no_mesh_override() {
+    fn application_default_is_resolved() {
         let view = ResolvedCascadeView::for_field(cascade_field_inputs(
-            None, None, None, Some("opus-4"),
+            None, None, Some("opus-4"),
         ));
         assert_eq!(view.resolved.as_deref(), Some("opus-4"));
         assert_eq!(view.layers.application.as_deref(), Some("opus-4"));
-    }
-
-    #[test]
-    fn mesh_override_beats_application_default() {
-        // The IPC builder stitches mesh_override above application in
-        // `build_cascade_view`; pin that ordering here so a future refactor
-        // can't silently drop layer-2 precedence.
-        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
-            None,
-            Some("claude-mesh-override"),
-            None,
-            Some("opus-app-default"),
-        ));
-        assert_eq!(view.resolved.as_deref(), Some("claude-mesh-override"));
-        assert_eq!(
-            view.layers.mesh_override.as_deref(),
-            Some("claude-mesh-override")
-        );
-        assert_eq!(view.layers.application.as_deref(), Some("opus-app-default"));
     }
 
     #[test]
@@ -878,7 +837,7 @@ mod resolved_view_tests {
         // both the spawn path and the IPC, so this is a redundant-but-
         // useful pin at the IPC layer.
         let view = ResolvedCascadeView::for_field(cascade_field_inputs(
-            None, None, None, Some("opus-4"),
+            None, None, Some("opus-4"),
         ));
         let caps = CapabilityMaskForResolver {
             supports_model_override: false,
