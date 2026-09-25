@@ -18,11 +18,50 @@
  * API when available) so it is never clipped by the Probe panel's or the
  * Settings modal's scroll containers — mirroring `SpawnConfigurationMenu`.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ProviderInfo } from '../../types/generated/ProviderInfo';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
+import { listSpawnConfigurations } from '../../lib/tauri/provider';
 import { GroupedProviderMenu } from './GroupedProviderMenu';
+
+/**
+ * Resolve a Spawn Option / Launch Configuration id to its human label.
+ *
+ * The provider list already carries saved Launch Configurations as rows
+ * (`configuration_menu` appends them), so most ids resolve from `providers`.
+ * A configuration that is *not* in the menu — its harness is hidden on this
+ * host, or the id was stored before the recipe became unavailable — would
+ * otherwise fall back to the raw `launch/<uuid>` id on the trigger, so this
+ * falls back to `listSpawnConfigurations()` for `launch/`-prefixed ids.
+ * Returns `null` when the id cannot be resolved (caller decides the fallback).
+ */
+export function useSpawnOptionLabel(providers: ProviderInfo[], id: string | null): string | null {
+  const options = useMemo(() => mapBackendProviders(providers), [providers]);
+  const fromOptions = id ? options.find((option) => option.id === id)?.label : undefined;
+  const [fetchedName, setFetchedName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id || fromOptions || !id.startsWith('launch/')) {
+      setFetchedName(null);
+      return;
+    }
+    let current = true;
+    listSpawnConfigurations()
+      .then((configurations) => {
+        if (current) setFetchedName(configurations.find((value) => value.id === id)?.name ?? null);
+      })
+      .catch(() => {
+        if (current) setFetchedName(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [id, fromOptions]);
+
+  if (!id) return null;
+  return fromOptions ?? fetchedName ?? null;
+}
 
 export interface SpawnOptionPickerProps {
   /** Optional id for the trigger button (label `htmlFor` targets). */
@@ -68,25 +107,35 @@ export function SpawnOptionPicker({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 240 });
+  // Stable key mirrored onto the panel's `data-dropdown-for`. The nested
+  // `SpawnConfigurationMenu` (and its editor) portal outside this panel and
+  // inherit the same key, so the outside-click guard below can recognise
+  // them as part of this picker.
+  const menuKey = useId();
 
   const options = useMemo(() => {
     const mapped = mapBackendProviders(providers);
     return decorate ? mapped.map(decorate) : mapped;
   }, [providers, decorate]);
-  const label = value
-    ? options.find((option) => option.id === value)?.label ?? value
-    : unsetLabel;
+  const resolvedLabel = useSpawnOptionLabel(providers, value);
+  const label = value ? resolvedLabel ?? value : unsetLabel;
 
   useEffect(() => {
     if (!open) return;
     const handler = (event: MouseEvent) => {
       const target = event.target as Node | null;
+      if (!target) return;
       if (panelRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      // The configuration submenu (and its editor) portal to the top layer,
+      // outside `panelRef`; they carry our `data-dropdown-for` key so a click
+      // there is not swallowed as an outside click (which would unmount the
+      // menu before the item's `click` fires).
+      if (target instanceof Element && target.closest(`[data-dropdown-for="${menuKey}"]`)) return;
       setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
+  }, [open, menuKey]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -153,6 +202,7 @@ export function SpawnOptionPicker({
             ref={panelRef}
             popover={typeof HTMLElement.prototype.showPopover === 'function' ? 'manual' : undefined}
             data-testid="spawn-option-picker-menu"
+            data-dropdown-for={menuKey}
             style={{
               position: 'fixed',
               margin: 0,

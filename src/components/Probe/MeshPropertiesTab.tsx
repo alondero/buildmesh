@@ -42,7 +42,7 @@ import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
-import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
+import { SpawnOptionPicker, useSpawnOptionLabel } from '../Providers/SpawnOptionPicker';
 import {
   checkGhAuth,
   detectMeshProject,
@@ -397,9 +397,9 @@ export function MeshPropertiesTab() {
   };
 
   // Human label for the app-wide default the `<Default>` inherit row would
-  // route to (falls back to the raw id when the row isn't in the list).
-  const appWideDefaultLabel =
-    providers.find((p) => p.id === appWideDefault)?.label ?? appWideDefault;
+  // route to (falls back to the raw id when the row isn't resolvable, e.g. a
+  // Launch Configuration whose harness is hidden on this host).
+  const appWideDefaultLabel = useSpawnOptionLabel(providers, appWideDefault) ?? appWideDefault;
 
   // Without a focused mesh there is nothing to edit. The probe shell
   // already renders a friendlier "no project" empty state, so this is

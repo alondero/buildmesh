@@ -8,7 +8,7 @@
  * Plus the inherit/unset row and the current-selection label.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { SpawnOptionPicker } from '../../src/components/Providers/SpawnOptionPicker';
@@ -163,6 +163,24 @@ describe('SpawnOptionPicker', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Anthropic (built-in default)' }));
 
     expect(onSelect).toHaveBeenCalledWith('__no_override__');
+  });
+
+  it('resolves a Launch Configuration id to its name even when its row is absent from providers', async () => {
+    render(
+      <SpawnOptionPicker
+        ariaLabel="Default provider"
+        providers={PROVIDERS}
+        value="launch/fast"
+        unsetLabel="<Default>"
+        unsetValue=""
+        onSelect={() => {}}
+      />,
+    );
+    // `PROVIDERS` carries no `launch/fast` row, so the label must come from
+    // the saved-configuration lookup — not the raw id.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Default provider' }).textContent).toContain('Fast'),
+    );
   });
 
   it('excludes filtered harnesses (e.g. Terminal) from the menu', async () => {
