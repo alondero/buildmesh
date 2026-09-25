@@ -1,8 +1,16 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import "./styles.css";
 import { AgentNode, Mesh, clearStoredToken, restoreSession } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
+import NodeOverview from "./screens/NodeOverview";
 import { ScreenLoading } from "./ui";
 
 // Terminal pulls in xterm.js + FitAddon (~90 KB gzipped). Most mobile
@@ -15,14 +23,76 @@ const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
 const ArchivedNodesScreen = lazy(() => import("./screens/ArchivedNodesScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
+type WorkState = {
+  visitId: number;
+  prompt?: string;
+  draft?: string;
+  replySending?: boolean;
+  replyNotice?: string;
+};
+
 export type Screen =
   | { kind: "connect" }
   | { kind: "list" }
-  | { kind: "terminal"; node: AgentNode }
-  | { kind: "changes"; node: AgentNode }
-  | { kind: "diff"; node: AgentNode; filePath: string }
+  | ({ kind: "overview"; node: AgentNode } & WorkState)
+  | ({ kind: "terminal"; node: AgentNode; fromOverview?: boolean } & WorkState)
+  | ({
+      kind: "changes";
+      node: AgentNode;
+      fromOverview?: boolean;
+      terminalFromOverview?: boolean;
+    } & WorkState)
+  | ({
+      kind: "diff";
+      node: AgentNode;
+      filePath: string;
+      fromOverview?: boolean;
+      terminalFromOverview?: boolean;
+    } & WorkState)
   | { kind: "sessions"; mesh: Mesh }
   | { kind: "issues"; mesh: Mesh };
+
+type WorkScreen = Extract<
+  Screen,
+  { kind: "overview" | "terminal" | "changes" | "diff" }
+>;
+
+function isWorkScreen(screen: Screen): screen is WorkScreen {
+  return (
+    screen.kind === "overview" ||
+    screen.kind === "terminal" ||
+    screen.kind === "changes" ||
+    screen.kind === "diff"
+  );
+}
+
+function preserveWorkState(screen: WorkScreen): WorkState {
+  return {
+    visitId: screen.visitId,
+    prompt: screen.prompt,
+    draft: screen.draft,
+    replySending: screen.replySending,
+    replyNotice: screen.replyNotice,
+  };
+}
+
+function patchWorkScreen(
+  current: Screen,
+  nodeId: number,
+  visitId: number,
+  patch: Partial<WorkState>,
+): Screen {
+  if (
+    !isWorkScreen(current) ||
+    current.node.id !== nodeId ||
+    current.visitId !== visitId
+  )
+    return current;
+  const unchanged = Object.entries(patch).every(
+    ([key, value]) => current[key as keyof WorkState] === value,
+  );
+  return unchanged ? current : { ...current, ...patch };
+}
 
 /// Where one step "back" lands from each screen. The popstate handler uses
 /// this instead of stored history payloads, so the OS back gesture, the
@@ -31,14 +101,50 @@ export type Screen =
 /// laterally from the sessions screen still backs out to the list).
 export function parentOf(s: Screen): Screen {
   switch (s.kind) {
+    case "overview":
+      return { kind: "list" };
     case "terminal":
+      return s.fromOverview
+        ? {
+            kind: "overview",
+            node: s.node,
+            ...preserveWorkState(s),
+          }
+        : { kind: "list" };
     case "sessions":
     case "issues":
       return { kind: "list" };
     case "changes":
-      return { kind: "terminal", node: s.node };
+      return s.fromOverview
+        ? {
+            kind: "overview",
+            node: s.node,
+            ...preserveWorkState(s),
+          }
+        : s.terminalFromOverview
+          ? {
+              kind: "terminal",
+              node: s.node,
+              fromOverview: true,
+              ...preserveWorkState(s),
+            }
+          : { kind: "terminal", node: s.node, ...preserveWorkState(s) };
     case "diff":
-      return { kind: "changes", node: s.node };
+      return s.fromOverview
+        ? {
+            kind: "changes",
+            node: s.node,
+            fromOverview: true,
+            ...preserveWorkState(s),
+          }
+        : s.terminalFromOverview
+          ? {
+              kind: "changes",
+              node: s.node,
+              terminalFromOverview: true,
+              ...preserveWorkState(s),
+            }
+          : { kind: "changes", node: s.node, ...preserveWorkState(s) };
     default:
       return s;
   }
@@ -46,7 +152,10 @@ export function parentOf(s: Screen): Screen {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ kind: "connect" });
-  const pairingOnLoad = useRef(new URLSearchParams(window.location.hash.slice(1)).has("pair"));
+  const workVisitIdRef = useRef(0);
+  const pairingOnLoad = useRef(
+    new URLSearchParams(window.location.hash.slice(1)).has("pair"),
+  );
   const [booting, setBooting] = useState(!pairingOnLoad.current);
   const bootstrapRef = useRef<Promise<boolean> | null>(null);
   useEffect(() => {
@@ -55,12 +164,23 @@ export default function App() {
     // Old QR links are deliberately not exchanged as root credentials.
     window.history.replaceState(null, "", window.location.pathname);
     bootstrapRef.current ??= restoreSession();
-    void bootstrapRef.current.then(ok => {
-      if (active && ok) setScreen({ kind: "list" });
-    }).catch(() => { /* Connect offers an explicit retry while offline. */ })
-      .finally(() => { if (active) setBooting(false); });
-    return () => { active = false; };
+    void bootstrapRef.current
+      .then((ok) => {
+        if (active && ok) setScreen({ kind: "list" });
+      })
+      .catch(() => {
+        /* Connect offers an explicit retry while offline. */
+      })
+      .finally(() => {
+        if (active) setBooting(false);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
+  const [homeView, setHomeView] = useState<"overview" | "work" | "capture">(
+    "overview",
+  );
   const [offline, setOffline] = useState(false);
   // Remount key for NodeList: "Try again" bumps it to force an immediate
   // refetch instead of waiting out the 5-second poll.
@@ -71,6 +191,7 @@ export default function App() {
     branch: string;
   } | null>(null);
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
+  const nextWorkVisitId = useCallback(() => ++workVisitIdRef.current, []);
 
   const prSheetRef = useRef(prSheet);
   prSheetRef.current = prSheet;
@@ -166,23 +287,59 @@ export default function App() {
     setAuthNotice(null);
     setScreen({ kind: "list" });
   }, []);
+  const updateWorkPrompt = useCallback(
+    (prompt: string | undefined, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { prompt }),
+      );
+    },
+    [],
+  );
+  const updateWorkDraft = useCallback(
+    (draft: string, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { draft }),
+      );
+    },
+    [],
+  );
+  const updateReplySending = useCallback(
+    (replySending: boolean, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { replySending }),
+      );
+    },
+    [],
+  );
+  const updateReplyNotice = useCallback(
+    (replyNotice: string, nodeId: number, visitId: number) => {
+      setScreen((current) =>
+        patchWorkScreen(current, nodeId, visitId, { replyNotice }),
+      );
+    },
+    [],
+  );
 
   if (booting) return <ScreenLoading />;
 
   return (
     <>
       {screen.kind === "connect" && (
-        <Connect
-          notice={authNotice}
-          onConnected={handleConnected}
-        />
+        <Connect notice={authNotice} onConnected={handleConnected} />
       )}
       {screen.kind === "list" && (
         <NodeList
           key={listKey}
-          onOpenNode={(node) => {
+          view={homeView}
+          onViewChange={setHomeView}
+          onOpenNode={(node, prompt) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-            navigate({ kind: "terminal", node });
+            navigate({
+              kind: "overview",
+              node,
+              prompt,
+              visitId: nextWorkVisitId(),
+            });
           }}
           onOpenAgentNodes={(mesh) => {
             if (activeRecoveryVersion !== recoveryVersionRef.current) return;
@@ -199,10 +356,54 @@ export default function App() {
           onAuthFailed={handleAuthFailedForActiveScreen}
         />
       )}
+      {screen.kind === "overview" && (
+        <NodeOverview
+          key={`${screen.node.id}:${screen.visitId}`}
+          node={screen.node}
+          visitId={screen.visitId}
+          prompt={screen.prompt}
+          draft={screen.draft}
+          replySending={screen.replySending}
+          replyNotice={screen.replyNotice}
+          onPromptChange={(prompt, nodeId, visitId) =>
+            updateWorkPrompt(prompt, nodeId, visitId)
+          }
+          onDraftChange={(draft, nodeId, visitId) =>
+            updateWorkDraft(draft, nodeId, visitId)
+          }
+          onReplySendingChange={(sending, nodeId, visitId) =>
+            updateReplySending(sending, nodeId, visitId)
+          }
+          onReplyNoticeChange={(notice, nodeId, visitId) =>
+            updateReplyNotice(notice, nodeId, visitId)
+          }
+          onBack={goBack}
+          onAuthFailed={handleAuthFailedForActiveScreen}
+          onTerminal={() =>
+            navigate({
+              kind: "terminal",
+              node: screen.node,
+              fromOverview: true,
+              ...preserveWorkState(screen),
+            })
+          }
+          onChanges={() =>
+            navigate({
+              kind: "changes",
+              node: screen.node,
+              fromOverview: true,
+              ...preserveWorkState(screen),
+            })
+          }
+        />
+      )}
       {screen.kind === "terminal" && (
         <Suspense
           fallback={
-            <ScreenLoading testId="terminal-loading" label="Loading terminal…" />
+            <ScreenLoading
+              testId="terminal-loading"
+              label="Loading terminal…"
+            />
           }
         >
           <TerminalScreen
@@ -211,7 +412,12 @@ export default function App() {
             onAuthFailed={handleAuthFailedForActiveScreen}
             onOpenChanges={() => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              navigate({ kind: "changes", node: screen.node });
+              navigate({
+                kind: "changes",
+                node: screen.node,
+                terminalFromOverview: screen.fromOverview,
+                ...preserveWorkState(screen),
+              });
             }}
           />
         </Suspense>
@@ -223,7 +429,14 @@ export default function App() {
             onBack={goBack}
             onOpenDiff={(filePath) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              navigate({ kind: "diff", node: screen.node, filePath });
+              navigate({
+                kind: "diff",
+                node: screen.node,
+                filePath,
+                fromOverview: screen.fromOverview,
+                terminalFromOverview: screen.terminalFromOverview,
+                ...preserveWorkState(screen),
+              });
             }}
             onOpenPr={(branch) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
@@ -250,7 +463,11 @@ export default function App() {
             onBack={goBack}
             onResumed={(node) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({ kind: "terminal", node });
+              setScreen({
+                kind: "overview",
+                node,
+                visitId: nextWorkVisitId(),
+              });
             }}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />
@@ -263,7 +480,11 @@ export default function App() {
             onBack={goBack}
             onSpawned={(node) => {
               if (activeRecoveryVersion !== recoveryVersionRef.current) return;
-              setScreen({ kind: "terminal", node });
+              setScreen({
+                kind: "overview",
+                node,
+                visitId: nextWorkVisitId(),
+              });
             }}
             onAuthFailed={handleAuthFailedForActiveScreen}
           />
@@ -334,7 +555,9 @@ export default function App() {
           }}
         >
           <div style={{ fontSize: 32 }}>📡</div>
-          <h2 style={{ fontSize: 18, margin: 0 }}>Can't reach the desktop app</h2>
+          <h2 style={{ fontSize: 18, margin: 0 }}>
+            Can't reach the desktop app
+          </h2>
           <p
             style={{
               color: "var(--text-faint)",
@@ -344,8 +567,8 @@ export default function App() {
               lineHeight: 1.5,
             }}
           >
-            Make sure Buildmesh is running on your computer and this phone is
-            on the same network.
+            Make sure Buildmesh is running on your computer and this phone is on
+            the same network.
           </p>
           <button
             className="btn-primary"

@@ -267,6 +267,31 @@ pub(super) async fn provision_workspace(
     // never lose a lock race to each other (issue #613 review).
     let mut ref_advanced_for_pool = false;
 
+    // Issue #1752: resolve provider routing CONCURRENTLY with the git work
+    // below (auto-sync fetch → worktree create/adopt → sanitize → Muse
+    // context). Routing reads only the resolved paths plus the
+    // preferences/DB snapshot — it never touches the worktree — so it is a
+    // genuinely independent provision step. Overlapping it hides its cost (a
+    // cold preferences walk, or a Codex pairing verification) behind the git
+    // checkout instead of appending it after, and the join further down
+    // keeps the launch ordering intact (routing is resolved before the
+    // attention hooks and command build that consume it).
+    //
+    // The task is detached if `provision_for_spawn` fails below: a failed
+    // spawn returns early and drops the handle, but the blocking closure runs
+    // to completion. That is safe — the routing closure's only side effects
+    // are idempotent (a Codex proxy profile materialisation) and it holds no
+    // lock across them.
+    let routing_harness_id = node.provider.clone();
+    let routing_resolved = resolved.clone();
+    let routing_task = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
+            return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
+        }
+        crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
+    });
+    timer.checkpoint("routing_started");
+
     // Auto-sync (issue #213) + PR-head-fetch (#420/#443) + worktree_base_ref
     // resolution only run when the host path doesn't exist yet — for resume /
     // handover / re-spawn the existing worktree's tree IS the agent's starting
@@ -506,18 +531,13 @@ pub(super) async fn provision_workspace(
     }
 
     timer.checkpoint("before_provider_preflight");
-    let routing_harness_id = node.provider.clone();
-    let routing_resolved = resolved.clone();
-    let routing = match crate::commands::run_blocking("prepare_provider_routing", move || {
-        if let Some(plan) = crate::db::node_spawn_configuration(session_id, &routing_harness_id)?.and_then(|c| c.resolved) {
-            return crate::agent::launch_routing::prepare_snapshot(&plan, &routing_resolved);
-        }
-        crate::agent::launch_routing::prepare(&routing_harness_id, provider, &routing_resolved)
-    })
-    .await
-    {
-        Ok(routing) => routing,
-        Err(error) => {
+    // Join the routing resolution started above. It has been running
+    // concurrently with the auto-sync fetch, the worktree create/adopt, and
+    // the sanitize/Muse steps, so by now it is typically already complete —
+    // the join is where its cost would otherwise have been paid serially.
+    let routing = match routing_task.await {
+        Ok(Ok(routing)) => routing,
+        Ok(Err(error)) => {
             if provider == Provider::Codex {
                 if let Ok(Some((pairing, _))) =
                     crate::preferences::resolve_stored_pairing_and_account(&node.provider)
@@ -532,6 +552,12 @@ pub(super) async fn provision_workspace(
             }
             timer.checkpoint("provider_preflight_failed");
             return Err(format!("spawn preflight failed: {error}"));
+        }
+        Err(join_error) => {
+            timer.checkpoint("provider_preflight_failed");
+            return Err(format!(
+                "prepare_provider_routing task failed: {join_error}"
+            ));
         }
     };
     timer.checkpoint("after_provider_preflight");

@@ -109,6 +109,7 @@ impl std::fmt::Display for InitialPrompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpawnIntent {
     Fresh,
+    Prompt { text: String },
     Issue(IssueContext),
     PullRequest(PullRequestContext),
     Handover { selected_text: String },
@@ -125,6 +126,7 @@ impl SpawnIntent {
     /// | Variant                            | Result                                          |
     /// |------------------------------------|-------------------------------------------------|
     /// | `Fresh`                            | `None`                                          |
+    /// | `Prompt { text }`                  | `Some(text)` verbatim                           |
     /// | `Resume { .. }`                    | `None`                                          |
     /// | `Issue(context)` w/ title          | `Some("Please work on ... #N — title\n<url>")`  |
     /// | `Issue(context)` blank title       | `Some("Please work on ... #N\n<url>")`          |
@@ -134,6 +136,7 @@ impl SpawnIntent {
     pub(crate) fn initial_prompt(&self) -> Option<InitialPrompt> {
         match self {
             Self::Fresh | Self::Resume { .. } => None,
+            Self::Prompt { text } => Some(InitialPrompt(text.clone())),
             Self::Issue(context) => Some(InitialPrompt(format_issue_prefill(
                 &context.owner,
                 &context.repo,
@@ -376,6 +379,12 @@ https://github.com/alondero/buildmesh/issues/247"
             .initial_prompt(),
             None
         );
+    }
+
+    #[test]
+    fn mobile_idea_is_the_initial_prompt_verbatim() {
+        let intent = SpawnIntent::Prompt { text: "Fix the mobile view\nKeep terminal access.".into() };
+        assert_eq!(intent.initial_prompt().unwrap().as_str(), "Fix the mobile view\nKeep terminal access.");
     }
 
     /// `Handover` passes the user's selection through verbatim — it's

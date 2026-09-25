@@ -346,11 +346,11 @@ pub(super) fn pty_writer_thread(
 }
 
 /// Capacity of the bounded `SyncSender` channel between the async
-/// Tauri command and the dedicated PTY writer thread. 64 entries ×
-/// ~tens of bytes per entry is a few KB of in-flight data — comfortably
-/// within the PTY pipe buffer (64 KB on Linux, similar on Windows
-/// ConPTY) yet bounded enough that a stuck agent can't grow memory
-/// without limit. A full channel surfaces as a `warn!` log and the
+/// Tauri command and the dedicated PTY writer thread. The bound counts
+/// messages: one `write_to_agent` call is one message, and a paste
+/// stays one message even when it is tens of kilobytes (issue #1498
+/// traced a 17,508-byte paste). Do not split a paste to manufacture
+/// smaller messages. A full channel surfaces as a `warn!` log and the
 /// bytes are dropped (the user can re-type); the alternative — blocking
 /// the async runtime on a full bounded channel — would defeat the
 /// whole reason the dedicated thread exists.
@@ -396,4 +396,139 @@ pub(super) fn register_agent(
             mesh_id,
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use crate::agent::process::PROCESS_REGISTRY;
+    use crate::agent::provider::{SpawnRecipe, WindowsShell};
+    use crate::agent::spawn_environment;
+    use crate::models::EnvType;
+
+    /// Records every `write` and signals when `flush` runs, so the test
+    /// observes the production writer thread's `write_all` boundary.
+    struct RecordingWriter {
+        chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+        flushed: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.chunks.lock().unwrap().push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let _ = self.flushed.send(());
+            Ok(())
+        }
+    }
+
+    struct KillSession(i64);
+
+    impl Drop for KillSession {
+        fn drop(&mut self) {
+            PROCESS_REGISTRY.kill_session(self.0);
+        }
+    }
+
+    /// Issue #1498 traced a 17,508-byte Windows paste. The body contains
+    /// newlines so a line-pacing workaround fails this contract.
+    fn large_bracketed_paste() -> Vec<u8> {
+        const PASTE_LEN: usize = 17_508;
+        let open = b"\x1b[200~";
+        let close = b"\x1b[201~";
+        let line = b"paste line\n";
+        let body_len = PASTE_LEN - open.len() - close.len();
+        let mut body = Vec::with_capacity(body_len);
+        while body.len() + line.len() <= body_len {
+            body.extend_from_slice(line);
+        }
+        body.resize(body_len, b'x');
+        let mut paste = Vec::with_capacity(PASTE_LEN);
+        paste.extend_from_slice(open);
+        paste.extend_from_slice(&body);
+        paste.extend_from_slice(close);
+        assert_eq!(paste.len(), PASTE_LEN);
+        paste
+    }
+
+    /// `write_to_agent` forwards the whole IPC string through
+    /// `PROCESS_REGISTRY.write_bytes` before any newline handling.
+    /// Calling that registry method on an agent installed by
+    /// `register_agent` is the PTY half of the command: the production
+    /// `pty_writer_thread` must `write_all` the paste as one buffer.
+    /// A newline payload also consults the process database after the
+    /// write, which is a separate attention-signal path.
+    #[test]
+    fn write_to_agent_delivers_a_large_paste_as_one_pty_write() {
+        let session_id = -915_1498;
+        let paste = large_bracketed_paste();
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let (flushed_tx, flushed_rx) = std::sync::mpsc::channel();
+
+        let cwd = std::env::current_dir().unwrap();
+        let recipe = SpawnRecipe {
+            binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
+            base_args: if cfg!(windows) {
+                vec!["/c".into(), "exit".into(), "0".into()]
+            } else {
+                vec!["-c".into(), "exit 0".into()]
+            },
+            trailing_args: Vec::new(),
+            windows_shell: WindowsShell::Direct,
+        };
+        let cmd = spawn_environment::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            None,
+            &cwd.to_string_lossy(),
+            session_id,
+            false,
+        );
+        let pair = super::super::open_pty_pair(24, 80).expect("open pty pair");
+        let child = super::spawn_child(&pair, cmd).expect("spawn child");
+        drop(pair.slave);
+        drop(pair.master.take_writer().expect("take writer"));
+
+        super::register_agent(
+            session_id,
+            child,
+            Box::new(RecordingWriter {
+                chunks: chunks.clone(),
+                flushed: flushed_tx,
+            }),
+            pair.master,
+            Arc::new(AtomicBool::new(true)),
+            None,
+            std::time::Instant::now(),
+            0,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let _stop = KillSession(session_id);
+
+        PROCESS_REGISTRY
+            .write_bytes(session_id, &paste)
+            .expect("enqueue the paste");
+
+        flushed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pty writer thread did not flush the paste");
+
+        let recorded = chunks.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a large paste must stay one PTY write, saw {} writes (first {} bytes)",
+            recorded.len(),
+            recorded.first().map(|chunk| chunk.len()).unwrap_or(0),
+        );
+        assert_eq!(recorded[0], paste);
+    }
 }

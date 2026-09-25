@@ -35,7 +35,9 @@ const mesh: Mesh = {
 
 describe("parentOf", () => {
   it("terminal backs out to the list", () => {
-    expect(parentOf({ kind: "terminal", node })).toEqual({ kind: "list" });
+    expect(
+      parentOf({ kind: "terminal", node, visitId: 1 }),
+    ).toEqual({ kind: "list" });
   });
 
   it("sessions and issues back out to the list", () => {
@@ -44,16 +46,20 @@ describe("parentOf", () => {
   });
 
   it("changes backs out to the same node's terminal", () => {
-    expect(parentOf({ kind: "changes", node })).toEqual({
+    expect(parentOf({ kind: "changes", node, visitId: 1 })).toEqual({
       kind: "terminal",
       node,
+      visitId: 1,
     });
   });
 
   it("diff backs out to the same node's changes screen", () => {
-    expect(parentOf({ kind: "diff", node, filePath: "src/a.ts" })).toEqual({
+    expect(
+      parentOf({ kind: "diff", node, filePath: "src/a.ts", visitId: 1 }),
+    ).toEqual({
       kind: "changes",
       node,
+      visitId: 1,
     });
   });
 
@@ -63,7 +69,7 @@ describe("parentOf", () => {
   });
 
   it("a full diff → list unwind terminates", () => {
-    let s: Screen = { kind: "diff", node, filePath: "src/a.ts" };
+    let s: Screen = { kind: "diff", node, filePath: "src/a.ts", visitId: 1 };
     const seen: string[] = [s.kind];
     for (let i = 0; i < 10 && s.kind !== "list"; i++) {
       s = parentOf(s);
@@ -71,4 +77,71 @@ describe("parentOf", () => {
     }
     expect(seen).toEqual(["diff", "changes", "terminal", "list"]);
   });
+});
+
+
+it("returns from direct changes to details, and through terminal when opened there", () => {
+  const direct: Screen = {
+    kind: "diff",
+    node,
+    filePath: "a.ts",
+    fromOverview: true,
+    visitId: 2,
+  };
+  expect(parentOf(parentOf(direct))).toEqual({ kind: "overview", node, visitId: 2 });
+  const viaTerminal: Screen = {
+    kind: "diff",
+    node,
+    filePath: "a.ts",
+    terminalFromOverview: true,
+    visitId: 3,
+  };
+  expect(parentOf(parentOf(viaTerminal))).toEqual({
+    kind: "terminal",
+    node,
+    fromOverview: true,
+    visitId: 3,
+  });
+  expect(parentOf(parentOf(parentOf(viaTerminal)))).toEqual({
+    kind: "overview",
+    node,
+    visitId: 3,
+  });
+});
+
+it("preserves the agent request and reply draft while backing out of work screens", () => {
+  const detail = {
+    kind: "overview",
+    node,
+    visitId: 4,
+    prompt: "Please fix the preview deploy.",
+    draft: "I will check the build logs.",
+    replySending: true,
+    replyNotice: "",
+  } satisfies Screen;
+  const directDiff: Screen = {
+    kind: "diff",
+    node,
+    filePath: "src/deploy.ts",
+    fromOverview: true,
+    visitId: detail.visitId,
+    prompt: detail.prompt,
+    draft: detail.draft,
+    replySending: detail.replySending,
+    replyNotice: detail.replyNotice,
+  };
+  expect(parentOf(parentOf(directDiff))).toEqual(detail);
+
+  const terminalDiff: Screen = {
+    kind: "diff",
+    node,
+    filePath: "src/deploy.ts",
+    terminalFromOverview: true,
+    visitId: detail.visitId,
+    prompt: detail.prompt,
+    draft: detail.draft,
+    replySending: detail.replySending,
+    replyNotice: detail.replyNotice,
+  };
+  expect(parentOf(parentOf(parentOf(terminalDiff)))).toEqual(detail);
 });

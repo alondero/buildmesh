@@ -8,10 +8,10 @@
 //! turn that only ended because the harness is waiting on background tasks and
 //! will re-invoke itself — those must NOT mark the node as awaiting input.
 //!
-//! No token required: the hook is configured locally and runs over localhost.
-//! Because it is unauthenticated, the handler verifies the client peer address
-//! is loopback (issue #496 / ADR-0012) — an external machine cannot spoof
-//! attention events even if it can reach the port.
+//! Grok callbacks carry a runtime-scoped token; other providers use their
+//! existing local hook contracts. The handler also verifies the client peer
+//! address is loopback (issue #496 / ADR-0012), so an external machine cannot
+//! spoof attention events even if it can reach the port.
 
 use std::path::Path;
 
@@ -33,8 +33,8 @@ pub(crate) const MAX_HOOK_BODY: usize = 64 * 1024;
 /// (`{}` or nothing at all) degrades to the pre-#878 behaviour of always
 /// marking attention.
 ///
-/// Grok Code's HTTP hook (`~/.grok/docs/user-guide/10-hooks.md`, issue
-/// #1282) POSTs the same envelope shape but with camelCase top-level
+/// Grok Code's command hook (`~/.grok/docs/user-guide/10-hooks.md`, issue
+/// #1282) forwards the same envelope shape by POST, but with camelCase top-level
 /// keys (`sessionId`, `hookEventName`) — and adds a separate
 /// `notificationType` field on `Notification` events (`idle_prompt`,
 /// `permission_prompt`, `task_complete`, …). The `#[serde(alias)]`

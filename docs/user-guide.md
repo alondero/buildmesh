@@ -51,9 +51,11 @@ yet, its meter stays hidden.
    Native Windows and WSL installations are detected separately, but the spawn
    menu offers WSL only for harnesses without native Windows support. Sign in
    to that CLI or configure its API key according to the CLI's own documentation.
-3. Create or open a Mesh for the repository you want to work on. Confirm that
-   Git can read the repository and that the base branch/ref is the one you
-   expect.
+3. Create or open a Mesh for the repository you want to work on. **Open folder**
+   points at a repository already on disk; **Clone from GitHub** takes an
+   `owner/repo` or github.com URL, clones it into a new subfolder under a parent
+   folder you pick, and creates the Mesh from the clone in one step. Confirm that
+   Git can read the repository and that the base ref is the one you expect.
 4. Use the provider control in the sidebar to choose a harness, then create an
    Agent Node. `Ctrl+T` (`Cmd+T` on macOS) opens the new-node flow.
 5. Give the node a focused task. Watch the terminal and the node status; an
@@ -253,6 +255,36 @@ The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
 Do not share QR codes, pairing invitations, cookies, certificates, or logs.
+
+### Using Buildmesh on your phone
+
+The phone opens on **Overview**, with counts for agents needing attention,
+running agents, and all active agents. Errors and degraded status reporting
+appear first, followed by agents waiting for input. Each agent card shows its
+mesh name. Status reporting warnings mean the agent's activity may be out of
+date; inspect its terminal to check.
+
+Use the bottom navigation to switch between **Overview**, **Work**, and
+**Capture**. Work searches agent names, meshes, providers, and branches, with
+filters for attention, running, and idle agents. Each mesh has direct links
+to GitHub Issues and its Archive, plus a button to start an empty agent.
+
+**Capture** saves an idea draft on this phone as you type. Choose a mesh and
+an available agent (your choices are remembered on this phone), then select **Start working on this**. The idea becomes
+the new agent's initial prompt. Saved launch configurations are available;
+only agents supporting initial prompts are offered. A failed launch retains
+the draft. If the connection drops during launch, check Work before retrying:
+the desktop may have accepted the request. Drafts are local to the browser,
+are not a desktop backlog, and disappear when site data is cleared.
+
+Tapping an agent opens **Work details**, with current status, base reference,
+**Review changes**, **Open terminal**, and a reply field. Replies send text
+and Enter to an idle or waiting agent; delivery confirmation means the text
+reached the terminal, not that the agent completed the request. Inspect the
+agent's actual request before answering it. Longer replies belong in the
+terminal. Changes still supports file diffs and pull request creation. The
+request and unsent reply remain available while you inspect changes or the
+terminal. Back returns through the screen you came from.
 
 The **Coordinator Read API** is a separate, read-only surface for an external
 coordinator. It is off by default and uses its own capability-scoped token; it

@@ -125,6 +125,11 @@ export const pickMeshFolder = () =>
 export const createMesh = (name: string, path: string, color?: string | null) =>
   _invoke<Mesh>('create_mesh', { name, path, color: color ?? null });
 
+/** Clone a GitHub repo (`owner/repo` or a github.com URL) into
+ * `<parentDir>/<repo>` and create a mesh from it in one step. */
+export const cloneMeshRepo = (url: string, parentDir: string, color?: string | null) =>
+  _invoke<Mesh>('clone_mesh_repo', { url, parentDir, color: color ?? null });
+
 /** Set (or clear, with null) a mesh's accent colour hex. */
 export const updateMeshColor = (meshId: number, color: string | null) =>
   _invoke('update_mesh_color', { meshId, color });

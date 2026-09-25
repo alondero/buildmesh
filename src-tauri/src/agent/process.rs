@@ -388,13 +388,14 @@ impl AgentProcessRegistry {
         // pipe could park the async runtime for the entire write duration,
         // reintroducing the latency this PR is meant to fix. With this
         // channel split, the Tauri command does at most one bounded
-        // `try_send` per keystroke and returns immediately.
+        // `try_send` per `write_to_agent` call and returns immediately.
         //
         // `try_send` (not `send`) so a stuck agent can't back-pressure
         // the async runtime. A full channel means the writer thread is
         // still draining a slow PTY; we drop the new bytes with a warn
-        // (the user can re-type). Bound is 64 entries × ~tens of bytes
-        // — a few KB of in-flight data, well within the PTY pipe buffer.
+        // (the user can re-type). The bound is 64 messages. A paste is
+        // one message of whatever size the caller passed (issue #1498);
+        // do not split it into keystroke-sized writes.
         let send_result = agent.enqueue_input(data.to_vec());
         match send_result {
             Ok(()) => {}

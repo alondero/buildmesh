@@ -12,7 +12,7 @@ metadata:
 
 Review of what the `grok` binary actually exposes, versus what Buildmesh's Grok adapter advertises and uses. Primary concerns: **session resume** and **prefill**.
 
-**Status (2026-08-27):** items 1 (positional prefill), 2 (assign `--session-id`), and 3 (effort, issue #1280) landed on this branch. Remaining follow-ups: #1281 (transcripts), #1282 (attention hooks).
+**Status (2026-09-24):** items 1 (positional prefill), 2 (assign `--session-id`), and 3 (effort, issue #1280) are wired. Attention hooks (#1282) use platform-specific command hooks because Grok's native HTTP-hook SSRF guard rejects Buildmesh's local plain-HTTP URL.
 
 ## Sources (primary only)
 
@@ -60,7 +60,7 @@ From `adapters/grok.rs` and the inventory pin in `capabilities.rs` **after** pre
 | `supports_prefill` | `true` | Trailing positional `[PROMPT]`; not `--prefill`, not `-p` |
 | `supports_model_override` | `true` | `--model <id>` |
 | `effort_control` | `Closed { none, minimal, low, medium, high, xhigh, max }` | Grok CLI has `--effort`; wired in #1280 (`--effort` alias of `--reasoning-effort`) |
-| `requires_attention_hook` | `false` | Grok has Notification/Stop/HTTP; unwired — #1282 |
+| `requires_attention_hook` | `true` | Notification, Stop, prompt, failure/cancel, and question events; command callback to loopback — #1282 |
 | `produces_readable_transcript` | `false` | On-disk ACP JSONL exists; unwired — #1281. Archived picker `resumable: false` |
 | Shell | `WindowsShell::Direct` | Correct — native binary, not a `.cmd` shim |
 | Launch mode | Interactive TUI | Correct — `#914` verified ConPTY; `-p` is unused |
@@ -214,7 +214,7 @@ Trait default `effort_args` already emits `--effort <level>`, which is a documen
 
 Not a resume/prefill blocker, but it is a capability Grok has that Buildmesh's resolver will currently drop.
 
-## Attention hooks — Grok speaks Claude's events, including HTTP
+## Attention hooks — command callback to the loopback listener
 
 Buildmesh's Node Turn signal is a catch-all `Notification` + `Stop` POST to `/api/attention/$BUILDMESH_SESSION_ID` (issue #886). Grok's hook surface (`10-hooks.md`) includes:
 
@@ -222,16 +222,14 @@ Buildmesh's Node Turn signal is a catch-all `Notification` + `Stop` POST to `/ap
 |---|---|
 | `Notification` (`idle_prompt`, `permission_prompt`, `task_complete`, …) | Same yield types CONTEXT.md maps to Node Turn |
 | `Stop` | Turn ended; can block-stop like Claude |
-| HTTP handler `{ "type": "http", "url": "…" }` | Native POST; no curl wrapper |
+| Command handler `{ "type": "command", "command": "…" }` | Forwards event JSON from stdin to the local attention route with curl |
 
 Grok **reads Claude hook files by default**:
 
 - Global: `~/.claude/settings.json` and `settings.local.json` (always trusted)
 - Project: `<project>/.claude/settings.json` and `settings.local.json` (**requires folder trust**)
 
-Mesh creation already writes `.claude/settings.local.json` via `inject_attention_hook`. A Grok node in that mesh *might* fire those hooks if the user has `/hooks-trust` / `--trust` on the folder. That is accidental, not owned: `requires_attention_hook` is still `false`, so a Grok-only spawn does not inject anything, and untrusted project hooks are "silently skipped".
-
-A first-class Grok attention path would write `.grok/hooks/*.json` (or `~/.grok/hooks/`, which is always trusted) with `Notification` + `Stop` HTTP handlers. `--trust` is **not** in `grok --help`; docs say it exists for launch. Confirm before baking it into the recipe.
+Mesh creation still writes `.claude/settings.local.json` via `inject_attention_hook`; Grok may also discover it when project hooks are trusted. Buildmesh owns its Grok integration separately in the always-trusted `~/.grok/hooks/buildmesh-attention.json`, so project trust is not required. The adapter provisions `Notification`, `Stop`, `StopFailure`, `StopCancelled`, `UserPromptSubmit`, and question-tool pre/post/failure hooks. Grok's native HTTP handler rejects the local `http://` callback under its SSRF policy, so the command handler forwards the unchanged stdin envelope with platform curl to the loopback endpoint. Reprovisioning recognizes both the old URL marker and the command marker and updates the owned entry in place, preserving user handlers.
 
 ## Other Grok capabilities outside the current contract
 
@@ -261,7 +259,7 @@ These are real, first-party, and unused. None of them are required for resume/pr
 | Prefill | positional `[PROMPT]` (landed) | positional on interactive TUI | Done |
 | Model override | `--model` | Yes | Keep |
 | Effort | **`Closed { none, minimal, low, medium, high, xhigh, max }`** | **`--effort` / `--reasoning-effort` closed vocab** | Done (#1280) |
-| Attention hook | false | Notification + Stop + HTTP; Claude-compat files | #1282 |
+| Attention hook | command hook to loopback | Notification + Stop + question events; HTTP hooks require HTTPS | Wired (#1282) |
 | Readable transcript | false | `~/.grok/sessions/<enc-cwd>/<id>/updates.jsonl` | #1281 |
 | Worktree flag | not passed | `-w` exists | Keep not passing |
 
@@ -271,7 +269,7 @@ These are real, first-party, and unused. None of them are required for resume/pr
 2. **Assign session IDs — landed.** Trait default `--session-id`; resume still `--resume <id>`.
 3. **Effort — landed (#1280).** `EffortControlKind::Closed` with `none|minimal|low|medium|high|xhigh|max`. Trait-default `--effort` already matches.
 4. **Transcript reader — #1281.** New `TranscriptFormat`; unblocks archived-picker `resumable`.
-5. **Attention hooks — #1282.** Grok-native Notification + Stop HTTP.
+5. **Attention hooks — landed (#1282).** Global command hooks forward lifecycle events to the loopback callback.
 6. **Not in this pass:** ACP, `--fork-session`, `--restore-code`, `-w`, `-p`.
 
 ## Open questions (cannot answer from docs alone)

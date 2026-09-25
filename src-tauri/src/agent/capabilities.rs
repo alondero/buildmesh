@@ -708,7 +708,7 @@ mod tests {
         let grok = grok_caps();
         assert!(grok.supports_resume);
         assert!(grok.auto_resume_on_startup);
-        // Issue #1364 §3 — Grok's Notification + Stop HTTP hooks deliver
+        // Issue #1364 §3 — Grok's Notification + Stop callbacks deliver
         // completion/input/permission/question signals under permission-ask.
         // Issue #1366 — pin the validated Grok release (1.0.5) so a
         // refactor that flips `min_version` back to None trips here

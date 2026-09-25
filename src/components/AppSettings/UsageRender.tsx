@@ -305,7 +305,7 @@ export function UsagePanel({
         <span className="text-sm font-medium text-text-primary truncate">{account.name}</span>
         {meter.cachedAt != null && (
           <span
-            className="text-2xs text-text-muted border border-border-subtle rounded px-1 py-px shrink-0" /* allow-bare-rounded */
+            className="text-2xs text-text-muted border border-border-subtle rounded-md px-1 py-px shrink-0"
             data-testid="usage-cached-badge"
             title={`Last updated ${new Date(meter.cachedAt * 1000).toLocaleString()}`}
           >

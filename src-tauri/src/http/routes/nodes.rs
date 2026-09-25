@@ -31,6 +31,9 @@ pub struct CreateNodeRequest {
     pub mesh_id: i64,
     #[serde(default)]
     #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_id: Option<String>,
@@ -57,10 +60,18 @@ pub async fn create(req: &ParsedRequest) -> Response {
     };
 
     let mesh_id = parsed.mesh_id;
+    let intent = match parsed.prompt {
+        Some(text) if text.trim().is_empty() || text.len() > 16_000 => {
+            return Response::json_error("400 Bad Request", "Idea must contain 1 to 16000 bytes of text");
+        }
+        Some(text) => crate::agent::spawn::SpawnIntent::Prompt { text },
+        None => crate::agent::spawn::SpawnIntent::Fresh,
+    };
     let provider = if parsed.provider.as_deref().is_none_or(|p| p.trim().is_empty()) {
         parsed.configuration_id.clone().unwrap_or_default()
     } else { parsed.provider.unwrap() };
     let configuration_id = parsed.configuration_id.clone();
+    let has_prompt = matches!(intent, crate::agent::spawn::SpawnIntent::Prompt { .. });
     let node = match crate::commands::run_blocking("http_create_node", move || {
         let result: Result<_, CreateNodeError> = (|| {
             let configuration = crate::preferences::spawn_configurations::resolve_saved(
@@ -68,6 +79,17 @@ pub async fn create(req: &ParsedRequest) -> Response {
                 configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
             )
             .map_err(CreateNodeError::Configuration)?;
+        if has_prompt {
+            let selection = configuration.as_ref().map(|c| c.id.as_str()).unwrap_or(&provider);
+            let supports_prompt = crate::agent::provider_menu::available_providers().iter().any(|p| {
+                p.id == selection && p.capabilities.supports_prefill && p.unavailable_reason.is_none()
+            });
+            if !supports_prompt {
+                return Err(CreateNodeError::Agent(crate::services::agent_node::AgentNodeError::InvalidConfiguration(
+                    "Choose an available agent that supports an initial prompt".into(),
+                )));
+            }
+        }
         // Issue #1658 step 5 — the mesh-lookup + branch-resolution +
         // node-create trio is now a single shared runner; the helper
         // resolves `mesh.path` and the `"main"` branch internally, and
@@ -136,7 +158,7 @@ pub async fn create(req: &ParsedRequest) -> Response {
         app,
         crate::agent::spawn::SpawnRequest::new(
             node_id,
-            crate::agent::spawn::SpawnIntent::Fresh,
+            intent,
             crate::agent::spawn::TerminalSize {
                 rows: parsed.rows.unwrap_or(24),
                 cols: parsed.cols.unwrap_or(80),
@@ -296,6 +318,16 @@ mod tests {
 
     fn req(body: &[u8], node_id: i64) -> ParsedRequest {
         ParsedRequest::test_post("/api/nodes/0/input", body).with_ids(Some(node_id), None)
+    }
+
+    #[tokio::test]
+    async fn create_rejects_blank_and_oversized_ideas_before_creating_nodes() {
+        for prompt in [" \n ".to_string(), "a".repeat(16_001)] {
+            let body = serde_json::to_vec(&serde_json::json!({"mesh_id": 0, "prompt": prompt})).unwrap();
+            let response = create(&ParsedRequest::test_post("/api/nodes/create", &body)).await;
+            assert_eq!(response.status_code(), 400);
+            assert!(String::from_utf8_lossy(response.body()).contains("Idea must contain"));
+        }
     }
 
     /// Issue #1377 (post-review): malformed JSON must reject with 400

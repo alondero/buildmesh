@@ -41,6 +41,8 @@ pub mod git;
 #[cfg(test)]
 pub mod git_tests;
 pub mod mesh;
+#[cfg(test)]
+pub mod mesh_tests;
 pub mod mesh_properties;
 pub mod muse;
 pub mod network;

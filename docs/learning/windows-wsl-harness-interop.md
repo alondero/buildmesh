@@ -126,7 +126,7 @@ For Muse specifically (Windows-native support landed in 1.3.0, 2026-09): the ada
 
 Guest launches use `wsl.exe --exec`, with a login-shell PATH and positional arguments. A real probe demonstrated that plain `--` allowed the default zsh to reinterpret embedded quotes, `$HOME`, and backticks; `--exec` preserved them literally. Cross-runtime worktrees use relative forward links and locked host administration, with preparation on the blocking pool. Windows-side Git must trust WSL repositories; the Windows CLI must support network-share paths. Tests isolate fixture trust rather than changing the user's Git configuration.
 
-Windows-hosted shell attention hooks prefer Windows curl for NAT-safe host loopback; Windows hooks under a Linux-hosted backend explicitly call curl in the owning WSL distribution. Grok uses native HTTP and therefore requires mirrored networking for attention callbacks. The Windows process sandbox rejects WSL launches because it cannot contain the guest process.
+Windows-hosted shell attention hooks prefer Windows curl for NAT-safe host loopback; Windows hooks under a Linux-hosted backend explicitly call curl in the owning WSL distribution. Grok uses platform-specific command hooks with curl, but its attention callback still requires mirrored networking when the Windows/WSL boundary makes host loopback otherwise unreachable. The Windows process sandbox rejects WSL launches because it cannot contain the guest process.
 
 ## Verification evidence
 

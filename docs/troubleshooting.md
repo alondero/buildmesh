@@ -54,6 +54,16 @@ and its integration; some harnesses have no hook or passive watcher.
 - If the badge claims attention after you answered, check the terminal and
   capture the node status plus the surrounding log entries for a report.
 
+## Codex reports “Hook failed”
+
+Buildmesh's Codex attention hook sends lifecycle updates to the local app. The
+hook is best-effort, so an unavailable app or an already archived node should
+not stop Codex. Restart the node from Buildmesh to refresh its project hook
+configuration. If Buildmesh is closed, Codex can continue, but its lifecycle
+state cannot be updated until a later callback succeeds. If the error persists,
+use [What to include in a report](#what-to-include-in-a-report) and include the
+Codex version, node status, and relevant redacted log lines.
+
 ## A phone cannot connect
 
 Check these in order:
@@ -116,6 +126,25 @@ fast-forward would overwrite.
   local work was discarded.
 
 Do not reset or delete a worktree as a first response to a sync warning.
+
+## Cloning a repository fails
+
+**Clone from GitHub** in the New Mesh dialog runs a plain `git clone` with your
+machine's own Git authentication, and reports Git's own error in the dialog.
+
+- **`fatal: repository … not found`** — check the `owner/repo` spelling and that
+  the repository exists and you can reach it from this machine.
+- **`fatal: could not read Username` / `Authentication failed`** — a private
+  repository needs credentials that already work from your shell: an SSH key, the
+  Git credential manager, or `gh auth login` followed by `gh auth setup-git` for
+  HTTPS. Buildmesh never stores a GitHub token in the new repository, so an
+  unauthenticated clone fails immediately instead of prompting.
+- **`A folder already exists at …` / `A file already exists at …`** — the chosen
+  parent already holds an entry named after the repository. Pick a different
+  parent, or move the existing entry aside.
+- **The dialog stays on "Cloning…" and then fails** — a very large repository over
+  a slow link can outlast the clone timeout (10 minutes). Clone it from a
+  terminal, then use **Open folder** on the result.
 
 ## Build or Run fails
 
