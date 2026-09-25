@@ -23,6 +23,24 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
     let id = crate::agent::harness_catalog::HARNESS_PROFILE_ALIASES.iter()
         .find(|(alias, _)| *alias == provider).map(|(_, id)| *id).unwrap_or(provider);
     let (foreground, owned_work, final_report, reconciliation, yielded_budget_ms) = match id {
+        // Issue #1899: OpenCode 1.18.3 (Windows `.cmd` via `cmd.exe /c`,
+        // Linux/macOS direct spawn) was inspected, not assumed. Its project
+        // plugin forwards `session.idle` / `question.asked` /
+        // `permission.asked` (plus capture-only `session.created`) and its
+        // `opencode.db` SQLite store yields a readable transcript/report —
+        // but no event carries a turn/input fence and no pull source exposes
+        // a turn completion or a complete child/background registry. Every
+        // string below stays `Unavailable:`-prefixed so Circuit execution
+        // remains visibly unsupported/Unverified for this provider; a live
+        // controlled run is still required before any of these may claim
+        // authority.
+        "opencode" => (
+            "Unavailable: OpenCode 1.18.3 (Windows .cmd via cmd.exe /c; Linux/macOS direct) has no validated Circuit lifecycle adapter; the session.idle plugin hook carries no turn/input fence and cannot establish foreground termination",
+            "Unavailable: OpenCode exposes no complete child/background registry to Buildmesh; unknown child/background work never establishes completion",
+            "Transcript (opencode.db SQLite) or PTY text may inform interpretation; complete native report unavailable",
+            "Status and report discovery only; unsupported lifecycle remains unverified",
+            30_000,
+        ),
         "anthropic" => (
             "Native hook receipts only; authoritative submission correlation unavailable",
             "Child hooks and explicit task/cron registries; missing coverage remains unverified",
@@ -73,7 +91,19 @@ mod tests {
             let policy = for_provider(id);
             assert_eq!(policy.harness, id);
             assert!(policy.yielded_budget_ms > 0 && policy.yielded_budget_ms <= 90_000);
-            if !matches!(id, "anthropic" | "codex" | "agy") {
+            if id == "opencode" {
+                // Issue #1899: explicit unsupported contract. Still
+                // `Unavailable:`-prefixed (Circuit execution stays
+                // Unverified), but records the inspected version, platform,
+                // hook/pull sources, and the missing ownership registry
+                // instead of the generic fallback.
+                assert!(policy.foreground.starts_with("Unavailable:"), "opencode foreground must stay unavailable");
+                assert!(policy.foreground.contains("OpenCode"), "must record the inspected harness version");
+                assert!(policy.foreground.contains("session.idle"), "must name the hook source that was inspected");
+                assert!(policy.owned_work.starts_with("Unavailable:"), "opencode ownership must stay unavailable");
+                assert!(policy.owned_work.contains("child/background"), "must state the ownership coverage gap");
+                assert_eq!(policy.yielded_budget_ms, 30_000);
+            } else if !matches!(id, "anthropic" | "codex" | "agy") {
                 assert_eq!(policy.foreground, "Unavailable: no authoritative Circuit lifecycle adapter is wired");
                 assert_eq!(policy.owned_work, "Unavailable: no authoritative Circuit ownership adapter is wired");
             }
@@ -95,5 +125,60 @@ mod tests {
         assert!(policy.owned_work.contains("no child/background registry"));
         assert_eq!(policy.yielded_budget_ms, 30_000, "no validated basis to change the default budget");
         assert_eq!(policy.active_budget_ms, super::super::ACTIVE_WAIT_MS as u32);
+    }
+
+    #[test]
+    fn opencode_policy_advertises_no_authoritative_evidence() {
+        use crate::autopilot::circuit::observation::{
+            CircuitObservation, ObservationDisposition, ObservationIdentity, ObservedWorkFact,
+            WorkEvidence,
+        };
+        // Identity-fenced opencode-shaped lifecycle facts: a mismatched
+        // `ses_…` session is rejected, a repeated source is a duplicate, and
+        // even an accepted foreground termination without owned-work coverage
+        // never verifies completion.
+        let identity = ObservationIdentity {
+            run_id: 7, step_id: "work".into(), attempt: 1, agent_node_id: 11,
+            session_incarnation: Some("1".into()),
+            session_id: Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7".into()),
+            turn_id: None, report_revision: None,
+        };
+        let mut evidence = WorkEvidence::default();
+        let foreground = CircuitObservation {
+            identity: identity.clone(), source: "agent_status_projection".into(),
+            source_id: Some("opencode-status-1".into()), observed_at_ms: 100,
+            authoritative: false, fact: ObservedWorkFact::ForegroundTerminated,
+        };
+        assert_eq!(
+            evidence.observe(&identity, &foreground),
+            ObservationDisposition::ReducedConfidence
+        );
+        assert_eq!(
+            evidence.observe(&identity, &foreground),
+            ObservationDisposition::Duplicate
+        );
+        let mut wrong_session = identity.clone();
+        wrong_session.session_id = Some("ses_00000000000000000000000000".into());
+        let stale = CircuitObservation {
+            identity: wrong_session, source: "agent_status_projection".into(),
+            source_id: Some("opencode-status-2".into()), observed_at_ms: 101,
+            authoritative: false, fact: ObservedWorkFact::ForegroundTerminated,
+        };
+        assert_eq!(
+            evidence.observe(&identity, &stale),
+            ObservationDisposition::Rejected
+        );
+        // Unknown child/background termination never completes the step:
+        // the work id was never registered as owned, so closing it cannot
+        // supply the missing ownership coverage.
+        let unknown_child = CircuitObservation {
+            identity: identity.clone(), source: "agent_status_projection".into(),
+            source_id: Some("opencode-child-1".into()), observed_at_ms: 102,
+            authoritative: false,
+            fact: ObservedWorkFact::OwnedTerminated { work_id: "task:unknown".into() },
+        };
+        evidence.observe(&identity, &unknown_child);
+        assert!(!evidence.completion_verified(), "unknown owned work must never become completion");
+        assert!(!evidence.lifecycle_verified(), "foreground alone without ownership coverage is unverified");
     }
 }

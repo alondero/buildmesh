@@ -867,6 +867,40 @@ mod tests {
     }
 
     #[test]
+    fn opencode_plugin_events_never_enter_the_native_hook_path() {
+        // Issue #1899: OpenCode's plugin wire (`session.idle`,
+        // `permission.asked`, `question.asked`, capture-only
+        // `session.created`, plus `session.busy` / reply events) is
+        // attention-route input only. It must never parse as a native
+        // Circuit hook receipt — under its own provider id or under a
+        // sibling harness id — so malformed OpenCode data cannot alter
+        // another harness's lifecycle.
+        let bodies = [
+            br#"{"hook_event_name":"session.idle","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7"}"#.as_slice(),
+            br#"{"hook_event_name":"permission.asked","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7","request_id":"req-1","tool_name":"Bash"}"#.as_slice(),
+            br#"{"hook_event_name":"question.asked","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7","request_id":"q-1"}"#.as_slice(),
+            br#"{"hook_event_name":"session.created","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7"}"#.as_slice(),
+            br#"{"hook_event_name":"session.busy","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7"}"#.as_slice(),
+            br#"{"hook_event_name":"question.replied","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7","request_id":"q-1"}"#.as_slice(),
+            br#"{"hook_event_name":"permission.replied","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7","request_id":"req-1"}"#.as_slice(),
+            br#"{"hook_event_name":"session.error","sessionID":"ses_fc52ccfb9ffek1jl23ZwpRuSP7"}"#.as_slice(),
+            br#"not json at all"#.as_slice(),
+            br#"{}"#.as_slice(),
+        ];
+        for body in bodies {
+            for provider in ["opencode", "claude", "claude_code", "anthropic", "codex"] {
+                assert!(
+                    NativeHook::parse(provider, body).is_none(),
+                    "opencode-shaped payload must not parse as a native hook for {provider}"
+                );
+            }
+        }
+        // The gate itself stays provider-scoped: unknown harness ids never
+        // enter the native path either.
+        assert!(NativeHook::parse("terminal", br#"{"hook_event_name":"Stop"}"#).is_none());
+    }
+
+    #[test]
     fn native_registry_preserves_all_task_types_and_scheduled_wakeups() {
         let hook = NativeHook::parse("anthropic", br#"{"hook_event_name":"Stop","background_tasks":[{"id":"a","type":"subagent"},{"id":"b","type":"future-task-type"}],"session_crons":[{"id":"a"}]}"#).unwrap();
         assert_eq!(
