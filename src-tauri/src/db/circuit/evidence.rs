@@ -185,7 +185,7 @@ pub(crate) fn receive_native_hook(
     receive_native_hook_locked(&mut db, receipt)
 }
 
-fn receive_native_hook_locked(
+pub(crate) fn receive_native_hook_locked(
     db: &mut Connection,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
 ) -> Result<(), String> {
