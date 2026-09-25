@@ -107,6 +107,7 @@ function LoadedCircuitEditor({
   return (
     <div className="absolute inset-0 z-40" data-testid="circuit-editor-overlay">
       <CircuitFlowEditor
+        key={circuit.id}
         circuit={circuit}
         runs={runs}
         onClose={onClose}

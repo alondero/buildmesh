@@ -131,7 +131,7 @@ export function stepVerdict(
   kind: CircuitNodeKind | undefined,
   context: Record<string, string>
 ): StepVerdict | null {
-  if (kind === undefined) return null;
+    if (kind === undefined || step.status === 'unverified') return null;
   switch (kind.type) {
     case 'review_verdict': {
       switch (currentReviewVerdict(step, context)) {

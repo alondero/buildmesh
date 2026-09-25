@@ -69,7 +69,9 @@ impl TranscriptAdapter for CodexAdapter {
                         .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
                         .map(|timestamp| timestamp.timestamp_millis());
                     completion = turn_id.zip(completed_at_ms).map(|(turn_id, completed_at_ms)|
-                        super::super::NativeTurnCompletion { turn_id: turn_id.into(), completed_at_ms });
+                        super::super::NativeTurnCompletion { turn_id: turn_id.into(), completed_at_ms,
+                            final_report: payload["last_agent_message"].as_str().filter(|text| !text.trim().is_empty())
+                                .map(crate::secret_scrubber::SecretScrubber::scrub) });
                 }
                 (Some("event_msg"), Some("token_count")) | (Some("token_usage_record"), _) => {}
                 // User input, tool activity, aborts, and unknown records after

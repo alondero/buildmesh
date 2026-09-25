@@ -14,6 +14,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { CircuitFlowEditor } from '../../src/components/Circuits/CircuitFlowEditor';
+import { useUIStore } from '../../src/stores/uiStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 
@@ -150,6 +151,25 @@ beforeEach(() => {
 });
 
 describe('CircuitFlowEditor', () => {
+  it('keeps the Review Blueprint inspectable and copies it into an independent editor', async () => {
+    useUIStore.setState({activeCircuitEditorId:CIRCUIT.id});
+    vi.mocked(invoke).mockResolvedValue({...CIRCUIT,id:99,is_preset:false,enabled:false});
+    render(<CircuitFlowEditor circuit={{...CIRCUIT,is_preset:true}} runs={[]} onClose={()=>{}}/>);
+    expect(screen.getByText('Read-only Review Blueprint')).toBeTruthy();
+    expect(screen.queryByTestId('editor-save')).toBeNull();
+    expect(screen.queryByTestId('circuit-palette')).toBeNull();
+    expect((screen.getByTestId('editor-step-slots') as HTMLSelectElement).disabled).toBe(true);
+    fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
+    const prompt=await screen.findByTestId('inspector-prompt');
+    expect(prompt.closest('fieldset')?.disabled).toBe(true);
+    fireEvent.change(prompt,{target:{value:'Attempted mutation'}});
+    expect(screen.queryByTestId('editor-dirty')).toBeNull();
+    expect(screen.queryByTestId('inspector-delete-node')).toBeNull();
+    fireEvent.click(screen.getByTestId('copy-review-blueprint'));
+    await waitFor(()=>expect(invoke).toHaveBeenCalledWith('copy_review_blueprint',{circuitId:7,name:'Review Blueprint copy'}));
+    await waitFor(()=>expect(useUIStore.getState().activeCircuitEditorId).toBe(99));
+  });
+
   it('renders every node of the stored blueprint as a card', async () => {
     renderEditor();
     expect(await screen.findByTestId('circuit-node-trigger')).toBeTruthy();

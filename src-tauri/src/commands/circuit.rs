@@ -35,6 +35,24 @@ pub struct CircuitRunDetail {
     pub steps: Vec<AutopilotCircuitRunStep>,
 }
 
+#[command]
+pub fn circuit_run_history(run_id: i64) -> Result<crate::db::circuit::evidence::CircuitEvidenceView, String> {
+    crate::db::circuit::evidence::history(run_id).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn copy_review_blueprint(circuit_id: i64, name: String) -> Result<AutopilotCircuit, String> {
+    crate::db::circuit::ledger::copy_review_blueprint(circuit_id, &name)
+}
+
+#[command]
+pub fn record_circuit_outcome(app: AppHandle, request: crate::db::circuit::evidence::CheckpointRequest) -> Result<(), String> {
+    crate::db::circuit::evidence::record_outcome(&request)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id: request.run_id, state: "running".into() });
+    Ok(())
+}
+
 /// One pending Circuit Run in the mesh-wide admission queue. `queue_rank` is
 /// presentation-friendly (1 = next to start); the mutable storage position
 /// stays private to the database.
@@ -532,9 +550,13 @@ pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), Stri
 
 #[command]
 pub fn delete_circuit(app: AppHandle, circuit_id: i64) -> Result<(), String> {
-    crate::db::get_autopilot_circuit(circuit_id)
+    let circuit = crate::db::get_autopilot_circuit(circuit_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("circuit {} does not exist", circuit_id))?;
+
+    if circuit.is_preset {
+        return Err("Built-in Review Blueprints are read-only".into());
+    }
 
     // Stop fresh trigger ingestion before terminalising existing runs. The
     // worker re-checks terminal state before spawning, closing the race with a
@@ -615,9 +637,10 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
     // worker wake signals a condvar other DB callers can park on; firing
     // it while holding the writer mutex would deadlock any reader pool
     // checkout that races the wake against the next commit.
+    let preferences = crate::preferences::load()?;
     let run_id = {
         let mut db = crate::db::write_conn();
-        trigger_circuit_now_locked(&mut db, circuit_id)?
+        trigger_circuit_now_prepared_locked(&mut db, circuit_id, &preferences)?
     };
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
@@ -633,9 +656,18 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
 /// Does NOT wake the circuit worker — the caller must drop the writer
 /// mutex first so the wake's condvar signal doesn't deadlock concurrent
 /// reader-pool checkouts (CLAUDE.md three-phase pattern).
+#[cfg(test)]
 pub fn trigger_circuit_now_locked(
     conn: &mut rusqlite::Connection,
     circuit_id: i64,
+) -> Result<i64, String> {
+    trigger_circuit_now_prepared_locked(conn, circuit_id, &crate::preferences::AppPreferences::default())
+}
+
+fn trigger_circuit_now_prepared_locked(
+    conn: &mut rusqlite::Connection,
+    circuit_id: i64,
+    preferences: &crate::preferences::AppPreferences,
 ) -> Result<i64, String> {
     let circuit = crate::db::circuit::get_autopilot_circuit_inner(conn, circuit_id)
         .map_err(|e| e.to_string())?
@@ -662,16 +694,17 @@ pub fn trigger_circuit_now_locked(
     );
     let mut context = crate::autopilot::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
-    context.with_app_reviewer_provider();
+    context.set("review.provider", preferences.reviewer_provider.as_deref().unwrap_or(""));
     let action =
         crate::services::autopilot::configured_action_on_success_inner(conn, circuit.mesh_id);
     context.with_autopilot_finish_prompt(None, Some(action.as_str()));
-    let run_id = crate::db::circuit::create_circuit_run_locked(
+    let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
         conn,
         circuit.id,
         circuit.mesh_id,
         &identity,
         &context.to_json()?,
+        preferences,
     )
     .map_err(|e| e.to_string())?;
     Ok(run_id)
@@ -755,6 +788,9 @@ pub fn list_circuit_runs(
 /// own the agent concurrently.
 #[command]
 pub async fn continue_circuit_review(app: AppHandle, run_id: i64, max_rounds: i32) -> Result<i64, String> {
+    if let Some(existing) = crate::commands::run_blocking("existing_review_successor", move || {
+        crate::db::circuit::recovery::existing_review_successor(run_id)
+    }).await? { return Ok(existing); }
     let source_id = crate::commands::run_blocking("review_recovery_source", move || {
         crate::db::circuit::recovery::review_recovery_source(run_id, max_rounds)
     }).await?;

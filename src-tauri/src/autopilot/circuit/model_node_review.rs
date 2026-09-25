@@ -4,6 +4,27 @@ use super::model::{
 };
 
 impl CircuitGraph {
+    /// Continuation accepts the review shape with editable prompts and launch settings.
+    /// Changed control flow or additional actions need deliberate manual recovery.
+    pub fn has_local_review_contract(&self) -> bool {
+        let Some(K::RetryLimit { max_retries }) = self.node("retry").map(|node| &node.kind) else { return false; };
+        if !(1..=10).contains(max_retries) { return false; }
+        let expected = Self::agent_review(None, None, *max_retries);
+        if self.nodes.len() != expected.nodes.len() || self.edges.len() != expected.edges.len() { return false; }
+        for template in &expected.nodes {
+            let Some(actual) = self.node(&template.id) else { return false; };
+            let matches = match (&template.kind, &actual.kind) {
+                (K::SpawnAgentNode { .. }, K::SpawnAgentNode { .. }) => true,
+                (K::InjectPty { target_node_id: expected, .. }, K::InjectPty { target_node_id: actual, .. }) => expected == actual,
+                (K::Notify { .. }, K::Notify { .. }) => true,
+                (K::AwaitAgentTurn { target_node_id: expected }, K::LlmTurnClassifier { target_node_id: actual }) => expected == actual,
+                (expected, actual) => expected == actual,
+            };
+            if !matches { return false; }
+        }
+        expected.edges.iter().all(|edge| self.edges.iter().filter(|actual| *actual == edge).count() == 1)
+    }
+
     /// A borrowed source stays outside the owned-agent ledger. The reviewer
     /// reads its working directory, including uncommitted changes, from its
     /// own workspace and never writes to the source tree.
@@ -95,6 +116,7 @@ impl CircuitGraph {
 
 #[cfg(test)]
 mod tests {
+    use crate::autopilot::circuit::test_support::advance_with_report_evidence;
     use super::*;
     use crate::autopilot::circuit::{context::CircuitContext, stepper::*};
     use crate::autopilot::evaluator::Classification;
@@ -110,9 +132,9 @@ mod tests {
     }
 
     fn classified(run: &mut RunView, node: &str, classification: Classification) -> Transition {
-        advance(
+        advance_with_report_evidence(
             run,
-            &CircuitEvent::TurnClassified {
+            &CircuitEvent::TurnClassified { binding: None,
                 node_id: node.into(),
                 classification: Some(classification),
                 output: Some("review report".into()),
@@ -160,7 +182,7 @@ mod tests {
 
     fn finish_review_turn(run: &mut RunView, id: i64) {
         run.attach_agent_node("reviewer", id);
-        advance(
+        crate::autopilot::circuit::test_support::advance_with_completion_evidence(
             run,
             &CircuitEvent::AgentFinished {
                 agent_node_id: id,
@@ -184,7 +206,10 @@ mod tests {
         assert!(feedback.effects.iter().any(
             |e| matches!(e, Effect::InjectPty { prompt, .. } if prompt.contains("review report"))
         ));
-        assert!(feedback.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id, .. } if target_node_id.as_deref() == Some("reviewer"))));
+        assert!(feedback.effects.iter().all(|e| !matches!(e, Effect::CloseAgentNode { .. })));
+        let attempt = run.step("feedback").unwrap().attempt;
+        let delivered = advance(run, &CircuitEvent::PromptDelivered { node_id: "feedback".into(), attempt });
+        assert!(delivered.effects.iter().any(|e| matches!(e, Effect::CloseAgentNode { target_node_id, .. } if target_node_id.as_deref() == Some("reviewer"))));
         run.step_mut("reviewer").unwrap().agent_node_id = None;
         tick(run);
         let result = classified(run, "await_fixes", Classification::Completed);
@@ -259,5 +284,31 @@ mod tests {
             },
         });
         assert_eq!(run.resolve_target_agent("unsafe_close"), None);
+    }
+}
+
+#[cfg(test)]
+mod continuation_contract_tests {
+    use super::*;
+
+    #[test]
+    fn review_copy_allows_prompt_and_settings_edits_but_rejects_changed_obligations() {
+        let mut graph = CircuitGraph::agent_review(None, None, 3);
+        if let K::SpawnAgentNode { prompt, model, .. } = &mut graph.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
+            *prompt = "Review the security boundaries".into();
+            *model = Some("gpt-6-luna".into());
+        }
+        assert!(graph.has_local_review_contract());
+        let mut unsafe_graph = graph.clone();
+        unsafe_graph.edges.iter_mut().find(|e| e.to == "close_approved").unwrap().condition = EdgeCondition::Always;
+        assert!(!unsafe_graph.has_local_review_contract(), "approval cannot be bypassed");
+        let mut unsafe_graph = graph.clone();
+        unsafe_graph.nodes.iter_mut().find(|n| n.id == "feedback").unwrap().kind = K::InjectPty { prompt: "fix".into(), target_node_id: Some("reviewer".into()) };
+        assert!(!unsafe_graph.has_local_review_contract(), "feedback must return to borrowed source");
+        let mut unsafe_graph = graph.clone();
+        unsafe_graph.nodes.iter_mut().find(|n| n.id == "retry").unwrap().kind = K::RetryLimit { max_retries: 0 };
+        assert!(!unsafe_graph.has_local_review_contract(), "review must be bounded");
+        graph.nodes.push(CircuitNode { id: "publication".into(), kind: K::Notify { message: "additional action".into() } });
+        assert!(!graph.has_local_review_contract(), "continuation must not inherit extra actions");
     }
 }

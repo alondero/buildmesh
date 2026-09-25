@@ -60,8 +60,10 @@ pub(crate) use types::AssistantReport;
 pub(crate) struct NativeTurnCompletion {
     pub turn_id: String,
     pub completed_at_ms: i64,
+    pub final_report: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeTurnSnapshot {
     pub completion: NativeTurnCompletion,
     path: PathBuf,
@@ -116,6 +118,41 @@ mod native_completion_tests {
     use super::*;
 
     #[test]
+    fn circuit_reconciliation_rejects_transcript_activity_between_observation_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let completed = serde_json::json!({"timestamp":"2026-09-24T14:24:36.861Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}).to_string() + "\n";
+        fs::write(&path,&completed).unwrap();
+        let snapshot = native_turn_snapshot_from_file(&path,TranscriptFormat::Codex).unwrap();
+        assert!(snapshot.is_current());
+        let guard = crate::autopilot::circuit::stepper::ObservationInputFence {
+            transcript_guard: Some(snapshot), agent_node_id: 9, input_stamp: "input".into(),
+            observed_at_ms: 1, session_id: "session".into(), session_incarnation: "incarnation".into(),
+        };
+        fs::write(&path,completed + &serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"next"}}).to_string() + "\n").unwrap();
+        let error = crate::db::circuit::evidence::commit_transition(0,None,"{}",&[],crate::db::circuit::evidence::EvidenceWrite {
+            input_guard: Some(&guard), ..Default::default()
+        }).unwrap_err();
+        assert!(error.to_string().contains("Native transcript changed before evidence commit"));
+    }
+
+    #[test]
+    fn circuit_codex_native_final_report_is_complete_and_secret_scrubbed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let body = format!("{}\nCredential ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\nFINAL FINDING", "Synthetic review finding.\n".repeat(1500));
+        let records = [
+            serde_json::json!({"ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),
+            serde_json::json!({"ordinal":31,"timestamp":"2026-09-24T14:24:36.861Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn","last_agent_message":body}}),
+        ];
+        fs::write(&path,format!("{}\n{}\n",records[0],records[1])).unwrap();
+        let report = native_turn_completion_from_file(&path,TranscriptFormat::Codex).unwrap().final_report.unwrap();
+        assert_eq!(report,crate::secret_scrubber::SecretScrubber::scrub(&body));
+        assert!(report.ends_with("FINAL FINDING"));
+        assert!(!report.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"));
+    }
+
+    #[test]
     fn codex_completion_replays_missed_hook_and_rejects_later_activity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rollout.jsonl");
@@ -129,7 +166,7 @@ mod native_completion_tests {
         );
         fs::write(&path, completed).unwrap();
         assert_eq!(native_turn_completion_from_file(&path, TranscriptFormat::Codex), Some(NativeTurnCompletion {
-            turn_id: "turn-1".into(), completed_at_ms: 1789324053252,
+            turn_id: "turn-1".into(), completed_at_ms: 1789324053252, final_report: None,
         }));
         for noise in ["\n \t\n", "old damaged record\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"old\"},\"timestamp\":\"bad\"}\n"] {

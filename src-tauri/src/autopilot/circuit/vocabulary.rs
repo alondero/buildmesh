@@ -111,6 +111,9 @@ pub enum StepStatus {
     /// waiting for the user's Approve click. Not terminal.
     #[serde(rename = "blocked")]
     Blocked,
+    /// Evidence is insufficient; neither failure nor permission to advance.
+    #[serde(rename = "unverified")]
+    Unverified,
     #[serde(rename = "completed")]
     Completed,
     #[serde(rename = "failed")]
@@ -129,6 +132,7 @@ impl StepStatus {
             Self::Queued => "pending_slot",
             Self::Running => "running",
             Self::Blocked => "blocked",
+            Self::Unverified => "unverified",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -140,6 +144,7 @@ impl StepStatus {
             "pending_slot" | "queued" => Self::Queued,
             "running" => Self::Running,
             "blocked" => Self::Blocked,
+            "unverified" => Self::Unverified,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -161,7 +166,7 @@ impl StepStatus {
 
     /// In-flight (not terminal) step statuses, including the legacy
     /// `queued` alias so cancellation still covers old rows.
-    pub const SQL_IN_IN_FLIGHT: &'static str = "'pending_slot', 'queued', 'running', 'blocked'";
+    pub const SQL_IN_IN_FLIGHT: &'static str = "'pending_slot', 'queued', 'running', 'blocked', 'unverified'";
 }
 
 #[cfg(test)]

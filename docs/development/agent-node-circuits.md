@@ -117,6 +117,38 @@ alive, the source still has to be in `Running | AwaitingInput | Completed |
 Ready`, and the first-writer-wins dedupe (issue #1660) still hands back the
 original run id on a retry.
 
+## Unverified checkpoints and evidence history
+
+An **Unverified Checkpoint** holds the current attempt when its evidence window
+expires or an external action may have been sent without a recorded result.
+Open **Circuit Run History** in the expanded run to inspect recorded transitions,
+observations, action intent, possible dispatch, and operator decisions.
+
+For an uncertain GitHub action, inspect GitHub before recording **completed** or
+**not performed**, and supply a reason and supporting evidence. These records
+are operator attestations. They do not grant tool permission or review approval.
+Recording **not performed** leaves the checkpoint unresolved and offers a
+separate **Retry as new attempt** action. A stale action requires refreshing the
+history. Unknown GitHub effects are never automatically replayed.
+
+Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
+the observation window without sending the original prompt or requesting an
+automatic continuation. Observed human-input waits and explicit approval gates
+are excluded from the evidence deadline; native wait coverage across harnesses
+is still being integrated.
+A yielded foreground turn alone cannot complete a spawn that was assigned work.
+Native child/background observation is still being integrated; the current
+status projection has reduced confidence and cannot prove complete ownership.
+See the [acceptance record](circuit-reliability-acceptance.md) for the remaining
+implementation and live-verification gaps.
+
+Review Runs pin their graph, reviewer launch configuration and behavior revision
+when created. Later model, effort, argument, runtime or provider-route edits
+apply to future runs. Continue carries the retained configuration into its
+successor. A copied review remains continuable while its borrowed source,
+reviewer, explicit verdict, feedback, approval and bounded-loop structure remain
+verifiable; changing that structure requires manual recovery.
+
 ## Blueprint authors
 
 On prompt injection and classifier steps, select **Triggering agent** to target
@@ -145,9 +177,60 @@ the schema migration. Each run stores its borrowed source in the indexed
 `source_agent_node_id` foreign key (with the context copy retained for
 templates), while only reviewers occupy owned `agent_node_id` step
 associations. The reviewer footprint reserves one additional automated-agent
-slot. The Circuits Probe renders the preset as history-only (no blueprint
-editor, trigger, enable, or delete controls), preserving terminal reports for
-blocked and exhausted reviews without polluting the authored blueprint list.
+slot. The Circuits Probe offers **Inspect Review Blueprint**. The inspector is
+read-only and offers **Copy to editable Circuit**, which creates an independent,
+disabled manual Circuit on the same Mesh. Copying transfers no runs or history.
+The preset retains its reports and has no trigger, enable, or delete controls.
 Worker source-health checks, ownership, and cleanup use the relational source
 binding; graph template expansion and target resolution retain the context
 copy.
+
+
+## Legacy automation retirement
+
+Startup cancels active legacy Autopilot runs before automatic session recovery,
+disables legacy scheduling, and durably queues owned processes to stop. A stop
+that is interrupted is retried without dispatching more work. Agent Nodes,
+worktrees, PR identities and legacy history are retained. Cancelled legacy work
+is excluded from automatic resume. Legacy enable commands reject activation.
+
+The Autopilot Probe destination now exposes retained settings read-only and a
+link to Circuits. Configure Circuits manually: no legacy settings or runs are
+converted. Circuit run capacity remains independently editable and does not
+inherit the old legacy concurrency value.
+
+
+### Human request evidence
+
+Circuit history distinguishes input, permission, ordinary questions and review
+approval. Identified Claude/Codex callbacks retain their request ID and originating
+session/turn; only a matching response resolves that request. A tool result may
+resolve its matching tool question and permission, but supplies no completion
+proof. Generic Working, Stop and prompt-submission signals do not answer requests.
+Missing request correlation remains visible with reduced confidence and no automatic
+timeout. Status projections retain their lifecycle-transition time so a delayed
+snapshot cannot recreate a request already answered by newer native evidence.
+Paused and terminal runs show retained waits as history, without active-wait actions.
+
+Codex permission callbacks that omit a request ID retain an uncorrelated permission
+wait. An unrelated tool result cannot resolve that wait. Inspect the harness's
+permission state and the recorded evidence; generic activity is not approval.
+
+
+### Evidence reconciliation history
+
+The built-in Review Blueprint is available for inspection and copying before the
+first review run. Its graph, settings and history cannot be deleted or edited as
+an individual Circuit; deleting its entire Mesh remains a separate operation.
+
+Run History records pinned behavior/graph identity and effective reviewer selection,
+model and effort, evidence-window changes, run and step capacity waits, and
+continuation prompt intent, possible dispatch and outcome. Unchanged polling
+results do not add repeated entries. Arguments, endpoints and prompts are excluded
+from the configuration history summary.
+
+Conflicts retain their cause and triggering evidence identity. A validated Codex
+foreground pull may resolve only the matching foreground conflict, and its file
+fingerprint is checked again before persistence. Ownership, identity and legacy
+conflicts remain unresolved. Foreground reconciliation cannot supply missing
+child/background coverage, answer a human request, or approve a review.

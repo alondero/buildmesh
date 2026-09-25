@@ -700,6 +700,7 @@ pub(crate) fn observe_wrapup_git_state(
 /// Node Turn hook — third consumer in `node_turn::publish`. Cheap for
 /// non-piloted nodes (one in-memory set lookup).
 pub fn on_turn(node_id: i64, app: &AppHandle) {
+    if crate::services::autopilot::legacy_retired() { return; }
     // Circuit-owned nodes use this module's evaluator blackboard but have no
     // legacy `autopilot_runs` row. Let the circuit worker own their turn;
     // otherwise the lookup below would classify them as stale and unregister
@@ -895,7 +896,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
             complete_autopilot_run(node_id, issue_number, persisted_pr_url, app);
         }
         // terminal — stale registration cleanup
-        S::Completed | S::Failed | S::Merged => evaluator::unregister(node_id),
+        S::Completed | S::Failed | S::Merged | S::Cancelled => evaluator::unregister(node_id),
     }
 }
 

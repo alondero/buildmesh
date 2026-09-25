@@ -1,13 +1,10 @@
 //! GitHub effects for the circuit worker (issue #1660).
 //! A new GitHub action kind is added here, not in the observe-step-commit loop.
 
-use tauri::AppHandle;
-
 use crate::autopilot::circuit::model::CircuitNodeKind;
-use crate::autopilot::circuit::stepper::{advance, CircuitEvent, RunView};
+use crate::autopilot::circuit::stepper::{CircuitEvent, RunView};
 use crate::db;
 
-use super::{execute_effects, prepare_turn_boundaries};
 
 /// Determine the target (issue vs PR number) for a GitHub action.
 /// If the action is CloseIssue, it explicitly requires an issue trigger.
@@ -70,11 +67,24 @@ pub(super) fn determine_github_target(
 /// Reconcile the implementation branch with GitHub before emitting the durable
 /// result. Inject the external observations so replay and lookup failures can
 /// be exercised without a process-wide database or GitHub writes.
+#[cfg(test)]
 pub(super) fn ensure_open_pr(
     view: &RunView,
     node_id: &str,
     policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
     observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
+    find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
+    create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
+) -> Result<CircuitEvent, String> {
+    ensure_open_pr_with_target(view, node_id, policy, observe, |_| Ok(()), find, create)
+}
+
+pub(super) fn ensure_open_pr_with_target(
+    view: &RunView,
+    node_id: &str,
+    policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
+    observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
+    record_target: impl FnOnce(&str) -> Result<(), String>,
     find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
     create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
 ) -> Result<CircuitEvent, String> {
@@ -93,6 +103,7 @@ pub(super) fn ensure_open_pr(
         .branch
         .clone()
         .ok_or_else(|| "the implementation worktree has no checked-out branch".to_string())?;
+    record_target(&head)?;
     let title = view
         .context
         .get("issue.title")
@@ -132,20 +143,140 @@ pub(super) fn ensure_open_pr(
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct OpenPrEffectTarget {
+    owner: String,
+    repo: String,
+    head: String,
+}
+
+fn recheck_open_pr_target(
+    target: &OpenPrEffectTarget,
+    find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
+) -> Result<crate::services::github::PullRequest, String> {
+    if target.owner.trim().is_empty()
+        || target.repo.trim().is_empty()
+        || target.head.trim().is_empty()
+    {
+        return Err("The saved OpenPr target is incomplete; no GitHub request was made.".into());
+    }
+    let pull_request = find(&target.owner, &target.repo, &target.head)?;
+    let pull_request = pull_request.ok_or_else(|| {
+        format!(
+            "No open pull request was found for {}/{} branch {}; this recheck did not create one.",
+            target.owner, target.repo, target.head
+        )
+    })?;
+    if !pull_request.head_ref.trim().is_empty() && pull_request.head_ref != target.head {
+        return Err(format!(
+            "GitHub returned branch {} while rechecking {}; the result remains unverified.",
+            pull_request.head_ref, target.head
+        ));
+    }
+    Ok(pull_request)
+}
+
+pub(super) fn reconcile_open_pr_effect_for_worker(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+) -> CircuitEvent {
+    use crate::services::github::GitHubClient;
+
+    reconcile_open_pr_for_worker(active, view, node_id, |owner, repo, head| {
+        GitHubClient::new()
+            .map_err(|error| error.to_string())?
+            .find_open_pr_for_branch(owner, repo, head)
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Resolve the saved OpenPr target through the read-only lookup and produce
+/// the worker outcome. The injected lookup is the same boundary used by the
+/// production GitHub client, so tests can exercise the complete handoff
+/// without making a live request or creating a pull request.
+fn reconcile_open_pr_effect_with_lookup(
+    active: &db::ActiveCircuitRun,
+    view: &RunView,
+    node_id: &str,
+    find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
+) -> Result<CircuitEvent, String> {
+    let attempt = view.step(node_id).map_or(1, |step| step.attempt);
+    let detail = db::circuit::evidence::latest_effect_target(active.run.id, node_id, attempt)?
+        .ok_or_else(|| {
+            "No durable OpenPr target is recorded for this attempt; no GitHub request was made."
+                .to_string()
+        })?;
+    let target: OpenPrEffectTarget = serde_json::from_str(&detail).map_err(|_| {
+        "The saved OpenPr target cannot be read; no GitHub request was made.".to_string()
+    })?;
+    let pull_request = recheck_open_pr_target(&target, find)?;
+    let title = pull_request.title.trim();
+    Ok(CircuitEvent::GithubActionResult {
+        node_id: node_id.to_string(),
+        success: true,
+        pr_number: Some(pull_request.number),
+        pr_url: Some(pull_request.html_url),
+        pr_head_ref: Some(if pull_request.head_ref.trim().is_empty() {
+            target.head
+        } else {
+            pull_request.head_ref
+        }),
+        pr_title: (!title.is_empty()).then(|| title.to_string()),
+        error: None,
+    })
+}
+
+/// Worker handoff shared by the production GitHub call and its deterministic
+/// integration coverage. Only a matching read-only result marks the existing
+/// attempt reconciled; missing, mismatched, or failed lookups stay uncertain.
+pub(super) fn reconcile_open_pr_for_worker(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+    find: impl FnOnce(&str, &str, &str) -> Result<Option<crate::services::github::PullRequest>, String>,
+) -> CircuitEvent {
+    let attempt = view.step(node_id).map_or(1, |step| step.attempt);
+    view.context
+        .set(&format!("node.{node_id}.recheck_only"), "0");
+    let result = reconcile_open_pr_effect_with_lookup(active, view, node_id, find);
+    if let Ok(CircuitEvent::GithubActionResult {
+        success: true,
+        pr_number: Some(number),
+        pr_url: Some(url),
+        pr_head_ref: Some(head),
+        ..
+    }) = &result
+    {
+        view.context.set(
+            &format!("node.{node_id}.effect_reconciled_attempt"),
+            attempt.to_string(),
+        );
+        view.context.set(
+                &format!("node.{node_id}.effect_reconciled_detail"),
+                format!("Read-only GitHub lookup found open pull request #{number} ({url}) on branch {head}."),
+            );
+    }
+    result.unwrap_or_else(|reason| CircuitEvent::EffectUncertain {
+        node_id: node_id.to_string(),
+        attempt,
+        reason: format!("Read-only pull-request recheck could not establish the result: {reason}"),
+    })
+}
+
 /// Perform one `CallGithub` effect (milestone 3, issue #1208): resolve
 /// the target repo from the mesh's `origin`, execute the mutation through
 /// the shared [`crate::services::github::GitHubClient`] seam, and advance
 /// the stepper with the result so context updates (e.g. `pr.*`) commit atomically
 /// before downstream nodes cascade.
 pub(super) fn call_github_effect(
-    app: &AppHandle,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
     node_id: &str,
     action: crate::autopilot::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
-) -> Result<(), String> {
+) -> Result<CircuitEvent, String> {
     use crate::autopilot::circuit::model::GithubActionKind;
     use crate::services::github::GitHubClient;
 
@@ -248,7 +379,8 @@ pub(super) fn call_github_effect(
                 return Err("this OpenPr action requires a pull-request wrap-up policy".to_string());
             }
             let body = resolved_comment.unwrap_or_default();
-            ensure_open_pr(
+            let mut target_revision = None;
+            let result = ensure_open_pr_with_target(
                 view,
                 node_id,
                 open_pr_policy,
@@ -264,6 +396,21 @@ pub(super) fn call_github_effect(
                     Ok(crate::autopilot::pipeline::observe_wrapup_git_state(
                         &agent_node,
                     ))
+                },
+                |head| {
+                    let target = OpenPrEffectTarget {
+                        owner: owner.clone(),
+                        repo: repo.clone(),
+                        head: head.to_string(),
+                    };
+                    let detail = serde_json::to_string(&target).map_err(|error| error.to_string())?;
+                    target_revision = Some(db::circuit::evidence::record_effect_target(
+                        active.run.id,
+                        node_id,
+                        view.step(node_id).map_or(1, |step| step.attempt),
+                        &detail,
+                    )?);
+                    Ok(())
                 },
                 |head| {
                     client.find_open_pr_for_branch(&owner, &repo, head)
@@ -288,12 +435,21 @@ pub(super) fn call_github_effect(
                         .create_pull_request_idempotent(req)
                         .map_err(|e| e.to_string())
                 },
-            )
+            );
+            if let Some(revision) = target_revision {
+                view.context.set("evidence.revision", revision.to_string());
+            }
+            result
         }
     })();
 
     let event = match action_res {
         Ok(ev) => ev,
+        Err(err) if !open_pr_policy.is_some_and(|policy| policy.requires_existing()) => CircuitEvent::EffectUncertain {
+            node_id: node_id.to_string(),
+            attempt: view.step(node_id).map_or(1, |s| s.attempt),
+            reason: format!("External action result is unknown: {err}. Inspect GitHub before recording an outcome or deliberately retrying."),
+        },
         Err(err) => CircuitEvent::GithubActionResult {
             node_id: node_id.to_string(),
             success: false,
@@ -305,47 +461,6 @@ pub(super) fn call_github_effect(
         },
     };
 
-    let transition = advance(view, &event);
-    // GitHub actions can cascade directly into a wrap-up correction prompt.
-    // Capture that prompt's pre-turn report in this same transition commit;
-    // otherwise the recursive effect path would bypass the normal drive loop.
-    let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)?;
-    if !transition.step_writes.is_empty()
-        || transition.run_state_changed
-        || transition.context_changed
-        || turn_boundary_changed
-    {
-        let ops = transition
-            .step_writes
-            .iter()
-            .map(|w| db::CircuitStepOp {
-                node_id: w.node_id.clone(),
-                status: w.status.as_db_str().to_string(),
-                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
-                error: w.error.clone(),
-                agent_node_id: None,
-                attempt: w.attempt,
-                fresh_attempt: w.fresh_attempt,
-            })
-            .collect::<Vec<_>>();
-        let run_state = if transition.run_state_changed {
-            Some(view.state.as_db_str())
-        } else {
-            None
-        };
-        db::commit_circuit_advance(
-            active.run.id,
-            run_state,
-            Some(&view.context.to_json()?),
-            &ops,
-        )
-        .map_err(|e| format!("commit failed: {}", e))?;
-    }
-
-    if !transition.effects.is_empty() {
-        execute_effects(app, active, view, &transition.effects)?;
-    }
-
     tracing::info!(
         "circuits: run {} executed GitHub {:?} on {}/{}",
         active.run.id,
@@ -353,5 +468,69 @@ pub(super) fn call_github_effect(
         owner,
         repo
     );
-    Ok(())
+    Ok(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn pull_request(head_ref: &str) -> crate::services::github::PullRequest {
+        serde_json::from_value(serde_json::json!({
+            "number": 314,
+            "html_url": "https://github.com/example/buildmesh/pull/314",
+            "title": "Implementation",
+            "head": { "ref": head_ref }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn open_pr_recheck_queries_only_the_saved_repository_and_branch() {
+        let target = OpenPrEffectTarget {
+            owner: "example".into(),
+            repo: "buildmesh".into(),
+            head: "feature/circuit".into(),
+        };
+        let seen = RefCell::new(None);
+        let found = recheck_open_pr_target(&target, |owner, repo, head| {
+            *seen.borrow_mut() = Some((owner.to_string(), repo.to_string(), head.to_string()));
+            Ok(Some(pull_request(head)))
+        })
+        .unwrap();
+        assert_eq!(
+            *seen.borrow(),
+            Some((
+                "example".into(),
+                "buildmesh".into(),
+                "feature/circuit".into()
+            ))
+        );
+        assert_eq!(found.head_ref, "feature/circuit");
+    }
+
+    #[test]
+    fn open_pr_recheck_keeps_missing_and_mismatched_results_unverified() {
+        let target = OpenPrEffectTarget {
+            owner: "example".into(),
+            repo: "buildmesh".into(),
+            head: "feature/circuit".into(),
+        };
+        assert!(recheck_open_pr_target(&target, |_, _, _| Ok(None))
+            .unwrap_err()
+            .contains("did not create one"));
+        assert!(recheck_open_pr_target(&target, |_, _, _| Ok(Some(pull_request("other"))))
+            .unwrap_err()
+            .contains("remains unverified"));
+        let incomplete = OpenPrEffectTarget {
+            head: String::new(),
+            ..target
+        };
+        assert!(recheck_open_pr_target(&incomplete, |_, _, _| {
+            panic!("incomplete identity must not reach GitHub")
+        })
+        .unwrap_err()
+        .contains("no GitHub request was made"));
+    }
 }

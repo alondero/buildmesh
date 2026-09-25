@@ -23,6 +23,7 @@ const DONE_LEGACY_STATES = new Set<AutopilotRunState>(['completed', 'merged']);
 const LIVE_CIRCUIT_STATES = new Set(['pending', 'running', 'paused']);
 
 const LEGACY_RUN_DETAILS: Record<AutopilotRunState, AutopilotRunDetails> = {
+  cancelled: { label: 'autopilot ? cancelled', title: 'Legacy automation cancelled; node, worktree and history retained' },
   implementing: { label: 'autopilot', title: 'Autopilot: agent is implementing the task' },
   finishing: { label: 'autopilot · wrap-up', title: 'Autopilot: wrap-up in progress (verify, commit, push, PR)' },
   suffix_pending: {

@@ -15,6 +15,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useUIStore } from '../../stores/uiStore';
+import { copyReviewBlueprint } from '../../lib/tauri/circuitBlueprint';
 import {
   Background,
   BackgroundVariant,
@@ -109,6 +111,8 @@ export function CircuitFlowEditor(props: CircuitFlowEditorProps) {
 }
 
 function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlowEditorProps) {
+  const readOnly = circuit.is_preset;
+  const openCircuitEditor = useUIStore((state) => state.openCircuitEditor);
   const { screenToFlowPosition } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -246,6 +250,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
    *  requires unique edge ids). */
   const cycleEdge = useCallback(
     (edgeId: string) => {
+      if (readOnly) return;
       setEdges((es) => {
         const target = es.find((e) => e.id === edgeId);
         if (!target) return es;
@@ -273,7 +278,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           .concat(cycled);
       });
     },
-    [setEdges]
+    [setEdges, readOnly]
   );
 
   // Keep edge highlight/badge wiring in sync with the selected run.
@@ -426,6 +431,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   };
 
   const updateSelectedKind = (kind: CircuitNodeKind) => {
+    if (readOnly) return;
     if (selectedNodeId === null) return;
     setNodes((ns) =>
       ns.map((n): CircuitFlowNode => {
@@ -437,6 +443,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   };
 
   const deleteSelectedNode = () => {
+    if (readOnly) return;
     if (selectedNodeId === null) return;
     setNodes((ns) => ns.filter((n) => n.id !== selectedNodeId));
     setEdges((es) => es.filter((e) => e.source !== selectedNodeId && e.target !== selectedNodeId));
@@ -507,6 +514,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   };
 
   const handleSave = async () => {
+    if (readOnly) return;
     setSaving(true);
     setEditorError(null);
     try {
@@ -524,6 +532,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
   };
 
   const handleStepSlotsChange = async (limit: number) => {
+    if (readOnly) return;
     const previous = stepSlots;
     // Optimistic: the controlled select must not snap back mid-flight.
     setStepSlots(limit);
@@ -605,6 +614,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border-subtle bg-bg-surface shrink-0">
         <span className="text-sm font-semibold text-text-primary">{circuit.name}</span>
+        {readOnly && <span className="text-xs text-text-muted">Read-only Review Blueprint</span>}
         {dirty && (
           <span className="text-2xs text-status-warning" data-testid="editor-dirty">
             unsaved
@@ -620,7 +630,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             id="editor-step-slots"
             data-testid="editor-step-slots"
             value={stepSlots}
-            disabled={savingStepSlots}
+            disabled={savingStepSlots || readOnly}
             onChange={(e) => void handleStepSlotsChange(Number(e.target.value))}
             className="px-1.5 py-0.5 rounded-md bg-text-muted/10 text-text-primary text-xs disabled:opacity-40"
           >
@@ -665,7 +675,17 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             {editorError}
           </span>
         )}
-        <button
+        {readOnly && <button type="button" disabled={saving} data-testid="copy-review-blueprint"
+          className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan disabled:opacity-40 text-xs"
+          onClick={() => {
+            setSaving(true);
+            setEditorError(null);
+            void copyReviewBlueprint(circuit.id, 'Review Blueprint copy').then((copy) => {
+              onSaved?.();
+              if (useUIStore.getState().activeCircuitEditorId === circuit.id) openCircuitEditor(copy.id);
+            }, (error: unknown) => setEditorError(formatError(error))).finally(() => setSaving(false));
+          }}>Copy to editable Circuit</button>}
+        {!readOnly && <button
           type="button"
           onClick={() => void handleSave()}
           disabled={saving}
@@ -673,7 +693,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           className="px-2 py-0.5 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40 text-xs"
         >
           {saving ? 'Saving…' : 'Save'}
-        </button>
+        </button>}
         <button
           type="button"
           onClick={requestClose}
@@ -693,9 +713,11 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onConnectEnd={onConnectEnd}
-            onDrop={onDrop}
+            onConnect={readOnly ? undefined : onConnect}
+            onConnectEnd={readOnly ? undefined : onConnectEnd}
+            onDrop={readOnly ? undefined : onDrop}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
             onDragOver={(e) => {
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
@@ -713,7 +735,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
             <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
-          <NodePalette
+          {!readOnly && <NodePalette
             onAdd={(d) => {
               const rect = wrapperRef.current?.getBoundingClientRect();
               const position = screenToFlowPosition({
@@ -722,7 +744,7 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
               });
               addNodeAt(d, { x: position.x - 110, y: position.y - 32 });
             }}
-          />
+          />}
           {quickConnect && (
             <QuickConnectMenu
               position={quickConnect.screen}
@@ -740,12 +762,12 @@ function CircuitFlowEditorInner({ circuit, runs, onClose, onSaved }: CircuitFlow
           )}
         </div>
 
-        <InspectorPanel
+        <fieldset disabled={readOnly} className="contents"><InspectorPanel
           node={currentNode}
           onChange={updateSelectedKind}
           graph={currentGraph}
-        />
-        {currentNode !== null && (
+        /></fieldset>
+        {!readOnly && currentNode !== null && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
             <button
               type="button"

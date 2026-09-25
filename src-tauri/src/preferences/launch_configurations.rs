@@ -165,6 +165,12 @@ pub fn resolve_for_edit(prefs: &AppPreferences, selection: &str) -> Result<Resol
     resolve_plan(prefs, selection, &Default::default(), &Default::default(), false)
 }
 
+/// Freeze effective settings without probing installed processes or reading preferences.
+/// Availability and credentials are checked again when the frozen plan launches.
+pub fn capture(prefs: &AppPreferences, selection: &str, overrides: &LaunchOverrides, mesh: &HarnessConfigValue) -> Result<ResolvedLaunchPlan, String> {
+    resolve_plan(prefs, selection, overrides, mesh, false)
+}
+
 pub fn capture_legacy(prefs: &AppPreferences, selection: &str, mesh: &HarnessConfigValue) -> Result<ResolvedLaunchPlan, String> {
     resolve_plan(prefs, selection, &Default::default(), mesh, false)
 }

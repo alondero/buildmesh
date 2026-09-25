@@ -71,6 +71,8 @@ export function stepStatusLabel(status: string): string {
       return 'Running';
     case 'blocked':
       return 'Needs approval';
+    case 'unverified':
+      return 'Unverified Checkpoint';
     case 'completed':
       return 'Done';
     case 'failed':

@@ -25,6 +25,7 @@ fn suspended_recovery_schema() -> rusqlite::Connection {
         ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
         ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
         ALTER TABLE agent_nodes ADD COLUMN session_started_at INTEGER;
+        CREATE TABLE legacy_autopilot_retirements(node_id INTEGER PRIMARY KEY);
         UPDATE agent_nodes SET status = 'suspended';
         INSERT INTO agent_nodes (id, mesh_id, name, path, status, cli_session_id)
         VALUES (43, 1, 'empty', '/repo', 'suspended', ''),

@@ -151,6 +151,9 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::Skipped(node));
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if db::legacy_retirement::pending(node_id).map_err(|error| error.to_string())? {
+        return Err("Legacy retirement is still stopping this node. Retry after cleanup finishes.".into());
+    }
     let mut durable_claim = if lifecycle_lease {
         let claim = db::claim_agent_spawn(node_id).map_err(|e| e.to_string())?
             .map(|generation| DurableAgentSpawnLease { node_id, generation, succeeded: false });

@@ -511,6 +511,7 @@ pub enum AutopilotRunState {
     /// Deterministic wrap-up passed and the optional Looping-mode suffix was
     /// injected; the same node stays active until that second turn yields.
     SuffixPending,
+    Cancelled,
     Completed,
     Failed,
     /// Terminal state set by the merged-PR auto-close sweep. The node row
@@ -527,6 +528,7 @@ impl AutopilotRunState {
             Self::Implementing => "implementing",
             Self::Finishing => "finishing",
             Self::SuffixPending => "suffix_pending",
+            Self::Cancelled => "cancelled",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Merged => "merged",
@@ -542,6 +544,7 @@ impl AutopilotRunState {
             "implementing" => Self::Implementing,
             "finishing" => Self::Finishing,
             "suffix_pending" => Self::SuffixPending,
+            "cancelled" => Self::Cancelled,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "merged" => Self::Merged,
@@ -595,12 +598,12 @@ pub fn set_autopilot_run_state(
     match attempts {
         Some(n) => db.execute(
             "UPDATE autopilot_runs SET state = ?1, attempts = ?2, \
-             updated_at = datetime('now') WHERE node_id = ?3",
+             updated_at = datetime('now') WHERE node_id = ?3 AND state <> 'cancelled'",
             params![state_str, n, node_id],
         )?,
         None => db.execute(
             "UPDATE autopilot_runs SET state = ?1, updated_at = datetime('now') \
-             WHERE node_id = ?2",
+             WHERE node_id = ?2 AND state <> 'cancelled'",
             params![state_str, node_id],
         )?,
     };

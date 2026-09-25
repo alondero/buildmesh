@@ -68,8 +68,13 @@ fn attention_hook_windows_shell_command(url: &str) -> String {
 }
 
 fn attention_hook_windows_fallback_command(url: &str) -> String {
+    let url = crate::env::powershell_literal(url);
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; $body = [Console]::In.ReadToEnd(); try {{ Invoke-WebRequest -UseBasicParsing -Method Post -Uri {url} -ContentType 'application/json' -Body $body -TimeoutSec 10 | Out-Null }} catch {{ }}; [Console]::Out.WriteLine('{{}}'); exit 0"
+    );
     format!(
-        "curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>NUL >NUL & echo {{}}"
+        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+        crate::env::encode_powershell(&script)
     )
 }
 
@@ -1783,11 +1788,16 @@ mod tests {
         assert!(unix.contains("2>/dev/null || true; printf '{}'"), "{unix}");
 
         let windows = attention_hook_windows_fallback_command(url);
-        assert!(windows.contains("2>NUL >NUL & echo {}"), "{windows}");
+        let script = crate::env::decode_powershell_command(&windows)
+            .expect("native Windows callback is valid in either PowerShell or cmd.exe");
+        assert!(script.contains("[Console]::In.ReadToEnd()"), "{script}");
+        assert!(script.contains("Invoke-WebRequest"), "{script}");
+        assert!(script.contains("catch { }"), "{script}");
         assert!(
-            !windows.contains("&& echo"),
-            "must not gate echo on curl: {windows}"
+            script.contains("[Console]::Out.WriteLine('{}')"),
+            "{script}"
         );
+        assert!(script.ends_with("exit 0"), "{script}");
     }
 
     #[cfg(unix)]
@@ -1813,17 +1823,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_fallback_emits_json_after_curl_lookup_failure() {
+    fn windows_fallback_emits_json_after_callback_failure() {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
 
-        let empty_path = TempDir::new().unwrap();
-        let command = attention_hook_windows_fallback_command(
-            "http://localhost:1992/api/attention/42",
-        );
+        let command =
+            attention_hook_windows_fallback_command("http://localhost:1/api/attention/42");
         let output = Command::new("cmd.exe")
             .args(["/d", "/c", &command])
-            .current_dir(empty_path.path())
-            .env("PATH", empty_path.path())
+            .creation_flags(0x08000000)
             .output()
             .expect("run attention hook in cmd.exe");
 
@@ -2136,11 +2144,81 @@ web_search = true
         assert_eq!(trust_project_path(&resolved), "/home/alice/repo");
     }
 
-    /// Codex already wraps hook commands in `cmd.exe /C` (Windows) or
-    /// `$SHELL -lc` (Unix) and then `env_clear()`s down to a Core inherit
-    /// snapshot. A nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never
-    /// expands, never sees stdin, and never POSTs — which leaves
-    /// `cli_session_id` empty so restart resume is skipped.
+    /// The native fallback is encoded PowerShell so Codex can invoke it through
+    /// either PowerShell or cmd.exe without shell-specific quoting.
+    #[cfg(windows)]
+    #[test]
+    fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        for shell in ["powershell.exe", "cmd.exe"] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/api/attention/42", server.server_addr());
+            let handler = attention_hook_handler(42);
+            let original_url = format!(
+                "http://localhost:{}/api/attention/42",
+                crate::http_server::current_http_port()
+            );
+            let encoded_command = handler["commandWindows"]
+                .as_str()
+                .expect("commandWindows hook missing");
+            let script = crate::env::decode_powershell_command(encoded_command)
+                .expect("Windows hook command must be encoded PowerShell")
+                .replace(&original_url, &endpoint);
+            let command = format!(
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+                crate::env::encode_powershell(&script)
+            );
+            let receiver = std::thread::spawn(move || {
+                let mut request = server
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .unwrap()?;
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                let path = request.url().to_owned();
+                request.respond(tiny_http::Response::empty(200)).unwrap();
+                Some((path, body))
+            });
+            let mut process = Command::new(shell);
+            if shell == "powershell.exe" {
+                process.args(["-NoProfile", "-NonInteractive", "-Command"]);
+                process.arg(&command);
+            } else {
+                process.args(["/D", "/C"]);
+                // `/C` consumes a shell command line. Passing it through
+                // `arg()` adds Windows quoting that changes cmd's parse.
+                process.raw_arg(format!(" {command}"));
+            }
+            let mut child = process
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .creation_flags(0x08000000)
+                .spawn()
+                .unwrap();
+            let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            let received = receiver.join().unwrap();
+            assert!(
+                output.status.success(),
+                "{shell} command {command:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                received,
+                Some(("/api/attention/42".into(), payload.into())),
+                "{shell}"
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        }
+    }
+
     #[test]
     fn windows_hook_is_not_double_wrapped_and_does_not_rely_on_process_env() {
         let temp = TempDir::new().unwrap();
@@ -2162,7 +2240,7 @@ web_search = true
             );
             assert!(
                 !windows.contains("cmd.exe"),
-                "{event} commandWindows must not nest cmd.exe; Codex already runs cmd /C: {windows}"
+                "{event} commandWindows must not nest cmd.exe; the Codex hook runner owns shell execution: {windows}"
             );
             assert!(
                 !command.contains("BUILDMESH_PORT")
@@ -2180,9 +2258,17 @@ web_search = true
                 "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
             );
             assert!(
-                command.contains("-o /dev/null") && windows.contains(if crate::env::is_wsl_host() { "-o /dev/null" } else { "-o NUL" }),
-                "{event} must discard HTTP body; Codex Stop treats non-JSON stdout as failure: {command} / {windows}"
+                command.contains("-o /dev/null"),
+                "{event} must discard HTTP response bodies: {command}"
             );
+            if crate::env::is_wsl_host() {
+                assert!(windows.contains("-o /dev/null"), "{event}: {windows}");
+            } else {
+                assert!(
+                    windows.contains("Invoke-WebRequest") && windows.contains("Out-Null"),
+                    "{event}: {windows}"
+                );
+            }
         }
     }
 

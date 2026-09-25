@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod queue;
 pub mod leases;
 pub mod recovery;
+pub mod evidence;
 
 pub use ledger::*;
 pub use queue::*;
@@ -90,6 +91,7 @@ pub fn list_circuit_probe(
     mesh_id: i64,
     runs_per_circuit: i64,
 ) -> SqlResult<(CircuitProbeLedger, QueuedCircuitRun)> {
+    ledger::ensure_review_blueprint(mesh_id)?;
     let db = crate::db::read_conn();
     let circuits = ledger::list_circuits_with_recent_runs_inner(&db, mesh_id, runs_per_circuit)?;
     let queued = queue::list_queued_circuit_runs_inner(&db, mesh_id)?;

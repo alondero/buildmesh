@@ -21,6 +21,10 @@ pub mod model;
 pub mod model_node_review;
 pub mod stepper;
 pub mod vocabulary;
+pub mod observation;
 
 #[cfg(test)]
 mod blueprint_contract;
+
+#[cfg(test)]
+pub(crate) mod test_support;

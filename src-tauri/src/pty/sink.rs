@@ -24,6 +24,83 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 /// because xterm's scrollback cannot retain more anyway.
 const PENDING_CAP: usize = 4 * 1024 * 1024;
 
+const BUFFERED_COLOUR_QUERIES: [&[u8]; 4] = [
+    b"\x1b]10;?\x07",
+    b"\x1b]10;?\x1b\\",
+    b"\x1b]11;?\x07",
+    b"\x1b]11;?\x1b\\",
+];
+
+fn filter_buffered_colour_queries(pending: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut replay = Vec::with_capacity(pending.len());
+    let mut index = 0;
+
+    while index < pending.len() {
+        let remaining = &pending[index..];
+        if let Some(query) = BUFFERED_COLOUR_QUERIES
+            .iter()
+            .find(|query| remaining.starts_with(query))
+        {
+            index += query.len();
+            continue;
+        }
+
+        if BUFFERED_COLOUR_QUERIES
+            .iter()
+            .any(|query| query.len() > remaining.len() && query.starts_with(remaining))
+        {
+            return (replay, remaining.to_vec());
+        }
+
+        replay.push(pending[index]);
+        index += 1;
+    }
+
+    (replay, Vec::new())
+}
+
+struct LiveOutput {
+    channel: Channel<InvokeResponseBody>,
+    pending_colour_query_prefix: parking_lot::Mutex<Vec<u8>>,
+}
+
+impl LiveOutput {
+    fn new(channel: Channel<InvokeResponseBody>, pending_colour_query_prefix: Vec<u8>) -> Self {
+        Self {
+            channel,
+            pending_colour_query_prefix: parking_lot::Mutex::new(pending_colour_query_prefix),
+        }
+    }
+
+    fn send(&self, data: Vec<u8>) {
+        let mut prefix = self.pending_colour_query_prefix.lock();
+        if prefix.is_empty() {
+            drop(prefix);
+            let _ = self.channel.send(InvokeResponseBody::Raw(data));
+            return;
+        }
+
+        let mut candidate = std::mem::take(&mut *prefix);
+        candidate.extend(data);
+        if let Some(query) = BUFFERED_COLOUR_QUERIES
+            .iter()
+            .find(|query| candidate.starts_with(query))
+        {
+            let remainder = candidate[query.len()..].to_vec();
+            if !remainder.is_empty() {
+                let _ = self.channel.send(InvokeResponseBody::Raw(remainder));
+            }
+        } else if BUFFERED_COLOUR_QUERIES
+            .iter()
+            .any(|query| query.starts_with(&candidate))
+        {
+            *prefix = candidate;
+        } else {
+            let _ = self.channel.send(InvokeResponseBody::Raw(candidate));
+        }
+    }
+}
+
 enum SinkState {
     /// Frontend has not subscribed yet. Append-only; flushed on `set`.
     /// `VecDeque` so overflow drops the oldest bytes in O(1) per pop
@@ -32,7 +109,7 @@ enum SinkState {
     /// before the frontend mounts).
     Pending(VecDeque<u8>),
     /// Live Channel. `send` uses this handle in place -- no clone.
-    Live(Channel<InvokeResponseBody>),
+    Live(LiveOutput),
     /// Terminal disposed or node deleted. Further sends are dropped.
     /// Process exit must not enter this state.
     Closed,
@@ -55,8 +132,8 @@ impl OutputSink {
     pub fn send_owned(&self, data: Vec<u8>) {
         {
             let inner = self.inner.read();
-            if let SinkState::Live(channel) = &*inner {
-                let _ = channel.send(InvokeResponseBody::Raw(data));
+            if let SinkState::Live(live) = &*inner {
+                live.send(data);
                 return;
             }
             if matches!(&*inner, SinkState::Closed) {
@@ -65,8 +142,8 @@ impl OutputSink {
         }
         let mut inner = self.inner.write();
         match &mut *inner {
-            SinkState::Live(channel) => {
-                let _ = channel.send(InvokeResponseBody::Raw(data));
+            SinkState::Live(live) => {
+                live.send(data);
             }
             SinkState::Pending(buf) => {
                 buf.extend(data);
@@ -80,19 +157,28 @@ impl OutputSink {
 
     pub(crate) fn set(&self, channel: Channel<InvokeResponseBody>) {
         let mut inner = self.inner.write();
-        let pending: Vec<u8> = match &mut *inner {
-            SinkState::Pending(buf) => std::mem::take(buf).into(),
-            SinkState::Live(_) => Vec::new(),
+        let (pending, live_prefix): (Vec<u8>, Vec<u8>) = match &mut *inner {
+            SinkState::Pending(buf) => (std::mem::take(buf).into(), Vec::new()),
+            SinkState::Live(live) => (
+                Vec::new(),
+                std::mem::take(&mut *live.pending_colour_query_prefix.lock()),
+            ),
             // Closed is a terminal state (terminal disposed or node
             // deleted). Do not resurrect it into Live -- the prior
             // subscription was deliberately torn down and any new
             // caller here is a stale reference. Drop the channel.
             SinkState::Closed => return,
         };
-        if !pending.is_empty() {
-            let _ = channel.send(InvokeResponseBody::Raw(pending));
+        let (replay, replay_prefix) = filter_buffered_colour_queries(&pending);
+        if !replay.is_empty() {
+            let _ = channel.send(InvokeResponseBody::Raw(replay));
         }
-        *inner = SinkState::Live(channel);
+        let pending_colour_query_prefix = if live_prefix.is_empty() {
+            replay_prefix
+        } else {
+            live_prefix
+        };
+        *inner = SinkState::Live(LiveOutput::new(channel, pending_colour_query_prefix));
     }
 
     pub(crate) fn close(&self) {
@@ -187,6 +273,73 @@ mod tests {
             h.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
+    }
+
+    #[test]
+    fn circuit_buffered_colour_queries_do_not_inject_late_input() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.send_owned(b"before\x1b]10;?".to_vec());
+        sink.send_owned(b"\x1b\\middle\x1b]11;?\x07after\x1b[31mred\x1b[0m".to_vec());
+        sink.set(collecting_channel(&received));
+        assert_eq!(
+            &*received.lock().unwrap(),
+            b"beforemiddleafter\x1b[31mred\x1b[0m"
+        );
+        sink.send_owned(b"\x1b]10;?\x1b\\".to_vec());
+        assert!(
+            received.lock().unwrap().ends_with(b"\x1b]10;?\x1b\\"),
+            "live terminal queries must still reach xterm"
+        );
+    }
+
+    #[test]
+    fn circuit_buffered_colour_query_split_at_subscribe_does_not_reply_late() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.send_owned(b"before\x1b]10;?".to_vec());
+        sink.set(collecting_channel(&received));
+        assert_eq!(&*received.lock().unwrap(), b"before");
+
+        sink.send_owned(b"\x1b\\after".to_vec());
+        assert_eq!(&*received.lock().unwrap(), b"beforeafter");
+
+        sink.send_owned(b"\x1b]11;?\x07".to_vec());
+        assert!(received.lock().unwrap().ends_with(b"\x1b]11;?\x07"));
+    }
+
+    #[test]
+    fn circuit_buffered_non_query_colour_osc_is_preserved_across_subscribe() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.send_owned(b"before\x1b]10;".to_vec());
+        sink.set(collecting_channel(&received));
+        assert_eq!(&*received.lock().unwrap(), b"before");
+
+        sink.send_owned(b"rgb:abab/cdcd/efef\x07after".to_vec());
+        assert_eq!(
+            &*received.lock().unwrap(),
+            b"before\x1b]10;rgb:abab/cdcd/efef\x07after"
+        );
+    }
+
+    #[test]
+    fn circuit_pending_colour_osc_prefix_survives_channel_replacement() {
+        let first_received = Arc::new(Mutex::new(Vec::new()));
+        let second_received = Arc::new(Mutex::new(Vec::new()));
+        let sink = OutputSink::new();
+        sink.send_owned(b"before\x1b]10;".to_vec());
+        sink.set(collecting_channel(&first_received));
+        assert_eq!(&*first_received.lock().unwrap(), b"before");
+
+        sink.set(collecting_channel(&second_received));
+        sink.send_owned(b"rgb:abab/cdcd/efef\x07after".to_vec());
+
+        assert_eq!(&*first_received.lock().unwrap(), b"before");
+        assert_eq!(
+            &*second_received.lock().unwrap(),
+            b"\x1b]10;rgb:abab/cdcd/efef\x07after"
+        );
     }
 
     #[test]

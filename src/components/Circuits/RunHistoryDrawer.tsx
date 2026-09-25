@@ -13,6 +13,7 @@
  */
 
 import { useMemo } from 'react';
+import { CircuitEvidenceHistory } from './CircuitEvidenceHistory';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
 import { formatDurationMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
@@ -76,6 +77,7 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
       </ul>
       {selected && (
         <div className="flex-1 overflow-y-auto p-2" data-testid={`run-steps-${selected.run.id}`}>
+          <CircuitEvidenceHistory key={selected.run.id} runId={selected.run.id} updatedAt={selected.run.updated_at} />
           {selected.steps.length === 0 && (
             <p className="text-2xs text-text-muted px-1">No steps recorded.</p>
           )}
@@ -114,7 +116,7 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
                 )}
                 {s.error_message && (
                   // Per-step log surface: the classifier/PTY error text.
-                  <pre className="mt-0.5 whitespace-pre-wrap text-status-error font-mono">
+                  <pre className={`mt-0.5 whitespace-pre-wrap font-mono ${s.status === 'blocked' || s.status === 'unverified' ? 'text-status-warning' : 'text-status-error'}`}>
                     {s.error_message}
                   </pre>
                 )}

@@ -600,6 +600,15 @@ impl AgentProcessRegistry {
     /// calls this before the child exists (step 2 of `spawn_agent_inner`);
     /// unregistering here drops the terminal's subscription and the new
     /// reader buffers bytes the viewport never sees.
+    /// Cleanup callers must name the incarnation they observed, so a delayed
+    /// retirement cannot tear down a replacement process for the same node.
+    pub(crate) fn kill_session_if_generation(&self, session_id: i64, generation: u64) -> bool {
+        let Some(agent) = self.remove_if_current(session_id, generation) else { return false; };
+        agent.deliberate_kill.store(true, Ordering::SeqCst);
+        teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
+        true
+    }
+
     pub fn kill_session(&self, session_id: i64) {
         while let Some(current) = self.get(&session_id) {
             let Some(agent) = self.remove_if_current(session_id, current.generation) else { continue; };
@@ -897,6 +906,23 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    #[test]
+    fn circuit_retirement_cannot_stop_a_replacement_process_generation() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_099;
+        insert_trivial_agent(&registry, id);
+        let old_generation = registry.get(&id).unwrap().generation;
+        assert!(registry.kill_session_if_generation(id, old_generation));
+        // Stop succeeded but its durable acknowledgement failed. A replacement
+        // must survive the original cleanup request being retried.
+        insert_trivial_agent(&registry, id);
+        let replacement = registry.get(&id).unwrap().generation;
+        assert_ne!(old_generation, replacement);
+        assert!(!registry.kill_session_if_generation(id, old_generation));
+        assert_eq!(registry.get(&id).unwrap().generation, replacement);
+        assert!(registry.kill_session_if_generation(id, replacement));
+    }
 
     #[test]
     fn recovered_turn_database_work_does_not_lock_other_sessions() {

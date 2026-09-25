@@ -837,7 +837,7 @@ fn classify(
             },
         };
     }
-    if event == Some("sessionstart") {
+    if event == Some("sessionstart") || (matches!(provider, "claude" | "claude_code" | "anthropic") && matches!(event, Some("subagentstart" | "subagentstop"))) {
         return Classified {
             decision: Decision::Ignore,
             detail,
@@ -1006,6 +1006,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // is read from the row already fetched for the token gate above —
     // no extra DB hop.
     let hook_uuid = hook_session_id(body, provider);
+    let native_hook = crate::services::circuit_worker::native_hooks::NativeHook::parse(provider, body);
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
@@ -1076,7 +1077,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     let stored_cli_session_id_owned = stored_cli_session_id;
     let classified_decision = classified.decision;
     let hook_payload = payload_parsed;
-    let _ = crate::commands::run_blocking(
+    let applied = crate::commands::run_blocking(
         "http_attention_apply",
         move || -> Result<Applied, String> {
             // Hold the per-node owner through acceptance and effects so a
@@ -1138,6 +1139,13 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             });
             let codex_permission_pending =
                 codex_post_tool_result && state.has_permission_requests();
+            // A persisted child may outlive its launching foreground turn.
+            // Keep the session fence above, but let Circuit ownership validate
+            // child termination independently of the foreground attention gate.
+            if let Some(hook) = native_hook.as_ref().filter(|hook| hook.event == "SubagentStop" && hook.child_id.is_some()) {
+                crate::services::circuit_worker::native_hooks::receive(session_id, hook.clone(), state.matches_turn(hook.turn_id.as_deref()))?;
+                return Ok(Applied::Applied);
+            }
             if let Some(payload) = hook_payload {
                 // `PostToolUse` is catch-all in Codex. Only an approval marker
                 // makes it a lifecycle resume; ordinary tool output is
@@ -1146,6 +1154,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     return Ok(Applied::StaleDropped);
                 }
             }
+            let receipt_result = if let Some(hook) = native_hook {
+                let turn_fenced = state.matches_turn(hook.turn_id.as_deref());
+                crate::services::circuit_worker::native_hooks::receive(session_id, hook, turn_fenced)
+            } else { Ok(()) };
 
             // A Kimi task notification can race with the foreground Stop.
             // While the model is still active it is correlation-only; after
@@ -1240,15 +1252,22 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     );
                 }
             }
+            receipt_result?;
             Ok(Applied::Applied)
         },
     )
     .await;
 
-    // Both outcomes answer 200 OK — the harnesses' fail-open contract (an
-    // applied callback and a stale-dropped one are indistinguishable to the
-    // poster; a stale drop simply changed nothing).
-    Response::empty("200 OK")
+    // A successful receipt is durable even when reconciliation has not run.
+    // Persistence failure must not be acknowledged as received. Ordinary
+    // Agent Node lifecycle publication still runs before returning this error.
+    match applied {
+        Ok(_) => Response::empty("200 OK"),
+        Err(error) => {
+            tracing::warn!("attention receipt for node {session_id} failed: {error}");
+            Response::empty("503 Service Unavailable")
+        }
+    }
 }
 
 /// Outcome of the single blocking apply pass (issue #1364 review): the

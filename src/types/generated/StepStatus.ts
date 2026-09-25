@@ -3,4 +3,4 @@
 /**
  * Circuit Step row `status`. `Queued` stores as `pending_slot`.
  */
-export type StepStatus = "pending_slot" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+export type StepStatus = "pending_slot" | "running" | "blocked" | "unverified" | "completed" | "failed" | "cancelled";

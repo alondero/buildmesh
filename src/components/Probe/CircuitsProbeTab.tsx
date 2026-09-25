@@ -970,8 +970,9 @@ export function CircuitsProbeTab() {
               return (
               <li key={circuit.id} className="rounded-md border border-border-subtle p-2" data-testid="circuit-row">
                 {circuit.is_preset ? (
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="text-xs font-semibold text-text-primary">Agent review history</span>
+                  <div className="flex flex-col items-start gap-1">
+                    <span className="text-xs font-semibold text-text-primary">Review Blueprint</span>
+                    <button type="button" className="text-2xs text-accent-cyan" onClick={() => openCircuitEditor(circuit.id)}>Inspect Review Blueprint</button>
                     <span className="text-2xs text-text-muted truncate" title={circuit.name}>{circuit.name}</span>
                   </div>
                 ) : (

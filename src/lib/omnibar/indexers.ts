@@ -196,7 +196,7 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
     // header did not share, breaking the palette ↔ header parity rule.
     id: 'probe-autopilot',
     label: 'Open Autopilot',
-    subtitle: 'Keep recurring work moving',
+    subtitle: 'Inspect retained legacy settings',
     icon: 'autopilot',
     keywords: ['automation', 'policies', 'loops', 'issue-driven'],
   },
