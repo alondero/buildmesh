@@ -186,6 +186,38 @@ A user-authored trigger-action graph on one Mesh — the composable generalisati
 Pending Circuit Runs have a persisted, per-Mesh queue position and are admitted nearest-first; users may move or cancel them. The worker uses `circuit_run_capacity` as the per-Mesh run-admission policy and reserves the blueprint's declared SpawnAgentNode footprint in a durable per-run lease; the optional app-wide Autopilot pool remains a separate host-process backstop. Without that optional pool, there is no additional per-mesh agent-process cap: run capacity limits admitted runs, not fan-out. Admission accounts for durable worst-case leases, while Tick accounts for live circuit agents. Cancellation terminalises the run before attached Agent Nodes are retired; deleting a Circuit disables it and removes its ledger only after every retirement succeeds, retaining the disabled ledger for retry when cleanup fails.
 _Avoid_: workflow graph, pipeline (when meaning a Circuit), flow (when meaning the blueprint)
 
+**Review Blueprint**:
+The built-in local workflow for reviewing an Agent Node's work. It can be inspected read-only and copied into an independent, editable Review-derived Circuit tied to the built-in behavior revision at copy time.
+_Avoid_: Automated review loop, issue-driven PR review blueprint
+
+**Review-derived Circuit**:
+An independent editable Circuit copied from the Review Blueprint and selectable when reviewing an Agent Node. It remains eligible for continuation only while its review contract is verifiable: a borrowed source, a separate reviewer, explicit approval, feedback to the source for requested changes, and a bounded review loop.
+_Avoid_: Review preset copy
+
+**Review Run Snapshot**:
+The immutable graph and effective reviewer configuration a run used, shown as read-only history; later graph or settings changes affect future runs only.
+_Avoid_: Current blueprint, live configuration
+
+**Review Successor**:
+A follow-up review run linked to a prior failed run. Requests reuse an active or successful successor; continuing after a failed successor creates the next generation, while cancellation requires a fresh review.
+_Avoid_: Review retry (when referring to a distinct follow-up run)
+
+**Review Behavior Revision**:
+A revision identifying a change to the built-in Review Blueprint's behavior, such as its flow, instructions, approval, or recovery rules. Storage-format changes do not change the behavior revision.
+_Avoid_: Graph schema version
+
+**Circuit Run History**:
+The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before.
+_Avoid_: attempt snapshot, recovery session
+
+**Unverified Checkpoint**:
+A Circuit Step whose outcome or owned work Buildmesh cannot currently verify, requiring evidence recheck or operator intervention. It is not itself a failure, a completion, or permission to proceed.
+_Avoid_: failed step, stalled step
+
+**Operator-recorded Outcome**:
+A human-attested outcome for a Circuit Step, recorded with a reason. It remains distinct from verified evidence and cannot satisfy separate permission or review-approval requirements.
+_Avoid_: verified outcome, skip
+
 **Node Digest**:
 A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for harnesses with a wired transcript reader (currently Claude Code/Claude-compatible profiles, Codex, Cursor, AGY, Grok, and Command Code), with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). Muse nodes may additionally carry **Observed Session Telemetry** when MSP token/context events have been ingested; that layer is omitted when there are no observations and is never a Usage Meter. The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot
@@ -209,6 +241,8 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 - A **Proxied Provider**'s configuration splits by scope: the **credential (API key)** and (for first-class) **billing mode** are **global to the Model Provider**; the **Compatible API surface + endpoint URL + model-tier remap** are **per harness×provider pairing** and are edited only on the Harnesses page. Saving a key never auto-attaches a pairing — attach is explicit. A first-class provider's published surface→URL(+tiers) map prefills the attach form; the stored pairing is the source of truth at spawn
 - A **Mesh** can have one or more **Agent Nodes**
 - A **Mesh** can have **Autopilot** enabled, governed by its **Autopilot Policy**
+- A **Circuit Run History** preserves the sequence of **Circuit Step** attempts, evidence, and **Operator-recorded Outcomes** within one **Circuit Run**
+- An **Unverified Checkpoint** can be rechecked or given an **Operator-recorded Outcome**; that outcome stays distinct from verified evidence and approval
 - **Autopilot** automatically spawns **Agent Nodes** for matching issues or PRs, enforcing branched worktree mode
 - An **Agent Node** operates on a child worktree or branch of its parent **Mesh**
 - An **Agent Node** runs inside a configured **Sandbox Mode** to isolate execution from the host OS
