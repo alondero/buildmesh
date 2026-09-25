@@ -1143,7 +1143,12 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // Keep the session fence above, but let Circuit ownership validate
             // child termination independently of the foreground attention gate.
             if let Some(hook) = native_hook.as_ref().filter(|hook| hook.event == "SubagentStop" && hook.child_id.is_some()) {
-                crate::services::circuit_worker::native_hooks::receive(session_id, hook.clone(), state.matches_turn(hook.turn_id.as_deref()))?;
+                crate::services::circuit_worker::native_hooks::receive(
+                    session_id,
+                    hook.clone(),
+                    state.matches_turn(hook.turn_id.as_deref()),
+                    state.mismatches_turn(hook.turn_id.as_deref()),
+                )?;
                 return Ok(Applied::Applied);
             }
             if let Some(payload) = hook_payload {
@@ -1151,12 +1156,33 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 // makes it a lifecycle resume; ordinary tool output is
                 // correlation-neutral and must not spam `work_resumed`.
                 if !accept_hook(&mut state, &payload, &classified) {
+                    // Preserve an explicitly old-turn native lifecycle event
+                    // for Circuit history while keeping it out of the active
+                    // session projection. A missing optional turn ID is not
+                    // an explicit mismatch and continues through the normal
+                    // receipt path below.
+                    if let Some(hook) = native_hook.as_ref().filter(|hook| {
+                        state.mismatches_turn(hook.turn_id.as_deref())
+                    }) {
+                        crate::services::circuit_worker::native_hooks::receive(
+                            session_id,
+                            hook.clone(),
+                            false,
+                            true,
+                        )?;
+                    }
                     return Ok(Applied::StaleDropped);
                 }
             }
             let receipt_result = if let Some(hook) = native_hook {
                 let turn_fenced = state.matches_turn(hook.turn_id.as_deref());
-                crate::services::circuit_worker::native_hooks::receive(session_id, hook, turn_fenced)
+                let explicit_turn_mismatch = state.mismatches_turn(hook.turn_id.as_deref());
+                crate::services::circuit_worker::native_hooks::receive(
+                    session_id,
+                    hook,
+                    turn_fenced,
+                    explicit_turn_mismatch,
+                )
             } else { Ok(()) };
 
             // A Kimi task notification can race with the foreground Stop.

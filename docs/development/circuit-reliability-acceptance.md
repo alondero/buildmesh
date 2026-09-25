@@ -6,7 +6,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live question request/reply and a no-ID permission receipt are recorded below; authoritative permission resolution and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex foreground pull, request callbacks, missing-hook bounded recovery and stale-turn rejection are recorded below | A missing Stop reaches actionable Unverified after the evidence window; rollout-based completion reconciliation remains unverified. Authoritative permission resolution and Claude production submission correlation are unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
@@ -26,6 +26,33 @@ The clean checkout and GitHub state were checked before this work: PR #1893 was
 open, draft and mergeable; issue #1889 was open. The earlier implementation and
 full Windows gate remain approved. Historical checkpoints below describe their
 own snapshots; the results here describe additional work, not full acceptance.
+
+### Live lost and delayed Codex hooks (#1905)
+
+The issue-specific Windows smoke used Codex CLI 0.157.0 / `gpt-6-luna` with a
+real development Buildmesh app, Tauri IPC, Circuit worker and durable history.
+An opt-in loopback relay sat on the actual Codex hook URL and duplicated,
+dropped, or held real callback requests before forwarding them to the app.
+The app used a unique identifier (`com.alond.buildmesh.issue1905.dev`) and
+ports 2991/2992/9224; it did not use the stable app profile. Codex approval was
+`never`, the smoke relay mode selected a read-only sandbox, and prompts asked
+for exact text with no tools or external effects. Project hook trust was
+provisioned for Buildmesh's managed process.
+
+| Run / controlled delivery | Durable result | Evidence boundary |
+| --- | --- | --- |
+| Run 1, Circuit 1, Agent Node 1: duplicate the first `UserPromptSubmit`, drop `Stop` | Both duplicate HTTP forwards returned 200; one native start receipt and one spawn effect were recorded. After the authored 60-second Codex evidence window, attempt 1 remained Unverified with the `recheck` action. The smoke evidence records source `60_second_evidence_window` and disposition `unverified_actionable`. | Real Codex callbacks traversed the loopback relay and native app route. The rollout contained task completion, but the app did not record a `codex_rollout_task_complete` observation in this run; this proves bounded missing-hook recovery to actionable uncertainty, not completion reconciliation. |
+| Run 2, Circuit 1, Agent Node 2: hold the first turn's `Stop`, send a second turn, then release the held callback | The old-turn callback was persisted with disposition `rejected`; attempt 1 remained attached to the same node and Unverified with `recheck`. One spawn effect remained. Exactly two deliberate `UserPromptSubmit` turns were observed. | The delayed callback crossed the real relay and app route after the new turn began. No replay, tool callback, or permission callback was observed. |
+
+The run cancelled both Runs 3 and 4, deleted the disposable Mesh, shut down the
+isolated app, and removed its profile. JSON evidence is in
+`.tmp/codex-hook-recovery-2026-09-25T16-48-39-815Z/evidence.json`; it records
+the commit, CLI version, Windows version, model, launch/trust configuration,
+callback actions and results, run history summaries, and cleanup state without
+recording prompt text. The smoke and relay can be rerun with
+`npm run tauri:build:dev:codex-hook-smoke` followed by
+`npm run smoke:codex-hook-recovery`. This is Windows-only evidence; native
+Linux, WSL, and macOS callback delivery remain unverified.
 
 ### Live OpenPr recovery
 

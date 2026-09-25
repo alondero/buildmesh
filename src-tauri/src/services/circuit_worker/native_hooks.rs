@@ -29,10 +29,6 @@ impl NativeHook {
         // Codex's PermissionRequest contract has no stable request id. Keep
         // the event as an uncorrelated permission wait instead of dropping
         // it or inventing a correlation token.
-        let uncorrelated_codex_permission = provider == "codex"
-            && event == "PermissionRequest"
-            && human_fact.is_none();
-        if provider == "codex" && human_fact.is_none() && !uncorrelated_codex_permission { return None; }
         if human_fact.is_none() && !matches!(
             event,
             "UserPromptSubmit"
@@ -117,6 +113,8 @@ pub(crate) struct NativeReceipt {
     pub received_at_ms: i64,
     pub turn_fenced: bool,
     #[serde(default)]
+    pub explicit_turn_mismatch: bool,
+    #[serde(default)]
     pub submission_correlated: bool,
     pub hook: NativeHook,
 }
@@ -125,6 +123,7 @@ pub(crate) fn receive(
     agent_node_id: i64,
     hook: NativeHook,
     turn_fenced: bool,
+    explicit_turn_mismatch: bool,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
@@ -149,6 +148,7 @@ pub(crate) fn receive(
         source_id,
         received_at_ms: chrono::Utc::now().timestamp_millis(),
         turn_fenced,
+        explicit_turn_mismatch,
         // Native turn IDs do not acknowledge a Buildmesh submission. Arrival
         // time cannot establish that association after delayed hook delivery.
         submission_correlated: false,
@@ -268,10 +268,11 @@ fn normalize(
     use sha2::{Digest, Sha256};
     let child_terminal = receipt.hook.event == "SubagentStop" && receipt.hook.child_id.is_some();
     let stale = !child_terminal
-        && current_input
+        && (receipt.explicit_turn_mismatch
+            || current_input
             .as_ref()
             .zip(receipt.input_stamp.as_ref())
-            .is_some_and(|(a, b)| a != b);
+            .is_some_and(|(a, b)| a != b));
     let identity = ObservationIdentity {
         run_id,
         step_id: entry.node_id.unwrap_or_default(),
@@ -419,6 +420,7 @@ mod tests {
             source_id: "permission-without-id".into(),
             received_at_ms: 10,
             turn_fenced: true,
+            explicit_turn_mismatch: false,
             submission_correlated: false,
             hook,
         };
@@ -460,6 +462,7 @@ mod tests {
             source_id: "unrelated-tool-result".into(),
             received_at_ms: 11,
             turn_fenced: true,
+            explicit_turn_mismatch: false,
             submission_correlated: false,
             hook: reply,
         };
@@ -532,7 +535,7 @@ mod tests {
                     let payload = serde_json::json!({"hook_event_name":event,"session_id":"session","turn_id":"turn","tool_use_id":"request","tool_name":tool});
                     let hook = NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap()).unwrap();
                     let receipt = NativeReceipt { agent_node_id:9,input_stamp:None,session_incarnation:Some("1".into()),
-                        source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,submission_correlated:false,hook };
+                        source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,explicit_turn_mismatch:false,submission_correlated:false,hook };
                     let entry = crate::db::circuit::evidence::CircuitHistoryEntry {id:index,node_id:Some("work".into()),attempt:Some(1),kind:"native_hook_received".into(),detail:String::new(),observed_at:String::new()};
                     let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(42,entry,receipt,Some("session".into()),Some("1".into()),Some("input".into())) else { panic!("native batch") };
                     assert!(!stale);
@@ -596,6 +599,7 @@ mod tests {
             source_id: "receipt".into(),
             received_at_ms: 5,
             turn_fenced: false,
+            explicit_turn_mismatch: false,
             submission_correlated: false,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop"}"#).unwrap(),
         };
@@ -646,7 +650,7 @@ mod tests {
     fn normalization_retains_identity_and_rejects_input_that_overtook_the_hook() {
         use crate::autopilot::circuit::observation::ObservedWorkFact as Fact;
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()),
-            source_id: "native-event".into(), received_at_ms: 5, turn_fenced: true, submission_correlated: true,
+            source_id: "native-event".into(), received_at_ms: 5, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"prompt","background_tasks":[],"session_crons":[],"last_assistant_message":"Final report"}"#).unwrap() };
         for (input, stale, authoritative) in [
             (Some("1:2"), false, true),
@@ -699,6 +703,77 @@ mod tests {
     }
 
     #[test]
+    fn explicit_old_turn_hook_is_recorded_rejected_and_does_not_reopen_checkpoint() {
+        use crate::autopilot::circuit::observation::ObservationDisposition;
+        use crate::autopilot::circuit::{
+            context::CircuitContext,
+            model::CircuitGraph,
+            stepper::{advance, RunState, RunView, StepView, StepStatus},
+        };
+
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("current-input".into()),
+            session_incarnation: Some("1000".into()),
+            source_id: "delayed-old-stop".into(),
+            received_at_ms: 50,
+            turn_fenced: false,
+            explicit_turn_mismatch: true,
+            submission_correlated: false,
+            hook: NativeHook::parse(
+                "codex",
+                br#"{"hook_event_name":"Stop","session_id":"session","turn_id":"old-turn"}"#,
+            )
+            .unwrap(),
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 99,
+            node_id: Some("spawn".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            observed_at: String::new(),
+        };
+        let event = normalize(
+            42,
+            entry,
+            receipt,
+            Some("session".into()),
+            Some("1000".into()),
+            Some("current-input".into()),
+        );
+        let super::super::CircuitEvent::ObservationBatch { stale, observations, .. } = &event else {
+            panic!("expected a receipt observation batch");
+        };
+        assert!(*stale, "an explicit old-turn mismatch stays stale even when its input stamp is current");
+
+        let mut run = RunView {
+            run_id: 42,
+            state: RunState::Running,
+            graph: CircuitGraph::walking_skeleton(""),
+            context: CircuitContext::default(),
+            steps: vec![StepView {
+                node_id: "spawn".into(),
+                status: StepStatus::Unverified,
+                outcome: None,
+                error: Some("latest evidence remains unavailable".into()),
+                agent_node_id: Some(9),
+                attempt: 1,
+            }],
+        };
+        let transition = advance(&mut run, &event);
+        assert_eq!(
+            transition.observations[0].disposition,
+            ObservationDisposition::Rejected
+        );
+        assert!(transition.effects.is_empty());
+        assert_eq!(run.step("spawn").unwrap().status, StepStatus::Unverified);
+        assert_eq!(run.step("spawn").unwrap().attempt, 1);
+        assert_eq!(run.context.get("observer.receipt_cursor"), Some("99"));
+        assert!(observations.iter().all(|item| !item.authoritative));
+    }
+
+    #[test]
     fn native_registry_absence_and_malformed_items_cannot_claim_zero_owned_work() {
         for registry in [
             serde_json::json!({}),
@@ -723,11 +798,68 @@ mod tests {
             hook.active_work.unwrap(),
             BTreeSet::from(["task:a".into(), "task:b".into(), "cron:a".into()])
         );
-        assert!(NativeHook::parse(
+        let codex_stop = NativeHook::parse(
             "codex",
             br#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#
         )
-        .is_none());
+        .expect("retain the Codex lifecycle callback for Circuit history");
+        assert_eq!(codex_stop.active_work, Some(BTreeSet::new()));
         assert!(NativeHook::parse("claude", br#"{"hook_event_name":"TaskCompleted"}"#).is_none());
+    }
+
+    #[test]
+    fn codex_foreground_callbacks_are_recordable_without_authoritative_completion() {
+        use crate::autopilot::circuit::observation::ObservedWorkFact as Fact;
+        for (event, expected_fact) in [
+            ("UserPromptSubmit", Fact::Working),
+            ("Stop", Fact::ForegroundTerminated),
+        ] {
+            let hook = NativeHook::parse(
+                "codex",
+                serde_json::to_vec(&serde_json::json!({
+                    "hook_event_name": event,
+                    "session_id": "session",
+                    "turn_id": "turn",
+                }))
+                .unwrap()
+                .as_slice(),
+            )
+            .expect("retain lifecycle receipt even without a human-wait fact");
+            assert_eq!(hook.event, event);
+            assert!(hook.human_fact.is_none());
+
+            let receipt = NativeReceipt {
+                agent_node_id: 9,
+                input_stamp: Some("input-1".into()),
+                session_incarnation: Some("1000".into()),
+                source_id: format!("{event}:source"),
+                received_at_ms: 2_000,
+                turn_fenced: true,
+                explicit_turn_mismatch: false,
+                submission_correlated: false,
+                hook,
+            };
+            let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+                id: 1,
+                node_id: Some("work".into()),
+                attempt: Some(1),
+                kind: "native_hook_received".into(),
+                detail: String::new(),
+                observed_at: String::new(),
+            };
+            let super::super::CircuitEvent::ObservationBatch { observations, .. } = normalize(
+                42,
+                entry,
+                receipt,
+                Some("session".into()),
+                Some("1000".into()),
+                Some("input-1".into()),
+            ) else {
+                panic!("expected a foreground callback observation");
+            };
+            assert!(observations.iter().any(|observation| observation.fact == expected_fact));
+            assert!(observations.iter().all(|observation| !observation.authoritative),
+                "a Codex lifecycle callback is not correlated to a Buildmesh submission");
+        }
     }
 }
