@@ -111,7 +111,6 @@ const MESH: Mesh = {
   loop_max_iterations: null,
   loop_interval_seconds: 0,
   loop_consecutive_failures: 0,
-  harness_overrides: {},
   circuit_run_capacity: 2,
   worktree_directory: null,
 };

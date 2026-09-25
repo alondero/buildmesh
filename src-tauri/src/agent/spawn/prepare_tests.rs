@@ -528,7 +528,6 @@ fn prepare_threads_typed_spawn_option_id_into_launch_params() {
         explicit_extra_args: None,
         explicit_timeout_seconds: None,
         spawn_option_id: id.clone(),
-        node_mesh_id: 0,
         registry_mesh_id: 0,
         session_id_mode: SessionIdMode::None,
         sandbox: false,

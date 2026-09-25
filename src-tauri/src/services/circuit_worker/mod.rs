@@ -4335,7 +4335,6 @@ mod tests {
             loop_max_iterations: None,
             loop_interval_seconds: 0,
             loop_consecutive_failures: 0,
-            harness_overrides: std::collections::HashMap::new(),
             circuit_run_capacity: 2,
             worktree_directory: None,
         }
@@ -5495,7 +5494,7 @@ mod tests {
         prefs.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue {
             model: Some("gpt-6-luna".into()), effort: Some("low".into()),
         });
-        let plan = crate::preferences::launch_configurations::capture(&prefs, "codex", &Default::default(), &Default::default()).unwrap();
+        let plan = crate::preferences::launch_configurations::capture(&prefs, "codex", &Default::default()).unwrap();
         let snapshot = crate::preferences::launch_configurations::snapshot(plan);
         context.set("review.launch.reviewer", serde_json::to_string(&snapshot).unwrap());
         let view = RunView { run_id: 1, graph: CircuitGraph::agent_review(None, None, 2), state: RunState::Running, context, steps: vec![] };

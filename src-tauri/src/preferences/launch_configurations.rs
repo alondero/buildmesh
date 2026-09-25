@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AppPreferences, HarnessConfigValue, HarnessProfile, ProviderPairing};
+use super::{AppPreferences, HarnessProfile, ProviderPairing};
 use crate::agent::capabilities::{capabilities_for, resolve_agent_config, AgentConfigInputs, FieldInputs};
 use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
@@ -156,30 +156,28 @@ pub fn resolve(
     prefs: &AppPreferences,
     selection: &str,
     overrides: &LaunchOverrides,
-    mesh: &HarnessConfigValue,
 ) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, overrides, mesh, true)
+    resolve_plan(prefs, selection, overrides, true)
 }
 
 pub fn resolve_for_edit(prefs: &AppPreferences, selection: &str) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, &Default::default(), &Default::default(), false)
+    resolve_plan(prefs, selection, &Default::default(), false)
 }
 
 /// Freeze effective settings without probing installed processes or reading preferences.
 /// Availability and credentials are checked again when the frozen plan launches.
-pub fn capture(prefs: &AppPreferences, selection: &str, overrides: &LaunchOverrides, mesh: &HarnessConfigValue) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, overrides, mesh, false)
+pub fn capture(prefs: &AppPreferences, selection: &str, overrides: &LaunchOverrides) -> Result<ResolvedLaunchPlan, String> {
+    resolve_plan(prefs, selection, overrides, false)
 }
 
-pub fn capture_legacy(prefs: &AppPreferences, selection: &str, mesh: &HarnessConfigValue) -> Result<ResolvedLaunchPlan, String> {
-    resolve_plan(prefs, selection, &Default::default(), mesh, false)
+pub fn capture_legacy(prefs: &AppPreferences, selection: &str) -> Result<ResolvedLaunchPlan, String> {
+    resolve_plan(prefs, selection, &Default::default(), false)
 }
 
 fn resolve_plan(
     prefs: &AppPreferences,
     selection: &str,
     overrides: &LaunchOverrides,
-    mesh: &HarnessConfigValue,
     require_available: bool,
 ) -> Result<ResolvedLaunchPlan, String> {
     let configuration = prefs.spawn_configurations.iter().find(|c| c.id == selection);
@@ -212,8 +210,8 @@ fn resolve_plan(
     let effort = nonblank(overrides.effort.as_deref()).or_else(|| nonblank(configured_effort));
     let extra = nonblank(overrides.extra_args.as_deref()).or_else(|| configuration.and_then(|c| nonblank(c.extra_args.as_deref())));
     let mut config = resolve_agent_config(&caps, AgentConfigInputs {
-        model: FieldInputs { explicit: model.as_deref(), mesh_override: mesh.model.as_deref().filter(|_| native_defaults), mesh: None, application: app.and_then(|c| c.model.as_deref()) },
-        effort: FieldInputs { explicit: effort.as_deref(), mesh_override: mesh.effort.as_deref().filter(|_| native_defaults), mesh: None, application: app.and_then(|c| c.effort.as_deref()) },
+        model: FieldInputs { explicit: model.as_deref(), mesh: None, application: app.and_then(|c| c.model.as_deref()) },
+        effort: FieldInputs { explicit: effort.as_deref(), mesh: None, application: app.and_then(|c| c.effort.as_deref()) },
     }, extra.as_deref());
     let route = if let Some(provider_id) = id.provider_id() {
         let account = prefs.provider_accounts.iter().find(|a| a.id == provider_id)
@@ -353,7 +351,7 @@ pub fn resolve_snapshot(plan: &ResolvedLaunchPlan, overrides: &LaunchOverrides) 
         spawn_configurations: vec![snapshot(plan.clone())],
         ..Default::default()
     };
-    resolve(&prefs, &plan.configuration_id, overrides, &Default::default())
+    resolve(&prefs, &plan.configuration_id, overrides)
 }
 
 #[cfg(test)]
@@ -365,7 +363,7 @@ mod tests {
         let mut prefs = generated_preferences();
         prefs.harness_profiles[0].runtime = Some(if cfg!(windows) { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl });
         reconcile(&mut prefs);
-        assert!(resolve(&prefs, "claude", &Default::default(), &Default::default()).unwrap_err().contains("unavailable"));
+        assert!(resolve(&prefs, "claude", &Default::default()).unwrap_err().contains("unavailable"));
         assert!(resolve_for_edit(&prefs, "claude").is_ok());
     }
 
@@ -439,12 +437,11 @@ mod tests {
     fn proxy_defaults_do_not_inherit_native_harness_models() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.harness_defaults.insert("claude".into(), HarnessConfigValue {
+        prefs.harness_defaults.insert("claude".into(), crate::preferences::HarnessConfigValue {
             model: Some("sonnet".into()), effort: Some("high".into()),
         });
         prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
-        let plan = resolve_plan(&prefs, "launch/my-minimax", &Default::default(),
-            &HarnessConfigValue { model: Some("opus".into()), effort: Some("max".into()) }, false).unwrap();
+        let plan = resolve_plan(&prefs, "launch/my-minimax", &Default::default(), false).unwrap();
         assert_eq!(plan.model.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(plan.effort, None);
     }
@@ -457,12 +454,12 @@ mod tests {
         for effort in ["none", "high"] {
             let plan = resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
                 model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
-            }, &Default::default(), false).unwrap();
+            }, false).unwrap();
             assert_eq!(plan.effort.as_deref(), Some(effort));
         }
         assert!(resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
             model: Some("MiniMax-M3".into()), effort: Some("xhigh".into()), extra_args: None,
-        }, &Default::default(), false).unwrap_err().contains("Effort"));
+        }, false).unwrap_err().contains("Effort"));
     }
 
     #[test]
@@ -470,7 +467,7 @@ mod tests {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
-        let resolve_current = |prefs: &AppPreferences| resolve(prefs, "launch/my-minimax", &Default::default(), &Default::default());
+        let resolve_current = |prefs: &AppPreferences| resolve(prefs, "launch/my-minimax", &Default::default());
         assert!(resolve_current(&prefs).is_ok());
         prefs.provider_accounts[0].api_key = None;
         assert!(resolve_current(&prefs).unwrap_err().contains("credential"));
@@ -485,16 +482,15 @@ mod tests {
     fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.harness_defaults.insert("claude".into(), HarnessConfigValue { model: Some("app".into()), effort: Some("low".into()) });
-        let mesh = HarnessConfigValue { model: Some("mesh".into()), effort: Some("medium".into()) };
-        let plan = resolve(&prefs, "claude", &Default::default(), &mesh).unwrap();
-        assert_eq!(plan.model.as_deref(), Some("mesh"));
-        assert_eq!(plan.effort.as_deref(), Some("medium"));
+        prefs.harness_defaults.insert("claude".into(), crate::preferences::HarnessConfigValue { model: Some("app".into()), effort: Some("low".into()) });
+        let plan = resolve(&prefs, "claude", &Default::default()).unwrap();
+        assert_eq!(plan.model.as_deref(), Some("app"));
+        assert_eq!(plan.effort.as_deref(), Some("low"));
         let overrides = LaunchOverrides { model: Some("explicit".into()), effort: Some("high".into()), extra_args: Some("--verbose".into()) };
-        let plan = resolve(&prefs, "claude", &overrides, &mesh).unwrap();
+        let plan = resolve(&prefs, "claude", &overrides).unwrap();
         assert_eq!(plan.model.as_deref(), Some("explicit"));
         assert_eq!(plan.extra_args.as_deref(), Some("--verbose"));
-        let plan = resolve(&prefs, "terminal", &overrides, &mesh).unwrap();
+        let plan = resolve(&prefs, "terminal", &overrides).unwrap();
         assert_eq!((plan.model, plan.effort, plan.extra_args), (None, None, None));
     }
 
@@ -505,7 +501,7 @@ mod tests {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
-        let plan = resolve(&prefs, "launch/my-minimax", &Default::default(), &Default::default()).unwrap();
+        let plan = resolve(&prefs, "launch/my-minimax", &Default::default()).unwrap();
         prefs.harness_profiles.clear();
         prefs.provider_pairings.clear();
         prefs.spawn_configurations.clear();
@@ -527,13 +523,13 @@ mod tests {
             "provider_pairings": [{"harness_id":"claude", "provider_id":"custom", "surface":"anthropic", "base_url":"https://example.test/anthropic", "model_tiers":{"default":"route-model"}}],
             "spawn_configurations": [{"id":"launch/private", "name":"Private", "spawn_option_id":"claude:custom", "model":"chosen-model", "effort":"high", "extra_args":null}]
         })).unwrap();
-        let plan = resolve(&prefs, "launch/private", &LaunchOverrides::default(), &HarnessConfigValue::default()).unwrap();
+        let plan = resolve(&prefs, "launch/private", &LaunchOverrides::default()).unwrap();
         assert_eq!(plan.route.as_ref().unwrap().base_url.as_deref(), Some("https://example.test/anthropic"));
         assert_eq!(plan.route.as_ref().unwrap().model_tiers.default.as_deref(), Some("chosen-model"));
         assert!(!serde_json::to_string(&plan).unwrap().contains("secret-test-key"));
         let mut disabled = prefs.clone();
         disabled.provider_accounts[0].enabled = false;
-        assert!(resolve(&disabled, "launch/private", &LaunchOverrides::default(), &HarnessConfigValue::default()).unwrap_err().contains("disabled"));
+        assert!(resolve(&disabled, "launch/private", &LaunchOverrides::default()).unwrap_err().contains("disabled"));
     }
 
     #[test]
@@ -659,8 +655,7 @@ mod tests {
         let prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
             "spawn_configurations": [{"id":"launch/fast", "name":"Fast", "spawn_option_id":"codex", "model":"gpt-5.6-sol", "effort":"high", "extra_args":null}]
         })).unwrap();
-        let plan = resolve(&prefs, "launch/fast", &LaunchOverrides::default(),
-            &super::super::HarnessConfigValue { model: Some("mesh-model".into()), effort: None }).unwrap();
+        let plan = resolve(&prefs, "launch/fast", &LaunchOverrides::default()).unwrap();
         assert_eq!(plan.configuration_id, "launch/fast");
         assert_eq!(plan.harness.harness, "codex");
         assert_eq!(plan.model.as_deref(), Some("gpt-5.6-sol"));

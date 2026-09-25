@@ -332,7 +332,7 @@ fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::A
         row.configuration = Some(configuration.clone());
         row.configurations.clear();
         row.unavailable_reason = crate::preferences::launch_configurations::resolve(prefs, &configuration.id,
-            &Default::default(), &Default::default()).err();
+            &Default::default()).err();
         if row.unavailable_reason.is_none() && !available.contains(&configuration.spawn_option_id) {
             row.unavailable_reason = Some(if id.is_proxied() && available.contains(id.harness_id()) {
                 "Provider Route needs verification for this harness/runtime; open advanced routes".into()

@@ -65,21 +65,12 @@ const MESH_CONFIG = {
   autopilot_concurrency_limit: 2,
   autopilot_provider: null,
   autopilot_action_on_success: null,
-  // Per-Mesh harness overrides (issue #1151) — pre-seed with a Claude
-  // override so the section renders an editable row by default. The save
-  // lifecycle tests blur into this row's model/effort inputs to exercise
-  // the global SaveStatus indicator; the IPC is `upsert_mesh_harness_override`,
-  // not `update_mesh_column`. Per-test overrides can flip this off to
-  // exercise the empty state.
-  harness_overrides: {
-    claude: { model: 'opus-4', effort: 'high' },
-  },
 };
 
 /** Capability descriptor for the test fixtures — every native row in
- *  `list_providers` carries one so the per-Mesh override section
- *  (issue #1151) can render capability-gated controls. Mirrors the
- *  shape of `HarnessCapabilities` from `src/types/generated/`. */
+ *  `list_providers` carries one so the Spawn Menu picker can decide which
+ *  harnesses expose a configurations submenu. Mirrors the shape of
+ *  `HarnessCapabilities` from `src/types/generated/`. */
 function capsFixture(harness_id: string): unknown {
   if (harness_id === 'claude') {
     return {
@@ -142,12 +133,11 @@ function mockBackend() {
       case 'list_providers':
         // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
         // (harness_id, provider_id, is_proxied, group_key). The mock
-        // returns three native harnesses, each its own group, so the
-        // selector renders three plain `<option>` rows (no optgroups
-        // for a single-row group). The `capabilities` field is the
-        // issue #1149 descriptor — required by the per-Mesh override
-        // section (issue #1151) and the App Settings harness defaults
-        // section (issue #1150).
+        // returns two native harnesses plus one Proxied Provider child so
+        // the picker renders native parents and hides the proxied route at
+        // the top level. The `capabilities` field is the issue #1149
+        // descriptor — required by the Spawn Menu (configurations
+        // submenu) and the App Settings harness defaults section (#1150).
         return Promise.resolve([
           { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude', capabilities: capsFixture('claude') },
           { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: 'anthropic', is_proxied: true, group_key: 'claude', capabilities: capsFixture('claude') },
@@ -218,12 +208,10 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // pass through so a future hint rewrite doesn't break the matcher.
     // Every lookup is awaited: the #1375 open path no longer goes through
     // a rail click whose async settle used to cover the form's load, so
-    // each control waits for its own mount (the Model select arrives with
-    // the async provider list).
+    // each control waits for its own mount (the Default provider picker
+    // arrives with the async provider list).
     expect(await screen.findByLabelText('Name')).toBeTruthy();
     expect(await screen.findByLabelText('Directory')).toBeTruthy();
-    expect(await screen.findByLabelText(/^Model\b/)).toBeTruthy();
-    expect(await screen.findByLabelText(/^Effort\b/)).toBeTruthy();
     expect(await screen.findByLabelText('Default provider')).toBeTruthy();
     expect(await screen.findByLabelText('Project preset')).toBeTruthy();
     expect(await screen.findByLabelText(/^Build command/)).toBeTruthy();
@@ -255,64 +243,39 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // operation. See the `Delete Mesh button` describe block below.
   });
 
-  it('preloads the mesh config (Name, Model, Build/Run) from the backend', async () => {
+  it('preloads the mesh config (Name, Default provider, Build/Run) from the backend', async () => {
     openProbeDestination('properties');
 
     const name = (await screen.findByLabelText('Name')) as HTMLInputElement;
     expect(name.value).toBe('demo');
 
     // Awaited lookups — see the note in the config-form test above.
-    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
-    expect(model.value).toBe('opus-4');
-
-    const effort = (await screen.findByLabelText(/^Effort\b/)) as HTMLSelectElement;
-    expect(effort.value).toBe('high');
-
     const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     expect(build.value).toBe('npm run build');
 
     const run = (await screen.findByLabelText(/^Run command/)) as HTMLInputElement;
     expect(run.value).toBe('npm run dev');
 
-    const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
-    expect(provider.value).toBe('anthropic');
+    // The Default provider picker shows the stored selection's label.
+    const provider = await screen.findByLabelText('Default provider');
+    expect(provider.textContent).toContain('Anthropic');
   });
 
-  it('groups the default-provider options by harness (issue #575) with no "Legacy" header', async () => {
-    openProbeDestination('properties');
-
-    const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
-    // Issue #575 / ADR-0016 — the Spawn Menu is harness-grouped. A group
-    // with more than one row becomes a native `<optgroup>`; a single-row
-    // group stays a plain `<option>` (the common case for one-harness
-    // configs). The optgroup label is the native row's friendly
-    // `label` (the harness profile's user-facing name, e.g. "Claude
-    // Code"), NOT the raw `harness_id` — code-review finding B3.
-    const optgroups = provider.querySelectorAll('optgroup');
-    expect(optgroups).toHaveLength(1);
-    expect(optgroups[0].getAttribute('label')).toBe('Claude Code');
-    // The Codex harness is a single-row group, so it stays a plain option.
-    expect(provider.querySelector('option[value="claude"]')).toBeTruthy();
-    expect(provider.querySelector('option[value="anthropic"]')).toBeTruthy();
-    expect(provider.querySelector('option[value="codex"]')).toBeTruthy();
-  });
-
-  it('saves text fields on blur via upsert_mesh_harness_override', async () => {
+  it('opens the Spawn Menu (harness-grouped) from the Default provider picker (ADR-0016)', async () => {
     const user = userEvent.setup();
     openProbeDestination('properties');
 
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    await user.clear(model);
-    await user.type(model, 'sonnet-4');
-    fireEvent.blur(model);
+    const trigger = await screen.findByLabelText('Default provider');
+    await user.click(trigger);
 
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('upsert_mesh_harness_override', {
-        meshId: 42,
-        harnessId: 'claude',
-        value: { model: 'sonnet-4', effort: 'high' },
-      });
-    });
+    // The inherit row plus the native harness parent rows. The bare
+    // Proxied Provider route is NOT a top-level row — it is reachable only
+    // through a saved Launch Configuration, matching every spawn surface.
+    expect(await screen.findByTestId('spawn-option-picker-menu')).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /^<Default>/ })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Claude Code' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Codex' })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: 'Anthropic' })).toBeNull();
   });
 
   it('saves Build/Run on blur', async () => {
@@ -464,34 +427,6 @@ describe('MeshPropertiesTab (issue #375)', () => {
     await user.clear(run);
     await user.keyboard('./target/debug/myapp');
     expect(run.value).toBe('./target/debug/myapp');
-  });
-
-  it('saves Effort on change and skips writes when cleared to ""', async () => {
-    const user = userEvent.setup();
-    openProbeDestination('properties');
-
-    const effort = (await screen.findByTestId('mesh-override-effort-select-claude')) as HTMLSelectElement;
-    await user.selectOptions(effort, 'medium');
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('upsert_mesh_harness_override', {
-        meshId: 42,
-        harnessId: 'claude',
-        value: { model: 'opus-4', effort: 'medium' },
-      });
-    });
-
-    // Reset to "Not set" — clearing the override value removes the
-    // sparse map entry rather than writing a blank-value entry.
-    vi.mocked(invoke).mockClear();
-    await user.selectOptions(effort, '');
-    await new Promise((r) => setTimeout(r, 20));
-    const overrideWrites = vi.mocked(invoke).mock.calls.filter(
-      ([cmd]) => cmd === 'upsert_mesh_harness_override',
-    );
-    expect(overrideWrites.length).toBe(1);
-    const latestArgs = overrideWrites[0][1] as { value?: { model: string | null; effort: string | null } };
-    expect(latestArgs.value?.effort).toBe(null);
   });
 
   it('applies a project preset to both Build and Run on a single change', async () => {
@@ -816,10 +751,10 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     path: '/repos/other',
   };
 
-  function rejectNextOverrideWrite(message: string) {
+  function rejectNextBuildWrite(message: string) {
     let armed = true;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (armed && cmd === 'upsert_mesh_harness_override') {
+      if (armed && cmd === 'update_mesh_column') {
         armed = false;
         return Promise.reject(new Error(message));
       }
@@ -851,48 +786,42 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     const user = userEvent.setup();
     openProbeDestination('properties');
 
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    await user.clear(model);
-    await user.type(model, 'sonnet-4');
-    fireEvent.blur(model);
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    await user.clear(build);
+    await user.type(build, 'cargo build --release');
+    fireEvent.blur(build);
 
-    // Wait for the save's transition: Saving… â†’ Saved. The save itself
+    // Wait for the save's transition: Saving… → Saved. The save itself
     // is fire-and-await'd inside onBlur, so the indicator resolves once
     // the IPC's `.then` runs.
     expect(await screen.findByText('Saved')).toBeTruthy();
     // And the IPC fired with the right payload.
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('upsert_mesh_harness_override', {
-        meshId: 42, harnessId: 'claude', value: { model: 'sonnet-4', effort: 'high' },
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42, column: 'build_command', value: 'cargo build --release',
       });
     });
   });
 
-  it('shows "Save failed: <message>" and rolls the field back to the last confirmed value', async () => {
+  it('shows "Save failed: <message>" and keeps the typed value for retry', async () => {
     const user = userEvent.setup();
-    rejectNextOverrideWrite('boom-model-save');
+    rejectNextBuildWrite('boom-build-save');
     openProbeDestination('properties');
 
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    expect(model.value).toBe('opus-4');
-    await user.clear(model);
-    await user.type(model, 'sonnet-4');
-    fireEvent.blur(model);
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    expect(build.value).toBe('npm run build');
+    await user.clear(build);
+    await user.type(build, 'cargo build --release');
+    fireEvent.blur(build);
 
     // The error message surfaces in the global banner. The "Save failed:"
     // prefix is part of the indicator copy so the user distinguishes it
     // from any other surface; the rest is the rejection's `.message`.
-    expect(await screen.findByText(/Save failed.*boom-model-save/)).toBeTruthy();
+    expect(await screen.findByText(/Save failed.*boom-build-save/)).toBeTruthy();
 
-    // The field's text rolls back to the last confirmed value — the
-    // user typed "sonnet-4" but the rejected save means we keep the
-    // committed "opus-4" visible. Matches the issue #1148 acceptance
-    // criterion "preserve the last confirmed override list" on a failed
-    // save (the visible draft is rolled back so the user can't mistake
-    // an unsaved edit for active configuration).
-    await waitFor(() => {
-      expect(model.value).toBe('opus-4');
-    });
+    // The tab's documented "do not revert on failure" rule: the field keeps
+    // the user's input so they can retry rather than losing their edit.
+    expect(build.value).toBe('cargo build --release');
   });
 
   it('does NOT leak an unhandled rejection on a failing blur save', async () => {
@@ -906,13 +835,13 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     // in `captured` even if the tab's component tree ate the warning.
     window.addEventListener('unhandledrejection', listener);
 
-    rejectNextOverrideWrite('boom-leak-test');
+    rejectNextBuildWrite('boom-leak-test');
     openProbeDestination('properties');
 
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    await user.clear(model);
-    await user.type(model, 'opus-4-fail');
-    fireEvent.blur(model);
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    await user.clear(build);
+    await user.type(build, 'cargo build --fail');
+    fireEvent.blur(build);
 
     // Wait past the awaited IPC + the next microtask boundary.
     await waitFor(() => {
@@ -942,12 +871,12 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
       ]),
       selectedMeshId: MESH.id,
     });
-    // Make the FIRST `upsert_mesh_harness_override` reject on the slow side
+    // Make the FIRST `update_mesh_column` reject on the slow side
     // (returns after a small delay) so we have time to switch meshes
     // before the rejection lands.
     let armed = true;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (armed && cmd === 'upsert_mesh_harness_override') {
+      if (armed && cmd === 'update_mesh_column') {
         armed = false;
         return new Promise((_, reject) =>
           setTimeout(() => reject(new Error('boom-after-switch')), 50),
@@ -967,10 +896,10 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     });
 
     openProbeDestination('properties');
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    await user.clear(model);
-    await user.type(model, 'mesh-a-edit');
-    fireEvent.blur(model);
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    await user.clear(build);
+    await user.type(build, 'mesh-a-edit');
+    fireEvent.blur(build);
 
     // Switch to mesh B before the 50ms-delayed rejection lands. The
     // SaveIndicator's `useEffect([activeMeshId])` reset already wipes
@@ -993,21 +922,21 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
 
   it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {
     const user = userEvent.setup();
-    rejectNextOverrideWrite('first-failure');
+    rejectNextBuildWrite('first-failure');
     openProbeDestination('properties');
 
-    const model = (await screen.findByTestId('mesh-override-model-input-claude')) as HTMLInputElement;
-    await user.clear(model);
-    await user.type(model, 'fail-then-succeed');
-    fireEvent.blur(model);
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    await user.clear(build);
+    await user.type(build, 'fail-then-succeed');
+    fireEvent.blur(build);
 
     expect(await screen.findByText(/Save failed/)).toBeTruthy();
 
-    // Re-arm — the next `upsert_mesh_harness_override` will succeed (the next
-    // blur on the same field). Default mock resolver returns `{}`, which
-    // the IPC treats as a clean resolution.
+    // Re-arm — the next `update_mesh_column` will succeed (the next blur
+    // on the same field). Default mock resolver returns `{}`, which the
+    // IPC treats as a clean resolution.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'upsert_mesh_harness_override') return Promise.resolve();
+      if (cmd === 'update_mesh_column') return Promise.resolve();
       if (cmd === 'list_providers') return Promise.resolve([]);
       if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
       if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
@@ -1020,9 +949,9 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     // want to confirm the error copy disappears, not test the timer.
     // (The timer is independently covered in `useSaveStatus` tests.)
 
-    await user.clear(model);
-    await user.type(model, 'recovered');
-    fireEvent.blur(model);
+    await user.clear(build);
+    await user.type(build, 'recovered');
+    fireEvent.blur(build);
 
     await waitFor(() => {
       expect(screen.queryByText(/Save failed/)).toBeNull();

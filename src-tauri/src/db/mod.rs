@@ -58,9 +58,6 @@ pub(crate) use auth::{COORDINATOR_DRIVE_TOKEN_KEY, COORDINATOR_READ_TOKEN_KEY};
 #[allow(unused_imports)]
 pub(crate) use mesh::{
     get_mesh_by_id_inner,
-    get_mesh_harness_overrides_inner,
-    upsert_mesh_harness_override_inner,
-    remove_mesh_harness_override_inner,
     count_active_autopilot_nodes_total_inner,
     get_mesh_scratchpad_inner,
     set_mesh_scratchpad_inner,
@@ -155,9 +152,6 @@ mod warm_pool_tests;
 
 #[cfg(test)]
 mod agent_node_tests;
-
-#[cfg(test)]
-mod harness_overrides_tests;
 
 #[cfg(test)]
 mod circuit_tests;

@@ -9,10 +9,8 @@
 //! ## What lives here
 //!
 //! - **Harness defaults** — `setHarnessDefault`, `clearHarnessDefault`,
-//!   `upsertMeshHarnessOverride`, `removeMeshHarnessOverride`,
-//!   `clearMeshHarnessOverrides`, `setHarnessOrder`,
-//!   `setProxiedProviderOrder` (each pair-write busts the
-//!   `providerListPromise` cache so a stale menu never lingers).
+//!   `setHarnessOrder`, `setProxiedProviderOrder` (each pair-write busts
+//!   the `providerListPromise` cache so a stale menu never lingers).
 //! - **Provider catalogue** — `listProviders` (module-scope promise cache
 //!   via `providerCache.ts`), `getDefaultProvider` (per-mesh promise
 //!   cache).
@@ -27,7 +25,7 @@
 //! - **Usage meters** — `getProviderMeters`, `getMuseSessionTelemetry`
 //!   + the `MUSE_SESSION_TELEMETRY_EVENT` constant.
 //! - **Resolved harness view** (issue #1656) — `getResolvedHarnessView`
-//!   returns the per-harness cascade (four-layer breakdown +
+//!   returns the per-harness cascade (per-layer breakdown +
 //!   capability-masked resolved value) so the UI reads the cascade
 //!   rather than re-implementing it client-side.
 //!
@@ -35,7 +33,7 @@
 //!
 //! `provider.ts` is the natural home for the new `getResolvedHarnessView`
 //! IPC command (issue #1656 Phase 1) and owns every read+write to the
-//! `AppPreferences.harness_defaults` + `meshes.harness_overrides` data.
+//! `AppPreferences.harness_defaults` data.
 //! The cache-bust discipline (`finally { setProviderListPromise(null); }`)
 //! is co-located with the wrapper that triggers it — moving the
 //! wrappers here keeps the discipline intact.
@@ -169,23 +167,6 @@ export const setHarnessDefault = (
 
 export const clearHarnessDefault = (profileId: string) =>
   _invoke<void>('clear_harness_default', { profileId });
-
-export const upsertMeshHarnessOverride = (
-  meshId: number,
-  harnessId: string,
-  value: HarnessConfigValue,
-) =>
-  _invoke<void>('upsert_mesh_harness_override', {
-    meshId,
-    harnessId,
-    value,
-  });
-
-export const removeMeshHarnessOverride = (meshId: number, harnessId: string) =>
-  _invoke<void>('remove_mesh_harness_override', { meshId, harnessId });
-
-export const clearMeshHarnessOverrides = (meshId: number) =>
-  _invoke<void>('clear_mesh_harness_overrides', { meshId });
 
 /** Reorder the spawn-menu harness rows. Busts the provider-list cache. */
 export const setHarnessOrder = async (order: string[]): Promise<void> => {
