@@ -6,10 +6,10 @@ Source inspection, deterministic automated checks, and live delivery are separat
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live request/permission receipts and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live question request/reply and a no-ID permission receipt are recorded below; authoritative permission resolution and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
-| Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live response checks pending |
-| Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Current app process restart and identity-proven Codex reattachment remain untested |
+| Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
+| Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
 | Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
@@ -42,11 +42,15 @@ worker and GitHub client performed the read-only lookup and committed its result
 | --- | --- | --- |
 | `node scripts/ui-shot.mjs --out .tmp/1889-continued-openpr.png --steps .tmp/1889-continued-openpr.mjs` | Passed: Run 47 / Circuit 47, PR 1893, attempt 1, completed run and step, acknowledged effect, 10 history entries | Live GitHub lookup through worker and durable commit; initial uncertainty was seeded |
 | Same command with `BUILDMESH_ACCEPTANCE_NOT_PERFORMED=1` and output `1889-continued-openpr-attested.png` | Passed: Run 48 / Circuit 48, PR 1893, attempt 1, acknowledged effect, 12 history entries; NotPerformed attestation retained | Actual operator IPC followed by live lookup; no deliberate retry or create |
+| Final source `7d97617`: `npm run tauri:build:dev`, then `node scripts/ui-shot.mjs --out .tmp/1889-final-openpr.png --steps .tmp/1889-continued-openpr.mjs` | Build passed; Run 51 / Circuit 51 passed, PR 1893, attempt 1, completed run and step, acknowledged effect, 10 entries | Same controlled real lookup and worker handoff on the committed implementation |
+| Final source, same script with `BUILDMESH_ACCEPTANCE_NOT_PERFORMED=1`, output `1889-final-openpr-attested.png` | Run 52 / Circuit 52 passed, PR 1893, attempt 1, acknowledged effect, 12 entries; attestation retained | Same no-create fixture and real operator IPC on final source |
 
-Both runs asserted zero new `effect_possible_dispatch` entries and retained the
+All four runs asserted zero new `effect_possible_dispatch` entries and retained the
 exact PR number and branch in durable context. Scratch JSON evidence is in
 `.tmp/1889-continued-openpr-evidence.json` and
-`.tmp/1889-continued-openpr-attested-evidence.json`. This establishes the recovery
+`.tmp/1889-continued-openpr-attested-evidence.json` (final-source runs; baseline
+copies use `1889-baseline-openpr` names). Final build log:
+`.tmp/1889-continued-final-dev-build.log`. This establishes the recovery
 lookup-to-worker handoff. It does not establish a real crash during PR creation,
 a live cancellation race, or the Codex stale-completion race.
 
@@ -58,7 +62,7 @@ the callback and could expose only a generic status-derived input wait. No
 request ID is invented, and an unrelated tool result cannot resolve the wait.
 The regression covers normalization, unrelated and wrong-session replies,
 serialized evidence restoration, and subsequent input/ready/working projections.
-This deterministic evidence is not a live permission request/reply result.
+The live no-ID PermissionRequest recorded below also exercises callback retention; exact permission request/reply resolution remains Unverified.
 
 ### Current Windows Codex foreground observation
 
@@ -80,7 +84,104 @@ receipts; this run proves rollout observation, not human-hook delivery.
 Commands used `node scripts/ui-shot.mjs --steps` with
 `.tmp/1889-continued-start.mjs` and `.tmp/1889-continued-recheck.mjs`, followed by
 `node .tmp/1889-continued-counts.mjs`. Durable state, session identity and rollout
-counts are recorded in `.tmp/1889-continued-result.json`.
+counts were recorded in `.tmp/1889-continued-result.json`. Later invocations of
+the counts script updated that scratch file with cumulative multi-turn counts;
+the one-turn result above describes the checkpoint before the question and
+permission experiments, not the final contents of that file.
+
+### Live question request and reply
+
+On the baseline dev binary (`25308d33`), the same Run 49 / attempt 1 / Agent 128
+was explicitly switched to Codex Plan mode. The real `request_user_input` tool
+asked "Which color should I use?" with Blue and Green options. The unanswered
+question was inspected in the terminal before Blue was submitted.
+
+The native PreToolUse receipt (history 485) and accepted request observation
+(486) retained request ID `call_NQ5egkF8ECx6NArJwjB4alyt`. PostToolUse receipt
+487 and accepted response observation 488 retained that exact ID, session
+`01a0d80f-8139-7861-b94a-30f8aa468f78`, incarnation `1790331283070`, and turn
+`01a0d824-a0bb-7fb3-b3bf-98ea5f30d986`. The rollout's matching function output
+contains the Blue answer. This establishes live question callback delivery and
+request/reply correlation on native Windows Codex 0.157.0 / Luna.
+
+The run was already Unverified for unavailable ownership coverage before this
+question. Its continued lack of progression does not independently prove that
+an otherwise runnable Circuit is blocked solely by human input. That acceptance
+criterion and live permission resolution remain Unverified. Native receipts
+were turn-fenced but did not establish
+Buildmesh submission correlation.
+
+Scratch evidence: `.tmp/1889-continued-human-wait.json`, with inspected captures
+`1889-continued-question-wait.png` and `1889-continued-question-answered.png`.
+Commands used the controlled Plan-mode input and answer scripts through real
+Tauri `write_to_agent` IPC. A separate Run 50 / Agent 129 attempt displayed the
+Codex welcome screen but never supplied a captured session or readable report;
+it is not counted as a passed request flow.
+
+### Actual app restart and remaining wait limitation
+
+The controlled dev watchdog (PID 77188) was stopped before its parent app
+(74412), leaving the stable app untouched. The committed implementation
+`7d97617` was built and launched with CDP 9223 (app 74068, watchdog 60212).
+Startup logged `resumed node 128`; a new `codex.exe resume` process (4916)
+started with the same saved session ID. Run 49 retained Agent 128, attempt 1,
+its persisted incarnation and question/reply observations. One spawn intent and
+one acknowledgement remained; the step stayed Unverified rather than completing.
+
+Timestamp inspection corrected the initial visual assumption that a second
+question prompt had remained unsent: a third turn and question request
+`call_0v980n2XoaOQ00yWKAE7SmkX` were recorded before shutdown (history 489/490).
+After restart the real terminal showed an interrupted conversation and no
+answerable Yes/No request. No answer was injected into that missing request.
+The displayed prompt contains text repeated during the controlled submission
+attempts; this alone is not evidence of worker replay.
+
+This establishes session resume and durable evidence retention across an actual
+app restart. It does **not** satisfy pending-human-wait restoration or complete
+work reattachment acceptance: the interrupted question was not resolved after
+restart. Evidence: `.tmp/1889-continued-restart-check.mjs`,
+`.tmp/1889-continued-restart-result.json` and the inspected
+`.tmp/1889-continued-resumed-agent128.png` capture.
+
+### Live permission attempt
+
+On the final dev binary, the resumed Agent 128 exposed the real `/permissions`
+menu. Selecting Ask for approval displayed `Permission selection requested:
+Ask for approval`. A harmless scratch-file creation then executed without a
+visible approval prompt. Its PostToolUse receipt (history 513) carried request
+ID `exec-ca309c27-9f30-4572-a160-30aa66dfca00`; the corresponding permission
+response observation (514) was rejected without a matching permission request.
+An ordinary workspace write need not require approval, so neither the menu
+selection nor this result establishes a permission request/reply round trip.
+No approval was inferred from the unmatched response.
+
+A subsequent explicit approval-required probe requested only
+`Write-Output BUILDMESH_PERMISSION_CHECK` in the disposable workspace. This
+produced a real `PermissionRequest` (history 515) with session
+`01a0d80f-8139-7861-b94a-30f8aa468f78`, turn
+`01a0d83d-a2c4-72b3-bcbf-cf23c5aad469`, and no request ID. History 516 retained
+`permission_requested` with reduced confidence, and Agent 128 became
+`awaiting_input`. This is live evidence for the new no-ID callback retention;
+it is not authoritative permission resolution.
+
+The actual terminal displayed Yes, proceed; a persistent allow option; and No.
+Only the one-time approval was selected. The terminal then showed the exact
+command and `BUILDMESH_PERMISSION_CHECK` output. During the bounded inspection,
+history still ended at the uncorrelated permission request, without a matching
+response hook. Thus the live harness approval UI and no-ID request retention
+were exercised, but authoritative request/reply resolution remains Unverified.
+Inspected captures: `.tmp/1889-continued-permission-prompt.png` and
+`.tmp/1889-continued-permission-approved.png`. No persistent command permission
+was granted.
+
+### Fixture cleanup
+
+Real Tauri IPC cancelled Runs 49 and 50 and disabled Circuits 49 and 50.
+Their histories remained present: 38 entries for Run 49 (last ID 516), 12 for
+Run 50 (last ID 484). The final permission response hook had not arrived by
+cleanup. The owned dev watchdog 60212 was stopped before app 74068; both were
+confirmed absent. The stable app was untouched. Completed OpenPr fixtures were
+already disabled and retained their completed run histories.
 
 ### Additional automated evidence
 
@@ -111,7 +212,7 @@ full Rust suite executed and passed the new permission regression.
 | Boundary inspected | Actual environment / source | Acceptance status |
 | --- | --- | --- |
 | Native Windows Codex rollout pull | CLI 0.157.0, ChatGPT login, Luna; Run 49 above | Foreground and non-replaying recheck observed; complete ownership Unverified |
-| Native Windows Codex request hooks | Configured PreToolUse/PostToolUse and PermissionRequest callbacks | No question/permission round trip established by the no-tools run; uncorrelated permissions cannot imply approval |
+| Native Windows Codex request hooks | Configured PreToolUse/PostToolUse and PermissionRequest callbacks | Question request/reply and no-ID permission request observed below; authoritative permission resolution remains Unverified. The no-tools run establishes neither |
 | Windows host / Ubuntu WSL2 | Linux 6.6.87.2-microsoft-standard-WSL2 x86_64; `/usr/bin/codex` 0.49.0 | Below the adapter's 0.154.0 hook minimum; current hook contract Unverified. Ordinary startup rejects configured effort `xhigh`; `codex -c model_reasoning_effort=low login status` confirms ChatGPT login without changing configuration. No WSL model was launched |
 | Claude native receipts | Windows CLI 2.1.282; user has no Claude account | Live delivery Unverified; authoritative submission correlation remains unavailable |
 | Other installed Windows harnesses | OpenCode 1.18.3, Kimi 0.27.0, Agy 1.2.11, Cline 3.0.62, Grok 1.0.41 | Installation does not establish a Circuit lifecycle/ownership adapter. Current observer policy marks these unsupported; no completion claim |
