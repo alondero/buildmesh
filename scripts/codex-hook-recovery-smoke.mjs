@@ -302,7 +302,7 @@ async function scenarioMissingStopAndDuplicateStart() {
   const nodeId = running.step.agent_node_id;
   console.log(`Run ${runId} attached Agent Node ${nodeId}; waiting for the omitted Stop recheck.`);
 
-  const start = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'UserPromptSubmit');
+  const start = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'UserPromptSubmit', 150_000);
   await waitFor('both duplicate UserPromptSubmit forwards', () => start.forwardCount === 2, 15_000);
   const duplicateCallbackForwardCount = start.forwardCount;
   if (duplicateCallbackForwardCount !== 2) throw new Error('Expected to record both duplicate UserPromptSubmit forwards');
@@ -366,7 +366,7 @@ async function scenarioDelayedOldTurn() {
   const runId = await startRun();
   const running = await waitForRunStep(runId, ({ step }) => step?.agent_node_id != null, `Run ${runId} Codex session attachment`);
   const nodeId = running.step.agent_node_id;
-  const firstStart = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'UserPromptSubmit');
+  const firstStart = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'UserPromptSubmit', 150_000);
   const oldStop = await relay.waitFor((event) => event.nodeId === nodeId && event.event === 'Stop', 150_000);
   if (oldStop.action !== 'delay' || relay.heldEvents().length !== 1) throw new Error('The old-turn Stop was not delayed in the fixture relay');
   const firstCheckpoint = await waitForUnverifiedCheckpoint(runId);

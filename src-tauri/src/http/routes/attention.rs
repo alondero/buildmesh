@@ -1335,7 +1335,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejected_stale_native_hook_is_recorded_without_lifecycle_projection() {
+    fn stale_and_current_native_stops_follow_the_turn_fence() {
         use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
 
         crate::db::test_support::ensure_db_for_tests();
@@ -1426,6 +1426,54 @@ mod tests {
         assert_eq!(receipt.hook.event, "Stop");
         assert!(!receipt.turn_fenced);
         assert!(receipt.explicit_turn_mismatch);
+
+        let current_body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "codex-session",
+            "turn_id": "current-turn",
+            "last_assistant_message": "current turn completion"
+        })
+        .to_string()
+        .into_bytes();
+        let current_payload = HookPayload::parse(&current_body).unwrap();
+        let current_classified = classify(&current_body, "codex", |_| Some(0));
+        let current_native_hook = NativeHook::parse("codex", &current_body).unwrap();
+        let mut accepted_projection_called = false;
+        let accepted = apply_hook_after_turn_fence(
+            node_id,
+            &mut state,
+            Some(&current_payload),
+            &current_classified,
+            Some(&current_native_hook),
+            |state, hook| {
+                accepted_projection_called = true;
+                let hook = hook.expect("matching Stop has a native receipt");
+                crate::services::circuit_worker::native_hooks::receive(
+                    node_id,
+                    hook.clone(),
+                    state.matches_turn(hook.turn_id.as_deref()),
+                    state.mismatches_turn(hook.turn_id.as_deref()),
+                )?;
+                Ok(Applied::Applied)
+            },
+        )
+        .unwrap();
+        assert!(matches!(accepted, Applied::Applied));
+        assert!(
+            accepted_projection_called,
+            "a matching current-turn Stop reaches accepted-hook projection"
+        );
+
+        let history = crate::db::circuit::evidence::native_hook_receipts(run_id, 0).unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "both stale and matching Stop receipts are durable"
+        );
+        let current_receipt: NativeReceipt = serde_json::from_str(&history[1].detail).unwrap();
+        assert_eq!(current_receipt.hook.event, "Stop");
+        assert!(current_receipt.turn_fenced);
+        assert!(!current_receipt.explicit_turn_mismatch);
 
         let db = crate::db::read_conn();
         let status: String = db
