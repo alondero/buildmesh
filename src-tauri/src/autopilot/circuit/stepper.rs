@@ -137,10 +137,39 @@ impl RunView {
         self.steps.iter().find(|s| s.node_id == node_id)
     }
 
+    fn has_human_wait(&self, node_id: &str) -> bool {
+        self.step(node_id).and_then(|step| self.context.get(&format!("node.{node_id}.evidence.{}", step.attempt)))
+            .and_then(|json| serde_json::from_str::<super::observation::WorkEvidence>(json).ok())
+            .map_or_else(|| self.context.get(&format!("node.{node_id}.human_wait")) == Some("1"), |evidence| evidence.has_human_wait())
+    }
+
+    pub(crate) fn report_has_known_blockers(&self, node_id: &str) -> bool {
+        let target = self.step(node_id).and_then(|step| step.agent_node_id).or_else(|| self.resolve_target_agent(node_id));
+        self.steps.iter().filter(|step| step.node_id == node_id || step.agent_node_id.or_else(|| self.resolve_target_agent(&step.node_id)).is_some_and(|id| Some(id) == target))
+            .any(|step| self.has_human_wait(&step.node_id) || self.context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
+                .is_some_and(|json| serde_json::from_str::<super::observation::WorkEvidence>(json)
+                    .map_or(true, |evidence| evidence.conflicted || evidence.children.values().any(|terminal| !terminal))))
+    }
+
+    fn accepts_report_binding(&self, node_id: &str, binding: &ClassificationBinding, output: Option<&str>) -> bool {
+        let Some(step) = self.step(node_id) else { return false; };
+        let owner = &binding.owner;
+        let guard = &binding.input_guard;
+        guard.report_guard.as_ref().is_some_and(|report|
+            output == Some(report.text.as_str()) && !report.text.trim().is_empty() && binding.report_revision == report.revision
+                && owner.report_revision.as_deref() == Some(report.revision.as_str()) && guard.observed_at_ms == report.published_at_ms)
+            && owner.run_id == self.run_id && owner.step_id == node_id && owner.attempt == step.attempt
+            && step.agent_node_id.or_else(|| self.resolve_target_agent(node_id)) == Some(owner.agent_node_id)
+            && owner.agent_node_id == guard.agent_node_id
+            && owner.session_id.as_deref() == Some(guard.session_id.as_str())
+            && owner.session_incarnation.as_deref() == Some(guard.session_incarnation.as_str())
+            && !self.report_has_known_blockers(node_id)
+    }
+
     pub fn evidence_deadline_ms(&self, node_id: &str) -> Option<i64> {
         let step = self.step(node_id)?;
         if self.state != RunState::Running || step.status != StepStatus::Running
-            || self.context.get(&format!("node.{node_id}.human_wait")) == Some("1")
+            || self.has_human_wait(node_id)
             || self.context.get(&format!("node.{node_id}.classification")) == Some("blocked") { return None; }
         let prefix = wait_prefix(node_id);
         if self.context.get(&format!("{prefix}.attempt"))?.parse::<i32>().ok()? != step.attempt { return None; }
@@ -156,7 +185,7 @@ impl RunView {
     pub fn classifier_evidence(&self, node_id: &str) -> Option<super::observation::WorkEvidence> {
         let target = self.resolve_target_agent(node_id)?;
         let gate = self.step(node_id)?;
-        if self.context.get(&format!("node.{node_id}.human_wait")) == Some("1") { return None; }
+        if self.has_human_wait(node_id) { return None; }
         let own = match self.context.get(&format!("node.{node_id}.evidence.{}", gate.attempt)) {
             Some(json) => Some(serde_json::from_str::<super::observation::WorkEvidence>(json).ok()?),
             None => None,
@@ -172,7 +201,7 @@ impl RunView {
             let Some(identity) = evidence.identity.as_ref() else { continue; };
             if identity.run_id != self.run_id || identity.step_id != owner.node_id || identity.attempt != owner.attempt
                 || identity.agent_node_id != target || !evidence.lifecycle_verified()
-                || self.context.get(&format!("node.{}.human_wait", owner.node_id)) == Some("1") { continue; }
+                || self.has_human_wait(&owner.node_id) { continue; }
             if own.as_ref().is_some_and(|current| current.conflicted || current.identity.as_ref().is_some_and(|current|
                 [(&current.session_id, &identity.session_id), (&current.session_incarnation, &identity.session_incarnation), (&current.turn_id, &identity.turn_id)]
                     .iter().any(|(a,b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a,b)| a != b)))) { continue; }
@@ -606,6 +635,7 @@ pub struct ClassificationBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservationInputFence {
     pub(crate) transcript_guard: Option<crate::services::transcript_reader::NativeTurnSnapshot>,
+    pub(crate) report_guard: Option<crate::services::transcript_reader::report_snapshot::ReportSnapshot>,
     pub agent_node_id: i64,
     pub input_stamp: String,
     pub observed_at_ms: i64,
@@ -697,7 +727,7 @@ fn apply_observation(run: &mut RunView, t: &mut Transition, expected: &super::ob
 
 fn finish_observed_step(run: &mut RunView, t: &mut Transition, expected: &super::observation::ObservationIdentity) {
     if !run.step(&expected.step_id).is_some_and(|s| s.attempt == expected.attempt && !s.status.is_terminal()) { return; }
-    if run.context.get(&format!("node.{}.human_wait", expected.step_id)) == Some("1") { return; }
+    if run.has_human_wait(&expected.step_id) { return; }
     let key = format!("node.{}.evidence.{}", expected.step_id, expected.attempt);
     let Some(evidence) = run.context.get(&key).and_then(|s| serde_json::from_str::<super::observation::WorkEvidence>(s).ok()) else { return; };
     let hands_off_to_classifier = matches!(run.graph.node(&expected.step_id).map(|n| &n.kind), Some(CircuitNodeKind::SpawnAgentNode { .. }))
@@ -955,7 +985,12 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             let bound: Option<String> = run
                 .steps
                 .iter()
-                .find(|s| s.status == StepStatus::Running && s.agent_node_id == Some(*agent_node_id))
+                .find(|s| if *success {
+                    s.status == StepStatus::Running && s.agent_node_id == Some(*agent_node_id)
+                } else {
+                    matches!(s.status, StepStatus::Running | StepStatus::Unverified)
+                        && s.agent_node_id.or_else(|| run.resolve_target_agent(&s.node_id)) == Some(*agent_node_id)
+                })
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
                 if let Some(out) = output {
@@ -964,7 +999,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if *success {
                     let allocation_only = matches!(run.graph.node(&step_node).map(|node| &node.kind),
                         Some(CircuitNodeKind::SpawnAgentNode { prompt, .. }) if run.context.resolve(prompt).trim().is_empty());
-                    if run.context.get(&format!("node.{step_node}.human_wait")) == Some("1") { return t; }
+                    if run.has_human_wait(&step_node) { return t; }
                     if !allocation_only {
                         unverify_step(run, &mut t, &step_node, "Process readiness or exit cannot establish assigned-work completion. Recheck lifecycle and owned-work evidence.".into());
                         return t;
@@ -983,6 +1018,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             }
         }
         CircuitEvent::AgentLost { agent_node_id } => {
+            if !matches!(run.state, RunState::Running | RunState::Paused) { return t; }
             // Match both direct (`step.agent_node_id == Some(*id)`) and
             // lineage-resolved targets — `InjectPty` / `LlmTurnClassifier` /
             // `SetNodeStatus` / `CloseAgentNode` steps carry their target
@@ -992,7 +1028,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             let bound: Option<String> = run
                 .steps
                 .iter()
-                .filter(|s| s.status == StepStatus::Running)
+                .filter(|s| matches!(s.status, StepStatus::Running | StepStatus::Unverified))
                 .find(|s| {
                     if s.agent_node_id == Some(*agent_node_id) {
                         return true;
@@ -1053,12 +1089,13 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
         } => {
             let is_waiting_classifier = matches!(
                 run.step(node_id),
-                Some(s) if s.status == StepStatus::Running
+                Some(s) if matches!(s.status, StepStatus::Running | StepStatus::Unverified)
             ) && matches!(
                 run.graph.node(node_id).map(|n| &n.kind),
                 Some(CircuitNodeKind::LlmTurnClassifier { .. }
                     | CircuitNodeKind::AwaitAgentTurn { .. }
-                    | CircuitNodeKind::ReviewVerdict { .. })
+                    | CircuitNodeKind::ReviewVerdict { .. }
+                    | CircuitNodeKind::SpawnAgentNode { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
                 let Some(attempt) = run.step(node_id).map(|step| step.attempt) else {
@@ -1081,7 +1118,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 });
                 t.context_changed = true;
                 let evidence = run.classifier_evidence(node_id);
-                let valid = binding.as_ref().zip(evidence.as_ref()).is_some_and(|(binding, evidence)| {
+                let lifecycle_verified = binding.as_ref().zip(evidence.as_ref()).is_some_and(|(binding, evidence)| {
                     evidence.identity.as_ref() == Some(&binding.owner)
                         && evidence.report.as_ref().is_some_and(|report| report.revision == binding.report_revision && output.as_deref() == Some(report.text.as_str())
                             && report.input_stamp.as_deref() == Some(binding.input_guard.input_stamp.as_str())
@@ -1090,10 +1127,15 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         && binding.owner.session_id.as_deref() == Some(binding.input_guard.session_id.as_str())
                         && binding.owner.session_incarnation.as_deref() == Some(binding.input_guard.session_incarnation.as_str())
                 });
+                let valid = lifecycle_verified || binding.as_ref().is_some_and(|binding|
+                    run.accepts_report_binding(node_id, binding, output.as_deref()));
                 if let Some(out) = output {
                     run.context.set(&format!("node.{node_id}.evaluated_output"), out.clone());
                     t.context_changed = true;
                     if valid {
+                        if matches!(run.graph.node(node_id).map(|node| &node.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })) {
+                            run.context.set(&format!("node.{node_id}.output"), out.clone());
+                        }
                         if run.context.source_agent_id() == run.resolve_target_agent(node_id) {
                             run.context.set("source.output", out.clone());
                         }
@@ -1105,22 +1147,36 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 t.classifications.push(super::observation::RecordedClassification {
                     step_id: node_id.clone(), attempt, interpretation: (*classification).into(),
                     report_revision: binding.as_ref().map(|binding| binding.report_revision.clone()),
-                    evidence_owner: binding.as_ref().map(|binding| binding.owner.clone()), lifecycle_verified: valid,
+                    evidence_owner: binding.as_ref().map(|binding| binding.owner.clone()), lifecycle_verified,
                     report_text: output.clone(),
-                    report_completeness: if valid { super::observation::ReportCompleteness::Complete }
+                    report_completeness: if lifecycle_verified { super::observation::ReportCompleteness::Complete }
                         else if output.as_ref().is_some_and(|text| !text.is_empty()) { super::observation::ReportCompleteness::Partial }
                         else { super::observation::ReportCompleteness::Unavailable },
                 });
                 if let Some(classification) = classification {
-                    if run.context.get(&format!("node.{node_id}.human_wait")) == Some("1") { return t; }
+                    if run.has_human_wait(node_id) { return t; }
                     if !valid {
-                        unverify_step(run, &mut t, node_id, "The report was interpreted, but foreground or owned-work completion remains unverified. Recheck evidence cannot bypass this requirement.".into());
+                        unverify_step(run, &mut t, node_id, "No current report could be bound to this decision, or known work remains unresolved. Waiting for fresh evidence; inspection is available in the agent terminal.".into());
                         return t;
                     }
                     let binding = binding.as_ref().expect("validated classification binding");
                     t.input_guard = Some(binding.input_guard.clone());
                     run.context.set(&format!("node.{node_id}.classified_report_revision"), &binding.report_revision);
                     run.context.set(&format!("node.{node_id}.classified_evidence_owner"), serde_json::to_string(&binding.owner).expect("serializable identity"));
+                    // A report handoff acknowledges a finished turn without
+                    // inventing native lifecycle or complete ownership proof.
+                    // Spawn steps hand their report to the downstream gate.
+                    if matches!(run.graph.node(node_id).map(|node| &node.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })) {
+                        if *classification == Classification::Completed {
+                            complete_with_outcome(run, &mut t, node_id, StepOutcome::Completed);
+                            cascade_after_completion(run, &mut t, 1);
+                            finish_run_if_done(run, &mut t);
+                        }
+                        return t;
+                    }
+                    if run.step(node_id).is_some_and(|step| step.status == StepStatus::Unverified) {
+                        set_step(run, &mut t, node_id, StepStatus::Running);
+                    }
                     if matches!(run.graph.node(node_id).map(|n| &n.kind), Some(CircuitNodeKind::ReviewVerdict { .. })) {
                         run.context.set(&format!("node.{node_id}.review_verdict_attempt"), attempt.to_string());
                         run.context.set(&format!("node.{node_id}.review_verdict"), match classification {
@@ -1220,12 +1276,13 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             // `WaitObserved`.) The gate is judged when the report changes.
             let is_waiting_classifier = matches!(
                 run.step(node_id),
-                Some(s) if s.status == StepStatus::Running
+                Some(s) if matches!(s.status, StepStatus::Running | StepStatus::Unverified)
             ) && matches!(
                 run.graph.node(node_id).map(|n| &n.kind),
                 Some(CircuitNodeKind::ReviewVerdict { .. }
                     | CircuitNodeKind::LlmTurnClassifier { .. }
-                    | CircuitNodeKind::AwaitAgentTurn { .. })
+                    | CircuitNodeKind::AwaitAgentTurn { .. }
+                    | CircuitNodeKind::SpawnAgentNode { .. })
             );
             if is_waiting_classifier && run.state == RunState::Running {
                 if let Some(attempt) = run.step(node_id).map(|step| step.attempt) {
@@ -2513,6 +2570,33 @@ mod tests {
         assert_eq!(run.state,RunState::Running);
         assert!(transition.effects.is_empty());
         assert!(run.step("notify").is_none());
+    }
+
+    #[test]
+    fn lost_agent_releases_an_unverified_run() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        advance(&mut run, &agent_finished(900, true));
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+        let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
+        assert_eq!(run.state, RunState::Failed);
+        assert!(transition.run_state_changed);
+    }
+
+    #[test]
+    fn agent_error_releases_running_and_unverified_source_gates() {
+        for status in [StepStatus::Running, StepStatus::Unverified] {
+            let mut run = gate_run("classify", CircuitNodeKind::LlmTurnClassifier { target_node_id: None }, &[]);
+            fire_to_gate(&mut run, "classify");
+            run.step_mut("classify").unwrap().status = status;
+            let transition = advance(&mut run, &agent_finished(900, false));
+            assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
+            assert_eq!(run.state, RunState::Failed);
+            assert!(transition.run_state_changed);
+        }
     }
 
     #[test]

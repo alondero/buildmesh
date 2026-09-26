@@ -787,6 +787,13 @@ pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, Str
 ///
 /// Generated to src/types/generated/OpenPr.ts (issue #404). `i64` carries
 /// `#[ts(as = "i32")]` so it emits `number` (matches `GitHubIssue.number`).
+///
+/// The four `head_*` fields are the spawn inputs the PR pill's
+/// "Spawn reviewer agent" path forwards to `create_pr_node` (the same values
+/// the Pull Requests probe's `+` passes from `get_repo_pulls`). They ride
+/// along on the already-fetched `PullRequest`, so the spawn needs no second
+/// GitHub call. Empty strings keep their existing "unknown / skip" semantics
+/// on the spawn path (see `validate_pr_spawn_inputs` and `head_sha`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "OpenPr.ts")]
 pub struct OpenPr {
@@ -795,6 +802,17 @@ pub struct OpenPr {
     pub url: String,
     pub title: String,
     pub draft: bool,
+    /// PR's source-branch ref name (GitHub `head.ref`). Empty when unknown.
+    pub head_ref: String,
+    /// PR's head commit SHA (GitHub `head.sha`) — the exact-pinning handle
+    /// (issue #444). Empty when unknown, which skips the drift check.
+    pub head_sha: String,
+    /// Owner login of the PR's head repo (`head.repo.owner.login`). For
+    /// same-repo PRs this is the destination owner; empty when unknown.
+    pub head_repo_owner: String,
+    /// Clone URL of the PR's head repo (`head.repo.clone_url`). Paired with
+    /// `head_repo_owner` for fork PRs (issue #443); empty when unknown.
+    pub head_repo_clone_url: String,
 }
 
 /// Find the open PR for the branch an agent node is working on, if any.
@@ -853,6 +871,10 @@ pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenP
         url: pr.html_url,
         title: pr.title,
         draft: pr.draft,
+        head_ref: pr.head_ref,
+        head_sha: pr.head_sha,
+        head_repo_owner: pr.head_repo_owner,
+        head_repo_clone_url: pr.head_repo_clone_url,
     }))
 }
 

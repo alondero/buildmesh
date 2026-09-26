@@ -36,8 +36,8 @@ it('renders wait, capacity, configuration and recovery history with source, disp
       detail: JSON.stringify({ behavior_revision: 1, graph_sha256: 'abcdef0123456789', reviewers: [{ node_id: 'reviewer' }] }) }),
     historyEntry({ id: 4, kind: 'operator_attestation', node_id: 'open_pr', attempt: 1, source: 'operator', disposition: 'not_performed',
       detail: 'Operator-recorded outcome (NotPerformed): Confirmed request was rejected before dispatch' }),
-    historyEntry({ id: 5, kind: 'recovery', source: 'operator', disposition: 'applied',
-      detail: JSON.stringify({ successor_run_id: 88, rounds: 2 }) }),
+    historyEntry({ id: 5, kind: 'review_continuation', source: 'operator', disposition: 'applied',
+      detail: JSON.stringify({ from_run_id: 88 }) }),
   ], coverage: [], checkpoints: [] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
@@ -45,17 +45,17 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   expect(screen.getByText(/Step capacity wait — step slots busy · agent slot free/)).toBeTruthy();
   expect(screen.getByText(/behavior revision 1/)).toBeTruthy();
   expect(screen.getByText(/graph abcdef012345…/)).toBeTruthy();
-  expect(screen.getByText(/Recovered into run #88 \(2 round/)).toBeTruthy();
+  expect(screen.getByText(/Continued a failed review — this run follows run #88/)).toBeTruthy();
   expect(screen.getByText(/does not grant permission or review approval/)).toBeTruthy();
   // Uniform provenance line for non-observation entries.
   expect(screen.getByText('Source: circuit_worker.admission · waiting')).toBeTruthy();
   expect(screen.getByText('Source: operator · applied')).toBeTruthy();
   // Machine-readable disposition + wrap-first (no truncation) at 240px.
-  const recovery = screen.getByTestId('history-entry-5');
-  expect(recovery.dataset.historyKind).toBe('recovery');
-  expect(recovery.dataset.disposition).toBe('applied');
-  expect(recovery.className).toContain('break-words');
-  expect(recovery.querySelector('.truncate')).toBeNull();
+  const continuation = screen.getByTestId('history-entry-5');
+  expect(continuation.dataset.historyKind).toBe('review_continuation');
+  expect(continuation.dataset.disposition).toBe('applied');
+  expect(continuation.className).toContain('break-words');
+  expect(continuation.querySelector('.truncate')).toBeNull();
   const capacity = screen.getByTestId('history-entry-2');
   expect(capacity.textContent).toContain('spawn');
   expect(capacity.textContent).toContain('attempt 2');
@@ -197,6 +197,18 @@ it('keeps an interpretation separate from lifecycle proof and shows its exact re
   expect(screen.getByText('Evidence owner: reviewer \u00b7 Attempt 1')).toBeTruthy();
 });
 
+
+it('names the run a continued review follows even after the run context is compacted away', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [{ ...entry, id: 1, node_id: null,
+    attempt: null, kind: 'review_continuation', detail: '{"from_run_id":11}' }], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText('Continued a failed review')).toBeTruthy();
+  // Rendered from the entry's own detail (issue #1909), so it survives context
+  // compaction without a raw JSON fallback.
+  expect(screen.getByText(/this run follows run #11/)).toBeTruthy();
+  expect(container.querySelector('pre')).toBeNull();
+});
 
 it('shows unsupported ownership and the evidence deadline without promising live delivery', async () => {
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [], checkpoints: [], coverage: [{

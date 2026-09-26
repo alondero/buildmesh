@@ -96,9 +96,15 @@ pub fn to_host_path(path: String) -> String {
     env::to_host_path(&path)
 }
 
-/// Open a file in the system default editor (VS Code)
-// Offloaded via `run_blocking`: process creation on a loaded Windows box can
-// take tens of ms — cheap, but no reason to park a bounded tokio worker.
+/// Open a file in the host's default application for its type — VS Code for
+/// the types it has registered, whatever the user chose for the rest.
+///
+/// The path goes to the OS in one call (`ShellExecuteExW`, through the opener
+/// plugin). Going back to spawning the `code` CLI would reintroduce a shell
+/// hop: it is a `.cmd` shim on Windows, so it needs `cmd /c start`, and that
+/// batch file allocates a console — a terminal window flashing on every click.
+// Offloaded via `run_blocking`: the shell's association lookup is synchronous
+// and can block on a slow handler or a cold UNC path.
 #[command]
 pub async fn open_in_editor(path: String) -> Result<(), String> {
     crate::commands::run_blocking("open_in_editor", move || open_in_editor_blocking(path)).await
@@ -108,23 +114,12 @@ pub async fn open_in_editor(path: String) -> Result<(), String> {
 fn open_in_editor_blocking(path: String) -> Result<(), String> {
     let host_path = env::to_host_path(&path);
 
-    #[cfg(target_os = "windows")]
-    {
-        command_no_window("cmd.exe")
-            .args(["/c", "start", "code", &host_path])
-            .spawn()
-            .map_err(|e| format!("Failed to open editor: {}", e))?;
+    if !Path::new(&host_path).exists() {
+        return Err(format!("Path does not exist: {}", host_path));
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        command_no_window("code")
-            .arg(&host_path)
-            .spawn()
-            .map_err(|e| format!("Failed to open editor: {}", e))?;
-    }
-
-    Ok(())
+    tauri_plugin_opener::open_path(&host_path, None::<&str>)
+        .map_err(|e| format!("Failed to open editor: {}", e))
 }
 
 /// Open a folder in the OS file manager (Explorer on Windows, Finder on macOS,
@@ -267,5 +262,17 @@ mod tests {
         let result = open_in_file_manager_blocking(manifest);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("is not a directory"));
+    }
+
+    #[test]
+    fn test_open_in_editor_rejects_missing_path() {
+        // A path that cannot exist anywhere — the guard must fail before the
+        // path reaches the OS, so the test asserts no editor is ever handed a
+        // dangling path (and stays side-effect free on every platform).
+        let result = open_in_editor_blocking(
+            "Z:\\definitely-not-a-real-buildmesh-path-12345".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
     }
 }

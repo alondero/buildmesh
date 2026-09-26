@@ -1143,117 +1143,133 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // Keep the session fence above, but let Circuit ownership validate
             // child termination independently of the foreground attention gate.
             if let Some(hook) = native_hook.as_ref().filter(|hook| hook.event == "SubagentStop" && hook.child_id.is_some()) {
-                crate::services::circuit_worker::native_hooks::receive(session_id, hook.clone(), state.matches_turn(hook.turn_id.as_deref()))?;
+                crate::services::circuit_worker::native_hooks::receive(
+                    session_id,
+                    hook.clone(),
+                    state.matches_turn(hook.turn_id.as_deref()),
+                    state.mismatches_turn(hook.turn_id.as_deref()),
+                )?;
                 return Ok(Applied::Applied);
             }
-            if let Some(payload) = hook_payload {
-                // `PostToolUse` is catch-all in Codex. Only an approval marker
-                // makes it a lifecycle resume; ordinary tool output is
-                // correlation-neutral and must not spam `work_resumed`.
-                if !accept_hook(&mut state, &payload, &classified) {
-                    return Ok(Applied::StaleDropped);
-                }
-            }
-            let receipt_result = if let Some(hook) = native_hook {
-                let turn_fenced = state.matches_turn(hook.turn_id.as_deref());
-                crate::services::circuit_worker::native_hooks::receive(session_id, hook, turn_fenced)
-            } else { Ok(()) };
+            let applied = apply_hook_after_turn_fence(
+                session_id,
+                &mut state,
+                hook_payload.as_ref(),
+                &classified,
+                native_hook.as_ref(),
+                |state, native_hook| {
+                    // `PostToolUse` is catch-all in Codex. Only an approval marker
+                    // makes it a lifecycle resume; ordinary tool output is
+                    // correlation-neutral and must not spam `work_resumed`.
+                    let receipt_result = if let Some(hook) = native_hook {
+                        let turn_fenced = state.matches_turn(hook.turn_id.as_deref());
+                        let explicit_turn_mismatch = state.mismatches_turn(hook.turn_id.as_deref());
+                        crate::services::circuit_worker::native_hooks::receive(
+                            session_id,
+                            hook.clone(),
+                            turn_fenced,
+                            explicit_turn_mismatch,
+                        )
+                    } else { Ok(()) };
 
-            // A Kimi task notification can race with the foreground Stop.
-            // While the model is still active it is correlation-only; after
-            // the foreground turn has ended it is the authoritative clean
-            // completion. This prevents an asynchronous background callback
-            // from flipping an active turn to Ready.
-            let decision = normalize_decision(
-                classified_decision,
-                &state,
-                codex_permission_pending,
-            );
+                    // A Kimi task notification can race with the foreground Stop.
+                    // While the model is still active it is correlation-only; after
+                    // the foreground turn has ended it is the authoritative clean
+                    // completion. This prevents an asynchronous background callback
+                    // from flipping an active turn to Ready.
+                    let decision = normalize_decision(
+                        classified_decision,
+                        &state,
+                        codex_permission_pending,
+                    );
 
-            // A real, high-confidence callback proves hook delivery — persist
-            // the node's signal health as Ok so a provisioning failure earlier
-            // in the spawn doesn't linger. A degraded (unparseable/fieldless)
-            // callback does NOT clear a failure: its event says Degraded and
-            // the persisted health must agree (issue #1364 §3).
-            if decision != Decision::Ignore {
-                let _ = crate::db::update_agent_node_signal_health(
-                    session_id,
-                    Some(detail.signal_health),
-                );
-            }
+                    // A real, high-confidence callback proves hook delivery — persist
+                    // the node's signal health as Ok so a provisioning failure earlier
+                    // in the spawn doesn't linger. A degraded (unparseable/fieldless)
+                    // callback does NOT clear a failure: its event says Degraded and
+                    // the persisted health must agree (issue #1364 §3).
+                    if decision != Decision::Ignore {
+                        let _ = crate::db::update_agent_node_signal_health(
+                            session_id,
+                            Some(detail.signal_health),
+                        );
+                    }
 
-            match decision {
-                Decision::Running => {
-                    // Every disposition must be visible in the log: a node
-                    // that was marked (or cleared) without a line explaining
-                    // why is undiagnosable after the fact (run 163 review).
-                    tracing::info!(
-                        "attention webhook for node {}: harness resumed the turn — \
-                         node lands in Running",
-                        session_id
-                    );
-                    let _ = crate::agent::session_lifecycle::on_hook_running_with_detail(
-                        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app }, session_id, &detail,
-                    );
-                }
-                Decision::MarkInput => {
-                    tracing::info!(
-                        "attention webhook for node {}: the agent is waiting for input — \
-                         node lands in AwaitingInput",
-                        session_id
-                    );
-                    crate::node_turn::publish_with_signal(
-                        session_id,
-                        app,
-                        detail.semantic_turn.clone(),
-                        detail,
-                    );
-                }
-                Decision::Ready => {
-                    tracing::info!(
-                        "attention webhook for node {}: clean turn completion — \
-                         node lands in Ready (issue #1364)",
-                        session_id
-                    );
-                    // Naming and the autopilot pipeline still see the turn
-                    // (`publish_passive`), then the lifecycle writes `Ready`
-                    // and emits `agent-lifecycle` on both transports. No
-                    // `attention-needed`, no autoclear arm.
-                    crate::node_turn::publish_ready(session_id, app, detail);
-                }
-                Decision::SuppressPendingBackground => {
-                    tracing::info!(
-                        "attention webhook for node {}: background tasks still pending — \
-                         turn published without attention marking (issue #878)",
-                        session_id
-                    );
-                    crate::node_turn::publish_background(session_id, app, detail);
-                }
-                Decision::BackgroundTaskCompleted => {
-                    // Keep the webhook fail-open if a future caller bypasses
-                    // `effective_decision`; an unexpected correlation event
-                    // must never panic the HTTP handler or kill its request
-                    // task.
-                    tracing::warn!(
-                        "attention webhook for node {} received an unnormalized background completion",
-                        session_id
-                    );
-                }
-                Decision::CodexToolResult => {
-                    tracing::warn!(
-                        "attention webhook for node {} received an unnormalized Codex tool result",
-                        session_id
-                    );
-                }
-                Decision::Ignore => {
-                    tracing::debug!(
-                        "attention webhook for node {}: lifecycle-neutral hook, session capture only",
-                        session_id
-                    );
-                }
-            }
-            receipt_result?;
-            Ok(Applied::Applied)
+                    match decision {
+                        Decision::Running => {
+                            // Every disposition must be visible in the log: a node
+                            // that was marked (or cleared) without a line explaining
+                            // why is undiagnosable after the fact (run 163 review).
+                            tracing::info!(
+                                "attention webhook for node {}: harness resumed the turn — \
+                                 node lands in Running",
+                                session_id
+                            );
+                            let _ = crate::agent::session_lifecycle::on_hook_running_with_detail(
+                                &crate::agent::session_lifecycle::AppSessionLifecycleSink { app }, session_id, &detail,
+                            );
+                        }
+                        Decision::MarkInput => {
+                            tracing::info!(
+                                "attention webhook for node {}: the agent is waiting for input — \
+                                 node lands in AwaitingInput",
+                                session_id
+                            );
+                            crate::node_turn::publish_with_signal(
+                                session_id,
+                                app,
+                                detail.semantic_turn.clone(),
+                                detail,
+                            );
+                        }
+                        Decision::Ready => {
+                            tracing::info!(
+                                "attention webhook for node {}: clean turn completion — \
+                                 node lands in Ready (issue #1364)",
+                                session_id
+                            );
+                            // Naming and the autopilot pipeline still see the turn
+                            // (`publish_passive`), then the lifecycle writes `Ready`
+                            // and emits `agent-lifecycle` on both transports. No
+                            // `attention-needed`, no autoclear arm.
+                            crate::node_turn::publish_ready(session_id, app, detail);
+                        }
+                        Decision::SuppressPendingBackground => {
+                            tracing::info!(
+                                "attention webhook for node {}: background tasks still pending — \
+                                 turn published without attention marking (issue #878)",
+                                session_id
+                            );
+                            crate::node_turn::publish_background(session_id, app, detail);
+                        }
+                        Decision::BackgroundTaskCompleted => {
+                            // Keep the webhook fail-open if a future caller bypasses
+                            // `effective_decision`; an unexpected correlation event
+                            // must never panic the HTTP handler or kill its request
+                            // task.
+                            tracing::warn!(
+                                "attention webhook for node {} received an unnormalized background completion",
+                                session_id
+                            );
+                        }
+                        Decision::CodexToolResult => {
+                            tracing::warn!(
+                                "attention webhook for node {} received an unnormalized Codex tool result",
+                                session_id
+                            );
+                        }
+                        Decision::Ignore => {
+                            tracing::debug!(
+                                "attention webhook for node {}: lifecycle-neutral hook, session capture only",
+                                session_id
+                            );
+                        }
+                    }
+                    receipt_result?;
+                    Ok(Applied::Applied)
+                },
+            )?;
+            Ok(applied)
         },
     )
     .await;
@@ -1278,9 +1294,197 @@ enum Applied {
     StaleDropped,
 }
 
+/// Apply the turn fence before the route can update the node's lifecycle
+/// projection. A stale native event is retained as rejected Circuit history,
+/// then returned to the caller so it can take the early `StaleDropped` path.
+fn apply_hook_after_turn_fence(
+    session_id: i64,
+    state: &mut crate::agent::hook_state::HookState,
+    payload: Option<&HookPayload>,
+    classified: &Classified,
+    native_hook: Option<&crate::services::circuit_worker::native_hooks::NativeHook>,
+    on_accepted: impl FnOnce(
+        &mut crate::agent::hook_state::HookState,
+        Option<&crate::services::circuit_worker::native_hooks::NativeHook>,
+    ) -> Result<Applied, String>,
+) -> Result<Applied, String> {
+    if let Some(payload) = payload {
+        if !accept_hook(state, payload, classified) {
+            // Preserve an explicitly old-turn native lifecycle event for
+            // Circuit history while keeping it out of the active session
+            // projection. A missing optional turn ID is not an explicit
+            // mismatch and creates no native receipt on this rejected path.
+            if let Some(hook) =
+                native_hook.filter(|hook| state.mismatches_turn(hook.turn_id.as_deref()))
+            {
+                crate::services::circuit_worker::native_hooks::receive(
+                    session_id,
+                    hook.clone(),
+                    false,
+                    true,
+                )?;
+            }
+            return Ok(Applied::StaleDropped);
+        }
+    }
+    on_accepted(state, native_hook)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_and_current_native_stops_follow_the_turn_fence() {
+        use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
+
+        crate::db::test_support::ensure_db_for_tests();
+        let unique = format!(
+            "issue1905-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let (node_id, run_id) = {
+            let db = crate::db::write_conn();
+            db.execute(
+                "INSERT INTO meshes (name, path) VALUES (?1, ?2)",
+                rusqlite::params![unique, format!("/tmp/{unique}")],
+            )
+            .unwrap();
+            let mesh_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO agent_nodes (mesh_id, name, path, provider, status, session_started_at)
+                 VALUES (?1, ?2, ?3, 'codex', 'awaiting_input', 1000)",
+                rusqlite::params![mesh_id, format!("node-{unique}"), format!("/tmp/{unique}")],
+            )
+            .unwrap();
+            let node_id = db.last_insert_rowid();
+            let graph = crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work")
+                .to_json()
+                .unwrap();
+            db.execute(
+                "INSERT INTO autopilot_circuits (mesh_id, name, graph_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![mesh_id, format!("circuit-{unique}"), graph],
+            )
+            .unwrap();
+            let circuit_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO autopilot_circuit_runs
+                    (circuit_id, mesh_id, trigger_identity, state, source_agent_node_id)
+                 VALUES (?1, ?2, ?3, 'running', ?4)",
+                rusqlite::params![circuit_id, mesh_id, unique, node_id],
+            )
+            .unwrap();
+            let run_id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO autopilot_circuit_run_steps
+                    (run_id, node_id, attempt, status, agent_node_id)
+                 VALUES (?1, 'spawn', 1, 'running', ?2)",
+                rusqlite::params![run_id, node_id],
+            )
+            .unwrap();
+            (node_id, run_id)
+        };
+
+        let body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "codex-session",
+            "turn_id": "old-turn",
+            "last_assistant_message": "stale completion must not update the current node"
+        })
+        .to_string()
+        .into_bytes();
+        let payload = HookPayload::parse(&body).unwrap();
+        let classified = classify(&body, "codex", |_| Some(0));
+        assert_eq!(classified.decision, Decision::Ready);
+        let native_hook = NativeHook::parse("codex", &body).unwrap();
+        let mut state = crate::agent::hook_state::HookState::default();
+        assert!(state.accepts(Some("current-turn"), true));
+
+        let mut lifecycle_projection_called = false;
+        let applied = apply_hook_after_turn_fence(
+            node_id,
+            &mut state,
+            Some(&payload),
+            &classified,
+            Some(&native_hook),
+            |_, _| {
+                lifecycle_projection_called = true;
+                Ok(Applied::Applied)
+            },
+        )
+        .unwrap();
+        assert!(matches!(applied, Applied::StaleDropped));
+        assert!(
+            !lifecycle_projection_called,
+            "a rejected turn must return before accepted-hook projection"
+        );
+
+        let history = crate::db::circuit::evidence::native_hook_receipts(run_id, 0).unwrap();
+        assert_eq!(history.len(), 1, "the rejected native event is durable");
+        let receipt: NativeReceipt = serde_json::from_str(&history[0].detail).unwrap();
+        assert_eq!(receipt.hook.event, "Stop");
+        assert!(!receipt.turn_fenced);
+        assert!(receipt.explicit_turn_mismatch);
+
+        let current_body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "codex-session",
+            "turn_id": "current-turn",
+            "last_assistant_message": "current turn completion"
+        })
+        .to_string()
+        .into_bytes();
+        let current_payload = HookPayload::parse(&current_body).unwrap();
+        let current_classified = classify(&current_body, "codex", |_| Some(0));
+        let current_native_hook = NativeHook::parse("codex", &current_body).unwrap();
+        let mut accepted_projection_called = false;
+        let accepted = apply_hook_after_turn_fence(
+            node_id,
+            &mut state,
+            Some(&current_payload),
+            &current_classified,
+            Some(&current_native_hook),
+            |state, hook| {
+                accepted_projection_called = true;
+                let hook = hook.expect("matching Stop has a native receipt");
+                crate::services::circuit_worker::native_hooks::receive(
+                    node_id,
+                    hook.clone(),
+                    state.matches_turn(hook.turn_id.as_deref()),
+                    state.mismatches_turn(hook.turn_id.as_deref()),
+                )?;
+                Ok(Applied::Applied)
+            },
+        )
+        .unwrap();
+        assert!(matches!(accepted, Applied::Applied));
+        assert!(
+            accepted_projection_called,
+            "a matching current-turn Stop reaches accepted-hook projection"
+        );
+
+        let history = crate::db::circuit::evidence::native_hook_receipts(run_id, 0).unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "both stale and matching Stop receipts are durable"
+        );
+        let current_receipt: NativeReceipt = serde_json::from_str(&history[1].detail).unwrap();
+        assert_eq!(current_receipt.hook.event, "Stop");
+        assert!(current_receipt.turn_fenced);
+        assert!(!current_receipt.explicit_turn_mismatch);
+
+        let db = crate::db::read_conn();
+        let status: String = db
+            .query_row(
+                "SELECT status FROM agent_nodes WHERE id = ?1",
+                [node_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "awaiting_input", "stale Stop must skip Ready projection");
+    }
 
     #[test]
     fn native_question_resolution_unblocks_completion_and_old_turns_stay_stale() {

@@ -29,11 +29,22 @@ fn shell_for(platform: Platform) -> WindowsShell {
 }
 
 fn base_flags() -> Vec<String> {
+    let sandbox = if std::env::var_os(CODEX_HOOK_RELAY_ENV).is_some() {
+        // Controlled hook-delivery runs may exercise real callbacks, but
+        // must not give the model a path to alter the fixture or workspace.
+        "read-only"
+    } else {
+        "danger-full-access"
+    };
+    base_flags_with_sandbox(sandbox)
+}
+
+fn base_flags_with_sandbox(sandbox: &str) -> Vec<String> {
     vec![
         "--ask-for-approval".into(),
         "never".into(),
         "--sandbox".into(),
-        "danger-full-access".into(),
+        sandbox.into(),
         // Buildmesh owns the terminal surface and persists its scrollback.
         // Codex's inline mode keeps completed output in that scrollback instead
         // of confining it to the alternate screen buffer (issue #1089). This
@@ -78,9 +89,30 @@ fn attention_hook_windows_fallback_command(url: &str) -> String {
     )
 }
 
+const CODEX_HOOK_RELAY_ENV: &str = "BUILDMESH_CODEX_HOOK_RELAY_URL";
+
+fn attention_hook_url(node_id: i64, app_port: u16, relay_url: Option<&str>) -> String {
+    let app_path = format!("/api/attention/{node_id}");
+    if let Some(origin) = relay_url.and_then(valid_loopback_relay_origin) {
+        return format!("{origin}{app_path}?forward_port={app_port}");
+    }
+    format!("http://localhost:{app_port}{app_path}")
+}
+
+fn valid_loopback_relay_origin(value: &str) -> Option<&str> {
+    let origin = value.trim().trim_end_matches('/');
+    let authority = origin.strip_prefix("http://")?;
+    let (host, port) = authority.rsplit_once(':')?;
+    if host != "127.0.0.1" || port.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+        return None;
+    }
+    Some(origin)
+}
+
 fn attention_hook_handler(node_id: i64) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
-    let url = format!("http://localhost:{port}/api/attention/{node_id}");
+    let relay_url = std::env::var(CODEX_HOOK_RELAY_ENV).ok();
+    let url = attention_hook_url(node_id, port, relay_url.as_deref());
     serde_json::json!({
         "type": "command",
         "command": if cfg!(windows) {
@@ -1798,6 +1830,37 @@ mod tests {
             "{script}"
         );
         assert!(script.ends_with("exit 0"), "{script}");
+    }
+
+    #[test]
+    fn codex_hook_relay_override_is_opt_in_and_loopback_only() {
+        assert_eq!(
+            attention_hook_url(42, 2992, Some("http://127.0.0.1:43123/")),
+            "http://127.0.0.1:43123/api/attention/42?forward_port=2992"
+        );
+        for relay in [
+            "https://127.0.0.1:43123",
+            "http://example.test:43123",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:43123/path",
+            "http://user@127.0.0.1:43123",
+        ] {
+            assert_eq!(
+                attention_hook_url(42, 2992, Some(relay)),
+                "http://localhost:2992/api/attention/42",
+                "invalid relay must leave the app's local callback intact: {relay}"
+            );
+        }
+        assert_eq!(
+            attention_hook_url(42, 1992, None),
+            "http://localhost:1992/api/attention/42"
+        );
+        assert!(base_flags_with_sandbox("read-only")
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(base_flags_with_sandbox("danger-full-access")
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "danger-full-access"]));
     }
 
     #[cfg(unix)]

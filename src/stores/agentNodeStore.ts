@@ -351,6 +351,14 @@ interface AgentNodeState {
   /// pattern: a skipped fetch must never leave event state unapplied).
   refreshIfStale: (nodeIds?: number[]) => Promise<void>;
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean, configurationId?: string) => Promise<AgentNode>;
+  /// Insert a node the backend just created but that did not come back through
+  /// `createAgentNode` (e.g. `create_pr_node`'s reviewer sibling). Insert-if-
+  /// absent: the `node-created` listener's async `fetchAgentNodes` may have
+  /// already delivered the row, and its version must win. Exists so a caller
+  /// can act on the new id immediately — `nodeActivityStore.groupNodes` bails
+  /// unless both ids are in `nodesById`, so grouping a fresh spawn would
+  /// otherwise race the event-driven refresh.
+  adoptAgentNode: (node: AgentNode) => void;
   /// Sidebar "click + or pick provider" entrypoint — creates a node on the
   /// mesh, sets it active, and selects the mesh. The three steps live behind
   /// one action (issue #283) so the invariant — "only switch active mesh/node
@@ -768,6 +776,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({ error: formatError(e) });
       throw e;
     }
+  },
+
+  adoptAgentNode: (node) => {
+    // Insert-if-absent (never clobber): the `node-created` listener's fetch may
+    // already have delivered a fresher row, and this is only a bridge so a
+    // caller can act on the id before that fetch lands.
+    set((state) => state.nodesById[node.id] ? state : {
+      nodesById: { ...state.nodesById, [node.id]: node },
+      nodeIds: [...state.nodeIds, node.id],
+    });
   },
 
   selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean, initialPrompt?: string, configurationId?: string): Promise<AgentNode> => {

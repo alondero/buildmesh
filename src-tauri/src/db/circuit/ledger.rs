@@ -194,6 +194,14 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
 ) -> Result<i64, String> {
+    // Successor-dedupe fence. Re-resolving the lineage here — after the
+    // command's own `existing_review_successor` read, and under the same writer
+    // lock that mints the run — is what makes two overlapping continuation
+    // requests collapse onto one successor. Callers reach this through
+    // `continue_failed_review`, which takes the process-global writer, so the
+    // window between the first read and this one is serialized rather than
+    // racy. The per-source live-run check inside
+    // `create_node_circuit_run_with_recovery_locked` is the second fence.
     let recovery = match super::recovery::continuation_target_inner(db, recovery.run_id)? {
         super::recovery::ContinuationTarget::Existing(id) => return Ok(id),
         super::recovery::ContinuationTarget::Failed(id) if id != recovery.run_id =>
@@ -327,6 +335,7 @@ fn create_node_circuit_run_with_recovery_locked(
     recovery: Option<super::recovery::ReviewRecovery>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
+    let continued_from = recovery.as_ref().map(|recovery| recovery.run_id);
     let (reviewer_provider, preferences) = reviewer;
     let app_reviewer = preferences.and_then(|p| p.reviewer_provider.clone());
     let reviewer_override = if selected_circuit_id.is_none() && recovery.is_none() {
@@ -463,10 +472,6 @@ fn create_node_circuit_run_with_recovery_locked(
         pin_review_launches(&tx, circuit_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
     }
     context.set("retry.attempt", "1");
-    // Capture the failed run before `recovery` is consumed: the successor's
-    // `recovery.from_run_id` context and the predecessor's recovery history
-    // entry must agree (issue #1909).
-    let predecessor_run_id = recovery.as_ref().map(|recovery| recovery.run_id);
     if let Some(recovery) = &recovery {
         context.set("recovery.from_run_id", recovery.run_id.to_string());
     }
@@ -480,22 +485,21 @@ fn create_node_circuit_run_with_recovery_locked(
         params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?, node_id],
     ).map_err(|e| e.to_string())?;
     let run_id = tx.last_insert_rowid();
-    // A continuation is an operator recovery action; record it on the failed
-    // predecessor so its history names the successor run and disposition.
-    if let Some(predecessor) = predecessor_run_id {
-        super::evidence::append_history(
-            &tx,
-            predecessor,
-            None,
-            None,
-            "recovery",
-            &serde_json::json!({"successor_run_id": run_id, "rounds": max_rounds}).to_string(),
-            Some(super::evidence::SOURCE_OPERATOR),
-            Some(super::evidence::DISPOSITION_APPLIED),
-        )
-        .map_err(|e| e.to_string())?;
-    }
     super::evidence::pin_graph(&tx, run_id).map_err(|e| e.to_string())?;
+    // The lineage is also written to this run's own append-only history, so an
+    // operator reading Circuit Run History sees which run this one follows
+    // without having to read run context. It is an audit record, not a lookup
+    // path: the successor dedupe reads `recovery.from_run_id` from the context
+    // (see `recovery::continuation_target_inner`), and a sweep deletes a run's
+    // history rows along with the run. The failed ancestor is never written to
+    // — its ledger stays immutable. A continuation is an operator recovery
+    // action, so the entry names its source and disposition (issue #1909).
+    if let Some(continued_from) = continued_from {
+        super::evidence::append_history(&tx, run_id, None, None, "review_continuation",
+            &serde_json::json!({ "from_run_id": continued_from }).to_string(),
+            Some(super::evidence::SOURCE_OPERATOR),
+            Some(super::evidence::DISPOSITION_APPLIED)).map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run_id)
 }
@@ -1987,14 +1991,19 @@ mod reviewer_tests {
         }]).unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
-        // Recovery history (issue #1909): the failed predecessor records the
-        // continuation as an operator action naming the successor run.
+        // Recovery history (issue #1909): the successor's own history records
+        // the continuation as an operator action naming the run it follows.
         let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
-            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='recovery'",
-            params![first], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
+            params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["successor_run_id"].as_i64(), Some(successor));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
+        let predecessor_rows: i64 = db.query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind IN ('recovery','review_continuation')",
+            params![first], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(predecessor_rows, 0, "the failed ancestor's ledger stays immutable");
         let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
         assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()));
         assert_eq!(serde_json::to_value(read_snapshot(&db, successor)).unwrap(), serde_json::to_value(&frozen).unwrap());
@@ -2004,9 +2013,8 @@ mod reviewer_tests {
         assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
     }
 
-    /// Issue #1909 acceptance: the recovery entry survives a restart, and the
-    /// predecessor's recorded successor id still agrees with the reopened
-    /// successor's `recovery.from_run_id` after the database is reopened.
+    /// Issue #1909 acceptance: the continuation history survives a restart, and
+    /// the reopened successor's recorded lineage still agrees with its context.
     #[test]
     fn circuit_recovery_history_survives_reopen_and_matches_successor_context() {
         use crate::autopilot::circuit::context::CircuitContext;
@@ -2028,14 +2036,14 @@ mod reviewer_tests {
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
         drop(db);
 
-        // Restart: reopen the same file and read the recovery linkage back.
+        // Restart: reopen the same file and read the continuation back.
         let db = Connection::open(file.path()).unwrap();
         let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
-            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='recovery'",
-            params![first], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
+            params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["successor_run_id"].as_i64(), Some(successor));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
         let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
         assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()), "reopened successor still points back at its predecessor");
     }

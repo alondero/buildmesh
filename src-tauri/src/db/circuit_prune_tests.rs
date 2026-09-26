@@ -358,6 +358,62 @@ fn prune_on_an_empty_table_is_a_no_op() {
     );
 }
 
+/// A Review Successor must stay resolvable after the retention sweep, because
+/// the "reuses one successor" invariant is read off the successor's own
+/// `context_json` — `continuation_target_inner` finds children by
+/// `recovery.from_run_id` and nothing else.
+///
+/// It survives for a structural reason that no test pinned until now: a
+/// continuation's identity family is `manual:%`, which the sweep **deletes**
+/// rather than compacts, but the sweep also keeps the newest run per circuit,
+/// and a continuation is the only run on the recovery Circuit it is minted on.
+/// A compacted (non-manual) row would lose the key and orphan the chain, so
+/// this test is the regression that would fail first if either half of that
+/// reasoning changed.
+///
+/// The remaining boundary is recorded in issue #1924: an *intermediate*
+/// generation that shares a recovery Circuit with a newer one is not the
+/// newest, so it is sweepable, and re-continuing the ancestor then walks past
+/// the gap. This test does not claim that case is safe.
+#[test]
+fn retention_keeps_a_review_successor_resolvable() {
+    use crate::db::circuit::recovery::{ContinuationTarget, continuation_target_inner};
+
+    let conn = prune_db();
+    // The failed review on the author's Circuit, and the follow-up on the
+    // recovery Circuit `continue_failed_review` mints for it.
+    let ancestor = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    conn.execute(
+        "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
+        [],
+    ).unwrap();
+    let successor = insert_run_for(
+        &conn,
+        2,
+        "manual:agent:7:bbb",
+        "failed",
+        400,
+        &format!(r#"{{"recovery.from_run_id":"{ancestor}"}}"#),
+    );
+    conn.execute(
+        "INSERT INTO circuit_run_history (run_id, kind, detail) VALUES (?1, 'review_continuation', ?2)",
+        rusqlite::params![successor, format!(r#"{{"from_run_id":{ancestor}}}"#)],
+    ).unwrap();
+
+    let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+    assert_eq!((deleted, compacted), (0, 0), "a continuable lineage is swept by neither tier");
+    let body: String = conn
+        .query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1", [successor], |r| r.get(0))
+        .unwrap();
+    assert!(body.contains(&format!(r#""recovery.from_run_id":"{ancestor}""#)), "the lineage key survives the sweep");
+    // A failed successor is not a reuse target, so the walk reports it as the
+    // deepest generation to continue from. Landing on the successor rather than
+    // on the ancestor is what proves the sweep did not orphan the chain.
+    assert!(
+        matches!(continuation_target_inner(&conn, ancestor).unwrap(), ContinuationTarget::Failed(id) if id == successor),
+    );
+}
+
 /// A row exactly at the retention boundary is kept — the sweep uses
 /// `updated_at <`, mirroring the drive-ledger sweep, so a row that just turned
 /// 30 days old is not swept on the same tick.

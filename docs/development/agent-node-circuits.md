@@ -26,6 +26,21 @@ to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
 
+## Completion and recovery
+
+Circuits can progress from a finished, readable agent report even when the harness
+cannot prove a complete inventory of background work. The report must belong to
+the current session and input, and remain unchanged through the decision commit.
+Known unfinished work, actual permission requests, and actual questions still block
+progress. A status-only waiting-for-input signal does not create an indefinite
+human request. Report-based progress is recorded separately from verified native
+lifecycle evidence; it is not proof that an unobservable background task ended.
+
+Unverified agent steps continue checking for fresh evidence without spawning again
+or resending prompts. Removing an agent, or a confirmed agent error, terminates the
+waiting run so queued runs can use its capacity. Ambiguous GitHub actions and prompt
+deliveries retain their existing manual reconciliation controls.
+
 ## Review presentation contract
 
 The title-bar review preset and the issue-driven Autopilot review blueprint
@@ -224,14 +239,17 @@ first review run. Its graph, settings and history cannot be deleted or edited as
 an individual Circuit; deleting its entire Mesh remains a separate operation.
 
 Run History records pinned behavior/graph identity and effective reviewer selection,
-model and effort, evidence-window changes, run and step capacity waits, and
-continuation prompt intent, possible dispatch and outcome. Every entry names its
-source (who/what produced the event) and disposition (what Buildmesh did with it)
-beside its identity and time, so waits, capacity waits, configuration pins and
-recovery are diagnosable uniformly. Continuing a failed review appends a recovery
-entry to the failed predecessor naming the successor run. Unchanged polling
-results do not add repeated entries. Arguments, endpoints and prompts are excluded
-from the configuration history summary.
+model and effort, evidence-window changes, run and step capacity waits, the run a
+continued review follows, and continuation prompt intent, possible dispatch and
+outcome. Unchanged polling results do not add repeated entries. Arguments,
+endpoints and prompts are excluded from the configuration history summary. The
+"continued a failed review" entry is a record for the operator; the successor
+dedupe itself reads the run's own context, and a retention sweep removes a run
+together with its history. Every entry additionally names its source (who/what
+produced the event) and disposition (what Buildmesh did with it) beside its
+identity and time, so waits, capacity waits, configuration pins and recovery are
+diagnosable uniformly; a cleared wait records `resolved` and keeps the attempt it
+was parked on.
 
 Conflicts retain their cause and triggering evidence identity. A validated Codex
 foreground pull may resolve only the matching foreground conflict, and its file

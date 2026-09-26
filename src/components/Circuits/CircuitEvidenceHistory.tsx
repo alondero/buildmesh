@@ -11,7 +11,7 @@ import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 
 const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
-  recovery: 'Review recovery',
+  review_continuation: 'Continued a failed review',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
@@ -80,10 +80,10 @@ function configurationText(detail: string): string {
   return `Pinned run configuration — behavior revision ${configuration?.behavior_revision ?? 'unknown'} · graph ${graph} · ${configuration?.reviewers?.length ?? 0} reviewer(s).`;
 }
 
-/** Humanise the successor run a recovery/continuation produced. */
-function recoveryText(detail: string): string {
-  const recovery = parseDetail<{ successor_run_id?: number; rounds?: number }>(detail);
-  return `Recovered into run #${recovery?.successor_run_id ?? 'unknown'} (${recovery?.rounds ?? 'unknown'} round(s)); the failed run's history stays intact.`;
+/** Humanise the lineage record a review successor keeps about its source. */
+function reviewContinuationText(detail: string): string {
+  const continuation = parseDetail<{ from_run_id?: number }>(detail);
+  return `Continued a failed review — this run follows run #${continuation?.from_run_id ?? 'unknown'}; the failed run's history stays intact.`;
 }
 
 function observationDetail(detail: string): RecordedObservation | null {
@@ -154,7 +154,7 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
       case 'step_capacity_wait': return <p className="text-text-secondary break-words">{stepCapacityWaitText(entry.detail)}</p>;
       case 'evidence_window_changed': return <p className="text-text-secondary break-words">{evidenceWindowText(entry.detail)}</p>;
       case 'configuration_pinned': return <p className="text-text-secondary break-words">{configurationText(entry.detail)}</p>;
-      case 'recovery': return <p className="text-text-secondary break-words">{recoveryText(entry.detail)}</p>;
+      case 'review_continuation': return <p className="text-text-secondary break-words">{reviewContinuationText(entry.detail)}</p>;
       case 'operator_attestation': return <div className="space-y-1 text-text-secondary">
         <p className="break-words">{entry.detail}</p>
         <p>Attestation — does not grant permission or review approval.</p>

@@ -729,6 +729,11 @@ export const createPrNode = (
   headRepoOwner?: string,
   headRepoCloneUrl?: string,
   configurationId?: string,
+  // Spawn a *reviewer sibling* for the PR (the PR pill's "Spawn reviewer
+  // agent" row): a distinct name so it does not share the implementation
+  // node's worktree — see `commands::agent::create_pr_node`'s `reviewer`
+  // parameter for why sharing one is destructive. Omit for the probe's `+`.
+  reviewer?: boolean,
 ) =>
   _invoke<IssueNodeDraft>('create_pr_node', {
     meshId,
@@ -740,6 +745,7 @@ export const createPrNode = (
     headRepoOwner,
     headRepoCloneUrl,
     configurationId,
+    reviewer,
   });
 
 // AI context portability

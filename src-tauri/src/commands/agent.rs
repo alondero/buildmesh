@@ -770,6 +770,15 @@ pub fn create_pr_node(
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
     configuration_id: Option<String>,
+    // `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
+    // reviewer agent" row). Same intent and head pinning as the implementation
+    // spawn, but named distinctly — see the naming block in the body, and
+    // `git::worktree::provision_for_spawn` for why a shared worktree name is
+    // destructive rather than merely inconvenient. On a Root-Node mesh
+    // (`use_worktree = false`) there is no worktree to separate, so the
+    // distinct name only keeps the two rows distinguishable. `None`/`false` is
+    // the Pull Requests probe's `+` behaviour, byte-for-byte unchanged.
+    reviewer: Option<bool>,
 ) -> Result<IssueNodeDraft, String> {
     // Issue #1180 — the impl now returns the `SpawnIntent::PullRequest`
     // it built (owner/repo resolved from the mesh + the supplied
@@ -789,6 +798,7 @@ pub fn create_pr_node(
         head_repo_owner,
         head_repo_clone_url,
         configuration_id,
+        reviewer.unwrap_or(false),
     )?;
     let _ = app.emit(
         "node-created",
@@ -845,6 +855,37 @@ pub(crate) fn create_pr_node_impl(
         head_repo_owner,
         head_repo_clone_url,
         None,
+        false,
+    )
+}
+
+/// Reviewer-sibling counterpart of [`create_pr_node_impl`] — same args, but
+/// `reviewer = true`, so the node is named with the `review` marker and
+/// disambiguated against the mesh's existing worktree names. Test-only: this
+/// is the seam the PR pill's "Spawn reviewer agent" row exercises.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_pr_reviewer_node_impl(
+    mesh_id: i64,
+    pr_number: i64,
+    pr_title: String,
+    head_ref: String,
+    head_sha: String,
+    provider: Option<String>,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
+) -> Result<(IssueNodeDraft, SpawnIntent), String> {
+    create_pr_node_impl_configured(
+        mesh_id,
+        pr_number,
+        pr_title,
+        head_ref,
+        head_sha,
+        provider,
+        head_repo_owner,
+        head_repo_clone_url,
+        None,
+        true,
     )
 }
 
@@ -859,6 +900,7 @@ pub(crate) fn create_pr_node_impl_configured(
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
     configuration_id: Option<String>,
+    reviewer: bool,
 ) -> Result<(IssueNodeDraft, SpawnIntent), String> {
     // Issue #471 — the gate is split into two independent rejections. See
     // `validate_pr_spawn_inputs` for the truth table; both guards are tested
@@ -898,7 +940,31 @@ pub(crate) fn create_pr_node_impl_configured(
     // appears. Falls back to a random default if the title doesn't yield a
     // valid slug; the `pr` prefix is still applied so the user can spot the
     // originating PR at a glance.
-    let initial_name = crate::session_naming::pr_node_name(pr_number, &pr_title);
+    //
+    // A reviewer sibling (`reviewer = true`, the PR pill's "Spawn reviewer
+    // agent" row) instead gets a distinct `pr{N}-review-{slug}` name, because a
+    // worktree node's name IS its worktree directory name (and, on a branched
+    // spawn, its branch name). Two nodes sharing a name therefore share a
+    // worktree path, and `git::worktree::provision_for_spawn` handles that path
+    // badly: on the warm-pool branch the pre-move branch guard refuses the
+    // adoption and the failure cleanup used to delete the target directory —
+    // the other node's live worktree, uncommitted work included — and on the
+    // cold branch the path-exists short-circuit silently hands the same
+    // directory to both nodes. Repeat reviewer spawns are disambiguated against
+    // the mesh's existing worktree names so each reviewer gets its own.
+    let initial_name = if reviewer {
+        let taken: std::collections::HashSet<String> = db::list_agent_nodes_by_mesh(mesh_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|node| node.worktree_name)
+            .collect();
+        crate::session_naming::disambiguate_node_name(
+            &crate::session_naming::pr_reviewer_node_name(pr_number, &pr_title),
+            &taken,
+        )
+    } else {
+        crate::session_naming::pr_node_name(pr_number, &pr_title)
+    };
 
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
@@ -1302,6 +1368,86 @@ mod tests {
             draft.node.source_pr,
             Some(pr_number),
             "source_pr must be set to the originating PR number"
+        );
+    }
+
+    /// The PR pill's "Spawn reviewer agent" row spawns a *sibling* of the
+    /// implementation node for the same PR. A worktree node's name IS its
+    /// worktree directory (and branch) name, so an identical name puts both
+    /// nodes on one worktree path — which `git::worktree::provision_for_spawn`
+    /// resolves by refusing the warm adoption and (before `target_preexisted`)
+    /// deleting the other node's worktree, or by sharing the directory on the
+    /// cold path. Pin that the reviewer takes the distinct `review`-marked
+    /// name, and that a repeat reviewer spawn disambiguates so it, too, gets
+    /// its own worktree.
+    #[test]
+    fn create_pr_reviewer_node_impl_names_uniquely_per_spawn() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        let (_tmp, mesh_id) = create_test_mesh(
+            "pr-reviewer-naming",
+            "https://github.com/alondero/buildmesh.git",
+        );
+        let pr_number: i64 = 90210;
+        let pr_title = "add reviewer spawn";
+
+        let (first, _intent) = create_pr_reviewer_node_impl(
+            mesh_id,
+            pr_number,
+            pr_title.to_string(),
+            "feat/90210-review".to_string(),
+            "".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("first reviewer spawn must succeed");
+
+        let expected_base = crate::session_naming::pr_reviewer_node_name(pr_number, pr_title);
+        assert_eq!(
+            first.node.name, expected_base,
+            "the first reviewer must take the undecorated pr{{N}}-review-{{slug}} name"
+        );
+        assert!(
+            first.node.name.contains("-review-"),
+            "reviewer name must carry the review marker, got: {:?}",
+            first.node.name
+        );
+        // The whole point: the reviewer must not collide with the
+        // implementation node it reviews (same PR → same pr_node_name).
+        assert_ne!(
+            first.node.name,
+            crate::session_naming::pr_node_name(pr_number, pr_title),
+            "reviewer and implementation names for the same PR must differ"
+        );
+        assert_eq!(
+            first.node.worktree_name.as_deref(),
+            Some(first.node.name.as_str()),
+            "the name drives the worktree directory, so worktree_name must carry it"
+        );
+
+        let (second, _intent) = create_pr_reviewer_node_impl(
+            mesh_id,
+            pr_number,
+            pr_title.to_string(),
+            "feat/90210-review".to_string(),
+            "".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("a repeat reviewer spawn must still succeed");
+
+        assert_ne!(
+            second.node.name, first.node.name,
+            "a repeat reviewer spawn must disambiguate to a distinct name so it \
+             gets its own worktree instead of reusing the first reviewer's"
+        );
+        assert!(
+            second.node.name.ends_with("-2"),
+            "the second reviewer must take the -2 suffix, got: {:?}",
+            second.node.name
         );
     }
 

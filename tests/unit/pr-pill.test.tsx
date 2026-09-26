@@ -1,6 +1,8 @@
 /**
- * PR pill merge menu — clicking the agent-node title PR pill offers
- * merge options instead of opening the browser directly.
+ * PR pill menu — clicking the agent-node title PR pill offers merge options
+ * instead of opening the browser directly, plus a "Spawn reviewer agent" row
+ * that launches a PR-probe-style agent in its own worktree and groups it onto
+ * this node's card as another Node Activity tab.
  *
  * Desired UX (user request: reduce friction to merge PRs):
  *   - Pill click opens a menu (not the browser).
@@ -10,14 +12,19 @@
  *   - Draft PRs expose merge as aria-disabled (focusable, no action).
  *   - Failures keep the menu open with the error, which survives
  *     close/reopen until the next merge attempt.
+ *   - "Spawn reviewer agent…" reuses the shared Spawn Menu for the provider
+ *     options and does what the PRs probe's `+` does (`create_pr_node`), with
+ *     `reviewer: true` so the backend gives it its own worktree, then groups
+ *     the new node onto the clicked node's card.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-const { openUrlMock, mergePrMock, invalidateMock } = vi.hoisted(() => ({
+const { openUrlMock, mergePrMock, invalidateMock, createPrNodeMock } = vi.hoisted(() => ({
   openUrlMock: vi.fn().mockResolvedValue(undefined),
   mergePrMock: vi.fn().mockResolvedValue('Merged'),
   invalidateMock: vi.fn(),
+  createPrNodeMock: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/plugin-opener', () => ({
@@ -26,7 +33,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
-  return { ...actual, mergePr: mergePrMock };
+  return { ...actual, mergePr: mergePrMock, createPrNode: createPrNodeMock };
 });
 
 vi.mock('../../src/hooks/useOpenPr', async (importOriginal) => {
@@ -35,13 +42,57 @@ vi.mock('../../src/hooks/useOpenPr', async (importOriginal) => {
 });
 
 import { PrPill } from '../../src/components/AgentNodeView/PrPill';
+import type { OpenPr } from '../../src/types/generated/OpenPr';
+import type { AgentNode } from '../../src/stores/agentNodeStore';
+import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
+import type { SpawnOption } from '../../src/lib/groups';
 
-const OPEN_PR = {
+const OPEN_PR: OpenPr = {
   number: 123,
   url: 'https://github.com/acme/demo/pull/123',
   title: 'Add PR chip',
   draft: false,
+  head_ref: 'feat/pr-chip',
+  head_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+  head_repo_owner: 'acme',
+  head_repo_clone_url: 'https://github.com/acme/demo.git',
 };
+
+const NODE_ID = 1;
+const MESH_ID = 7;
+
+function spawnOption(id: string, label: string): SpawnOption {
+  return {
+    id,
+    label,
+    icon: id,
+    harness_id: id,
+    provider_id: null,
+    is_proxied: false,
+    group_key: id,
+    color: '#fff',
+  };
+}
+
+const PROVIDERS: SpawnOption[] = [spawnOption('claude', 'Claude Code'), spawnOption('codex', 'Codex')];
+
+/** The draft `create_pr_node` hands back — flattened `AgentNode` + `prefill`. */
+const REVIEWER_DRAFT = {
+  id: 555,
+  mesh_id: MESH_ID,
+  name: 'pr123-review-add-pr-chip',
+  status: 'pending',
+  provider: 'claude',
+  source_pr: 123,
+  prefill: 'Review PR #123',
+} as unknown as AgentNode;
+
+function renderPill(props: Partial<React.ComponentProps<typeof PrPill>> = {}) {
+  return render(
+    <PrPill nodeId={NODE_ID} meshId={MESH_ID} gitPath="/repo" openPr={OPEN_PR} providers={PROVIDERS} {...props} />,
+  );
+}
 
 function openPillMenu() {
   fireEvent.click(screen.getByText('PR #123'));
@@ -58,12 +109,22 @@ describe('PrPill merge menu', () => {
     mergePrMock.mockClear();
     mergePrMock.mockResolvedValue('Merged');
     invalidateMock.mockClear();
+    createPrNodeMock.mockReset();
+    createPrNodeMock.mockResolvedValue(REVIEWER_DRAFT);
+    // The reviewer spawn groups onto the clicked node's card, so both stores
+    // are real (not mocked) — seed the clicked node and clear view state.
+    useAgentNodeStore.setState({
+      nodesById: { [NODE_ID]: { id: NODE_ID, mesh_id: MESH_ID, name: 'impl', status: 'running' } as AgentNode },
+      nodeIds: [NODE_ID],
+      activeNodeId: null,
+    });
+    useNodeActivityStore.setState({ groups: [], selections: {}, utilities: {} });
   });
 
   it('keeps the menu outside the clipping title and treats portaled clicks as inside', () => {
     const { container } = render(
       <div style={{ overflow: 'hidden', height: 24 }}>
-        <PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />
+        <PrPill nodeId={NODE_ID} meshId={MESH_ID} gitPath="/repo" openPr={OPEN_PR} providers={PROVIDERS} />
       </div>,
     );
     openPillMenu();
@@ -75,19 +136,19 @@ describe('PrPill merge menu', () => {
   });
 
   it('renders the PR number pill', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     expect(screen.getByText('PR #123')).toBeTruthy();
   });
 
   it('collapses to an icon trigger without the PR number label', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} compact />);
+    renderPill({ compact: true });
     expect(screen.queryByText('PR #123')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open pull request #123 options' }));
     expect(screen.getByRole('menu')).toBeTruthy();
   });
 
   it('clicking the pill opens a menu instead of opening the browser directly', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     openPillMenu();
     expect(openUrlMock).not.toHaveBeenCalled();
     expect(screen.getByRole('menu')).toBeTruthy();
@@ -96,7 +157,7 @@ describe('PrPill merge menu', () => {
   });
 
   it('wires the trigger to the menu for assistive tech', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     const trigger = screen.getByTestId('pr-pill-trigger');
     expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
@@ -108,14 +169,14 @@ describe('PrPill merge menu', () => {
   });
 
   it('menu "Open on GitHub" opens the PR url', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     openPillMenu();
     fireEvent.click(screen.getByText(/Open on GitHub/));
     expect(openUrlMock).toHaveBeenCalledWith(OPEN_PR.url);
   });
 
   it('merge requires confirm then calls mergePr and invalidates the chip cache', async () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     armConfirm();
 
     // First click arms confirm — must NOT merge yet.
@@ -128,7 +189,7 @@ describe('PrPill merge menu', () => {
     await waitFor(() => {
       expect(mergePrMock).toHaveBeenCalledWith(OPEN_PR.url);
     });
-    expect(invalidateMock).toHaveBeenCalledWith(1, '/repo');
+    expect(invalidateMock).toHaveBeenCalledWith(NODE_ID, '/repo');
     // Menu closes on success.
     await waitFor(() => {
       expect(screen.queryByRole('menu')).toBeNull();
@@ -136,7 +197,7 @@ describe('PrPill merge menu', () => {
   });
 
   it('cancel backs out of the confirm without merging', () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     armConfirm();
     fireEvent.click(
       screen.getByLabelText(`Cancel merge of pull request #${OPEN_PR.number}`),
@@ -152,11 +213,11 @@ describe('PrPill merge menu', () => {
 
   it('cancelling from the keyboard-driven Cancel row restores focus and the roving tabindex', async () => {
     // Drive the keyboard path that landed Cancel at activeIndex=2:
-    // Open (0) -> ArrowDown to Merge (1) -> ArrowDown to Cancel (2).
+    // Open (0) -> ArrowDown to Merge/Confirm (1) -> ArrowDown to Cancel (2).
     // Activating Cancel must NOT drop focus to document.body, and the
     // post-cancel Merge row must carry tabIndex="0" so the WAI-ARIA
     // roving-tabindex invariant holds after the slot shrinks.
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     armConfirm();
     const cancel = screen.getByLabelText(
       `Cancel merge of pull request #${OPEN_PR.number}`,
@@ -191,7 +252,7 @@ describe('PrPill merge menu', () => {
 
   it('a merge failure keeps the menu open with the error and resets the confirm', async () => {
     mergePrMock.mockRejectedValueOnce(new Error('Conflicts'));
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     armConfirm();
     fireEvent.click(
       screen.getByLabelText(`Confirm squash merge of pull request #${OPEN_PR.number}`),
@@ -211,7 +272,7 @@ describe('PrPill merge menu', () => {
 
   it('a merge error survives close and reopen until the next attempt', async () => {
     mergePrMock.mockRejectedValueOnce(new Error('Blocked'));
-    const { unmount } = render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    const { unmount } = renderPill();
     armConfirm();
     fireEvent.click(
       screen.getByLabelText(`Confirm squash merge of pull request #${OPEN_PR.number}`),
@@ -233,26 +294,31 @@ describe('PrPill merge menu', () => {
     mergePrMock.mockImplementationOnce(
       () => new Promise<string>((res) => { resolveMerge = res; }),
     );
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     armConfirm();
     fireEvent.click(
       screen.getByLabelText(`Confirm squash merge of pull request #${OPEN_PR.number}`),
     );
 
-    // Merging row replaces Confirm/Cancel: still exactly 2 menuitems,
-    // matching itemCount, so no arrow step can fall off the end.
+    // Merging row replaces Confirm/Cancel: Open + Merging + Spawn — three
+    // menuitems, matching itemCount, so no arrow step can fall off the end.
     expect(screen.getByText('Merging…')).toBeTruthy();
-    expect(screen.getAllByRole('menuitem')).toHaveLength(2);
+    const items = screen.getAllByRole('menuitem');
+    expect(items).toHaveLength(3);
     expect(
       screen.getByLabelText(`Open pull request #${OPEN_PR.number} on GitHub`)
         .getAttribute('aria-disabled'),
     ).toBe('true');
+    // The spawn row is parked too — opening the dialog mid-merge would unmount
+    // it when a successful merge invalidates the chip.
+    expect(screen.getByTestId('pr-spawn-reviewer').getAttribute('aria-disabled')).toBe('true');
 
     // Walk past the end — focus must wrap inside the menu, never void.
-    const items = screen.getAllByRole('menuitem');
     expect(document.activeElement).toBe(items[0]);
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[2]);
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(items[0]);
 
@@ -263,9 +329,7 @@ describe('PrPill merge menu', () => {
   });
 
   it('aria-disabled merge row for drafts stays focusable but never merges', () => {
-    render(
-      <PrPill nodeId={1} gitPath="/repo" openPr={{ ...OPEN_PR, draft: true }} />,
-    );
+    renderPill({ openPr: { ...OPEN_PR, draft: true } });
     openPillMenu();
     const mergeBtn = screen.getByText(/Merge \(squash/);
     const btn = mergeBtn.closest('button')!;
@@ -284,12 +348,12 @@ describe('PrPill merge menu', () => {
   });
 
   it('arrow navigation, Escape, and Tab follow the menu contract', async () => {
-    render(<PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />);
+    renderPill();
     const trigger = screen.getByTestId('pr-pill-trigger');
     openPillMenu();
 
     const items = screen.getAllByRole('menuitem');
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(3);
     expect(document.activeElement).toBe(items[0]);
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(items[1]);
@@ -317,12 +381,123 @@ describe('PrPill merge menu', () => {
     render(
       <div>
         <button data-testid="outside">outside</button>
-        <PrPill nodeId={1} gitPath="/repo" openPr={OPEN_PR} />
+        <PrPill nodeId={NODE_ID} meshId={MESH_ID} gitPath="/repo" openPr={OPEN_PR} providers={PROVIDERS} />
       </div>,
     );
     openPillMenu();
     expect(screen.getByRole('menu')).toBeTruthy();
     fireEvent.mouseDown(screen.getByTestId('outside'));
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('PrPill reviewer spawn', () => {
+  beforeEach(() => {
+    createPrNodeMock.mockReset();
+    createPrNodeMock.mockResolvedValue(REVIEWER_DRAFT);
+    useAgentNodeStore.setState({
+      nodesById: { [NODE_ID]: { id: NODE_ID, mesh_id: MESH_ID, name: 'impl', status: 'running' } as AgentNode },
+      nodeIds: [NODE_ID],
+      activeNodeId: null,
+    });
+    useNodeActivityStore.setState({ groups: [], selections: {}, utilities: {} });
+  });
+
+  function openReviewerDialog() {
+    openPillMenu();
+    fireEvent.click(screen.getByTestId('pr-spawn-reviewer'));
+  }
+
+  it('offers "Spawn reviewer agent…" which closes the pill menu and opens the shared Spawn Menu', () => {
+    renderPill();
+    openReviewerDialog();
+    expect(screen.queryByRole('menu', { name: /Pull request #123 actions/ })).toBeNull();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Spawn reviewer agent for PR #123' })).toBeTruthy();
+    const menu = screen.getByRole('menu', { name: 'Select a provider' });
+    expect(menu).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Claude Code' })).toBeTruthy();
+  });
+
+  it('picking a provider spawns the PR reviewer and groups it as a tab', async () => {
+    renderPill();
+    openReviewerDialog();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code' }));
+
+    await waitFor(() => {
+      expect(createPrNodeMock).toHaveBeenCalledWith(
+        MESH_ID,
+        OPEN_PR.number,
+        OPEN_PR.title,
+        OPEN_PR.head_ref,
+        OPEN_PR.head_sha,
+        'claude',
+        OPEN_PR.head_repo_owner,
+        OPEN_PR.head_repo_clone_url,
+        undefined,
+        true,
+      );
+    });
+
+    // The reviewer is merged into the clicked node's card and focused.
+    await waitFor(() => {
+      expect(useNodeActivityStore.getState().groups).toEqual([[NODE_ID, REVIEWER_DRAFT.id]]);
+    });
+    expect(useNodeActivityStore.getState().selections[NODE_ID]).toEqual({ nodeId: REVIEWER_DRAFT.id, utility: false });
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(REVIEWER_DRAFT.id);
+    // Dialog closed on success.
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+  });
+
+  it('returns focus to the PR pill when the dialog is dismissed', async () => {
+    renderPill();
+    openReviewerDialog();
+    // The Modal moves focus into the dialog on mount…
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // …and the pill — not <body> — must own it again. The dialog's own Modal
+    // restore cannot do this: the row that opened it unmounts in the same
+    // commit, so its captured `previouslyFocused` is already detached.
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        expect(document.activeElement).toBe(screen.getByTestId('pr-pill-trigger'));
+        resolve();
+      }),
+    );
+  });
+
+  it('returns focus to the PR pill after a successful spawn', async () => {
+    renderPill();
+    openReviewerDialog();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        expect(document.activeElement).toBe(screen.getByTestId('pr-pill-trigger'));
+        resolve();
+      }),
+    );
+  });
+
+  it('shows an empty state instead of an empty menu when no harnesses are available', () => {
+    renderPill({ providers: [] });
+    openReviewerDialog();
+    expect(screen.getByTestId('pr-reviewer-no-providers')).toBeTruthy();
+    expect(screen.queryByRole('menu', { name: 'Select a provider' })).toBeNull();
+  });
+
+  it('keeps the dialog open with an error when the spawn fails', async () => {
+    createPrNodeMock.mockRejectedValueOnce(new Error('PR head is unfetchable'));
+    renderPill();
+    openReviewerDialog();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('PR head is unfetchable');
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(useNodeActivityStore.getState().groups).toEqual([]);
   });
 });

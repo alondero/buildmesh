@@ -65,14 +65,15 @@ export default async function ({ page, invoke }) {
     const failed = insertRun.run(circuit, mesh.id, 'manual:state-failed', 'failed', '{}').lastInsertRowid;
     insertStep.run(failed, 'reviewer', 'failed', 1, 'failed', 'The review command exited before producing a result.');
 
-    // Recovery: a failed predecessor recording its successor, and the successor
-    // pointing back at it.
+    // Recovery: a failed predecessor and the successor that continues it. The
+    // lineage is recorded on the successor's own history (the failed ancestor's
+    // ledger stays immutable).
     const predecessor = insertRun.run(circuit, mesh.id, 'manual:state-recovery-a', 'failed', '{}').lastInsertRowid;
     insertStep.run(predecessor, 'reviewer', 'failed', 1, 'failed', 'No final approval is recorded.');
     const successor = insertRun.run(circuit, mesh.id, 'manual:state-recovery-b', 'paused',
       JSON.stringify({ 'recovery.from_run_id': String(predecessor) })).lastInsertRowid;
-    insertHistory.run(predecessor, null, null, 'recovery',
-      JSON.stringify({ successor_run_id: successor, rounds: 2 }), 'operator', 'applied');
+    insertHistory.run(successor, null, null, 'review_continuation',
+      JSON.stringify({ from_run_id: predecessor }), 'operator', 'applied');
 
     // Waiting (admission): a pending run held by the mesh's single run slot.
     const queued = insertRun.run(circuit, mesh.id, 'manual:state-queued', 'pending', '{}').lastInsertRowid;
@@ -97,6 +98,13 @@ export default async function ({ page, invoke }) {
     await expect(page.getByTestId(`run-activity-${unverified}`)).toContainText('Unverified Checkpoint');
     await expect(page.getByTestId(`run-reason-${unverified}`)).toContainText(/Evidence is incomplete/);
     await expect(page.getByText(new RegExp(`Continues run #${predecessor}`))).toBeVisible();
+    // The successor's own history records the lineage (the failed ancestor is
+    // never written to).
+    const successorCard = page.getByTestId(`run-card-${successor}`);
+    const successorToggle = page.getByTestId(`run-toggle-${successor}`);
+    if ((await successorToggle.getAttribute('aria-expanded')) !== 'true') await successorToggle.click();
+    await successorCard.getByText('Circuit Run History').click();
+    await expect(successorCard.getByText(new RegExp(`Continued a failed review — this run follows run #${predecessor}`))).toBeVisible();
 
     // The Unverified next safe action: open the card's history and its Recheck.
     const unverifiedCard = page.getByTestId(`run-card-${unverified}`);
@@ -111,17 +119,11 @@ export default async function ({ page, invoke }) {
     await recheck.scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(shotDir, '1909-states-activity.png') });
 
-    // --- History: failed reason + recovery successor reference ---------------
+    // --- History: the failed run's readable reason ---------------------------
     await page.getByTestId('circuits-view-history').click();
     await expect(page.getByTestId(`run-card-${failed}`)).toBeVisible();
     await expect(page.getByTestId(`run-error-${failed}`)).toContainText('The review command exited');
     await expect(page.getByTestId(`run-activity-${failed}`)).toContainText('Failed');
-    const predecessorCard = page.getByTestId(`run-card-${predecessor}`);
-    const predecessorToggle = page.getByTestId(`run-toggle-${predecessor}`);
-    if ((await predecessorToggle.getAttribute('aria-expanded')) !== 'true') await predecessorToggle.click();
-    await predecessorCard.getByText('Circuit Run History').click();
-    await expect(predecessorCard.getByText(new RegExp(`Recovered into run #${successor}`))).toBeVisible();
-    await expect(predecessorCard.getByText('Review recovery')).toBeVisible();
     await page.screenshot({ path: path.join(shotDir, '1909-states-history.png') });
 
     // --- Queue: the pending run's admission reason ---------------------------

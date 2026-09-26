@@ -1,31 +1,206 @@
 # Circuit reliability acceptance
 
+This records the strict native-proof acceptance work before the September 26
+recovery change. The current guarded report-based progress policy and the queue
+stall evidence are documented in [the failure investigation](circuit-failures-2026-09-26.md).
+The live checks below remain historical evidence, not verification of that change.
+
 Implementation evidence for [#1889](https://github.com/alondero/buildmesh/issues/1889), governed by [#1850](https://github.com/alondero/buildmesh/issues/1850). This is a working acceptance record, not a claim that the specification is implemented. Baseline: `d8e3a1a780599cbdcece4710df2b603860065e7a`.
 
 Source inspection, deterministic automated checks, and live delivery are separate evidence tiers. No aggregate reliability percentage is asserted. Unless recorded otherwise below, platform evidence is Windows, development configuration; harness versions and live delivery are recorded per scenario.
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live question request/reply and a no-ID permission receipt are recorded below; authoritative permission resolution and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex foreground pull, request callbacks, missing-hook bounded recovery and stale-turn rejection are recorded below | A missing Stop reaches actionable Unverified after the evidence window; rollout-based completion reconciliation remains unverified. Authoritative permission resolution and Claude production submission correlation are unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. The create-dispatch crash transition is now covered deterministically (issue #1907, below); a live process crash and live GitHub races remain unverified. Other effect kinds and continuation still need a complete typed journal audit |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
-| Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
+| Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
 
 
 Every supported observation strategy needs recorded capabilities, source, freshness bounds, child/background coverage, degraded cases, harness version, platform and launch/trust configuration. Fixture parsing alone cannot establish live delivery. Unsupported or untested combinations remain unverified.
 
-## Continued acceptance: 2026-09-25
+## Continued acceptance: 2026-09-26: Review Blueprint copy, deletion and continuation
 
-Continuation baseline: `25308d3326f69855bd8a73cadeef8be34276d397`.
+Work for [#1910](https://github.com/alondero/buildmesh/issues/1910). This section
+closes the two items the row above left open — the current-build continuation
+check and the blueprint availability/deletion audit — and records one addition:
+a continued review's Circuit Run History now names the run it follows, so an
+operator can read the relationship there without opening run context.
+
+That entry is an audit record, not a lookup path. The successor dedupe reads
+`recovery.from_run_id` from the run's own context
+(`db::circuit::recovery::continuation_target_inner`), and a retention sweep
+deletes a run together with its history rows. What keeps a lineage resolvable
+past the sweep is that a continuation's identity is `manual:%` — a family the
+sweep deletes rather than compacts, so the lineage key is never emptied — and
+that a continuation is the newest run on the recovery Circuit it is minted on,
+which the sweep always keeps. `retention_keeps_a_review_successor_resolvable`
+pins both halves. The one case that still breaks is recorded in
+[#1924](https://github.com/alondero/buildmesh/issues/1924).
+
+Environment: Windows, development profile, Codex CLI 0.157.0 (`codex --version`;
+its own TUI banner reads v0.157.1) on `gpt-6-luna` in native Windows PowerShell.
+Pre-launch log counts were `buildmesh.log` 51584, `panic.log` 132,
+`panic_early.log` 48; the panic files did not grow and the stable hub was never
+stopped. The only new `ERROR` lines are the pre-existing
+`resize_agent: Agent not running` noise and health probes for a long-deleted
+#1889 fixture directory.
+
+### What the live run did
+
+An isolated Mesh on a scratch repository, one real Codex implementation turn
+delivered through the production `write_to_agent` command body, then a
+two-generation failed lineage built by the new bridge fixture through
+production seams only (`list_circuit_probe`'s blueprint ensure,
+`copy_review_blueprint`, `create_node_circuit_run`, `continue_failed_review`,
+`commit_circuit_advance`). Everything after that was the real app: Probe
+buttons, canvas editor, the circuit worker, and durable SQLite rows read back
+afterwards.
+
+| Check | Observed result | Evidence boundary |
+| --- | --- | --- |
+| Built-in Review Blueprint availability | Present, `is_preset = 1`, `enabled = 0`, matching the local review contract; Probe row titled "Review Blueprint" with **only** "Inspect Review Blueprint" — no enable, trigger or delete control | Real IPC `list_circuit_probe` and rendered Probe. The absence of the controls *is* the read-only proof; the refusal messages themselves are deterministic-only |
+| Blueprint inspector | "Read-only Review Blueprint", Copy control present, no Save, no palette | Real canvas editor. `1910-blueprint-read-only.png` |
+| Copy through the UI | Real `copy_review_blueprint` minted `Review Blueprint copy` as `is_preset = 0`, `enabled = 0`, all entry points `manual`, `concurrency_limit` 2 inherited, zero runs; the blueprint's `graph_json` stayed byte-identical | Real IPC. `1910-blueprint-copy.png` |
+| Copy is editable and independent | Changing the reviewer prompt in the canvas and saving persisted to the copy; the blueprint's `graph_json` stayed byte-identical | Real `update_circuit_graph` |
+| Disabling the source Circuit | `set_circuit_enabled(copy, false)` through the Probe checkbox; the follow-up still continued from the retained run's pinned graph and frozen launch plan | Real IPC. The pinned-scope assertions are the same ones the deterministic test makes after a delete |
+| Concurrent continuation | Two genuinely overlapping calls into the production `continue_circuit_review` body returned the **same** successor and created exactly one run row | The Probe serialises its Continue button behind one busy flag, so the wire race is driven by a bridge command that calls the same command body from two threads — production code, not the UI |
+| Lineage | The live successor's `recovery.from_run_id` is the **failed first successor**, not the original run, and its own `review_continuation` history entry names that run | Durable rows after the real call |
+| Pinned scope | The successor's pinned snapshot contains no `github_action` and no `implementer`; `reviewer` is the only `spawn_agent_node`; its prompt is the retained run's, not the copy's post-hoc edit | Durable snapshot read back |
+| Repeated real-IPC continuation | A second Continue review from the failed successor's card minted nothing (run count unchanged) | Real IPC |
+| Effect journal and history | The follow-up claimed **no** effect rows at all; its history is `configuration_pinned`, `review_continuation`, `run_transition`, three `step_transition` entries, one `observation` and one `classification` — no GitHub action and no `open_pr` node | Durable rows |
+| Ownership | The follow-up has no step owning the implementation agent, and the Mesh contains only the source agent | Durable rows |
+| Cancellation | Real Probe cancel left the follow-up `cancelled` with 8 history entries retained and the ancestor still `failed`; two further continuations of the ancestor were both refused with "The continued review was cancelled. Start a fresh review." and minted nothing | Real IPC |
+| Reviewer dispatch | **Unverified.** The borrowed-source `await_source` gate parked Unverified ("The report was interpreted, but foreground or owned-work completion remains unverified"), a fresh source turn inside the follow-up window did not clear it, and a reasoned Recheck through `record_circuit_outcome` did not either. The reviewer was never dispatched | This is the parent issue's open Codex owned-work/foreground-termination gap, reproduced in a new place. The bound on *what may be dispatched* is asserted deterministically instead: a full review round emits a `SpawnAgentNode` only for `reviewer` and never a `CallGithub` |
+| Cleanup | The fixture Mesh, its runs, circuits, agents and scratch repository were removed; the dev profile is back to its prior fixture set | Bridge teardown |
+
+### Findings that are not defects in this issue
+
+- **A run on a copied Review Blueprint has no Continue review control.** The
+  Probe's `canContinueReview` recognises only the built-in preset
+  (`source.review_preset`), an earlier continuation
+  (`recovery.from_run_id`) or the issue-driven blueprint. A Review-derived
+  Circuit's run gets none of those, so the affordance is hidden — even though
+  the backend will continue it and the deterministic suite proves it
+  (`copied_review_continuation_requires_the_frozen_review_contract`). #1848
+  owns that policy, and #1910's scope is "continuation of an existing review
+  successor", so this is recorded rather than changed.
+- **Every continuation mints a visible "Continued review" Circuit.** The
+  recovery Circuit is `is_preset = 0`, so it appears in the user's Circuit list
+  next to their own. Reuse is keyed on the frozen graph, so one Mesh shows at
+  most one per distinct frozen scope. It is existing behaviour and is visible in
+  the History screenshot.
+
+### Added deterministic coverage
+
+- `review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_source_disable`
+  — a blank name and a user Circuit are both refused as copy sources; then
+  disabling, rewriting **and deleting** the Circuit the run was started from
+  leaves the retained run's pinned reviewer scope and frozen launch plan intact
+  and continuable.
+- `continued_review_dispatches_only_review_work_and_records_the_run_it_continues`
+  — a failed issue-driven run that owned an `implementer` step and an `open_pr`
+  step yields a follow-up with neither; the successor claims no effect, borrows
+  rather than owns the implementation agent, records its parent in its own
+  history, leaves the ancestor's history byte-identical, and a cancelled
+  successor closes the lineage. This test failed before the fix.
+- `a_full_review_loop_dispatches_only_the_reviewer` — across findings, feedback
+  to the borrowed source, a fresh reviewer and approval, the only spawned node
+  is `reviewer` and no `CallGithub` effect is ever emitted.
+- `the_built_in_review_blueprint_cannot_be_triggered_on_its_own` — Trigger Now
+  on the built-in Review Blueprint is refused and leaves no run, so an
+  unattended row can never mint a run.
+- Vitest: the `review_continuation` history entry renders as "Continued a
+  failed review" with the run id it names.
+
 The clean checkout and GitHub state were checked before this work: PR #1893 was
 open, draft and mergeable; issue #1889 was open. The earlier implementation and
 full Windows gate remain approved. Historical checkpoints below describe their
 own snapshots; the results here describe additional work, not full acceptance.
+
+### Live lost and delayed Codex hooks (#1905)
+
+The issue-specific Windows smoke used Codex CLI 0.157.0 / `gpt-6-luna` with a
+real development Buildmesh app, Tauri IPC, Circuit worker and durable history.
+An opt-in loopback relay sat on the actual Codex hook URL and duplicated,
+dropped, or held real callback requests before forwarding them to the app.
+The app used a unique identifier (`com.alond.buildmesh.issue1905.dev`) and
+ports 2991/2992/9224; it did not use the stable app profile. Codex approval was
+`never`, the smoke relay mode selected a read-only sandbox, and prompts asked
+for exact text with no tools or external effects. Project hook trust was
+provisioned for Buildmesh's managed process.
+
+| Run / controlled delivery | Durable result | Evidence boundary |
+| --- | --- | --- |
+| Run 1, Circuit 1, Agent Node 1: duplicate the first `UserPromptSubmit`, drop `Stop` | Both duplicate HTTP forwards returned 200; one native start receipt and one spawn effect were recorded. After the authored 60-second Codex evidence window, attempt 1 remained Unverified with the `recheck` action. The smoke evidence records source `60_second_evidence_window` and disposition `unverified_actionable`. | Real Codex callbacks traversed the loopback relay and native app route. The rollout contained task completion, but the app did not record a `codex_rollout_task_complete` observation in this run; this proves bounded missing-hook recovery to actionable uncertainty, not completion reconciliation. |
+| Run 2, Circuit 1, Agent Node 2: hold the first turn's `Stop`, send a second turn, then release the held callback | The old-turn callback was persisted with disposition `rejected`; attempt 1 remained attached to the same node and Unverified with `recheck`. One spawn effect remained. Exactly two deliberate `UserPromptSubmit` turns were observed. | The delayed callback crossed the real relay and app route after the new turn began. No replay, tool callback, or permission callback was observed. |
+
+The run cancelled both Runs 3 and 4, deleted the disposable Mesh, shut down the
+isolated app, and removed its profile. JSON evidence is in
+`.tmp/codex-hook-recovery-2026-09-25T16-48-39-815Z/evidence.json`; it records
+the commit, CLI version, Windows version, model, launch/trust configuration,
+callback actions and results, run history summaries, and cleanup state without
+recording prompt text. The smoke and relay can be rerun with
+`npm run tauri:build:dev:codex-hook-smoke` followed by
+`npm run smoke:codex-hook-recovery`. This is Windows-only evidence; native
+Linux, WSL, and macOS callback delivery remain unverified. The smoke runner
+requires Node.js 22.13+, 23.4+, or 24+ because it uses the built-in
+`node:sqlite` API without an experimental flag ([Node.js SQLite API](https://nodejs.org/api/sqlite.html)).
+
+#### Review follow-up: evidence capture and gate attribution
+
+The review found that the duplicate-forward wait returned a boolean and the
+smoke then read `forwardCount` from that boolean. The runner now snapshots
+`start.forwardCount` after the wait and asserts the recorded count is two. The
+first-hook waits now allow 150 seconds for Codex startup and its first token.
+An initial attempt at commit `4ab71692` timed out after 30 seconds with no
+relay events; it cancelled the run, deleted the disposable Mesh, and shut down
+the isolated app. After extending both waits and hardening profile isolation, the
+smoke passed at pushed commit `8ab3d85e`: duplicate delivery recorded two
+forwards and one durable receipt, the dropped Stop reached actionable Unverified
+with Recheck, and the delayed prior-turn Stop was rejected while the attempt
+stayed Unverified. The artifact is
+`.tmp/codex-hook-recovery-2026-09-26T09-03-35-449Z/evidence.json`; both runs
+were cancelled, the disposable Mesh was deleted, and the app and run-owned
+profile were cleaned up.
+
+The smoke resolves Tauri's Windows data directory from the Application Data
+known folder rather than trusting a child-process `APPDATA` override. It refuses
+to reuse a profile that existed before the run, checks that the opened database
+contains the expected schema, and removes only the issue-specific profile it
+created after a successful run. The child `APPDATA` points to the scratch folder
+for early panic logs.
+
+If a run fails, the runner preserves its JSON evidence and any profile it
+created so the failed state can be inspected. It refuses to reuse an existing
+issue profile. After confirming the isolated app has exited and the exact
+profile belongs to that failed run, inspect and remove it before retrying:
+
+```powershell
+$issue1905Profile = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) 'com.alond.buildmesh.issue1905.dev'
+Get-ChildItem -LiteralPath $issue1905Profile
+```
+
+After inspection confirms this exact profile belongs to the failed smoke and
+the isolated app has exited, remove it before retrying:
+
+```powershell
+Remove-Item -LiteralPath $issue1905Profile -Recurse
+```
+
+| Check / revision | Result | Attribution / scope |
+| --- | --- | --- |
+| `npm run test:ci -- --project=verify-smoke` on commit `4ab71692` | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
+| Focused UsageTab test on merge-base `91118ebc` | Passed: 1 passed, 23 skipped. | The reviewed PR failure did not reproduce when run alone on the base. |
+| Full Vitest unit/integration suite on merge-base `91118ebc` | 3,574 passed, 1 skipped, 3 failed: ui-shot timed out at 60 seconds, mobile ProviderPicker timed out at 5 seconds, and ProbePanel could not find `Changed Files`. The UsageTab timer test passed. | No matching UsageTab failure reproduced on the base; attribution of the PR-run failure remains unverified. Playwright was not run on the base. |
+| `npm run tauri:build:dev:codex-hook-smoke`; `npm run smoke:codex-hook-recovery` on commit `8ab3d85e` | Passed: two live Codex scenarios. Duplicate callback forward count 2; one durable prompt receipt; dropped Stop remained actionable Unverified; delayed old-turn Stop was rejected. | Windows, Codex CLI 0.157.0 / `gpt-6-luna`; no `codex_rollout_task_complete` observation, so completion reconciliation remains unverified. Artifact: `.tmp/codex-hook-recovery-2026-09-26T09-03-35-449Z/evidence.json`. |
+| `cargo test --locked --lib http::routes::attention -- --test-threads=1` after review fixes | Passed: 87 tests. | Includes route-gate coverage for stale receipt persistence and skipped projection, plus a matching current-turn Stop that reaches the accepted path and persists `turn_fenced=true`, `explicit_turn_mismatch=false`. |
+| `node --test tests/agent-infra/codex-hook-relay.test.mjs`; `node --check` on both smoke scripts | Passed: relay test 1/1; both scripts parse. | Relay forwarding behavior and smoke script syntax. |
 
 ### Live OpenPr recovery
 
@@ -496,6 +671,7 @@ the newly added path has not been repeated in the live app.
 | Full Rust library suite | 3,813 passed, 24 ignored | Serial current-source run; 3,837 discovered |
 | Focused recheck/freshness regressions | Passed | 13 recheck tests, the Codex stale-completion boundary regression, freshness-error classification, and transcript-change rejection |
 | OpenPr recheck and cancellation race | Passed | Saved-target lookup tests and stepper/database commits; 4 focused lookup and completion tests plus the cancelled-result fence test. The GitHub lookup to worker result handoff remains untested as one live path |
+| OpenPr create-dispatch crash recovery (issue #1907) | 6 passed, 0 failed | `cargo test --locked --lib services::circuit_worker::github_recovery_tests -- --test-threads=1`. Adds three dispatch-to-crash scenarios: the production create against a loopback endpoint, restart reconciliation, found/absent PR, and the cancellation/recheck stale fence. Loopback endpoint and an injected stop, not a live process crash |
 | Full Vitest | 3,542 passed, 1 failed, 1 skipped | Sole failure is the radius audit at `AppSettings/UsageRender.tsx:308`, reproduced at the recorded base |
 | Focused history UI | 9 passed | OpenPr safe recheck action and history presentation |
 | TypeScript / source ESLint | Passed | UI source build completed TypeScript and desktop/mobile Vite builds; lint reported no warnings. Rust commit-fence follow-up was covered by the full Rust suite, not a rebuilt live app |
@@ -503,6 +679,48 @@ the newly added path has not been repeated in the live app.
 | Documentation gates | Passed | `npm run test:docs`: 19 passed; `npm run check:docs`: 119 Markdown files |
 | Agent diff gate | Passed | `npm run check:agent -- --base d8e3a1a780599cbdcece4710df2b603860065e7a` covered the committed diff before push |
 
+
+### OpenPr create-dispatch crash recovery (issue #1907)
+
+The #1889 recovery checks seeded a durable uncertain OpenPr effect. They proved
+the saved-target lookup and worker handoff, but not recovery after the create
+request may have reached GitHub before Buildmesh stopped.
+[#1907](https://github.com/alondero/buildmesh/issues/1907) closes that
+transition with deterministic automated scenarios in
+`src-tauri/src/services/circuit_worker/github_recovery_tests.rs`. Each scenario
+drives the production dispatch (`github::ensure_open_pr_with_target`) and the
+worker's read-only handoff (`github::reconcile_open_pr_for_worker`) through the
+real `GitHubClient` against a loopback endpoint; only the network boundary and
+the process stop are simulated.
+
+Every scenario dispatches a real create, durably records the
+`possible_dispatch` claim and the saved owner/repository/branch, then abandons
+the result the way a crash would. On restart the stuck GitHub step is
+reconciled to Unverified (`GithubActionRetry`; the effect moves
+`possible_dispatch` → `uncertain`), an explicit operator Recheck parks it as
+`pending_slot`, the next Tick reschedules the read-only call, and the saved
+target lookup commits its result. The cancellation scenario runs that same
+chain up to the rescheduled recheck, then commits cancellation while the
+in-flight lookup is still running.
+
+| Scenario | Observed result | Evidence boundary |
+| --- | --- | --- |
+| `open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_second_create` | Passed: the create POST was answered; after restart the read-only lookup committed PR #314 to the same run, the effect moved `possible_dispatch` → `uncertain` → `acknowledged`, exactly one `effect_reconciled` was appended, and the endpoint saw 3 requests total (find, create, find) — no second create | Deterministic loopback endpoint; injected stop before the ledger commit; fresh DB connection for the restart |
+| `open_pr_create_dispatch_crash_keeps_absent_pr_uncertain_without_create` | Passed: an ambiguous create (502) left the effect `possible_dispatch`; after restart the lookup found no PR, the step stayed `unverified` and the effect `uncertain`; recovery issued one read-only find and no create | Same; absence stays uncertain and never auto-creates |
+| `open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck` | Passed: the same restart chain reached the rescheduled Running recheck, then cancellation committed while the read-only lookup that found the PR was in flight; the stale result was rejected at the durable fence — the run stayed `cancelled`, the effect stayed `uncertain`, zero `effect_reconciled` rows, and no `pr.number` | Competing cancellation/recheck order and stale-result fence |
+
+All three assert attempt 1, that `effect_intent` / `effect_possible_dispatch` /
+`effect_target` history survives the reopen, and that the effect can never be
+claimed and dispatched again. They do not establish a live process crash, a live
+GitHub race, or the same transitions against real GitHub.
+
+Focused evidence: from `src-tauri`,
+`cargo test --locked --lib services::circuit_worker::github_recovery_tests -- --test-threads=1`
+reported 6 passed, 0 failed (3 pre-existing #1889 checks plus the 3 above);
+`cargo test --locked --lib services::circuit_worker -- --test-threads=1`
+reported 135 passed, 0 failed. `cargo clippy --locked --all-targets` exited 0
+with the two existing library and 28 library-test warnings, none in the changed
+file.
 
 ## Wait, capacity, configuration and recovery history (#1909)
 
@@ -534,15 +752,15 @@ records the run, step, attempt, source, timestamps, and disposition.
   behavior revision, graph SHA-256 and reviewer allowlist. (`behavior_revision`
   remains the recorded placeholder `1`; the graph hash is the identity the Probe
   shows. Redefining the revision scheme is out of scope.)
-- **Recovery** — a new `recovery` entry is appended to the failed predecessor
-  run when Continue review mints its successor, recording the successor run id
-  and round count with source `operator` / disposition `applied`, in the same
-  transaction that sets the successor's `recovery.from_run_id` context. Existing
-  `operator_attestation` / `evidence_recheck` entries now carry source `operator`
-  and the recorded action as disposition. A reopen test
-  (`circuit_recovery_history_survives_reopen_and_matches_successor_context`)
-  asserts the predecessor's recorded successor id still matches the reopened
-  successor's `recovery.from_run_id`.
+- **Recovery** — continuing a failed review records the lineage in the
+  successor's own history (`review_continuation`, detail `from_run_id`) with
+  source `operator` / disposition `applied`, in the same transaction that sets the
+  successor's `recovery.from_run_id` context; the failed predecessor's ledger
+  stays immutable. Existing `operator_attestation` / `evidence_recheck` entries
+  now carry source `operator` and the recorded action as disposition. A reopen
+  test (`circuit_recovery_history_survives_reopen_and_matches_successor_context`)
+  asserts the successor's continuation entry survives restart and still matches
+  its `recovery.from_run_id`.
 
 The Probe renders these entries as structured, wrap-first text (reason, identity,
 and a uniform `Source: … · …` line) rather than raw JSON.
@@ -551,11 +769,11 @@ and a uniform `Source: … · …` line) rather than raw JSON.
 
 | Check | Result | Scope / limitation |
 |---|---|---|
-| `cargo test --locked --lib -- --test-threads=1` (clean env) | Passed: 3,847 passed, 0 failed, 24 ignored | Green full-library run for this branch, with `TERM_PROGRAM` and `COMMANDCODE_SCRATCHPAD` cleared (see the attribution note below) |
-| Same suite in this agent shell (sets `TERM_PROGRAM=vscode` and `COMMANDCODE_SCRATCHPAD` under `AppData\Local\Temp`) | 3,845 passed, 2 failed, 24 ignored | Both failures are ambient-env assertions, not test regressions — see the attribution note below |
+| `cargo test --locked --lib -- --test-threads=1` (clean env) | Passed: 3,877 passed, 0 failed, 24 ignored | Green full-library run for this branch, with `TERM_PROGRAM` and `COMMANDCODE_SCRATCHPAD` cleared (see the attribution note below) |
+| Same suite in this agent shell (sets `TERM_PROGRAM=vscode` and `COMMANDCODE_SCRATCHPAD` under `AppData\Local\Temp`) | 3,875 passed, 2 failed, 24 ignored | Both failures are ambient-env assertions, not test regressions — see the attribution note below |
 | Full `npx vitest run --pool=threads tests/unit` | Passed (252 files) | Green once `NODE_ENV` is cleared; this shell sets `production`, which makes React 19's production build leave `React.act` undefined and fails every component test |
 | Full `npx vitest run --pool=threads tests/integration` | Passed (10 files) | Includes the mock-mode 240px Circuit Run History check |
-| `cargo test --locked --lib circuit` | Passed (538) | Includes the reopen/projection-agreement test, the recovery reopen test, and the wait-resolution (cleared) regression |
+| `cargo test --locked --lib circuit` | Passed (552) | Includes the reopen/projection-agreement test, the continuation reopen test, and the wait-resolution (cleared) regression |
 | `cargo test --locked --lib init_schema_dump_matches_committed_snapshot` | Passed | Fresh-init schema dump matches the committed `schema_dump.txt` |
 | `npm run lint`, `npm run lint:fixtures`, `npm run build`, documentation gates, README drift, agent diff | Passed | From the `scripts\check.ps1 all` run |
 | Live real WebView2/CDP 240px run | Passed | Real `list_circuit_probe` / `circuit_run_history` / `list_circuit_queue` IPC; every state and its next safe action asserted (see below) |
@@ -584,7 +802,7 @@ environment, so a test process started from a VS Code terminal
 (`TERM_PROGRAM=vscode`) or a Command Code agent shell (`COMMANDCODE_SCRATCHPAD` =
 `…\AppData\Local\Temp\commandcode\…`) trips assertions written for an ordinary /
 CI environment. Clearing those two variables makes the full suite green
-(`3,847 passed; 0 failed; 24 ignored`). Neither assertion site is touched by this
+(`3,877 passed; 0 failed; 24 ignored`). Neither assertion site is touched by this
 change.
 
 The new Rust test
@@ -617,7 +835,7 @@ separator):
 | Waiting (step slot) | 111 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
 | Unverified | 112 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence**, and its resolved evidence wait renders as "Evidence wait cleared — …" with the attempt identity preserved (no "attempt …" line) |
 | Failed | 113 | Activity "Failed"; reason "The review command exited before producing a result." |
-| Recovery | 114 → 115 | Predecessor history entry "Review recovery · Source: operator · applied · Recovered into run #115 (2 round(s))"; successor shows "Continues run #114 on the same worktree." |
+| Recovery | 114 → 115 | Successor shows "Continues run #114 on the same worktree." and its own history entry "Continued a failed review — this run follows run #114" (source `operator`, disposition `applied`); the failed predecessor's ledger is not written to |
 | Waiting (admission) | 116 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
 
 Also asserted: `width <= 240`, `tab.scrollWidth <= clientWidth`,
@@ -628,7 +846,7 @@ Inspected captures (committed under `docs/pr-screenshots/issue-1909/`):
 
 ![Activity: working, waiting, Unverified with its Recheck action, resolved evidence wait, and the recovery successor link](../pr-screenshots/issue-1909/activity-states-and-recheck.png)
 
-![History: failed reason and the recovery entry with source/disposition](../pr-screenshots/issue-1909/history-recovery.png)
+![History: the failed run's readable reason](../pr-screenshots/issue-1909/history-recovery.png)
 
 ![Queue: the pending run's admission reason](../pr-screenshots/issue-1909/queue-admission.png)
 

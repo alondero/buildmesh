@@ -846,28 +846,32 @@ fn drive_run(
         // Effects may report a durable outcome only after their external work
         // completes. Feed those outcomes back through the stepper and its
         // normal atomic commit path; effect execution never writes run state.
-        let mut pending_outcomes = std::collections::VecDeque::from(effect_events);
-        while let Some(effect_event) = pending_outcomes.pop_front() {
-            let outcome = advance(&mut view, &effect_event);
-            let outcome_changed = persist_transition(active.run.id, &mut view, &outcome)?;
-            pending_outcomes.extend(execute_effects(app, active, &mut view, &outcome.effects)?);
-            // A terminal state is emitted once, after the cleanup sweep below,
-            // so a run does not fan out two refetches on the way out.
-            if !view.state.is_terminal()
-                && (!outcome.step_writes.is_empty()
-                    || outcome.run_state_changed
-                    || outcome.context_changed
-                    || outcome_changed)
-            {
-                let _ = app.emit(
-                    "circuit-run-updated",
-                    CircuitRunUpdatedPayload {
-                        run_id: active.run.id,
-                        state: view.state.as_db_str().to_string(),
-                    },
-                );
-            }
-        }
+        let exec_app = app.clone();
+        let emit_app = app.clone();
+        drain_effect_outcomes(
+            active.run.id,
+            &mut view,
+            effect_events,
+            &mut |view, effects| execute_effects(&exec_app, active, view, effects),
+            &mut |view, outcome, outcome_changed| {
+                // A terminal state is emitted once, after the cleanup sweep below,
+                // so a run does not fan out two refetches on the way out.
+                if !view.state.is_terminal()
+                    && (!outcome.step_writes.is_empty()
+                        || outcome.run_state_changed
+                        || outcome.context_changed
+                        || outcome_changed)
+                {
+                    let _ = emit_app.emit(
+                        "circuit-run-updated",
+                        CircuitRunUpdatedPayload {
+                            run_id: active.run.id,
+                            state: view.state.as_db_str().to_string(),
+                        },
+                    );
+                }
+            },
+        )?;
 
         // Live ledger: every step transition or state change refreshes
         // the Probe tab, not just terminal ones — otherwise a long agent
@@ -917,6 +921,51 @@ fn drive_run(
 /// writes, including post-effect delivery outcomes, pass through this seam.
 pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
     persist_transition_checked(run_id, view, transition).map_err(TransitionPersistFailure::into_message)
+}
+
+/// Commit one effect outcome through the production seam: advance the event,
+/// then persist the transition atomically. `drive_run` composes this into its
+/// pending-outcome loop; the deterministic coverage drives it directly so a
+/// late result meets the same commit path as a live one.
+pub(super) fn persist_effect_outcome(
+    run_id: i64,
+    view: &mut RunView,
+    event: &CircuitEvent,
+) -> Result<(Transition, bool), String> {
+    let outcome = advance(view, event);
+    let changed = persist_transition(run_id, view, &outcome)?;
+    Ok((outcome, changed))
+}
+
+/// Executes the follow-on effects a drained outcome collects.
+pub(super) type FollowOnExecutor<'a> = dyn FnMut(
+    &mut RunView,
+    &[crate::autopilot::circuit::stepper::Effect],
+) -> Result<Vec<CircuitEvent>, String> + 'a;
+
+/// Observes each committed outcome while draining.
+pub(super) type OutcomeObserver<'a> = dyn FnMut(&RunView, &Transition, bool) + 'a;
+
+/// Drain outcome events through persistence, executing follow-on effects via
+/// the caller's executor and reporting each commit to its observer. App-free:
+/// `drive_run` passes `execute_effects` plus its progress emit, so the
+/// pending-outcome loop's composition — persist, extend, observe, in that
+/// order — lives here once instead of being reproduced by coverage. A
+/// rejected commit aborts the drain with `Err` before any follow-on runs.
+pub(super) fn drain_effect_outcomes(
+    run_id: i64,
+    view: &mut RunView,
+    initial: Vec<CircuitEvent>,
+    execute_follow_ons: &mut FollowOnExecutor<'_>,
+    on_committed: &mut OutcomeObserver<'_>,
+) -> Result<(), String> {
+    let mut pending = std::collections::VecDeque::from(initial);
+    while let Some(event) = pending.pop_front() {
+        let (outcome, changed) = persist_effect_outcome(run_id, view, &event)?;
+        pending.extend(execute_follow_ons(view, &outcome.effects)?);
+        on_committed(view, &outcome, changed);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1425,7 +1474,7 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     // cancels the step via `cancel_step` and the run reaches a terminal
     // state through the normal cascade.
     for step in &view.steps {
-        if step.status != StepStatus::Running {
+        if !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
             continue;
         }
         if step.agent_node_id.is_none() && matches!(view.graph.node(&step.node_id).map(|node| &node.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })) {
@@ -1684,11 +1733,11 @@ fn observe_gates(
     app: &AppHandle,
 ) {
     for step in &view.steps {
-        if step.status != StepStatus::Running {
+        if !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
             continue;
         }
         match view.graph.node(&step.node_id).map(|n| &n.kind) {
-            Some(CircuitNodeKind::AwaitAgentTurn { .. } | CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. }) => {
+            Some(CircuitNodeKind::AwaitAgentTurn { .. } | CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. } | CircuitNodeKind::SpawnAgentNode { .. }) => {
                 let continuation_delivery = view.context.get(&format!("node.{}.continuation.delivery", step.node_id));
                 let continuation_attempt = view.context.get(&format!("node.{}.continuation.attempt", step.node_id))
                     .and_then(|s| s.parse::<i32>().ok());
@@ -1740,7 +1789,7 @@ fn observe_gates(
                     });
                 }
             }
-            Some(CircuitNodeKind::DeterministicVerification { command }) => {
+            Some(CircuitNodeKind::DeterministicVerification { command }) if step.status == StepStatus::Running => {
                 let resolved = view.context.resolve(command);
                 let mesh_path = db::get_mesh_by_id(active.run.mesh_id)
                     .map(|m| m.path)
@@ -1781,9 +1830,10 @@ fn classify_step_turn(
     node_id: &str,
 ) -> Option<ClassifiedTurn> {
     use crate::autopilot::evaluator;
-    let agent_node_id = view.resolve_target_agent(node_id)?;
     let step = view.step(node_id)?;
-    if view.state != RunState::Running || step.status != StepStatus::Running {
+    let agent_node_id = step.agent_node_id.or_else(|| view.resolve_target_agent(node_id))?;
+    if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+        || view.report_has_known_blockers(node_id) {
         return None;
     }
     let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
@@ -1796,7 +1846,7 @@ fn classify_step_turn(
     let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
     let mut agent_node = db::get_agent_node_by_id(agent_node_id).ok()?;
     let evidence = view.classifier_evidence(node_id);
-    let binding = evidence.as_ref().and_then(|evidence| {
+    let mut binding = evidence.as_ref().and_then(|evidence| {
         let owner = evidence.identity.clone()?;
         let report = evidence.report.as_ref()?;
         let input = input_stamp.as_ref()?;
@@ -1808,7 +1858,7 @@ fn classify_step_turn(
             owner,
             report_revision: report.revision.clone(),
             input_guard: crate::autopilot::circuit::stepper::ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
                 agent_node_id, input_stamp: input.clone(), observed_at_ms: report.observed_at_ms,
                 session_id: agent_node.cli_session_id.clone()?, session_incarnation: incarnation.into(),
             },
@@ -1830,7 +1880,8 @@ fn classify_step_turn(
     let probe_generation = evaluator::begin_circuit_probe(
         agent_node_id,
         &probe_key,
-        retry_due || has_unconsumed_classifier_evidence(view, node_id),
+        retry_due || has_unconsumed_classifier_evidence(view, node_id)
+            || (step.status == StepStatus::Unverified && since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000)),
     )?;
     if agent_node.cli_session_id.as_deref().is_none_or(str::is_empty) {
         match crate::services::session_recovery::recover_live_node(agent_node_id) {
@@ -1843,8 +1894,33 @@ fn classify_step_turn(
     if stamp != observed_stamp { return None; }
     let transcript = crate::coordinator::enrichment::assistant_report(&agent_node);
     let revision = transcript.as_ref().map(|r| r.revision.clone());
+    let report_snapshot = crate::coordinator::enrichment::circuit_report_snapshot(&agent_node);
+    if binding.is_none() {
+        binding = report_snapshot.as_ref().and_then(|report| {
+            if view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")) == Some(report.revision.as_str()) {
+                return None;
+            }
+            let incarnation = observed_stamp.as_deref()?.split_once(':')?.0.to_owned();
+            if report.published_at_ms < incarnation.parse::<i64>().ok()? { return None; }
+            let session_id = agent_node.cli_session_id.clone()?;
+            Some(crate::autopilot::circuit::stepper::ClassificationBinding {
+                owner: crate::autopilot::circuit::observation::ObservationIdentity {
+                    run_id: view.run_id, step_id: node_id.into(), attempt: step.attempt, agent_node_id,
+                    session_incarnation: Some(incarnation.clone()), session_id: Some(session_id.clone()),
+                    turn_id: None, report_revision: Some(report.revision.clone()),
+                },
+                report_revision: report.revision.clone(),
+                input_guard: crate::autopilot::circuit::stepper::ObservationInputFence {
+                    transcript_guard: None, report_guard: Some(report.clone()), agent_node_id,
+                    input_stamp: input_stamp.clone()?, observed_at_ms: report.published_at_ms,
+                    session_id, session_incarnation: incarnation,
+                },
+            })
+        });
+    }
     let native_report = binding.as_ref().and_then(|_| evidence.as_ref()?.report.as_ref().map(|report| report.text.clone()));
-    let Some(output) = native_report.or_else(|| select_turn_report(
+    let bound_report = binding.as_ref().and_then(|binding| binding.input_guard.report_guard.as_ref().map(|report| report.text.clone()));
+    let Some(output) = bound_report.or(native_report).or_else(|| select_turn_report(
         transcript,
         view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
         crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) && evaluator::has_turn_start(agent_node_id),
@@ -1909,6 +1985,7 @@ fn classify_step_turn(
     if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten() { return None; }
     if input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
     if revision != crate::coordinator::enrichment::assistant_report(&agent_node).map(|r| r.revision) { return None; }
+    if report_snapshot.as_ref().is_some_and(|snapshot| !snapshot.is_current()) { return None; }
     let mut classification = classification.filter(|c|
         *c != evaluator::Classification::Continue || matches!(view.graph.node(node_id).map(|n| &n.kind),
             Some(CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::AwaitAgentTurn { .. })));
@@ -1962,6 +2039,9 @@ fn classify_gate_report(
     {
         return None;
     }
+    if spawn_hands_off_report(view, node_id) {
+        return Some(evaluator::Classification::Completed);
+    }
     // Ready is a clean lifecycle turn completion, not an LLM judgement of
     // task quality. Review must work even when the classifier is unavailable.
     if review_turn_is_complete(view, node_id, status) {
@@ -2001,6 +2081,14 @@ fn is_reviewer_verdict_gate(view: &RunView, node_id: &str) -> bool {
         view.graph.node(node_id).map(|node| &node.kind),
         Some(CircuitNodeKind::ReviewVerdict { .. })
     )
+}
+
+fn spawn_hands_off_report(view: &RunView, node_id: &str) -> bool {
+    matches!(view.graph.node(node_id).map(|node| &node.kind), Some(CircuitNodeKind::SpawnAgentNode { .. }))
+        && view.graph.edges.iter().any(|edge| edge.from == node_id)
+        && view.graph.edges.iter().filter(|edge| edge.from == node_id).all(|edge|
+            matches!(view.graph.node(&edge.to).map(|node| &node.kind),
+                Some(CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::ReviewVerdict { .. })))
 }
 
 /// What a `verdict` gate may do with a yielded report.
@@ -2055,7 +2143,7 @@ fn reviewer_readiness(
     readiness: impl Fn(&str) -> Option<crate::autopilot::evaluator::Classification>,
 ) -> ReviewerReadiness {
     use crate::autopilot::evaluator::{reviewer_turn_prompt, Classification};
-    if !is_reviewer_verdict_gate(view, node_id) || status != SessionStatus::AwaitingInput {
+    if !(is_reviewer_verdict_gate(view, node_id) || spawn_hands_off_report(view, node_id)) || status != SessionStatus::AwaitingInput {
         return ReviewerReadiness::Reportable;
     }
     match readiness(&reviewer_turn_prompt(output)) {
@@ -2155,7 +2243,7 @@ fn has_unconsumed_classifier_evidence(view: &RunView, node_id: &str) -> bool {
 
 fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, output: &str, since_evaluation_ms: Option<u128>) -> bool {
     let Some(step) = view.step(node_id) else { return false; };
-    if view.state != RunState::Running || step.status != StepStatus::Running {
+    if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
         return false;
     }
     // The same report may first be observed on a watchdog/permission yield,
@@ -2169,6 +2257,7 @@ fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, 
         .and_then(|attempt| attempt.parse::<i32>().ok()) == Some(step.attempt);
     let same_output = view.context.get(&format!("{prefix}.evaluated_output")) == Some(output);
     if same_attempt && same_output {
+        if step.status == StepStatus::Unverified { return since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000); }
         if has_unconsumed_classifier_evidence(view, node_id) { return true; }
         // A failed backend must retry even when the ready agent stays silent.
         // The cooldown uses the existing evaluator clock; restarting permits
@@ -2258,6 +2347,125 @@ fn continuation_is_current(view: &RunView, node_id: &str, target: i64, status: S
         && view.resolve_target_agent(node_id) == Some(target)
         && stamp.is_some() && stamp == view.context.get(&format!("node.{node_id}.continuation.stamp"))
         && revision.is_some() && revision == view.context.get(&format!("node.{node_id}.continuation.revision"))
+}
+
+/// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
+/// idempotent create path use only the DB and the GitHub client, never the
+/// Tauri handle (which unit tests cannot construct — the codebase keeps
+/// `AppHandle` concrete everywhere). `execute_effects` delegates here, so
+/// the deterministic coverage drives the worker's real dispatch wiring
+/// against a controllable endpoint; production passes `None` for the live
+/// client.
+pub(super) fn execute_call_github_effect(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+    action: crate::autopilot::circuit::model::GithubActionKind,
+    label: Option<&str>,
+    comment: Option<&str>,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<Vec<CircuitEvent>, String> {
+    use crate::autopilot::circuit::model::GithubActionKind;
+    let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+    if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
+        if action == GithubActionKind::OpenPr {
+            let event = match github_client {
+                Some(client) => github::reconcile_open_pr_effect_for_worker_with_client(
+                    active, view, node_id, client,
+                ),
+                None => github::reconcile_open_pr_effect_for_worker(active, view, node_id),
+            };
+            return Ok(vec![event]);
+        }
+        view.context.set(&format!("node.{node_id}.recheck_only"), "0");
+        return Ok(vec![CircuitEvent::EffectUncertain {
+            node_id: node_id.to_string(),
+            attempt,
+            reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
+        }]);
+    }
+    let intent = db::circuit::evidence::EffectIntent { node_id: node_id.to_string(), attempt, kind: "github".into() };
+    let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    view.context.set("evidence.revision", revision.to_string());
+    Ok(vec![github::call_github_effect(active, view, node_id, action, label, comment)
+        .unwrap_or_else(|reason| CircuitEvent::EffectUncertain { node_id: node_id.to_string(), attempt, reason })])
+}
+
+/// Apply the worker's dispatch gates to one effect and, while open, dispatch
+/// a `CallGithub` effect through [`execute_call_github_effect`]. App-free.
+/// `execute_effects` delegates its `CallGithub` arm here — re-checking the
+/// same predicates the loop just evaluated, the way the InjectPty arms
+/// re-check the batch mid-effect — so the deterministic coverage drives the
+/// identical gate-then-dispatch composition against a controllable endpoint
+/// instead of reproducing it.
+pub(super) fn gated_dispatch_call_github(
+    batch: &CircuitEffectBatchPermit,
+    run_state: Option<&str>,
+    completing_transition: bool,
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effect: &crate::autopilot::circuit::stepper::Effect,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<Vec<CircuitEvent>, String> {
+    use crate::autopilot::circuit::stepper::Effect;
+    if batch.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    if !run_state.is_some_and(|state| {
+        effect_allowed_in_state(state, completing_transition, effect)
+    }) {
+        return Ok(Vec::new());
+    }
+    match effect {
+        Effect::CallGithub {
+            node_id,
+            action,
+            label,
+            comment,
+        } => execute_call_github_effect(
+            active,
+            view,
+            node_id,
+            *action,
+            label.as_deref(),
+            comment.as_deref(),
+            github_client,
+        ),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Drive one GitHub effect through the full worker composition — batch
+/// permit, durable run-state snapshot, gates, dispatch — without the Tauri
+/// handle `execute_effects` requires. Test entry point for the deterministic
+/// cancellation-ordering coverage; production reaches the same gated dispatch
+/// through the loop above. Returns the outcome events plus whether the
+/// batch observed cancellation while in flight (the ordering evidence a
+/// held lookup needs).
+#[cfg(test)]
+pub(super) fn run_github_effect_pass(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effect: &crate::autopilot::circuit::stepper::Effect,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<(Vec<CircuitEvent>, bool), String> {
+    let batch = begin_circuit_effect_batch(active.run.id);
+    let run_state = db::get_circuit_run(active.run.id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state);
+    let completing = matches!(view.state, RunState::Completed | RunState::Failed);
+    let outcomes = gated_dispatch_call_github(
+        &batch,
+        run_state.as_deref(),
+        completing,
+        active,
+        view,
+        effect,
+        github_client,
+    )?;
+    Ok((outcomes, batch.is_cancelled()))
 }
 
 pub(super) fn execute_effects(
@@ -2475,30 +2683,16 @@ pub(super) fn execute_effects(
                     },
                 );
             }
-            Effect::CallGithub { node_id, action, label, comment } => {
-                let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
-                    if *action == crate::autopilot::circuit::model::GithubActionKind::OpenPr {
-                        outcome_events.push(github::reconcile_open_pr_effect_for_worker(
-                            active, view, node_id,
-                        ));
-                    } else {
-                        view.context.set(&format!("node.{node_id}.recheck_only"), "0");
-                        outcome_events.push(CircuitEvent::EffectUncertain {
-                            node_id: node_id.clone(),
-                            attempt,
-                            reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
-                        });
-                    }
-                    continue;
-                }
-                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: "github".into() };
-                let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
-                    continue;
-                };
-                view.context.set("evidence.revision", revision.to_string());
-                outcome_events.push(github::call_github_effect(active, view, node_id, *action, label.as_deref(), comment.as_deref())
-                    .unwrap_or_else(|reason| CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason }));
+            Effect::CallGithub { .. } => {
+                outcome_events.extend(gated_dispatch_call_github(
+                    &effect_batch,
+                    run_state.as_deref(),
+                    matches!(view.state, RunState::Completed | RunState::Failed),
+                    active,
+                    view,
+                    effect,
+                    None,
+                )?);
             }
         }
     }
@@ -3076,7 +3270,7 @@ mod tests {
             observations,
             stale: false,
             input_guard: Some(ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
                 agent_node_id: 9,
                 input_stamp: "1:2".into(),
                 observed_at_ms: 2_000,

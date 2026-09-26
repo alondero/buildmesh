@@ -142,8 +142,8 @@ const HISTORY_ENTRIES: CircuitHistoryEntry[] = [
   { id: 2, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
     detail: '{"before":null,"after":"{\\"circuit_limit\\":true,\\"agent_limit\\":false}"}',
     source: 'circuit_worker.capacity', disposition: 'waiting', observed_at: '2026-08-22 10:05:10' },
-  { id: 3, node_id: null, attempt: null, kind: 'recovery',
-    detail: '{"successor_run_id":88,"rounds":2}', source: 'operator',
+  { id: 3, node_id: null, attempt: null, kind: 'review_continuation',
+    detail: '{"from_run_id":88}', source: 'operator',
     disposition: 'applied', observed_at: '2026-08-22 10:06:00' },
 ];
 
@@ -1305,10 +1305,10 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
 
     fireEvent.click(await screen.findByText('Circuit Run History'));
 
-    const recovery = await screen.findByTestId('history-entry-3');
-    expect(recovery.dataset.historyKind).toBe('recovery');
-    expect(recovery.dataset.disposition).toBe('applied');
-    expect(recovery.textContent).toContain('Recovered into run #88');
+    const continuation = await screen.findByTestId('history-entry-3');
+    expect(continuation.dataset.historyKind).toBe('review_continuation');
+    expect(continuation.dataset.disposition).toBe('applied');
+    expect(continuation.textContent).toContain('this run follows run #88');
     expect(screen.getByTestId('history-entry-1').dataset.disposition).toBe('waiting');
     expect(screen.getByText('Source: circuit_worker.admission · waiting')).toBeTruthy();
   });

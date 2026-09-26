@@ -27,7 +27,7 @@ export default async function ({ page }) {
   await page.getByText('Circuit Run History').click();
   await expect(page.getByTestId('history-entry-9002')).toBeVisible();
   await expect(page.getByText(/all 2 circuit-run slot/)).toBeVisible();
-  await expect(page.getByText(/Recovered into run #88/)).toBeVisible();
+  await expect(page.getByText(/this run follows run #88/)).toBeVisible();
   await expect(page.getByText('Source: circuit_worker.admission · waiting')).toBeVisible();
   const historyOverflow = await page.getByTestId('circuits-probe-body').evaluate((body) => ({
     scroll: body.scrollWidth,

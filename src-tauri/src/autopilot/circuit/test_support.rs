@@ -60,7 +60,7 @@ pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, te
         report_revision: None,
     };
     let input_guard = ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
         agent_node_id,
         input_stamp: format!("input-{turn_id}"),
         observed_at_ms: 1000,

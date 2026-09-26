@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
 use crate::models::AgentNode;
 
@@ -523,6 +525,55 @@ fn pr_node_name_differs_from_issue_name_only_by_prefix() {
         issue_slug, pr_slug,
         "pr and issue slugs must match for the same title"
     );
+}
+
+// --- pr_reviewer_node_name + disambiguate_node_name ---
+
+/// The reviewer sibling carries a `review` token so it reads as distinct from
+/// the implementation node for the same PR.
+#[test]
+fn pr_reviewer_node_name_marks_review_and_prefixes_pr_number() {
+    assert_eq!(
+        pr_reviewer_node_name(123, "add pr chip"),
+        "pr123-review-add-pr-chip"
+    );
+}
+
+/// The whole point of the separate helper: a reviewer must NOT collide with the
+/// implementation node's name, or the two would share one worktree.
+#[test]
+fn pr_reviewer_node_name_differs_from_implementation_name() {
+    let title = "add pr chip";
+    assert_ne!(pr_reviewer_node_name(123, title), pr_node_name(123, title));
+}
+
+#[test]
+fn disambiguate_node_name_returns_base_when_free() {
+    assert_eq!(
+        disambiguate_node_name("pr1-review-x", &HashSet::new()),
+        "pr1-review-x"
+    );
+}
+
+/// Repeat reviewer spawns append the next free numeric suffix so each gets its
+/// own worktree directory.
+#[test]
+fn disambiguate_node_name_appends_next_free_suffix() {
+    let taken = HashSet::from(["pr1-review-x".to_string(), "pr1-review-x-2".to_string()]);
+    assert_eq!(disambiguate_node_name("pr1-review-x", &taken), "pr1-review-x-3");
+}
+
+/// A base already at the 50-char cap must still yield a valid slug after the
+/// suffix is appended — the suffix is carved out of the base, not past the cap.
+#[test]
+fn disambiguate_node_name_stays_within_the_slug_cap() {
+    let base = format!("pr1-review-{}", "a".repeat(39));
+    assert_eq!(base.len(), 50);
+    let taken = HashSet::from([base.clone()]);
+    let result = disambiguate_node_name(&base, &taken);
+    assert!(result.ends_with("-2"), "expected a -2 suffix, got {:?}", result);
+    assert!(result.len() <= 50, "must stay within the cap: {:?}", result);
+    assert!(SLUG_REGEX.is_match(&result), "must stay valid: {:?}", result);
 }
 
 #[test]

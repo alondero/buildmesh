@@ -161,6 +161,7 @@ enum RunState {
 #[derive(Default)]
 pub struct MuseTurnTracker {
     state: Option<RunState>,
+    current_run: Option<String>,
     emitted_run: Option<String>,
 }
 
@@ -179,13 +180,16 @@ impl MuseTurnTracker {
         match event.get("kind")?.as_str()? {
             "started" => {
                 self.state = Some(RunState::Active);
+                self.current_run = Some(run_id);
                 None
             }
             "terminal" => {
-                self.state = Some(RunState::Terminal);
-                if self.emitted_run.as_deref() == Some(run_id.as_str()) {
+                if self.current_run.as_ref().is_some_and(|current| *current != run_id)
+                    || self.emitted_run.as_deref() == Some(run_id.as_str()) {
                     return None;
                 }
+                self.state = Some(RunState::Terminal);
+                self.current_run = Some(run_id.clone());
                 self.emitted_run = Some(run_id.clone());
                 Some(TurnTerminal {
                     run_id,
@@ -203,6 +207,16 @@ impl MuseTurnTracker {
             _ => None,
         }
     }
+}
+
+pub(crate) fn report_turn_finished(lines: &[String]) -> bool {
+    let mut tracker = MuseTurnTracker::default();
+    let mut terminal = None;
+    for line in lines {
+        if let Some(observed) = tracker.observe_session_log_line(line) { terminal = Some(observed); }
+    }
+    matches!(tracker.state, Some(RunState::Terminal))
+        && terminal.is_some_and(|terminal| terminal.terminal == "completed")
 }
 
 /// Incremental reader for an append-only Muse session log.

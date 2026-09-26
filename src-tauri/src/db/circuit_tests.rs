@@ -128,6 +128,176 @@ fn copied_review_continuation_requires_the_frozen_review_contract() {
     assert!(review_recovery_inner(&conn, changed, 2).unwrap_err().contains("manual recovery"));
 }
 
+/// #1910 audit: only the built-in Review Blueprint is copyable, and
+/// disabling, rewriting or deleting the copy a run was started from must not
+/// reach back into that run's pinned graph or frozen reviewer launch plan.
+#[test]
+fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_source_disable() {
+    use super::circuit::{ledger::copy_review_blueprint_locked, recovery::review_recovery_inner};
+    use crate::autopilot::circuit::context::CircuitContext;
+    use crate::autopilot::circuit::model::CircuitNodeKind;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "blueprint-audit", "/tmp/blueprint-audit").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Implementation", &mesh.path, "work", EnvType::Windows,
+        "claude", None, None, None, None, false, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
+    let blueprint = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()[0].0.id;
+
+    assert_eq!(copy_review_blueprint_locked(&mut conn, blueprint, "   ").unwrap_err(), "Give the Circuit a name.");
+    let copy = copy_review_blueprint_locked(&mut conn, blueprint, "Independent review").unwrap();
+    assert_eq!(
+        copy_review_blueprint_locked(&mut conn, copy.id, "Second copy").unwrap_err(),
+        "Select a built-in Review Blueprint to copy.",
+        "a user Circuit is not a copyable source"
+    );
+
+    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(copy.id), 2, None, false).unwrap();
+    let context = CircuitContext::from_json(&get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json).unwrap();
+    let pinned_launch = context.get("review.launch.reviewer").map(str::to_string);
+    assert!(
+        pinned_launch.as_deref().is_some_and(|plan| !plan.is_empty()),
+        "the effective reviewer launch plan is pinned when the run is created"
+    );
+    commit_circuit_advance_locked(&mut conn, run, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "failed".into(), outcome: Some(Some("working".into())),
+        error: Some(Some("One more pass is needed".into())), agent_node_id: None, attempt: 2, fresh_attempt: false,
+    }]).unwrap();
+
+    set_autopilot_circuit_enabled_inner(&conn, copy.id, false).unwrap();
+    let mut edited = CircuitGraph::from_json(&copy.graph_json).unwrap();
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } =
+        &mut edited.nodes.iter_mut().find(|node| node.id == "reviewer").unwrap().kind
+    {
+        *prompt = "A later, unrelated review instruction".into();
+    }
+    update_autopilot_circuit_graph_inner(&conn, copy.id, &edited.to_json().unwrap()).unwrap();
+
+    let plan = review_recovery_inner(&conn, run, 1).unwrap();
+    assert_eq!(plan.source_id, source.id);
+    assert!(
+        matches!(&plan.graph.node("reviewer").unwrap().kind,
+            CircuitNodeKind::SpawnAgentNode { prompt, .. } if !prompt.contains("A later, unrelated review instruction")),
+        "continuation reads the pinned reviewer scope, not the disabled copy's current graph"
+    );
+    assert_eq!(
+        plan.frozen_launches,
+        vec![("review.launch.reviewer".to_string(), pinned_launch.clone().unwrap())],
+        "the pinned reviewer configuration survives disabling and rewriting the source Circuit"
+    );
+    let successor = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    assert_ne!(
+        get_circuit_run_inner(&conn, successor).unwrap().unwrap().circuit_id,
+        copy.id,
+        "continuation never reuses the disabled source Circuit"
+    );
+    assert_eq!(
+        CircuitContext::from_json(&get_circuit_run_inner(&conn, successor).unwrap().unwrap().context_json)
+            .unwrap().get("review.launch.reviewer"),
+        pinned_launch.as_deref(),
+        "the successor carries the frozen reviewer configuration forward"
+    );
+
+    // Deleting the source Circuit removes its own ledger; the retained
+    // successor keeps its pinned graph and configuration.
+    let successor_graph: String = conn.query_row(
+        "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get(0),
+    ).unwrap();
+    delete_autopilot_circuit_locked(&mut conn, copy.id).unwrap();
+    assert!(get_circuit_run_inner(&conn, run).unwrap().is_none());
+    assert_eq!(
+        conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get::<_, String>(0)).unwrap(),
+        successor_graph
+    );
+    assert_eq!(
+        CircuitContext::from_json(&get_circuit_run_inner(&conn, successor).unwrap().unwrap().context_json)
+            .unwrap().get("review.launch.reviewer"),
+        pinned_launch.as_deref(),
+    );
+}
+
+/// #1910 audit: a Review Successor dispatches review work only. The failed
+/// run it continues owned an implementation step and an OpenPr publication
+/// step; neither may reappear in the follow-up's plan, snapshot, effect
+/// journal or ownership ledger.
+#[test]
+fn continued_review_dispatches_only_review_work_and_records_the_run_it_continues() {
+    use super::circuit::recovery::review_recovery_inner;
+    use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use crate::autopilot::circuit::model::{CircuitNodeKind, GithubActionKind};
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "review-only", "/tmp/review-only").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
+        "claude", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let original = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
+    let published = |graph: &CircuitGraph| graph.nodes.iter().any(|node| matches!(
+        &node.kind,
+        CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. }
+    ));
+    assert!(published(&original), "the continued run really did own a PR publication step");
+    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &original.to_json().unwrap()).unwrap();
+    let parent = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:7",
+        r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7"}"#).unwrap();
+    let op = |node_id: &str, agent_node_id| CircuitStepOp {
+        node_id: node_id.into(), status: "completed".into(), outcome: Some(Some("working".into())),
+        error: None, agent_node_id, attempt: 3, fresh_attempt: false,
+    };
+    commit_circuit_advance_locked(&mut conn, parent, Some("failed"), None, &[op("implementer", Some(source.id)), op("review_classifier", None)]).unwrap();
+    let parent_history: Vec<(i64, String)> = conn.prepare(
+        "SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id").unwrap()
+        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+        .collect::<Result<_, _>>().unwrap();
+
+    let plan = review_recovery_inner(&conn, parent, 1).unwrap();
+    assert!(!published(&plan.graph), "continuation drops the PR publication step");
+    assert!(!plan.graph.nodes.iter().any(|node| node.id == "implementer"), "continuation drops the implementation step");
+    let spawns: Vec<&str> = plan.graph.nodes.iter()
+        .filter(|node| matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }))
+        .map(|node| node.id.as_str()).collect();
+    assert_eq!(spawns, ["reviewer"], "the reviewer is the only agent a follow-up may spawn");
+    let successor = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    let snapshot = CircuitGraph::from_json(&conn.query_row(
+        "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get::<_, String>(0),
+    ).unwrap()).unwrap();
+    assert!(!published(&snapshot) && !snapshot.nodes.iter().any(|node| node.id == "open_pr"),
+        "the pinned snapshot of the follow-up cannot publish a pull request");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1", [successor], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "a fresh follow-up has claimed no external effect"
+    );
+    assert!(
+        list_circuit_run_steps_inner(&conn, successor).unwrap().iter().all(|step| step.agent_node_id != Some(source.id)),
+        "the implementation agent is borrowed by the follow-up, never owned by it"
+    );
+    let borrowed = list_circuit_agent_ownerships_inner(&conn).unwrap().into_iter()
+        .find(|row| row.0 == source.id).expect("the source is still visible as a borrowed run");
+    assert_eq!(borrowed.1, successor);
+    assert_eq!(borrowed.5, None, "the implementation agent is not an owned step of the follow-up");
+
+    let continuation: String = conn.query_row(
+        "SELECT detail FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'", [successor],
+        |row| row.get(0)).expect("the follow-up's own history names the run it continues");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&continuation).unwrap()["from_run_id"].as_i64(),
+        Some(parent)
+    );
+    let after: Vec<(i64, String)> = conn.prepare(
+        "SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id").unwrap()
+        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+        .collect::<Result<_, _>>().unwrap();
+    assert_eq!(after, parent_history, "the failed ancestor's ledger stays immutable");
+
+    cancel_circuit_run_locked(&mut conn, successor).unwrap();
+    assert_eq!(get_circuit_run_inner(&conn, successor).unwrap().unwrap().state, "cancelled");
+    let retry = review_recovery_inner(&conn, parent, 1).unwrap();
+    assert!(
+        create_node_circuit_run_recovery_locked(&mut conn, retry, 1).unwrap_err().contains("cancelled"),
+        "a cancelled successor closes the lineage; the ancestor cannot mint around it"
+    );
+}
+
 #[test]
 fn circuit_run_pins_its_blueprint_before_later_edits() {
     let mut conn = isolated_test_conn();
