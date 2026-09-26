@@ -238,25 +238,17 @@ pub struct ResolvedAgentConfig {
 /// value as it came from its source — whitespace-only inputs are normalised
 /// inside `resolve_field` so all layers are treated uniformly.
 ///
-/// Layers, highest precedence first (issue #1151 / slice 2 of #1148):
+/// Layers, highest precedence first:
 /// 1. **Explicit Agent Node spawn argument** — ad-hoc per-launch values the
 ///    caller passed in (e.g. an autopilot-side override).
-/// 2. **Mesh harness override** — the sparse per-Mesh `harness_overrides`
-///    map keyed by the selected harness's stable id. A mesh may override
-///    multiple harnesses independently (acceptance criteria 8-9); a missing
-///    harness entry means "no override on this mesh" and the cascade falls
-///    through.
-/// 3. **Mesh row legacy value** — the deprecated `meshes.model` /
+/// 2. **Mesh row legacy value** — the deprecated `meshes.model` /
 ///    `meshes.effort` columns. Physically present for positional
-///    compatibility but never populated by new UI writes after the v33
-///    migration; the v33 one-shot migration copies non-empty legacy values
-///    into the `claude` entry of the new map, so the legacy columns are
-///    inert on the resolved path for any Mesh that has been
-///    post-migration-read by the resolver.
-/// 4. **Application-level default** — per-harness defaults from App Settings
+///    compatibility but never populated by new UI writes; always `None` on
+///    the resolved path for any Mesh read after the migration.
+/// 3. **Application-level default** — per-harness defaults from App Settings
 ///    (issue #1150). Filled by `preferences::harness_default_for` at the
 ///    spawn seam.
-/// 5. **Harness native fallback** — never a Buildmesh synthetic value: when
+/// 4. **Harness native fallback** — never a Buildmesh synthetic value: when
 ///    every supplied layer is empty/absent, the resolver returns `None` so
 ///    the harness runs with its own defaults.
 ///
@@ -270,15 +262,9 @@ pub struct ResolvedAgentConfig {
 pub struct FieldInputs<'a> {
     /// Explicit Agent Node spawn argument (highest precedence).
     pub explicit: Option<&'a str>,
-    /// Per-Mesh harness override (issue #1151, sparse layer keyed by
-    /// the selected harness's stable id). `Some("")` is treated as
-    /// "inherited" — the resolver normalises whitespace-only to absent
-    /// so a "reset to inherit" UI click collapses cleanly.
-    pub mesh_override: Option<&'a str>,
-    /// Mesh row legacy value (`meshes.model` / `meshes.effort`). Kept
-    /// here so a pre-v33 read shape still resolves; the v33+
-    /// migration copied non-empty values into `mesh_override["claude"]`,
-    /// so on a healthy v33+ DB this layer is always `None`.
+    /// Mesh row legacy value (`meshes.model` / `meshes.effort`). Kept so a
+    /// pre-migration read shape still resolves; always `None` on a healthy
+    /// modern DB.
     pub mesh: Option<&'a str>,
     /// Application-level default (issue #1150).
     pub application: Option<&'a str>,
@@ -321,8 +307,8 @@ pub fn resolve_agent_config(
 
 /// Capability-masked extra-args resolver (issue #1358).
 ///
-/// Kept separate from `resolve_agent_config` so the four-layer cascade
-/// (`explicit > mesh_override > mesh > application`) — which doesn't own
+/// Kept separate from `resolve_agent_config` so the cascade
+/// (`explicit > mesh > application`) — which doesn't own
 /// any extras layer — doesn't have to grow. `extra_args` only flows in from
 /// the cascade layer-1 explicit slot (no mesh / application layer carries
 /// per-spawn flags), so the seam collapses to a single value plus the
@@ -339,16 +325,14 @@ pub fn resolve_extra_args(
 
 /// Whitespace-normalised first-non-empty-layer picker for one field. Every
 /// layer is trimmed; a layer that is empty or whitespace-only collapses to
-/// absent so the cascade falls through to the next layer. Cascade order
-/// mirrors the issue #1148 cascade (slice 2 settles the per-Mesh override
-/// layer between explicit and the legacy Mesh row):
-///   explicit > mesh_override > mesh (legacy) > application > native
+/// absent so the cascade falls through to the next layer. Cascade order:
+///   explicit > mesh (legacy) > application > native
 ///
 /// **Issue #1656:** the helper is now sourced from
 /// [`crate::preferences::resolver::resolve_field`] so the spawn pipeline
 /// AND the IPC `get_resolved_harness_view` rule on the same cascade. The
 /// helper-level tests in `agent::capabilities::tests`
-/// (`resolver_cascade_prefers_explicit_over_mesh_override_over_mesh_over_application`,
+/// (`resolver_cascade_prefers_explicit_over_mesh_over_application`,
 /// `resolver_cascade_falls_through_whitespace_layers`) now also gate the
 /// IPC resolver — a single helper, one set of cascade pin tests.
 fn resolve_field(field: FieldInputs<'_>) -> Option<String> {
@@ -1003,24 +987,20 @@ mod tests {
         }
     }
 
-    /// Cascade: explicit > mesh_override > mesh > application. Each layer
-    /// wins over the next-lower one when non-empty. Pin: the per-Mesh
-    /// override layer (issue #1151) sits between explicit and the legacy
-    /// Mesh row in the cascade order — explicit wins, then mesh_override,
-    /// then the legacy mesh columns, then application. A future ordering
-    /// regression in `resolve_field` would shatter this pin.
+    /// Cascade: explicit > mesh > application. Each layer wins over the
+    /// next-lower one when non-empty. Pin: explicit wins, then the legacy
+    /// mesh columns, then application. A future ordering regression in
+    /// `resolve_field` would shatter this pin.
     #[test]
-    fn resolver_cascade_prefers_explicit_over_mesh_override_over_mesh_over_application() {
+    fn resolver_cascade_prefers_explicit_over_mesh_over_application() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("explicit-model"),
-                mesh_override: Some("override-model"),
                 mesh: Some("mesh-model"),
                 application: Some("app-model"),
             },
             effort: FieldInputs {
                 explicit: Some("high"),
-                mesh_override: Some("override-effort"),
                 mesh: Some("medium"),
                 application: Some("low"),
             },
@@ -1031,22 +1011,18 @@ mod tests {
     }
 
     /// Cascade fallthrough: an empty / whitespace-only layer lets the next
-    /// layer win. Issue #1151 cascade order — whitespace `mesh_override`
-    /// collapses to absent so the legacy `mesh` layer (or further cascade)
-    /// surfaces. Mirrors the pre-#1151 fallthrough test, now extended
-    /// through the new layer.
+    /// layer win — whitespace collapses to absent so the legacy `mesh`
+    /// layer (or further cascade) surfaces.
     #[test]
     fn resolver_cascade_falls_through_whitespace_layers() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("   "),
-                mesh_override: Some("  \t  "),
                 mesh: Some("  \t  "),
                 application: Some("opus-4"),
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: Some(""),
                 mesh: Some(""),
                 application: Some("medium"),
             },
@@ -1060,14 +1036,12 @@ mod tests {
     /// even when the Mesh layer supplied one. Terminal is the standing
     /// example (OpenCode now advertises `--model`). The capability mask
     /// is the contract that unsupported values never reach a harness
-    /// process. Now extended through the new `mesh_override` layer
-    /// (issue #1151).
+    /// process.
     #[test]
     fn resolver_drops_model_for_harness_without_model_override() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: Some("some-model"),
                 mesh: Some("some-model"),
                 application: None,
             },
@@ -1095,7 +1069,6 @@ mod tests {
                 model: FieldInputs::default(),
                 effort: FieldInputs {
                     explicit: Some("high"),
-                    mesh_override: Some("medium"),
                     mesh: Some("medium"),
                     application: Some("low"),
                 },
@@ -1120,7 +1093,6 @@ mod tests {
             model: FieldInputs::default(),
             effort: FieldInputs {
                 explicit: Some("xhigh"),
-                mesh_override: None,
                 mesh: None,
                 application: None,
             },
@@ -1142,7 +1114,6 @@ mod tests {
             model: FieldInputs::default(),
             effort: FieldInputs {
                 explicit: Some("xhigh"),
-                mesh_override: None,
                 mesh: None,
                 application: None,
             },
@@ -1161,24 +1132,19 @@ mod tests {
     }
 
     /// Mesh legacy contract (issue #1149 acceptance criteria 5): a non-empty
-    /// Mesh row still affects supported harnesses before the later migration
-    /// ticket lands. Pin: feeding the Mesh slot through the resolver with
-    /// no explicit or application value resolves to the Mesh value. The
-    /// `mesh_override` slot is `None` here — the v33 migration is the path
-    /// that fills it on a real DB; the legacy column stays inert on the
-    /// resolver pass.
+    /// Mesh row still affects supported harnesses. Pin: feeding the Mesh
+    /// slot through the resolver with no explicit or application value
+    /// resolves to the Mesh value.
     #[test]
     fn resolver_mesh_slot_drives_supported_harness() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("opus-4-1"),
                 application: None,
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("high"),
                 application: None,
             },
@@ -1196,13 +1162,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("opus"),
                 application: None,
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("high"),
                 application: None,
             },
@@ -1214,20 +1178,17 @@ mod tests {
 
     /// Whitespace-only at every layer collapses to absent for both fields.
     /// Issue #1148 acceptance criteria 32 — "model and effort values trimmed
-    /// and empty values treated as absent". Now extended through the new
-    /// `mesh_override` layer (issue #1151).
+    /// and empty values treated as absent".
     #[test]
     fn resolver_treats_all_whitespace_layers_as_absent() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("   "),
-                mesh_override: Some("\t\n  "),
                 mesh: Some("\t\n  "),
                 application: Some("  "),
             },
             effort: FieldInputs {
                 explicit: Some(" "),
-                mesh_override: Some("\n"),
                 mesh: Some("\n"),
                 application: Some("\t"),
             },
@@ -1244,13 +1205,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("  opus  "),
-                mesh_override: None,
                 mesh: None,
                 application: None,
             },
             effort: FieldInputs {
                 explicit: Some(" high\t"),
-                mesh_override: None,
                 mesh: None,
                 application: None,
             },
@@ -1265,20 +1224,17 @@ mod tests {
     /// empty so `build_spawn_command` doesn't forward anything to the
     /// user's shell (the acceptance criteria "Terminal and other
     /// non-configurable harnesses receive no synthetic model or effort
-    /// arguments"). Extended with the new `mesh_override` layer
-    /// (issue #1151).
+    /// arguments").
     #[test]
     fn terminal_harness_receives_no_synthetic_flags() {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("anything"),
-                mesh_override: Some("whatever"),
                 mesh: Some("whatever"),
                 application: None,
             },
             effort: FieldInputs {
                 explicit: Some("high"),
-                mesh_override: Some("low"),
                 mesh: Some("low"),
                 application: None,
             },
@@ -1319,8 +1275,8 @@ mod tests {
     // Application-default slot feed (issue #1150 / #1148)
     // -----------------------------------------------------------------------
 
-    /// The application slot drives the resolved value when explicit + mesh_override
-    /// + mesh are empty (issue #1148 cascade layer 4: `explicit > mesh_override > mesh > application > native`).
+    /// The application slot drives the resolved value when explicit + mesh
+    /// are empty (issue #1148 cascade: `explicit > mesh > application > native`).
     ///
     /// The spawn path in `spawn_agent_inner` populates this slot from
     /// `preferences::harness_default_for(&node.provider)`; this test pins the resolver
@@ -1330,13 +1286,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("opus-4-1"),
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("high"),
             },
@@ -1358,13 +1312,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("some-model"),
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("high"),
             },
@@ -1394,7 +1346,6 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: None,
             },
@@ -1417,13 +1368,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("   "),
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("  high  "),
             },
@@ -1445,7 +1394,6 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: Some("sonnet-4"),
-                mesh_override: None,
                 mesh: None,
                 application: Some("opus-4-1"),
             },
@@ -1474,13 +1422,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("opus-4-1"),
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: None,
                 application: Some("high"),
             },
@@ -1488,132 +1434,6 @@ mod tests {
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Per-Mesh harness overrides layer (issue #1151 / slice 2 of #1148)
-    // -----------------------------------------------------------------------
-
-    /// Mesh override wins over the application default (issue #1151
-    /// cascade order explicit > mesh_override > mesh > application > native).
-    /// The legacy `mesh` column is intentionally absent here — the v33
-    /// migration copied any non-empty legacy values into the new map.
-    #[test]
-    fn resolver_mesh_override_wins_over_application_default() {
-        let inputs = AgentConfigInputs {
-            model: FieldInputs {
-                explicit: None,
-                mesh_override: Some("opus-4-1"),
-                mesh: None,
-                application: Some("app-model"),
-            },
-            effort: FieldInputs {
-                explicit: None,
-                mesh_override: Some("high"),
-                mesh: None,
-                application: Some("medium"),
-            },
-        };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
-        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
-        assert_eq!(resolved.effort.as_deref(), Some("high"));
-    }
-
-    /// Mesh override wins over the legacy `mesh` column (issue #1151 — the
-    /// cascade order puts the new layer strictly above the legacy Mesh
-    /// row). On a healthy v33+ DB the legacy columns are inert and the
-    /// cascade resolves to the new map; pinning this protects against a
-    /// future reorder that re-promotes the legacy columns.
-    #[test]
-    fn resolver_mesh_override_wins_over_legacy_mesh_row() {
-        let inputs = AgentConfigInputs {
-            model: FieldInputs {
-                explicit: None,
-                mesh_override: Some("opus-4-1"),
-                mesh: Some("legacy-model"),
-                application: None,
-            },
-            effort: FieldInputs {
-                explicit: None,
-                mesh_override: Some("high"),
-                mesh: Some("legacy-effort"),
-                application: None,
-            },
-        };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
-        assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
-        assert_eq!(resolved.effort.as_deref(), Some("high"));
-    }
-
-    /// Explicit Agent Node argument wins over the Mesh override (issue
-    /// #1151 cascade layer 1 — the spawn path lets an ad-hoc Agent Node
-    /// override pin the most-specific layer).
-    #[test]
-    fn resolver_explicit_argument_overrides_mesh_override() {
-        let inputs = AgentConfigInputs {
-            model: FieldInputs {
-                explicit: Some("ad-hoc-model"),
-                mesh_override: Some("override-model"),
-                mesh: None,
-                application: Some("app-model"),
-            },
-            effort: FieldInputs::default(),
-        };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
-        assert_eq!(resolved.model.as_deref(), Some("ad-hoc-model"));
-    }
-
-    /// Per-field independence: a partial Mesh override can override model
-    /// while inheriting effort (issue #1148 acceptance criteria 16:
-    /// "A partial Mesh override can override model while inheriting
-    /// effort, or vice versa"). The cascade resolves per field
-    /// independently, so a present mesh_override model falls through to
-    /// the application default for effort.
-    #[test]
-    fn resolver_partial_mesh_override_inherits_for_other_field() {
-        let inputs = AgentConfigInputs {
-            model: FieldInputs {
-                explicit: None,
-                mesh_override: Some("override-model"),
-                mesh: None,
-                application: Some("app-model"),
-            },
-            effort: FieldInputs {
-                explicit: None,
-                mesh_override: None,
-                mesh: None,
-                application: Some("high"),
-            },
-        };
-        let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
-        assert_eq!(resolved.model.as_deref(), Some("override-model"));
-        assert_eq!(resolved.effort.as_deref(), Some("high"));
-    }
-
-    /// Mesh override is masked by the capability contract: a harness
-    /// without `supports_model_override` (e.g. Terminal) drops the Mesh
-    /// override layer at the resolver, even when the user (or an IPC
-    /// write) supplied a value. Mirrors the application-default mask
-    /// (`resolver_application_slot_dropped_when_capability_masks_it`).
-    /// The spawn path supplies the stored override verbatim — the
-    /// validator at the write boundary only rejects *unsupported effort*,
-    /// not unsupported model — so the resolver's mask is the final gate.
-    #[test]
-    fn resolver_mesh_override_masked_for_harness_without_model_override() {
-        let inputs = AgentConfigInputs {
-            model: FieldInputs {
-                explicit: None,
-                mesh_override: Some("some-model"),
-                mesh: None,
-                application: None,
-            },
-            effort: FieldInputs::default(),
-        };
-        let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
-        assert!(
-            resolved.model.is_none(),
-            "Terminal doesn't support model overrides; the mask must drop the mesh override layer"
-        );
     }
 
     /// v33 migration pin: the legacy `mesh` column reading through the
@@ -1631,13 +1451,11 @@ mod tests {
         let inputs = AgentConfigInputs {
             model: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("opus-4-1"),
                 application: None,
             },
             effort: FieldInputs {
                 explicit: None,
-                mesh_override: None,
                 mesh: Some("high"),
                 application: None,
             },

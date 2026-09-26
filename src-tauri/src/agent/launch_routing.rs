@@ -489,7 +489,7 @@ mod routing_cache_tests {
             };
             preferences::save(prefs.clone()).unwrap();
             let plan = preferences::launch_configurations::resolve(
-                &prefs, "launch/cline:custom", &Default::default(), &Default::default(),
+                &prefs, "launch/cline:custom", &Default::default(),
             ).unwrap();
             assert_eq!(plan.route.as_ref().map(|route| route.surface), Some(surface));
             let routing = prepare_snapshot(&plan, &resolved).unwrap();

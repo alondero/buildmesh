@@ -6,7 +6,7 @@ import type { ResolvedCascadeView } from "./ResolvedCascadeView";
 
 /**
  * Per-harness cascade view returned by [`get_resolved_harness_view`].
- * Carries the harness profile + the four-layer breakdown for both `model`
+ * Carries the harness profile + the per-layer breakdown for both `model`
  * and `effort` + the capability-masked resolved value.
  *
  * **Generated** to `src/types/generated/ResolvedHarnessView.ts`. The IPC
@@ -22,10 +22,9 @@ export type ResolvedHarnessView = {
 harness_id: string, 
 /**
  * Optional mesh id the view was computed against. `None` when the
- * caller asked for the application-level only view (no mesh override
- * layer). The settings modal passes `None`; the Mesh Properties tab
- * passes the active mesh id so the mesh_override + mesh_legacy layers
- * participate.
+ * caller asked for the application-level only view (no mesh layer).
+ * The settings modal passes `None`; the Mesh Properties tab passes the
+ * active mesh id so the mesh_legacy layer participates.
  *
  * `#[ts(as = "Option<i32>")]` mirrors the project convention (CLAUDE.md
  * hard rule: 64-bit ints need the annotation so TS sees `number`, not
@@ -66,20 +65,13 @@ capabilities: CapabilityMaskForResolver | null,
  */
 application_default: HarnessConfigValue, 
 /**
- * Per-Mesh override from `meshes.harness_overrides[harness_id]`.
- * `None` when no mesh id was passed OR when the mesh has no override
- * for this harness (the sparse-map invariant).
- */
-mesh_override?: HarnessConfigValue | null, 
-/**
  * Per-Mesh legacy `meshes.model` / `meshes.effort` columns. `None` on
- * a healthy v33+ DB (the migration copied non-empty legacy values
- * into `mesh_override["claude"]`). Surfaced so a pre-v33 read shape
- * still resolves through the same IPC.
+ * a healthy DB. Surfaced so a legacy read shape still resolves through
+ * the same IPC.
  */
 mesh_legacy?: HarnessConfigValue | null, 
 /**
- * Cascade breakdown for the `model` field. Includes all four layers
+ * Cascade breakdown for the `model` field. Includes every layer
  * plus the capability-masked resolved value.
  */
 model: ResolvedCascadeView, 

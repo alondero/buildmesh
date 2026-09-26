@@ -14,13 +14,11 @@ pub use git::*;
 pub use circuit::*;
 
 /// Re-export the wire-level Agent Harness configuration value type from
-/// the private `preferences` module so [`crate::models::Mesh`] / [`MeshRow`]
-/// can include it in their public type signatures without leaking the
-/// `preferences` module through the public API (`preferences` stays private
+/// the private `preferences` module so the public API can expose it
+/// without leaking the `preferences` module (`preferences` stays private
 /// because the rest of its surface is internal-only). The same type is
 /// used by the application-level defaults map
-/// (`AppPreferences.harness_defaults`), the per-Mesh overrides map
-/// (`Mesh.harness_overrides`), and the spawn-config resolver
+/// (`AppPreferences.harness_defaults`) and the spawn-config resolver
 /// (`ResolvedAgentConfig`).
 pub use crate::preferences::HarnessConfigValue;
 

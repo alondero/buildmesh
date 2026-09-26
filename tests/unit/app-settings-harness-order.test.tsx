@@ -131,7 +131,7 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
     __resetProviderCachesForTests();
   });
 
-  it('rolls the default-provider dropdown back when set_app_default_provider rejects', async () => {
+  it('rolls the default-provider picker back when set_app_default_provider rejects', async () => {
     const providers = [
       provider('claude', 'Claude Code'),
       provider('codex', 'Codex'),
@@ -178,35 +178,24 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
     // query (which excludes hidden content) needs that pane active.
     await openSettingsPane('Providers');
 
-    // The default-provider `<select>` is now aria-labelled so this query is
-    // unambiguous (the Auto-naming picker is also a combobox). Reaching in via
-    // the role without a name would match either.
-    const dropdown = (await screen.findByRole('combobox', { name: 'Default provider' })) as HTMLSelectElement;
+    const trigger = (await screen.findByRole('button', { name: 'Default provider' })) as HTMLButtonElement;
     // The control mounts before the delayed provider response makes its
     // options available, so finding its role alone is not a readiness signal.
-    expect(dropdown.disabled).toBe(true);
-    expect(dropdown.querySelector('option[value="codex"]')).toBeNull();
+    expect(trigger.disabled).toBe(true);
+    expect(trigger.textContent).toContain('Anthropic (built-in default)');
 
     resolveProviders(providers);
-    await waitFor(() => {
-      expect(dropdown.disabled).toBe(false);
-      expect(dropdown.querySelector('option[value="codex"]')).not.toBeNull();
-    });
+    await waitFor(() => expect(trigger.disabled).toBe(false));
 
-    expect(dropdown.value).toBe('__no_override__');
+    // Open the Spawn Menu and pick the native Codex harness row.
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Codex' }));
 
-    // Fire the change. We don't assert the transient optimistic state
-    // ("codex") — React 18's automatic batching collapses the optimistic
-    // setSelected + the rollback setSelected into a single commit because
-    // the mocked IPC rejects synchronously, so the intermediate DOM state
-    // is never observable. The contract we're pinning is the *final* state:
-    // a rejected IPC leaves the dropdown reverted to its prior value.
-    await user.selectOptions(dropdown, 'codex');
-
-    // After the rejection, the rollback fires and the dropdown reverts. The
-    // ref-based fix (#581) ensures we revert to the *committed* value, not
-    // whichever stale snapshot the render-time closure happened to hold.
-    await waitFor(() => expect(dropdown.value).toBe('__no_override__'));
+    // After the rejection, the rollback fires and the trigger reverts to the
+    // committed value. The ref-based fix (#581) ensures we revert to the
+    // *committed* value, not whichever stale snapshot the render-time
+    // closure happened to hold.
+    await waitFor(() => expect(trigger.textContent).toContain('Anthropic (built-in default)'));
     expect(invoke).toHaveBeenCalledWith('set_app_default_provider', { provider: 'codex' });
   });
 });

@@ -2,6 +2,7 @@ import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
 import { HarnessOrderList } from './HarnessOrderList';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
@@ -2023,19 +2024,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             htmlFor="default-provider"
             summary="Provider used when a mesh has no default of its own."
           >
-            <select
+            <SpawnOptionPicker
               id="default-provider"
-              aria-label="Default provider"
-              value={selected}
+              size="md"
+              ariaLabel="Default provider"
+              providers={providers}
+              value={selected === NO_OVERRIDE ? null : selected}
+              unsetLabel="Anthropic (built-in default)"
+              unsetValue={NO_OVERRIDE}
               disabled={!prefsLoaded || !providersLoaded || saving}
-              onChange={e => handleSave(e.target.value)}
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-            >
-              <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
-              {providers.map(p => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-            </select>
+              onSelect={next => handleSave(next ?? NO_OVERRIDE)}
+            />
           </SettingsRow>
 
           <SettingsRow
@@ -2050,28 +2049,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               </>
             }
           >
-            <select
+            <SpawnOptionPicker
               id="reviewer-provider"
-              aria-label="Reviewer provider"
-              value={reviewerProvider}
+              size="md"
+              ariaLabel="Reviewer provider"
+              providers={providers}
+              value={reviewerProvider === NO_OVERRIDE ? null : reviewerProvider}
+              unsetLabel="Source agent provider"
+              unsetValue={NO_OVERRIDE}
               disabled={!prefsLoaded || !providersLoaded || reviewerSaving}
-              onChange={e => handleSaveReviewer(e.target.value)}
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-            >
-              <option value={NO_OVERRIDE}>Source agent provider</option>
-              {providers
-                .filter((p) => p.harness_id !== 'terminal')
-                .map(p => {
-                  // A reviewer whose harness cannot yield a turn never lets the
-                  // `verdict` gate fire, so it is offered but not pickable.
-                  const blocked = blocksReviewCircuit(p.harness_id);
-                  return (
-                    <option key={p.id} value={p.id} disabled={blocked}>
-                      {blocked ? `${p.label} (no review support)` : p.label}
-                    </option>
-                  );
-                })}
-            </select>
+              filter={(option) => option.harness_id !== 'terminal'}
+              // A reviewer whose harness cannot yield a turn never lets the
+              // `verdict` gate fire, so it is offered but not pickable.
+              decorate={(option) =>
+                blocksReviewCircuit(option.harness_id)
+                  ? { ...option, unavailable_reason: 'no review support' }
+                  : option
+              }
+              onSelect={next => handleSaveReviewer(next ?? NO_OVERRIDE)}
+            />
           </SettingsRow>
 
           {/* Issue #824: Auto-naming. Distinct from the default provider above.
@@ -2092,21 +2088,18 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               </>
             }
           >
-            <select
+            <SpawnOptionPicker
               id="auto-naming"
-              aria-label="Auto-naming"
-              value={namingProvider ?? ''}
+              size="md"
+              ariaLabel="Auto-naming"
+              providers={providers}
+              value={namingProvider ?? null}
+              unsetLabel="Disabled (auto-naming off)"
+              unsetValue={null}
               disabled={!prefsLoaded || !providersLoaded || namingSaving}
-              onChange={e => handleSaveNaming(e.target.value || null)}
-              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-            >
-              <option value="">Disabled (auto-naming off)</option>
-              {providers
-                .filter((p) => p.harness_id !== 'terminal')
-                .map((p) => (
-                  <option key={p.id} value={p.id} disabled={Boolean(p.unavailable_reason)}>{p.label}{p.unavailable_reason ? ` — ${p.unavailable_reason}` : ''}</option>
-                ))}
-            </select>
+              filter={(option) => option.harness_id !== 'terminal'}
+              onSelect={next => handleSaveNaming(next)}
+            />
           </SettingsRow>
           {namingProvider === 'anthropic' && (
             <p className="pb-2 text-sm text-text-muted">

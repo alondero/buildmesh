@@ -460,7 +460,7 @@ fn create_node_circuit_run_with_recovery_locked(
     if let Some(recovery) = &recovery {
         for (key, value) in &recovery.frozen_launches { context.set(key, value); }
     } else if let Some(preferences) = preferences {
-        pin_review_launches(&tx, circuit_id, node.mesh_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
+        pin_review_launches(&tx, circuit_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
     }
     context.set("retry.attempt", "1");
     if let Some(recovery) = recovery {
@@ -484,7 +484,6 @@ fn create_node_circuit_run_with_recovery_locked(
 fn pin_review_launches(
     db: &Connection,
     circuit_id: i64,
-    mesh_id: i64,
     source_provider: &str,
     source_configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     preferences: &crate::preferences::AppPreferences,
@@ -497,7 +496,6 @@ fn pin_review_launches(
     if let Some(configuration) = inherited_configuration { preferences.spawn_configurations.push(configuration.clone()); }
     let circuit = get_autopilot_circuit_inner(db, circuit_id).map_err(|e| e.to_string())?.ok_or("Circuit no longer exists")?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
-    let mesh_overrides = crate::db::get_mesh_harness_overrides_inner(db, mesh_id).map_err(|e| e.to_string())?.unwrap_or_default();
     for node in &graph.nodes {
         let CircuitNodeKind::SpawnAgentNode { provider, model, effort, extra_args, .. } = &node.kind else { continue; };
         if !graph.nodes.iter().any(|gate| matches!(&gate.kind, CircuitNodeKind::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some(&node.id))) { continue; }
@@ -509,8 +507,6 @@ fn pin_review_launches(
         let selection = provider.as_deref().filter(|_| !preset).filter(|p| !p.trim().is_empty())
             .or_else(|| context.get("review.provider").filter(|p| !p.trim().is_empty()))
             .or_else(|| context.get("source.provider")).or(parent_selection).unwrap_or(source_provider);
-        let option = preferences.spawn_configurations.iter().find(|c| c.id == selection).map_or(selection, |c| c.spawn_option_id.as_str());
-        let id = crate::agent::provider::SpawnOptionId::from(option);
         let overrides = LaunchOverrides {
             model: model.clone().filter(|_| !preset), effort: effort.clone().filter(|_| !preset), extra_args: extra_args.clone(),
         };
@@ -523,7 +519,7 @@ fn pin_review_launches(
                 launch_preferences.provider_pairings.push(route.clone());
             }
         }
-        let plan = capture(&launch_preferences, selection, &overrides, &mesh_overrides.get(id.harness_id()).cloned().unwrap_or_default())?;
+        let plan = capture(&launch_preferences, selection, &overrides)?;
         let key = format!("review.launch.{}", node.id);
         context.set(&key, serde_json::to_string(&snapshot(plan)).map_err(|e| e.to_string())?);
     }
@@ -1041,7 +1037,7 @@ pub(crate) fn create_circuit_run_prepared_locked(
     if context.get("review.provider").is_none() {
         if let Some(provider) = preferences.reviewer_provider.as_deref() { context.set("review.provider", provider); }
     }
-    pin_review_launches(&tx, circuit_id, mesh_id, &source_provider, None, preferences, &mut context).map_err(rusqlite::Error::InvalidParameterName)?;
+    pin_review_launches(&tx, circuit_id, &source_provider, None, preferences, &mut context).map_err(rusqlite::Error::InvalidParameterName)?;
     let context_json = context.to_json().map_err(rusqlite::Error::InvalidParameterName)?;
     let next_position: i64 = tx.query_row(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM autopilot_circuit_runs WHERE mesh_id = ?1",
@@ -1881,7 +1877,7 @@ mod reviewer_tests {
         prefs.harness_profiles.push(crate::preferences::HarnessProfile { id: harness.into(), name: "Retained Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
         let launch = snapshot(capture(&prefs, harness, &crate::preferences::launch_configurations::LaunchOverrides {
             model: Some("gpt-6-luna".into()), effort: Some("low".into()), extra_args: None,
-        }, &Default::default()).unwrap());
+        }).unwrap());
         assert_eq!(launch.id, format!("launch/{harness}"));
         prefs.harness_profiles.clear();
         assert!(prefs.spawn_configurations.is_empty());
@@ -1964,7 +1960,6 @@ mod reviewer_tests {
         assert_eq!(frozen.effort.as_deref(), Some("low"));
         assert_eq!(frozen.resolved.as_ref().unwrap().harness.harness, "codex");
         preferences.harness_defaults.get_mut("codex").unwrap().model = Some("changed-default".into());
-        db.execute(r#"UPDATE meshes SET harness_overrides='{"codex":{"model":"changed-mesh"}}' WHERE id=?1"#, [mesh.id]).unwrap();
         commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
             node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
         }]).unwrap();
@@ -1974,7 +1969,7 @@ mod reviewer_tests {
         assert_eq!(serde_json::to_value(read_snapshot(&db, first)).unwrap(), serde_json::to_value(&frozen).unwrap());
         cancel_circuit_run_locked(&mut db, successor).unwrap();
         let fresh = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
-        assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-mesh"));
+        assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
     }
 
     /// Issue #1816: every harness with neither an attention hook nor a
