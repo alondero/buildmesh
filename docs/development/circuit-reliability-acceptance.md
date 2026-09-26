@@ -10,7 +10,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. The create-dispatch crash transition is now covered deterministically (issue #1907, below); a live process crash and live GitHub races remain unverified. Other effect kinds and continuation still need a complete typed journal audit |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
@@ -496,9 +496,51 @@ the newly added path has not been repeated in the live app.
 | Full Rust library suite | 3,813 passed, 24 ignored | Serial current-source run; 3,837 discovered |
 | Focused recheck/freshness regressions | Passed | 13 recheck tests, the Codex stale-completion boundary regression, freshness-error classification, and transcript-change rejection |
 | OpenPr recheck and cancellation race | Passed | Saved-target lookup tests and stepper/database commits; 4 focused lookup and completion tests plus the cancelled-result fence test. The GitHub lookup to worker result handoff remains untested as one live path |
+| OpenPr create-dispatch crash recovery (issue #1907) | 6 passed, 0 failed | `cargo test --locked --lib services::circuit_worker::github_recovery_tests -- --test-threads=1`. Adds three dispatch-to-crash scenarios: the production create against a loopback endpoint, restart reconciliation, found/absent PR, and the cancellation/recheck stale fence. Loopback endpoint and an injected stop, not a live process crash |
 | Full Vitest | 3,542 passed, 1 failed, 1 skipped | Sole failure is the radius audit at `AppSettings/UsageRender.tsx:308`, reproduced at the recorded base |
 | Focused history UI | 9 passed | OpenPr safe recheck action and history presentation |
 | TypeScript / source ESLint | Passed | UI source build completed TypeScript and desktop/mobile Vite builds; lint reported no warnings. Rust commit-fence follow-up was covered by the full Rust suite, not a rebuilt live app |
 | Clippy | Passed, exit 0 | Two existing warnings remain in `environment.rs` and `harness_catalog.rs`; neither file was changed |
 | Documentation gates | Passed | `npm run test:docs`: 19 passed; `npm run check:docs`: 119 Markdown files |
 | Agent diff gate | Passed | `npm run check:agent -- --base d8e3a1a780599cbdcece4710df2b603860065e7a` covered the committed diff before push |
+
+
+### OpenPr create-dispatch crash recovery (issue #1907)
+
+The #1889 recovery checks seeded a durable uncertain OpenPr effect. They proved
+the saved-target lookup and worker handoff, but not recovery after the create
+request may have reached GitHub before Buildmesh stopped.
+[#1907](https://github.com/alondero/buildmesh/issues/1907) closes that
+transition with deterministic automated scenarios in
+`src-tauri/src/services/circuit_worker/github_recovery_tests.rs`. Each scenario
+drives the production dispatch (`github::ensure_open_pr_with_target`) and the
+worker's read-only handoff (`github::reconcile_open_pr_for_worker`) through the
+real `GitHubClient` against a loopback endpoint; only the network boundary and
+the process stop are simulated.
+
+Every scenario dispatches a real create, durably records the
+`possible_dispatch` claim and the saved owner/repository/branch, then abandons
+the result the way a crash would. On restart the stuck GitHub step is
+reconciled to Unverified (`GithubActionRetry`; the effect moves
+`possible_dispatch` → `uncertain`), an explicit operator Recheck parks it as
+`pending_slot`, the next Tick reschedules the read-only call, and the saved
+target lookup commits its result.
+
+| Scenario | Observed result | Evidence boundary |
+| --- | --- | --- |
+| `open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_second_create` | Passed: the create POST was answered; after restart the read-only lookup committed PR #314 to the same run, the effect moved `possible_dispatch` → `uncertain` → `acknowledged`, exactly one `effect_reconciled` was appended, and the endpoint saw 3 requests total (find, create, find) — no second create | Deterministic loopback endpoint; injected stop before the ledger commit; fresh DB connection for the restart |
+| `open_pr_create_dispatch_crash_keeps_absent_pr_uncertain_without_create` | Passed: an ambiguous create (502) left the effect `possible_dispatch`; after restart the lookup found no PR, the step stayed `unverified` and the effect `uncertain`; recovery issued one read-only find and no create | Same; absence stays uncertain and never auto-creates |
+| `open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck` | Passed: cancellation committed while a read-only lookup that found the PR was in flight; the stale result was rejected at the durable fence — the run stayed `cancelled`, the effect stayed `possible_dispatch`, zero `effect_reconciled` rows, and no `pr.number` | Competing cancellation/recheck order and stale-result fence |
+
+All three assert attempt 1, that `effect_intent` / `effect_possible_dispatch` /
+`effect_target` history survives the reopen, and that the effect can never be
+claimed and dispatched again. They do not establish a live process crash, a live
+GitHub race, or the same transitions against real GitHub.
+
+Focused evidence: from `src-tauri`,
+`cargo test --locked --lib services::circuit_worker::github_recovery_tests -- --test-threads=1`
+reported 6 passed, 0 failed (3 pre-existing #1889 checks plus the 3 above);
+`cargo test --locked --lib services::circuit_worker -- --test-threads=1`
+reported 135 passed, 0 failed. `cargo clippy --locked --all-targets` exited 0
+with the two existing library and 28 library-test warnings, none in the changed
+file.
