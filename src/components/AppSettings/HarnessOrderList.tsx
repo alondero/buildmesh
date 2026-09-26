@@ -16,6 +16,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import type { ProviderInfo } from '../../lib/tauri';
+import { getOrderableHarnesses } from './harnessOrder';
 
 /**
  * Drag-to-reorder list for the spawn-menu harness rows (issue #573 / ADR-0016).
@@ -83,10 +84,6 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
   );
 }
 
-export function isOrderableHarness(provider: ProviderInfo): boolean {
-  return !provider.configuration && !provider.is_proxied && provider.harness_id !== 'terminal';
-}
-
 export function HarnessOrderList({
   providers,
   onReorder,
@@ -122,12 +119,7 @@ export function HarnessOrderList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // The backend also includes saved launch configurations in this list. A
-  // native configuration row is non-proxied and shares its harness_id with
-  // the parent, so it must be removed before deduplication or its saved name
-  // can replace the harness label in Settings.
-  const rows = [...new Map(providers.filter(isOrderableHarness)
-    .map(p => [p.harness_id, { ...p, id: p.harness_id }])).values()];
+  const rows = getOrderableHarnesses(providers);
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
 

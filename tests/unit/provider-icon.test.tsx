@@ -163,41 +163,6 @@ describe('ProviderIcon', () => {
     expect(screen.getByTitle('claude:minimax')).toBeTruthy();
   });
 
-  it('harness order list shows harnesses without proxied or saved configuration rows', async () => {
-    // The HarnessOrderList in Settings is for reordering Agent Harnesses,
-    // not Proxied Provider rows or saved Launch Configurations. Those rows
-    // are both present in the backend's shared provider list.
-    const { HarnessOrderList, reorderIds } = await import(
-      '../../src/components/AppSettings/HarnessOrderList'
-    );
-    const { container } = render(
-      <HarnessOrderList
-        providers={[
-          { id: 'claude', label: 'Claude Code', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
-          { id: 'claude:minimax', label: 'MiniMax', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
-          { id: 'claude:kimi', label: 'Kimi', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: 'kimi', is_proxied: true, group_key: 'claude' },
-          { id: 'codex', label: 'Codex', color: '', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
-          { id: 'astra', label: 'Astra', color: '', icon: '', resumable: true, harness_id: 'astra', provider_id: null, is_proxied: false, group_key: 'astra' },
-          { id: 'astra-low-config', label: 'Astra Low', color: '', icon: '', resumable: true, harness_id: 'astra', provider_id: null, is_proxied: false, group_key: 'astra', configuration: { id: 'astra-low-config', name: 'Astra Low', spawn_option_id: 'astra', model: null, effort: null, extra_args: null } },
-          { id: 'terminal', label: 'Terminal', color: '', icon: '', resumable: false, harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
-        ]}
-        onReorder={() => {}}
-      />,
-    );
-    // Only harness parents are orderable. Proxied rows, saved launch
-    // configurations, and Terminal must not create or replace a row.
-    const dragHandles = container.querySelectorAll('[aria-label^="Reorder "]');
-    const labels = Array.from(dragHandles).map((h) => h.getAttribute('aria-label'));
-    expect(labels).toEqual(['Reorder Claude Code', 'Reorder Codex', 'Reorder Astra']);
-    expect(labels).not.toContain('Reorder MiniMax');
-    expect(labels).not.toContain('Reorder Kimi');
-    expect(labels).not.toContain('Reorder Astra Low');
-    expect(labels).not.toContain('Reorder Terminal');
-    // Sanity: the pure reorder math still composes the order array
-    // from only the orderable rows.
-    expect(reorderIds(['claude', 'codex'], 'codex', 'claude')).toEqual(['codex', 'claude']);
-  });
-
   // ----- Issue #328 — `backgroundColor` + `chipSize` props -----
   //
   // Mobile `NodeRow` drives the chip's background from the live

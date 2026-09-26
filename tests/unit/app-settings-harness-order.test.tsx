@@ -1,11 +1,11 @@
 /**
  * The Settings modal surfaces the spawn-menu harness reorder UI (issue #573)
- * when there are at least two orderable (non-Terminal) harnesses, and hides it
+ * when there are at least two distinct orderable harnesses, and hides it
  * otherwise. The drag→persist path is covered by the `reorderIds` and
  * `setHarnessOrder` unit tests; here we pin the modal's wiring of the section.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -47,7 +47,7 @@ function provider(id: string, label: string): ProviderInfo {
   };
 }
 
-function mockBackend(providers: ProviderInfo[]) {
+function mockBackend(providers: ProviderInfo[] | Promise<ProviderInfo[]>) {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'get_app_preferences':
@@ -109,6 +109,49 @@ describe('Settings — spawn menu order (issue #573)', () => {
     // both a nav-rail tab and a pane heading), so anchor on the tab role.
     await screen.findByRole('tab', { name: 'Providers' });
     await waitFor(() => expect(screen.queryByText('Spawn menu order')).toBeNull());
+  });
+
+  it('hides the reorder section when one harness has multiple saved configurations', async () => {
+    let resolveProviders!: (value: ProviderInfo[]) => void;
+    const providerResponse = new Promise<ProviderInfo[]>(resolve => {
+      resolveProviders = resolve;
+    });
+    mockBackend(providerResponse);
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('list_providers'));
+    await act(async () => {
+      resolveProviders([
+        provider('claude', 'Claude Code'),
+        {
+          ...provider('claude', 'Claude Low'),
+          id: 'claude-low-config',
+          configuration: {
+            id: 'claude-low-config',
+            name: 'Claude Low',
+            spawn_option_id: 'claude',
+            model: null,
+            effort: null,
+            extra_args: null,
+          },
+        },
+        {
+          ...provider('claude', 'Claude High'),
+          id: 'claude-high-config',
+          configuration: {
+            id: 'claude-high-config',
+            name: 'Claude High',
+            spawn_option_id: 'claude',
+            model: null,
+            effort: null,
+            extra_args: null,
+          },
+        },
+      ]);
+      await providerResponse;
+    });
+
+    expect(screen.queryByText('Spawn menu order')).toBeNull();
   });
 });
 
