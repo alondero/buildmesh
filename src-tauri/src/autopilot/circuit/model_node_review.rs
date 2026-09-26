@@ -249,6 +249,44 @@ mod tests {
         assert!(run.steps.iter().all(|s| s.agent_node_id != Some(42)));
     }
 
+    /// #1910: across a whole review round — findings, feedback to the
+    /// borrowed source, a fresh reviewer, then approval — the only agent a
+    /// review may dispatch is the reviewer, and no iteration may call GitHub.
+    /// A Review Successor reuses this exact graph, so this bounds what a
+    /// continuation can dispatch.
+    #[test]
+    fn a_full_review_loop_dispatches_only_the_reviewer() {
+        let mut emitted: Vec<Effect> = Vec::new();
+        let mut run = reviewing(3);
+        emitted.extend(request_fixes(&mut run));
+        finish_review_turn(&mut run, 102);
+        let mut approved = classified(&mut run, "verdict", Classification::Completed);
+        emitted.append(&mut approved.effects);
+        emitted.extend(tick(&mut run).effects);
+        assert_eq!(run.state, RunState::Completed);
+
+        let spawned: std::collections::BTreeSet<&str> = emitted
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::SpawnAgentNode { node_id, .. } => Some(node_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spawned,
+            ["reviewer"].into_iter().collect(),
+            "a review round may only spawn the reviewer"
+        );
+        assert!(
+            !emitted.iter().any(|effect| matches!(effect, Effect::CallGithub { .. })),
+            "a review must never call GitHub: no implementation, comment or pull request"
+        );
+        assert!(
+            run.steps.iter().all(|step| step.agent_node_id != Some(42)),
+            "the borrowed implementation agent is never adopted as an owned step"
+        );
+    }
+
     #[test]
     fn agent_review_exhaustion_never_claims_approval() {
         let mut run = reviewing(1);

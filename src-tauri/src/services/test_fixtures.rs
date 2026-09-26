@@ -226,6 +226,110 @@ pub(crate) fn delete_review_activity_fixture(mesh_id: i64) -> Result<(), String>
     }
 }
 
+/// #1910: a failed two-generation review lineage for the real-runtime Review
+/// Blueprint continuation check.
+///
+/// The built-in Review Blueprint, its independent copy and both failed runs
+/// are produced through the production seams (`list_circuit_probe`'s ensure,
+/// `copy_review_blueprint`, `create_node_circuit_run`,
+/// `continue_failed_review`, `commit_circuit_advance`), so the pinned graph,
+/// the frozen reviewer launch plan, the `review_continuation` history entry
+/// and the `recovery.from_run_id` lineage are the shipped ones.
+///
+/// The lineage is built on the source agent's own Mesh — which the caller
+/// created on a scratch repository and populated with one real Codex turn, so
+/// a live continuation borrows real work rather than a fabricated row.
+pub(crate) fn create_review_continuation_fixture(source_node_id: i64) -> Result<Value, String> {
+    let source = crate::db::get_agent_node_by_id(source_node_id).map_err(|error| error.to_string())?;
+    let mesh_id = source.mesh_id;
+    let mesh_path = crate::db::get_mesh_by_id(mesh_id)
+        .map(|mesh| mesh.path)
+        .map_err(|error| format!("the source agent's Mesh {mesh_id} is unreadable: {error}"))?;
+    match review_continuation_rows(mesh_id, source) {
+        Ok(data) => Ok(data),
+        Err(error) => match teardown_fixture(mesh_id, &mesh_path) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{}; fixture cleanup failed: {}",
+                error, cleanup_error
+            )),
+        },
+    }
+}
+
+fn review_continuation_rows(
+    mesh_id: i64,
+    source: crate::models::AgentNode,
+) -> Result<Value, String> {
+    // A continuation borrows the source's working tree, so the fixture stays
+    // branch-free and pre-warm-free on the caller's scratch repository. The
+    // review graph parks on its `confirm_source` approval gate before it can
+    // spawn a reviewer, so a lineage built here never launches a provider
+    // process.
+    {
+        let db = crate::db::write_conn();
+        db.execute(
+            "UPDATE meshes SET use_worktree = 0, pre_spawn_pool_size = 0, circuit_run_capacity = 2 WHERE id = ?1",
+            [mesh_id],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    if !matches!(
+        source.status,
+        SessionStatus::Running | SessionStatus::AwaitingInput | SessionStatus::Completed | SessionStatus::Ready
+    ) {
+        return Err(format!(
+            "source agent {} is {:?}; a review borrows a running, ready or completed agent",
+            source.id, source.status
+        ));
+    }
+    if source.cli_session_id.as_deref().is_none_or(str::is_empty) {
+        return Err(format!(
+            "source agent {} has no captured session; the readiness gate would refuse a review run",
+            source.id
+        ));
+    }
+    let review = |attempt: i32| {
+        vec![CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "failed".into(),
+            outcome: Some(Some(StepOutcome::Working.as_db_str().to_string())),
+            error: Some(Some("Fixture: the reviewer asked for changes and the round limit ran out".into())),
+            agent_node_id: None,
+            attempt,
+            fresh_attempt: false,
+        }]
+    };
+
+    // The built-in Review Blueprint, then the independent copy the UI's
+    // "Copy to editable Circuit" control produces.
+    let probe = crate::db::list_circuit_probe(mesh_id, 10).map_err(|error| error.to_string())?;
+    let blueprint = probe
+        .0
+        .iter()
+        .find(|row| row.0.is_preset)
+        .map(|row| row.0.id)
+        .ok_or("the built-in Review Blueprint is missing from this Mesh")?;
+    let copy = crate::db::circuit::ledger::copy_review_blueprint(blueprint, "Fixture review copy")?;
+
+    let parent = crate::db::create_node_circuit_run(source.id, Some(copy.id), 2, None, false)?;
+    crate::db::commit_circuit_advance(parent, Some("failed"), None, &review(2))
+        .map_err(|error| error.to_string())?;
+    let first_successor =
+        crate::db::circuit::recovery::continue_failed_review(parent, 1)?;
+    crate::db::commit_circuit_advance(first_successor, Some("failed"), None, &review(1))
+        .map_err(|error| error.to_string())?;
+
+    Ok(serde_json::json!({
+        "mesh": crate::db::get_mesh_by_id(mesh_id).map_err(|error| error.to_string())?,
+        "source": source.id,
+        "blueprint": blueprint,
+        "copy": copy.id,
+        "parent": parent,
+        "first_successor": first_successor,
+    }))
+}
+
 fn teardown_fixture(mesh_id: i64, mesh_path: &str) -> Result<(), String> {
     let db_error = crate::db::delete_mesh(mesh_id).err();
     let fs_error = remove_fixture_root(mesh_path).err();

@@ -120,6 +120,15 @@ it('keeps an interpretation separate from lifecycle proof and shows its exact re
 });
 
 
+it('names the run a continued review follows even after the run context is compacted away', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [{ ...entry, id: 1, node_id: null,
+    attempt: null, kind: 'review_continuation', detail: '{"from_run_id":11}' }], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText('Continued a failed review')).toBeTruthy();
+  expect(container.querySelector('pre')?.textContent).toBe('{"from_run_id":11}');
+});
+
 it('shows unsupported ownership and the evidence deadline without promising live delivery', async () => {
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [], checkpoints: [], coverage: [{
     node_id: 'reviewer', attempt: 2, platform: 'windows host / windows launch', deadline_ms: 1790251200000, waits_active: true, human_waits: [],

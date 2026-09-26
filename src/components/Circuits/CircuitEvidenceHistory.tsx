@@ -11,6 +11,7 @@ import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 
 const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
+  review_continuation: 'Continued a failed review',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
