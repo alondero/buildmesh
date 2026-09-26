@@ -80,6 +80,23 @@ contains the expected schema, and removes only the issue-specific profile it
 created after a successful run. The child `APPDATA` points to the scratch folder
 for early panic logs.
 
+If a run fails, the runner preserves its JSON evidence and any profile it
+created so the failed state can be inspected. It refuses to reuse an existing
+issue profile. After confirming the isolated app has exited and the exact
+profile belongs to that failed run, inspect and remove it before retrying:
+
+```powershell
+$issue1905Profile = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) 'com.alond.buildmesh.issue1905.dev'
+Get-ChildItem -LiteralPath $issue1905Profile
+```
+
+After inspection confirms this exact profile belongs to the failed smoke and
+the isolated app has exited, remove it before retrying:
+
+```powershell
+Remove-Item -LiteralPath $issue1905Profile -Recurse
+```
+
 | Check / revision | Result | Attribution / scope |
 | --- | --- | --- |
 | `npm run test:ci -- --project=verify-smoke` on commit `4ab71692` | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
