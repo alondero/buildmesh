@@ -105,6 +105,8 @@ export default async function ({ page, invoke }) {
     if ((await successorToggle.getAttribute('aria-expanded')) !== 'true') await successorToggle.click();
     await successorCard.getByText('Circuit Run History').click();
     await expect(successorCard.getByText(new RegExp(`Continued a failed review — this run follows run #${predecessor}`))).toBeVisible();
+    await successorCard.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(shotDir, '1909-states-continuation.png') });
 
     // The Unverified next safe action: open the card's history and its Recheck.
     const unverifiedCard = page.getByTestId(`run-card-${unverified}`);

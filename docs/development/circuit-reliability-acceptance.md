@@ -831,12 +831,12 @@ separator):
 
 | State | Run | Asserted next safe action / reason |
 |---|---|---|
-| Working | 110 | Activity "Running" |
-| Waiting (step slot) | 111 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
-| Unverified | 112 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence**, and its resolved evidence wait renders as "Evidence wait cleared — …" with the attempt identity preserved (no "attempt …" line) |
-| Failed | 113 | Activity "Failed"; reason "The review command exited before producing a result." |
-| Recovery | 114 → 115 | Successor shows "Continues run #114 on the same worktree." and its own history entry "Continued a failed review — this run follows run #114" (source `operator`, disposition `applied`); the failed predecessor's ledger is not written to |
-| Waiting (admission) | 116 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
+| Working | 124 | Activity "Running" |
+| Waiting (step slot) | 125 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
+| Unverified | 126 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence**, and its resolved evidence wait renders as "Evidence wait cleared — …" with the attempt identity preserved (no "attempt …" line) |
+| Failed | 127 | Activity "Failed"; reason "The review command exited before producing a result." |
+| Recovery | 128 → 129 | Successor shows "Continues run #128 on the same worktree." and its own history entry "Continued a failed review — this run follows run #128" (source `operator`, disposition `applied`); the failed predecessor's ledger is not written to |
+| Waiting (admission) | 130 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
 
 Also asserted: `width <= 240`, `tab.scrollWidth <= clientWidth`,
 `body.scrollWidth <= clientWidth`, and no `button`/`select`/`input` clipped
@@ -844,9 +844,11 @@ horizontally.
 
 Inspected captures (committed under `docs/pr-screenshots/issue-1909/`):
 
-![Activity: working, waiting, Unverified with its Recheck action, resolved evidence wait, and the recovery successor link](../pr-screenshots/issue-1909/activity-states-and-recheck.png)
+![Activity: working, waiting, Unverified with its Recheck action, and the resolved evidence wait](../pr-screenshots/issue-1909/activity-states-and-recheck.png)
 
-![History: the failed run's readable reason](../pr-screenshots/issue-1909/history-recovery.png)
+![Continuation: the successor's "Continued a failed review" entry with source and disposition](../pr-screenshots/issue-1909/continuation.png)
+
+![History: the failed run's readable reason](../pr-screenshots/issue-1909/history-failed.png)
 
 ![Queue: the pending run's admission reason](../pr-screenshots/issue-1909/queue-admission.png)
 
