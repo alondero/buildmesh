@@ -2300,6 +2300,50 @@ fn continuation_is_current(view: &RunView, node_id: &str, target: i64, status: S
         && revision.is_some() && revision == view.context.get(&format!("node.{node_id}.continuation.revision"))
 }
 
+/// Dispatch one `CallGithub` effect. App-free: the recheck lookup and the
+/// idempotent create path use only the DB and the GitHub client, never the
+/// Tauri handle (which unit tests cannot construct — the codebase keeps
+/// `AppHandle` concrete everywhere). `execute_effects` delegates here, so
+/// the deterministic coverage drives the worker's real dispatch wiring
+/// against a controllable endpoint; production passes `None` for the live
+/// client.
+pub(super) fn execute_call_github_effect(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+    action: crate::autopilot::circuit::model::GithubActionKind,
+    label: Option<&str>,
+    comment: Option<&str>,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<Vec<CircuitEvent>, String> {
+    use crate::autopilot::circuit::model::GithubActionKind;
+    let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+    if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
+        if action == GithubActionKind::OpenPr {
+            let event = match github_client {
+                Some(client) => github::reconcile_open_pr_effect_for_worker_with_client(
+                    active, view, node_id, client,
+                ),
+                None => github::reconcile_open_pr_effect_for_worker(active, view, node_id),
+            };
+            return Ok(vec![event]);
+        }
+        view.context.set(&format!("node.{node_id}.recheck_only"), "0");
+        return Ok(vec![CircuitEvent::EffectUncertain {
+            node_id: node_id.to_string(),
+            attempt,
+            reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
+        }]);
+    }
+    let intent = db::circuit::evidence::EffectIntent { node_id: node_id.to_string(), attempt, kind: "github".into() };
+    let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    view.context.set("evidence.revision", revision.to_string());
+    Ok(vec![github::call_github_effect(active, view, node_id, action, label, comment)
+        .unwrap_or_else(|reason| CircuitEvent::EffectUncertain { node_id: node_id.to_string(), attempt, reason })])
+}
+
 pub(super) fn execute_effects(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
@@ -2516,29 +2560,15 @@ pub(super) fn execute_effects(
                 );
             }
             Effect::CallGithub { node_id, action, label, comment } => {
-                let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
-                    if *action == crate::autopilot::circuit::model::GithubActionKind::OpenPr {
-                        outcome_events.push(github::reconcile_open_pr_effect_for_worker(
-                            active, view, node_id,
-                        ));
-                    } else {
-                        view.context.set(&format!("node.{node_id}.recheck_only"), "0");
-                        outcome_events.push(CircuitEvent::EffectUncertain {
-                            node_id: node_id.clone(),
-                            attempt,
-                            reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
-                        });
-                    }
-                    continue;
-                }
-                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: "github".into() };
-                let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
-                    continue;
-                };
-                view.context.set("evidence.revision", revision.to_string());
-                outcome_events.push(github::call_github_effect(active, view, node_id, *action, label.as_deref(), comment.as_deref())
-                    .unwrap_or_else(|reason| CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason }));
+                outcome_events.extend(execute_call_github_effect(
+                    active,
+                    view,
+                    node_id,
+                    *action,
+                    label.as_deref(),
+                    comment.as_deref(),
+                    None,
+                )?);
             }
         }
     }
