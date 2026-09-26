@@ -41,23 +41,18 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
-import { MeshOverridesSection } from './MeshOverridesSection';
 import { SaveIndicator } from '../shared/SaveIndicator';
-import { groupByHarness } from '../../lib/groups';
+import { SpawnOptionPicker, useSpawnOptionLabel } from '../Providers/SpawnOptionPicker';
 import {
   checkGhAuth,
-  clearMeshHarnessOverrides,
   detectMeshProject,
   getAppPreferences,
   getMeshProperties,
   listProviders,
-  removeMeshHarnessOverride,
   updateMeshColumn,
   updateMeshSandbox,
-  upsertMeshHarnessOverride,
   type ProviderInfo,
 } from '../../lib/tauri';
-import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import {
   PROJECT_PRESETS,
   resolvePreset,
@@ -90,12 +85,6 @@ export function MeshPropertiesTab() {
     defaultProvider: '',
     sandbox: false,
   });
-  // Per-Mesh harness overrides (issue #1151 / slice 2 of #1148). The
-  // legacy `meshes.model` / `meshes.effort` columns are no longer read as
-  // active configuration — the new sparse map is the user-facing surface.
-  const [harnessOverrides, setHarnessOverrides] = useState<
-    Record<string, HarnessConfigValue>
-  >({});
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
   // App-wide default provider id (from preferences.json). Drives the
@@ -225,7 +214,6 @@ export function MeshPropertiesTab() {
           defaultProvider: config.default_provider ?? '',
           sandbox: config.sandbox,
         });
-        setHarnessOverrides(config.harness_overrides ?? {});
         setLoading(false);
       })
       .catch(() => {
@@ -363,103 +351,7 @@ export function MeshPropertiesTab() {
     await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
   };
 
-  // ── Per-Mesh harness overrides (issue #1151 / slice 2 of #1148) ─────────
-  //
-  // The legacy `model` / `effort` columns remain physically present for
-  // upgrade compatibility but are no longer read as active configuration.
-  // The new sparse map is the user-facing surface — the section component
-  // owns the per-harness draft state; the parent owns the optimistic save
-  // lifecycle and the diagnostic banner. The IPC surface re-uses the
-  // shared `HarnessConfigValue` + capability-derived validation from
-  // `preferences::validate_harness_default` so unknown ids / out-of-vocab
-  // effort values are rejected at the write boundary.
-
-  const overrideUpsert = useCallback(
-    async (harnessId: string, value: HarnessConfigValue): Promise<boolean> => {
-      if (activeMeshId === null) return false;
-      // Capture the mesh id at the moment the IPC starts so a stale
-      // rejection on a slow save doesn't surface the error on a different
-      // mesh the user is now viewing (review finding #1 — same pattern
-      // as `wrappedSave`).
-      const saveMeshId = activeMeshId;
-      saveStatus.start();
-      try {
-        await upsertMeshHarnessOverride(activeMeshId, harnessId, value);
-        if (activeMeshIdRef.current !== saveMeshId) return true;
-        // Optimistic update — the IPC rejects unknown ids / out-of-vocab
-        // effort, so a successful write is the source of truth.
-        setHarnessOverrides((prev) => {
-          const isEmpty = value.model === null && value.effort === null;
-          if (isEmpty) {
-            const { [harnessId]: _removed, ...rest } = prev;
-            return rest;
-          }
-          return { ...prev, [harnessId]: value };
-        });
-        saveStatus.success();
-        return true;
-      } catch (e) {
-        if (activeMeshIdRef.current !== saveMeshId) {
-          console.error('Mesh harness override save failed after mesh switch:', e);
-          return false;
-        }
-        console.error('Mesh harness override save failed:', e);
-        saveStatus.fail(e);
-        return false;
-      }
-    },
-    [activeMeshId, saveStatus],
-  );
-
-  const overrideReset = useCallback(
-    async (harnessId: string): Promise<boolean> => {
-      if (activeMeshId === null) return false;
-      const saveMeshId = activeMeshId;
-      saveStatus.start();
-      try {
-        await removeMeshHarnessOverride(activeMeshId, harnessId);
-        if (activeMeshIdRef.current !== saveMeshId) return true;
-        setHarnessOverrides((prev) => {
-          const { [harnessId]: _removed, ...rest } = prev;
-          return rest;
-        });
-        saveStatus.success();
-        return true;
-      } catch (e) {
-        if (activeMeshIdRef.current !== saveMeshId) {
-          console.error('Mesh harness override reset failed after mesh switch:', e);
-          return false;
-        }
-        console.error('Mesh harness override reset failed:', e);
-        saveStatus.fail(e);
-        return false;
-      }
-    },
-    [activeMeshId, saveStatus],
-  );
-
-  const overrideResetAll = useCallback(async (): Promise<boolean> => {
-    if (activeMeshId === null) return false;
-    const saveMeshId = activeMeshId;
-    saveStatus.start();
-    try {
-      await clearMeshHarnessOverrides(activeMeshId);
-      if (activeMeshIdRef.current !== saveMeshId) return true;
-      setHarnessOverrides({});
-      saveStatus.success();
-      return true;
-    } catch (e) {
-      if (activeMeshIdRef.current !== saveMeshId) {
-        console.error('Mesh harness overrides reset-all failed after mesh switch:', e);
-        return false;
-      }
-      console.error('Mesh harness overrides reset-all failed:', e);
-      saveStatus.fail(e);
-      return false;
-    }
-  }, [activeMeshId, saveStatus]);
-
-// Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
+  // Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
   // failure" rule of the other binary controls — reverting a checkbox the user
   // just clicked is more confusing than an unchanged value. The flag is OS-
   // agnostic at the DB/UI layer; the OS-specific spawn policy is decided in
@@ -503,6 +395,11 @@ export function MeshPropertiesTab() {
     setShowDeleteConfirm(false);
     toggleProbe();
   };
+
+  // Human label for the app-wide default the `<Default>` inherit row would
+  // route to (falls back to the raw id when the row isn't resolvable, e.g. a
+  // Launch Configuration whose harness is hidden on this host).
+  const appWideDefaultLabel = useSpawnOptionLabel(providers, appWideDefault) ?? appWideDefault;
 
   // Without a focused mesh there is nothing to edit. The probe shell
   // already renders a friendlier "no project" empty state, so this is
@@ -563,73 +460,26 @@ export function MeshPropertiesTab() {
             isAuthenticated={isGhAuthenticated}
           />
 
-          {/* Per-Mesh harness overrides (issue #1151 / slice 2 of #1148).
-              Replaces the legacy Model + Effort fields with a sparse
-              override list. The cascade order at the spawn seam is now:
-              explicit > mesh_override > mesh (legacy) > application >
-              native. The legacy Mesh-wide model/effort columns remain
-              physically present for compatibility but are no longer
-              read as active configuration. */}
-          <MeshOverridesSection
-            providers={providers}
-            overrides={harnessOverrides}
-            onChange={overrideUpsert}
-            onReset={overrideReset}
-            onResetAll={overrideResetAll}
-          />
-
           <Field label="Default provider" htmlFor="mesh-prop-provider">
-            <select
+            {/* ADR-0016 — reuse the exact Spawn Menu so this picker's
+                options match every other spawn surface: native harness
+                parents with a `›` configuration submenu. Selecting a saved
+                Launch Configuration stores its id; the backend resolver
+                (`launch_configurations::resolve`) treats a configuration id
+                as a valid `default_provider` selection. */}
+            <SpawnOptionPicker
               id="mesh-prop-provider"
-              value={form.defaultProvider}
-              onChange={async (e) => {
-                setForm((p) => ({ ...p, defaultProvider: e.target.value }));
-                await saveDefaultProvider(e.target.value);
+              ariaLabel="Default provider"
+              providers={providers}
+              value={form.defaultProvider || null}
+              unsetLabel={`<Default> (${appWideDefaultLabel})`}
+              unsetValue=""
+              onSelect={async (next) => {
+                const value = next ?? '';
+                setForm((p) => ({ ...p, defaultProvider: value }));
+                await saveDefaultProvider(value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
-            >
-              <option value="">&lt;Default&gt; ({appWideDefault})</option>
-              {/* Issue #575 / ADR-0016 — group the Spawn Options by their
-                  `group_key` (== `harness_id`) so the dropdown matches the
-                  harness-grouped Spawn Menu shape on every other surface.
-                  The native row in each bucket is the clickable harness
-                  header; subsequent rows are Proxied children. We collapse
-                  a bucket to a plain <option> when the harness has no
-                  children so the one-harness config still looks clean.
-
-                  The optgroup label is the native row's `label` (e.g.
-                  "Claude Code"), NOT the raw `harness_id` (e.g. "claude")
-                  — the harness profile name is the user-facing string.
-                  The native row's label is the harness profile's friendly
-                  name from `HarnessProfile.name`, populated by
-                  `provider_info_for` on the backend. The bucketing is
-                  shared with `GroupedProviderMenu` and the mobile
-                  `ProviderPicker` via `groupByHarness` (issue #583). */}
-              {groupByHarness(providers).map(([harnessId, group]) => {
-                if (group.length === 1) {
-                  return (
-                    <option key={group[0].id} value={group[0].id}>
-                      {group[0].label}
-                    </option>
-                  );
-                }
-                // Find the native row to use its friendly name as the
-                // optgroup label. If the bucket has no native row (e.g.
-                // a filter removed it — see code-review finding B2),
-                // fall back to the raw `harness_id` rather than the
-                // first child's proxied label.
-                const native = group.find((p) => !p.is_proxied) ?? group[0];
-                return (
-                  <optgroup key={harnessId} label={native.label}>
-                    {group.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.is_proxied ? `  ${p.label} (via ${native.label})` : p.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                );
-              })}
-            </select>
+            />
           </Field>
 
           {/* Sandbox toggle (#498 Windows AppContainer / #497 macOS Seatbelt).

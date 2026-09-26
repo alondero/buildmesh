@@ -249,7 +249,6 @@ pub(crate) fn cascade_inputs_for<'a>(
     mesh_model: Option<&'a str>,
     mesh_effort: Option<&'a str>,
     app_default: Option<&'a crate::preferences::HarnessConfigValue>,
-    mesh_override: Option<&'a crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::AgentConfigInputs<'a> {
     /// Trim; collapse empty / whitespace-only to `None`. Mirrors
     /// `capabilities::normalize_non_empty` at the spawn seam (issue
@@ -266,13 +265,11 @@ pub(crate) fn cascade_inputs_for<'a>(
     crate::agent::capabilities::AgentConfigInputs {
         model: crate::agent::capabilities::FieldInputs {
             explicit: explicit_model.and_then(non_empty_trim),
-            mesh_override: mesh_override.and_then(|v| v.model.as_deref()),
             mesh: mesh_model,
             application: app_default.and_then(|v| v.model.as_deref()),
         },
         effort: crate::agent::capabilities::FieldInputs {
             explicit: explicit_effort.and_then(non_empty_trim),
-            mesh_override: mesh_override.and_then(|v| v.effort.as_deref()),
             mesh: mesh_effort,
             application: app_default.and_then(|v| v.effort.as_deref()),
         },
@@ -300,7 +297,6 @@ pub(crate) fn resolve_spawn_config(
     explicit_effort: Option<&str>,
     explicit_extra_args: Option<&str>,
     app_default: Option<&crate::preferences::HarnessConfigValue>,
-    mesh_override: Option<&crate::preferences::HarnessConfigValue>,
 ) -> crate::agent::capabilities::ResolvedAgentConfig {
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
@@ -311,7 +307,6 @@ pub(crate) fn resolve_spawn_config(
             None,
             None,
             app_default,
-            mesh_override,
         ),
         explicit_extra_args,
     )

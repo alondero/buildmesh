@@ -26,6 +26,21 @@ to review committed changes from the merge-base and uncommitted/untracked
 changes, without editing files or posting to GitHub. It has its own worktree;
 no commit, push, or PR is required for this workflow.
 
+## Completion and recovery
+
+Circuits can progress from a finished, readable agent report even when the harness
+cannot prove a complete inventory of background work. The report must belong to
+the current session and input, and remain unchanged through the decision commit.
+Known unfinished work, actual permission requests, and actual questions still block
+progress. A status-only waiting-for-input signal does not create an indefinite
+human request. Report-based progress is recorded separately from verified native
+lifecycle evidence; it is not proof that an unobservable background task ended.
+
+Unverified agent steps continue checking for fresh evidence without spawning again
+or resending prompts. Removing an agent, or a confirmed agent error, terminates the
+waiting run so queued runs can use its capacity. Ambiguous GitHub actions and prompt
+deliveries retain their existing manual reconciliation controls.
+
 ## Review presentation contract
 
 The title-bar review preset and the issue-driven Autopilot review blueprint

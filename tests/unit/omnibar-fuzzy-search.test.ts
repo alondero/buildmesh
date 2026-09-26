@@ -107,7 +107,6 @@ function makeMesh(overrides: Partial<Mesh> = {}): Mesh {
     loop_max_iterations: null,
     loop_interval_seconds: 0,
     loop_consecutive_failures: 0,
-    harness_overrides: {},
     ...overrides,
   };
 }

@@ -37,6 +37,10 @@ impl HookState {
         self.turn.as_deref().zip(incoming).is_some_and(|(known, incoming)| known == incoming)
     }
 
+    pub(crate) fn mismatches_turn(&self, incoming: Option<&str>) -> bool {
+        self.turn.as_deref().zip(incoming).is_some_and(|(known, incoming)| known != incoming)
+    }
+
     pub(crate) fn accepts(&mut self, turn: Option<&str>, starts_turn: bool) -> bool {
         if starts_turn {
             self.turn = turn.map(str::to_owned);
@@ -204,8 +208,13 @@ mod tests {
     #[test]
     fn old_turn_cannot_finish_a_new_prompt_but_missing_tokens_are_accepted() {
         let mut state = HookState::default();
+        assert!(!state.mismatches_turn(Some("old")), "no current turn means no explicit mismatch");
+        assert!(!state.mismatches_turn(None), "an omitted token is not an explicit mismatch");
         assert!(state.accepts(Some("old"), true));
         assert!(state.accepts(Some("new"), true));
+        assert!(state.mismatches_turn(Some("old")));
+        assert!(!state.mismatches_turn(Some("new")));
+        assert!(!state.mismatches_turn(None));
         assert!(!state.accepts(Some("old"), false));
         assert!(state.accepts(Some("new"), false));
         assert!(state.accepts(None, false));

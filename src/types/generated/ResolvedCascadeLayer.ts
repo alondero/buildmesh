@@ -15,10 +15,6 @@ export type ResolvedCascadeLayer = {
  */
 explicit?: string | null, 
 /**
- * The mesh-override layer (per-Mesh `harness_overrides` map).
- */
-mesh_override?: string | null, 
-/**
  * The mesh-legacy layer (`meshes.model` / `meshes.effort` columns).
  */
 mesh?: string | null, 

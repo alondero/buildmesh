@@ -96,7 +96,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                         waits_active: run.state == "running" && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
                         human_waits: context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
                             .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok())
-                            .map(|evidence| evidence.human_waits).unwrap_or_default(),
+                            .map(|evidence| evidence.human_waits.into_iter().filter(|wait| wait.source != "agent_status_projection").collect()).unwrap_or_default(),
                     });
                 }
             }
@@ -185,7 +185,7 @@ pub(crate) fn receive_native_hook(
     receive_native_hook_locked(&mut db, receipt)
 }
 
-fn receive_native_hook_locked(
+pub(crate) fn receive_native_hook_locked(
     db: &mut Connection,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
 ) -> Result<(), String> {
@@ -716,6 +716,9 @@ pub fn commit_transition(
             "Native transcript changed before evidence commit; recheck required",
         ));
     }
+    if evidence.input_guard.and_then(|guard| guard.report_guard.as_ref()).is_some_and(|snapshot| !snapshot.is_current()) {
+        return Err(observation_freshness_rejection("Agent report changed before evidence commit; recheck required"));
+    }
     let mut db = crate::db::write_conn();
     let result = if let Some(guard) = evidence.input_guard {
         let mut revision = None;
@@ -779,11 +782,13 @@ fn commit_transition_locked(
     if let Some(guard) = evidence.input_guard {
         let current: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id=?1 AND cli_session_id=?2
-            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost'))",
+            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost')
+            AND (?4=0 OR status IN ('ready','awaiting_input','completed')))",
             params![
                 guard.agent_node_id,
                 guard.session_id,
-                guard.session_incarnation
+                guard.session_incarnation,
+                guard.report_guard.is_some()
             ],
             |r| r.get(0),
         )?;
@@ -1185,7 +1190,7 @@ mod tests {
             [graph.to_json().unwrap()],
         )
         .unwrap();
-        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, submission_correlated: false,
+        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: false,
             hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"prompt","hook_event_name":"Stop","background_tasks":[],"session_crons":[],"last_assistant_message":"Complete final report"}"#).unwrap() };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         drop(db);
@@ -1239,7 +1244,7 @@ mod tests {
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
         db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
         let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-a".into()), session_incarnation: Some("1000".into()),
-            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, submission_correlated: true,
+            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true,
             hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"UserPromptSubmit"}"#).unwrap() };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         drop(db);
@@ -1428,7 +1433,7 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');").unwrap();
         let guard = ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
             agent_node_id: 9,
             input_stamp: "1:2".into(),
             observed_at_ms: 2000,

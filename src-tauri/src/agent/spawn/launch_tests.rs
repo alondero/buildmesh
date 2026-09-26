@@ -22,7 +22,6 @@ fn launch_params_carry_pty_size_and_cascade_overrides() {
         // item 1 moved the parse to the entry seam so the launch phase
         // never touches the raw `"<harness>:<provider>"` string.
         spawn_option_id: SpawnOptionId::from("anthropic"),
-        node_mesh_id: 1,
         registry_mesh_id: 1,
         session_id_mode: SessionIdMode::None,
         sandbox: false,

@@ -1,6 +1,7 @@
 /** Reviewer-provider settings coverage: hydration, filtering, persistence, and rollback. */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { openSettingsPane } from '../utils/settings-panes';
 
 const tauriMocks = vi.hoisted(() => ({
@@ -27,8 +28,6 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
 }));
 
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
-
-const NO_OVERRIDE = '__no_override__';
 
 function provider(id: string, label: string) {
   return {
@@ -98,25 +97,33 @@ describe('AppSettingsModal reviewer provider', () => {
     render(<AppSettingsModal onClose={() => {}} />);
     // Reviewer provider now lives on the Providers pane.
     await openSettingsPane('Providers');
-    return screen.findByRole('combobox', { name: 'Reviewer provider' });
+    return screen.findByRole('button', { name: 'Reviewer provider' });
   }
 
   it('hydrates the stored provider and filters out the terminal provider', async () => {
-    const select = (await renderModal()) as HTMLSelectElement;
-    await waitFor(() => expect(select.value).toBe('codex'));
-    expect(within(select).getByRole('option', { name: 'Codex' })).toBeTruthy();
-    expect(within(select).queryByRole('option', { name: 'Terminal' })).toBeNull();
+    const trigger = await renderModal();
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
+
+    const user = userEvent.setup();
+    await user.click(trigger);
+    expect(await screen.findByRole('menuitem', { name: 'Anthropic' })).toBeTruthy();
+    // The plain shell is absent entirely: it is not an agent at all.
+    expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
   });
 
   it('persists a selected provider and null for source-agent fallback', async () => {
-    const select = (await renderModal()) as HTMLSelectElement;
+    const user = userEvent.setup();
+    const trigger = await renderModal();
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
 
-    fireEvent.change(select, { target: { value: 'anthropic' } });
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
     await waitFor(() =>
       expect(tauriMocks.setAppReviewerProvider).toHaveBeenCalledWith('anthropic'),
     );
 
-    fireEvent.change(select, { target: { value: NO_OVERRIDE } });
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Source agent provider' }));
     await waitFor(() =>
       expect(tauriMocks.setAppReviewerProvider).toHaveBeenLastCalledWith(null),
     );
@@ -124,10 +131,14 @@ describe('AppSettingsModal reviewer provider', () => {
 
   it('rolls back the selection and shows the save error when persistence fails', async () => {
     tauriMocks.setAppReviewerProvider.mockRejectedValueOnce(new Error('settings write failed'));
-    const select = (await renderModal()) as HTMLSelectElement;
+    const user = userEvent.setup();
+    const trigger = await renderModal();
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
 
-    fireEvent.change(select, { target: { value: 'anthropic' } });
-    await waitFor(() => expect(select.value).toBe('codex'));
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
     expect(await screen.findByText('settings write failed')).toBeTruthy();
   });
 
@@ -138,17 +149,19 @@ describe('AppSettingsModal reviewer provider', () => {
       provider('freebuff', 'Freebuff'),
       provider('terminal', 'Terminal'),
     ]);
-    const select = (await renderModal()) as HTMLSelectElement;
+    const user = userEvent.setup();
+    const trigger = await renderModal();
+    await user.click(trigger);
 
-    const options = Array.from(select.querySelectorAll('option'));
+    const freebuff = await screen.findByRole('menuitem', { name: 'Freebuff' });
     // Greying out (not hiding) keeps the limitation discoverable — the same
     // reason the node title-bar picker renders these rows disabled.
-    expect(options.find(o => o.value === 'anthropic')?.disabled).toBe(false);
+    expect(freebuff.getAttribute('aria-disabled')).toBe('true');
+    expect(freebuff.textContent).toContain('no review support');
+    expect(screen.getByRole('menuitem', { name: 'Anthropic' }).getAttribute('aria-disabled')).toBe('false');
     // Issue #1775: Cline carries a native attention hook now and is pickable.
-    expect(options.find(o => o.value === 'cline')?.disabled).toBe(false);
-    expect(options.find(o => o.value === 'freebuff')?.disabled).toBe(true);
-    expect(options.find(o => o.value === 'freebuff')?.textContent).toBe('Freebuff (no review support)');
+    expect(screen.getByRole('menuitem', { name: 'Cline' }).getAttribute('aria-disabled')).toBe('false');
     // The plain shell is absent entirely: it is not an agent at all.
-    expect(options.find(o => o.value === 'terminal')).toBeUndefined();
+    expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
   });
 });
