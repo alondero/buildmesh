@@ -207,7 +207,7 @@ A revision identifying a change to the built-in Review Blueprint's behavior, suc
 _Avoid_: Graph schema version
 
 **Circuit Run History**:
-The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before.
+The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and recovery are diagnosable uniformly; a continued review records the run it follows in the successor's own history, leaving the failed predecessor's ledger immutable.
 _Avoid_: attempt snapshot, recovery session
 
 **Unverified Checkpoint**:

@@ -17,7 +17,85 @@ beforeEach(() => {
 });
 
 const entry: CircuitHistoryEntry = { id: 7, node_id: 'comment', attempt: 1,
-  kind: 'effect_possible_dispatch', detail: 'github', observed_at: '2026-09-24T12:00:00Z' };
+  kind: 'effect_possible_dispatch', detail: 'github', source: 'circuit_worker', disposition: 'possible_dispatch',
+  observed_at: '2026-09-24T12:00:00Z' };
+
+const historyEntry = (overrides: Partial<CircuitHistoryEntry>): CircuitHistoryEntry => ({
+  id: 1, node_id: null, attempt: null, kind: 'run_transition', detail: 'running',
+  source: 'circuit_worker', disposition: 'applied', observed_at: '2026-09-24T12:00:00Z', ...overrides,
+});
+
+it('renders wait, capacity, configuration and recovery history with source, disposition and identity', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, kind: 'queue_wait', source: 'circuit_worker.admission', disposition: 'waiting',
+      detail: JSON.stringify({ reason: 'mesh_capacity', capacity: 3 }) }),
+    historyEntry({ id: 2, kind: 'step_capacity_wait', node_id: 'spawn', attempt: 2,
+      source: 'circuit_worker.capacity', disposition: 'waiting',
+      detail: JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }) }),
+    historyEntry({ id: 3, kind: 'configuration_pinned', source: 'run.configuration', disposition: 'applied',
+      detail: JSON.stringify({ behavior_revision: 1, graph_sha256: 'abcdef0123456789', reviewers: [{ node_id: 'reviewer' }] }) }),
+    historyEntry({ id: 4, kind: 'operator_attestation', node_id: 'open_pr', attempt: 1, source: 'operator', disposition: 'not_performed',
+      detail: 'Operator-recorded outcome (NotPerformed): Confirmed request was rejected before dispatch' }),
+    historyEntry({ id: 5, kind: 'review_continuation', source: 'operator', disposition: 'applied',
+      detail: JSON.stringify({ from_run_id: 88 }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(/all 3 circuit-run slot/)).toBeTruthy();
+  expect(screen.getByText(/Step capacity wait — step slots busy · agent slot free/)).toBeTruthy();
+  expect(screen.getByText(/behavior revision 1/)).toBeTruthy();
+  expect(screen.getByText(/graph abcdef012345…/)).toBeTruthy();
+  expect(screen.getByText(/Continued a failed review — this run follows run #88/)).toBeTruthy();
+  expect(screen.getByText(/does not grant permission or review approval/)).toBeTruthy();
+  // Uniform provenance line for non-observation entries.
+  expect(screen.getByText('Source: circuit_worker.admission · waiting')).toBeTruthy();
+  expect(screen.getByText('Source: operator · applied')).toBeTruthy();
+  // Machine-readable disposition + wrap-first (no truncation) at 240px.
+  const continuation = screen.getByTestId('history-entry-5');
+  expect(continuation.dataset.historyKind).toBe('review_continuation');
+  expect(continuation.dataset.disposition).toBe('applied');
+  expect(continuation.className).toContain('break-words');
+  expect(continuation.querySelector('.truncate')).toBeNull();
+  const capacity = screen.getByTestId('history-entry-2');
+  expect(capacity.textContent).toContain('spawn');
+  expect(capacity.textContent).toContain('attempt 2');
+});
+
+it('renders a freed capacity window as cleared with a resolved disposition, not an active wait', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
+      source: 'circuit_worker.capacity', disposition: 'resolved',
+      detail: JSON.stringify({ before: JSON.stringify({ circuit_limit: true, agent_limit: true }),
+        after: JSON.stringify({ circuit_limit: false, agent_limit: false }) }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(/Step capacity wait cleared/)).toBeTruthy();
+  expect(screen.queryByText(/step slots busy/)).toBeNull();
+  const entry = screen.getByTestId('history-entry-1');
+  expect(entry.dataset.disposition).toBe('resolved');
+  expect(entry.textContent).toContain('Source: circuit_worker.capacity');
+});
+
+it('renders a resolved evidence wait as cleared, keeping its attempt identity', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, node_id: 'reviewer', attempt: 1, kind: 'evidence_window_changed',
+      source: 'circuit_worker.reconciliation', disposition: 'resolved',
+      // The real clear writes an empty attempt string, not a removed key.
+      detail: JSON.stringify({
+        before: { attempt: '1', timeout_ms: '60000', since_ms: '1000', observed: '0', explicit_budget: '0' },
+        after: { attempt: '', timeout_ms: null, since_ms: null, observed: null, explicit_budget: null },
+      }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(/Evidence wait cleared/)).toBeTruthy();
+  expect(screen.queryByText(/Evidence wait — attempt/)).toBeNull();
+  const entry = screen.getByTestId('history-entry-1');
+  expect(entry.dataset.disposition).toBe('resolved');
+  // Identity survives the resolution: the entry still names attempt 1.
+  expect(entry.textContent).toContain('attempt 1');
+});
 
 it('renders provenance and the entire final response without a JSON wrapper or clipping', async () => {
   const report = `${'A complete review finding.\n'.repeat(1500)}FINAL FINDING PRESERVED`;
@@ -126,7 +204,10 @@ it('names the run a continued review follows even after the run context is compa
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
   expect(await screen.findByText('Continued a failed review')).toBeTruthy();
-  expect(container.querySelector('pre')?.textContent).toBe('{"from_run_id":11}');
+  // Rendered from the entry's own detail (issue #1909), so it survives context
+  // compaction without a raw JSON fallback.
+  expect(screen.getByText(/this run follows run #11/)).toBeTruthy();
+  expect(container.querySelector('pre')).toBeNull();
 });
 
 it('shows unsupported ownership and the evidence deadline without promising live delivery', async () => {

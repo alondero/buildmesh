@@ -472,7 +472,7 @@ fn create_node_circuit_run_with_recovery_locked(
         pin_review_launches(&tx, circuit_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
     }
     context.set("retry.attempt", "1");
-    if let Some(recovery) = recovery {
+    if let Some(recovery) = &recovery {
         context.set("recovery.from_run_id", recovery.run_id.to_string());
     }
     context.set("retry.max_retries", max_rounds.to_string());
@@ -492,10 +492,13 @@ fn create_node_circuit_run_with_recovery_locked(
     // path: the successor dedupe reads `recovery.from_run_id` from the context
     // (see `recovery::continuation_target_inner`), and a sweep deletes a run's
     // history rows along with the run. The failed ancestor is never written to
-    // — its ledger stays immutable.
+    // — its ledger stays immutable. A continuation is an operator recovery
+    // action, so the entry names its source and disposition (issue #1909).
     if let Some(continued_from) = continued_from {
         super::evidence::append_history(&tx, run_id, None, None, "review_continuation",
-            &serde_json::json!({ "from_run_id": continued_from }).to_string()).map_err(|e| e.to_string())?;
+            &serde_json::json!({ "from_run_id": continued_from }).to_string(),
+            Some(super::evidence::SOURCE_OPERATOR),
+            Some(super::evidence::DISPOSITION_APPLIED)).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run_id)
@@ -1606,7 +1609,8 @@ pub(crate) fn commit_circuit_advance_inner(
     let mut terminal_woke = false;
     if let Some(state) = run_state {
         if durable_state.as_deref() != Some(state) {
-            super::evidence::append_history(tx, run_id, None, None, "run_transition", state)?;
+            super::evidence::append_history(tx, run_id, None, None, "run_transition", state,
+                Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
         }
     }
     if let Some(context) = context_json {
@@ -1647,7 +1651,8 @@ pub(crate) fn commit_circuit_advance_inner(
         (None, None) => {}
     }
     for op in step_ops {
-        super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status)?;
+        super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status,
+            Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
         let effect_state = match op.status.as_str() {
             "completed" => Some("acknowledged"),
             "unverified" => Some("uncertain"),
@@ -1657,7 +1662,8 @@ pub(crate) fn commit_circuit_advance_inner(
             let changed = tx.execute("UPDATE circuit_effects SET state=?4 WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='possible_dispatch'",
                 params![run_id, op.node_id, op.attempt, state])?;
             if changed > 0 {
-                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "effect_result", state)?;
+                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "effect_result", state,
+                    Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(state))?;
             }
         }
         let outcome_val = op.outcome.clone().flatten();
@@ -1985,11 +1991,61 @@ mod reviewer_tests {
         }]).unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
+        // Recovery history (issue #1909): the successor's own history records
+        // the continuation as an operator action naming the run it follows.
+        let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
+            params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
+        let predecessor_rows: i64 = db.query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind IN ('recovery','review_continuation')",
+            params![first], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(predecessor_rows, 0, "the failed ancestor's ledger stays immutable");
+        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
+        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()));
         assert_eq!(serde_json::to_value(read_snapshot(&db, successor)).unwrap(), serde_json::to_value(&frozen).unwrap());
         assert_eq!(serde_json::to_value(read_snapshot(&db, first)).unwrap(), serde_json::to_value(&frozen).unwrap());
         cancel_circuit_run_locked(&mut db, successor).unwrap();
         let fresh = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
         assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
+    }
+
+    /// Issue #1909 acceptance: the continuation history survives a restart, and
+    /// the reopened successor's recorded lineage still agrees with its context.
+    #[test]
+    fn circuit_recovery_history_survives_reopen_and_matches_successor_context() {
+        use crate::autopilot::circuit::context::CircuitContext;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        let mesh = crate::db::create_mesh_inner(&db, "recovery reopen", "/tmp/recovery-reopen").unwrap();
+        let source = crate::db::create_agent_node_inner(&db, mesh.id, "Source", &mesh.path, "main", crate::models::EnvType::Windows,
+            "codex", None, None, None, None, false, None, None, None).unwrap();
+        crate::db::update_agent_node_status_inner(&db, source.id, crate::models::SessionStatus::Ready).unwrap();
+        let mut preferences = crate::preferences::AppPreferences::default();
+        preferences.reviewer_provider = Some("codex".into());
+        preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
+        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
+        commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
+            node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
+        }]).unwrap();
+        let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
+        let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
+        drop(db);
+
+        // Restart: reopen the same file and read the continuation back.
+        let db = Connection::open(file.path()).unwrap();
+        let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
+            params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
+        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
+        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()), "reopened successor still points back at its predecessor");
     }
 
     /// Issue #1816: every harness with neither an attention hook nor a

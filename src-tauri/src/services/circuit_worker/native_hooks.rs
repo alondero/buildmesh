@@ -580,6 +580,8 @@ mod tests {
             attempt: Some(1),
             kind: "native_hook_received".into(),
             detail: String::new(),
+            source: None,
+            disposition: None,
             observed_at: String::new(),
         };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(
@@ -618,7 +620,7 @@ mod tests {
         };
         let reply_entry = crate::db::circuit::evidence::CircuitHistoryEntry {
             id: 2, node_id: Some("work".into()), attempt: Some(1), kind: "native_hook_received".into(),
-            detail: String::new(), observed_at: String::new(),
+            detail: String::new(), source: None, disposition: None, observed_at: String::new(),
         };
         let super::super::CircuitEvent::ObservationBatch { observations: reply_observations, .. } = normalize(
             42, reply_entry, reply_receipt, Some("session".into()), Some("1".into()), Some("input-1".into()),
@@ -686,7 +688,7 @@ mod tests {
                     let hook = NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap()).unwrap();
                     let receipt = NativeReceipt { agent_node_id:9,input_stamp:None,session_incarnation:Some("1".into()),
                         source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,explicit_turn_mismatch:false,submission_correlated:false,hook };
-                    let entry = crate::db::circuit::evidence::CircuitHistoryEntry {id:index,node_id:Some("work".into()),attempt:Some(1),kind:"native_hook_received".into(),detail:String::new(),observed_at:String::new()};
+                    let entry = crate::db::circuit::evidence::CircuitHistoryEntry {id:index,node_id:Some("work".into()),attempt:Some(1),kind:"native_hook_received".into(),detail:String::new(),source:None,disposition:None,observed_at:String::new()};
                     let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(42,entry,receipt,Some("session".into()),Some("1".into()),Some("input".into())) else { panic!("native batch") };
                     assert!(!stale);
                     assert!(observations.iter().all(|item| item.authoritative));
@@ -764,6 +766,8 @@ mod tests {
                 attempt: Some(1),
                 kind: "native_hook_received".into(),
                 detail,
+                source: None,
+                disposition: None,
                 observed_at: String::new(),
             };
             let event = resolve_receipt(42, entry, |_| {
@@ -813,6 +817,8 @@ mod tests {
                 attempt: Some(2),
                 kind: "native_hook_received".into(),
                 detail: String::new(),
+                source: None,
+                disposition: None,
                 observed_at: String::new(),
             };
             let event = normalize(
@@ -882,6 +888,8 @@ mod tests {
             attempt: Some(1),
             kind: "native_hook_received".into(),
             detail: String::new(),
+            source: None,
+            disposition: None,
             observed_at: String::new(),
         };
         let event = normalize(
@@ -1029,6 +1037,8 @@ mod tests {
                 attempt: Some(1),
                 kind: "native_hook_received".into(),
                 detail: String::new(),
+                source: None,
+                disposition: None,
                 observed_at: String::new(),
             };
             let super::super::CircuitEvent::ObservationBatch { observations, .. } = normalize(
@@ -1119,7 +1129,7 @@ mod tests {
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 1, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
             normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
@@ -1152,7 +1162,7 @@ mod tests {
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 2, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
             normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
@@ -1232,7 +1242,7 @@ mod tests {
             assert!(stored.get("input_stamp").is_none_or(|stamp| stamp.is_null()),
                 "persistence strips the input stamp without a turn-start binding: no input fence exists for AGY");
             let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: *id, node_id: Some("work".into()),
-                attempt: Some(1), kind: "native_hook_received".into(), detail: detail.clone(), observed_at: String::new() };
+                attempt: Some(1), kind: "native_hook_received".into(), detail: detail.clone(), source: None, disposition: None, observed_at: String::new() };
             let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
                 resolve_receipt(1, entry, |_| Ok((Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))))
                     .unwrap()
@@ -1267,7 +1277,7 @@ mod tests {
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
         let entry = || crate::db::circuit::evidence::CircuitHistoryEntry { id: 3, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), observed_at: String::new() };
+            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         // A replaced session (restart under a new conversation) is rejected.
         let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
             normalize(42, entry(), receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
@@ -1293,7 +1303,7 @@ mod tests {
         let deleted = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
             source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook: deleted_hook };
         let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 4, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: serde_json::to_string(&deleted).unwrap(), observed_at: String::new() };
+            attempt: Some(1), kind: "native_hook_received".into(), detail: serde_json::to_string(&deleted).unwrap(), source: None, disposition: None, observed_at: String::new() };
         let event = resolve_receipt(42, deleted_entry, |_| Err(rusqlite::Error::QueryReturnedNoRows)).unwrap();
         let super::super::CircuitEvent::ObservationBatch { observations: deleted_observations, .. } = event else { panic!("native batch") };
         assert_eq!(deleted_observations.len(), 1);
