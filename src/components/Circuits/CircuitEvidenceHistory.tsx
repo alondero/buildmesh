@@ -11,6 +11,7 @@ import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 
 const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
+  recovery: 'Review recovery',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
@@ -18,6 +19,66 @@ const labels: Record<string, string> = {
   observation: 'Observed evidence', evidence_recheck: 'Evidence recheck requested',
   native_hook_received: 'Native evidence received', classification: 'Report interpretation',
 };
+
+/** Parse a history `detail` payload, or `null` when it is not JSON. */
+function parseDetail<T>(detail: string): T | null {
+  try { return JSON.parse(detail) as T; } catch { return null; }
+}
+
+/** Humanise a persisted `queue_wait` reason without dropping its capacity inputs. */
+function queueWaitText(detail: string): string {
+  const reason = parseDetail<{ reason?: string; capacity?: number; required?: number; available?: number | null }>(detail);
+  switch (reason?.reason) {
+    case 'circuit_disabled':
+      return 'Circuit is disabled — waiting for admission.';
+    case 'mesh_capacity':
+      return `Waiting for admission — all ${reason.capacity ?? 0} circuit-run slot(s) busy.`;
+    case 'agent_capacity':
+      return `Waiting for admission — needs ${reason.required ?? 0} agent slot(s); ${reason.available ?? 'unknown'} free.`;
+    case 'reservation_unavailable':
+      return "Waiting for admission — the run's agent-slot reservation was unavailable.";
+    default:
+      return 'Waiting for admission.';
+  }
+}
+
+interface CapacityWindow { circuit_limit?: boolean; agent_limit?: boolean }
+
+/** Humanise the `{before,after}` diff of a step's `capacity_wait` window. */
+function stepCapacityWaitText(detail: string): string {
+  const change = parseDetail<{ before?: string | null; after?: string | null }>(detail);
+  const after = change?.after ? parseDetail<CapacityWindow>(change.after) : null;
+  if (!after) return 'Step capacity wait cleared.';
+  const binding = [
+    after.circuit_limit ? 'step slots busy' : 'step slots free',
+    after.agent_limit ? 'agent slot busy' : 'agent slot free',
+  ];
+  return `Step capacity wait — ${binding.join(' · ')}.`;
+}
+
+/** Humanise the `{before,after}` diff of a step's evidence wait window. */
+function evidenceWindowText(detail: string): string {
+  const change = parseDetail<{ after?: Record<string, string | null> | null }>(detail);
+  const after = change?.after;
+  const attempt = after?.attempt;
+  if (!after || attempt === null || attempt === undefined) return 'Evidence wait cleared.';
+  const timeout = after.timeout_ms ? `${Math.round(Number(after.timeout_ms) / 1000)}s` : 'no explicit budget';
+  const since = after.since_ms ? new Date(Number(after.since_ms)).toISOString() : null;
+  return `Evidence wait — attempt ${attempt} · timeout ${timeout}${since ? ` · since ${since}` : ''}.`;
+}
+
+/** Humanise the pinned configuration snapshot (never its prompts/endpoints). */
+function configurationText(detail: string): string {
+  const configuration = parseDetail<{ behavior_revision?: number; graph_sha256?: string; reviewers?: unknown[] }>(detail);
+  const graph = configuration?.graph_sha256 ? `${configuration.graph_sha256.slice(0, 12)}…` : 'unknown';
+  return `Pinned run configuration — behavior revision ${configuration?.behavior_revision ?? 'unknown'} · graph ${graph} · ${configuration?.reviewers?.length ?? 0} reviewer(s).`;
+}
+
+/** Humanise the successor run a recovery/continuation produced. */
+function recoveryText(detail: string): string {
+  const recovery = parseDetail<{ successor_run_id?: number; rounds?: number }>(detail);
+  return `Recovered into run #${recovery?.successor_run_id ?? 'unknown'} (${recovery?.rounds ?? 'unknown'} round(s)); the failed run's history stays intact.`;
+}
 
 function observationDetail(detail: string): RecordedObservation | null {
   try {
@@ -78,7 +139,24 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
     {classification.evidence_owner && <p>Evidence owner: {classification.evidence_owner.step_id} · Attempt {classification.evidence_owner.attempt}</p>}
   </div>;
   const record = entry.kind === 'observation' ? observationDetail(entry.detail) : null;
-  if (!record) return <pre className="whitespace-pre-wrap break-words font-mono text-text-secondary">{entry.detail}</pre>;
+  if (!record) {
+    // Structured renderers for the wait / capacity / configuration / recovery
+    // kinds (issue #1909). Raw `<pre>` stays the fallback for everything else
+    // (transitions, effects) whose detail is already short and labelled.
+    switch (entry.kind) {
+      case 'queue_wait': return <p className="text-text-secondary break-words">{queueWaitText(entry.detail)}</p>;
+      case 'step_capacity_wait': return <p className="text-text-secondary break-words">{stepCapacityWaitText(entry.detail)}</p>;
+      case 'evidence_window_changed': return <p className="text-text-secondary break-words">{evidenceWindowText(entry.detail)}</p>;
+      case 'configuration_pinned': return <p className="text-text-secondary break-words">{configurationText(entry.detail)}</p>;
+      case 'recovery': return <p className="text-text-secondary break-words">{recoveryText(entry.detail)}</p>;
+      case 'operator_attestation': return <div className="space-y-1 text-text-secondary">
+        <p className="break-words">{entry.detail}</p>
+        <p>Attestation — does not grant permission or review approval.</p>
+      </div>;
+      case 'evidence_recheck': return <p className="text-text-secondary break-words">Evidence recheck requested: {entry.detail} — same attempt re-read; no effect replayed.</p>;
+      default: return <pre className="whitespace-pre-wrap break-words font-mono text-text-secondary">{entry.detail}</pre>;
+    }
+  }
   const { observation, disposition } = record;
   const { identity, fact } = observation;
   return <div className="space-y-1 text-text-secondary">
@@ -173,9 +251,15 @@ export function CircuitEvidenceHistory({ runId, updatedAt }: {
         </ul>
       </details>}
       <ol className="space-y-2">
-        {rows?.map((entry) => <li key={entry.id} className="break-words">
+        {rows?.map((entry) => <li key={entry.id} className="break-words" data-testid={`history-entry-${entry.id}`}
+          data-history-kind={entry.kind} data-disposition={entry.disposition ?? undefined}>
           <div className="text-text-primary">{labels[entry.kind] ?? entry.kind}</div>
           <div className="text-text-muted">{entry.observed_at}{entry.node_id && ` · ${entry.node_id}`}{entry.attempt !== null && ` · attempt ${entry.attempt}`}</div>
+          {/* Uniform provenance (issue #1909). Observations already render a
+              richer source/disposition line inside their own block. */}
+          {entry.source && entry.kind !== 'observation' && <div className="text-text-muted break-words" data-testid={`history-provenance-${entry.id}`}>
+            Source: {entry.source}{entry.disposition ? ` · ${entry.disposition.replace(/_/g, ' ')}` : ''}
+          </div>}
           <HistoryDetail entry={entry} />
         </li>)}
       </ol>

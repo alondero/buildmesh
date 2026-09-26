@@ -788,6 +788,10 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             graph_json TEXT NOT NULL,
             behavior_revision INTEGER NOT NULL
         );
+        -- Append-only causal trace (issue #1847 / #1909). `source` names
+        -- who/what produced the event and `disposition` what Buildmesh did
+        -- with it; both are nullable so pre-v45 rows keep reading. Identity
+        -- (`node_id`/`attempt`) and time (`observed_at`) sit alongside them.
         CREATE TABLE IF NOT EXISTS circuit_run_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
@@ -795,6 +799,8 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             attempt INTEGER,
             kind TEXT NOT NULL,
             detail TEXT NOT NULL,
+            source TEXT,
+            disposition TEXT,
             observed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
         CREATE INDEX IF NOT EXISTS idx_circuit_history_run ON circuit_run_history(run_id, id);
