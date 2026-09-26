@@ -11,7 +11,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
 | Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
-| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45); a reopen test proves the history survives restart and agrees with the run/step projection; the 240px Probe renders them readably (mock-mode CI check). Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | The live real-IPC 240px screenshot for this change (working / waiting / Unverified / failed / recovery) is not yet captured; the steps script and exact checks are recorded below |
+| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
@@ -518,9 +518,13 @@ records the run, step, attempt, source, timestamps, and disposition.
   carries `circuit_worker.reconciliation` / `waiting`. `queue_wait` is run-level,
   so it has no step identity — honest "where applicable".
 - **Capacity/admission** — `step_capacity_wait` now records the parked step's
-  `attempt` (previously NULL) in addition to source `circuit_worker.capacity` /
-  disposition `waiting`. Queue exit is the existing `run_transition` → `running`
-  entry, now carrying source/disposition.
+  `attempt` (previously NULL) in addition to source `circuit_worker.capacity`. A
+  binding window records disposition `waiting`; a freed window (both budgets
+  free, or the key gone) records `resolved` and the Probe renders it as cleared,
+  so a resolved wait can no longer read as still active (regression test
+  `circuit_wait_history_records_resolution_when_capacity_and_evidence_clear`).
+  The same rule applies to `evidence_window_changed`. Queue exit is the existing
+  `run_transition` → `running` entry, now carrying source/disposition.
 - **Configuration revision** — `configuration_pinned` carries source
   `run.configuration` / disposition `applied`; its `detail` already pins the
   behavior revision, graph SHA-256 and reviewer allowlist. (`behavior_revision`
@@ -531,7 +535,10 @@ records the run, step, attempt, source, timestamps, and disposition.
   and round count with source `operator` / disposition `applied`, in the same
   transaction that sets the successor's `recovery.from_run_id` context. Existing
   `operator_attestation` / `evidence_recheck` entries now carry source `operator`
-  and the recorded action as disposition.
+  and the recorded action as disposition. A reopen test
+  (`circuit_recovery_history_survives_reopen_and_matches_successor_context`)
+  asserts the predecessor's recorded successor id still matches the reopened
+  successor's `recovery.from_run_id`.
 
 The Probe renders these entries as structured, wrap-first text (reason, identity,
 and a uniform `Source: … · …` line) rather than raw JSON.
@@ -540,12 +547,13 @@ and a uniform `Source: … · …` line) rather than raw JSON.
 
 | Check | Result | Scope / limitation |
 |---|---|---|
-| `scripts\check.ps1 all -SerialRust` — full `cargo test --locked --lib` | 3,843 passed, 2 failed, 24 ignored | The 2 failures are ambient-environment assertions unrelated to this change: `commands::agent_tests::agent_pty_gets_colour_capable_env` rejects the shell's `TERM_PROGRAM=vscode`, and `sandbox::spawn::curated_env_prepends_git_and_redirects_temp` rejects an `AppData\Local\Temp` value in the ambient env. Neither touches Circuit history |
-| Full `npx vitest run --pool=threads tests/unit` | 249 files passed, 3 failed | `conpty-runtime`, `mesh-properties-tab` and `circuits-probe-tab` pass in isolation; the parallel-run failures are load/ordering flakes, matching the recorded full-suite flakiness. The run must clear `NODE_ENV` (this shell sets `production`), or React 19's production build leaves `React.act` undefined and every component test fails |
+| `cargo test --locked --lib -- --test-threads=1` (full, current source) | 3,845 passed, 2 failed, 24 ignored | The 2 failures are ambient-environment assertions unrelated to this change: `commands::agent_tests::agent_pty_gets_colour_capable_env` rejects the shell's `TERM_PROGRAM=vscode`, and `sandbox::spawn::curated_env_prepends_git_and_redirects_temp` rejects an `AppData\Local\Temp` value in the ambient env. Neither touches Circuit history |
+| Full `npx vitest run --pool=threads tests/unit` | Passed (252 files) | Green once `NODE_ENV` is cleared; this shell sets `production`, which makes React 19's production build leave `React.act` undefined and fails every component test |
 | Full `npx vitest run --pool=threads tests/integration` | Passed (10 files) | Includes the mock-mode 240px Circuit Run History check |
-| `cargo test --locked --lib circuit` | Passed (536) | Includes the new reopen/projection-agreement test and the extended queue/config/recovery provenance tests |
+| `cargo test --locked --lib circuit` | Passed (538) | Includes the reopen/projection-agreement test, the recovery reopen test, and the wait-resolution (cleared) regression |
 | `cargo test --locked --lib init_schema_dump_matches_committed_snapshot` | Passed | Fresh-init schema dump matches the committed `schema_dump.txt` |
-| `npm run lint`, `npm run lint:fixtures`, `npm run build`, documentation gates, README drift, agent diff | Passed | From the same `scripts\check.ps1 all` run |
+| `npm run lint`, `npm run lint:fixtures`, `npm run build`, documentation gates, README drift, agent diff | Passed | From the `scripts\check.ps1 all` run |
+| Live real WebView2/CDP 240px run | Passed | Real `list_circuit_probe` / `circuit_run_history` / `list_circuit_queue` IPC; every state and its next safe action asserted (see below) |
 
 The new Rust test
 `circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection`
@@ -555,28 +563,42 @@ source/disposition/identity/time, that the `queue_wait` / `step_capacity_wait` /
 `configuration_pinned` agrees with `circuit_run_snapshots.behavior_revision`, and
 that the admitted run's `run_transition` records the queue exit.
 
-### Live 240px real-IPC check (operator-run)
+### Live 240px real-IPC check (recorded 2026-09-26)
 
-The real-backend check needs the Windows dev app (WebView2/CDP), so it is left
-for an operator:
+`scripts\run-dev.ps1 -CdpPort 9223` built and launched the dev profile, and
+`tests/integration/ui-shot-circuit-history.steps.mjs` drove the real WebView2
+window over CDP:
 
 ```
-powershell -File scripts\run-dev.ps1 -CdpPort 9223
 node scripts/ui-shot.mjs --out .tmp/1909-history-240.png --steps tests/integration/ui-shot-circuit-history.steps.mjs
 ```
 
-`ui-shot-circuit-history.steps.mjs` seeds durable history rows for every causal
-kind through the dev DB, opens the Probe at 240px (`End` on the resize separator),
-and asserts, against the real `circuit_run_history` IPC:
+The fixture seeded one synthetic run per lifecycle state through the dev DB
+(graph chosen so the running worker leaves the fixtures parked), then asserted,
+against the real `list_circuit_probe` / `circuit_run_history` /
+`list_circuit_queue` IPC at the 240px panel width (`End` on the resize
+separator):
 
-- the panel width is `<= 240` and neither the tab nor the history body overflows
-  sideways (`scrollWidth <= clientWidth`);
-- no `button`/`select`/`input` is clipped horizontally;
-- the admission reason ("all 2 circuit-run slot …"), the step-capacity binding,
-  and "Recovered into run #88" are visible;
-- the `Source: circuit_worker.admission · waiting` provenance line is visible, and
-  `data-disposition` is `waiting` on the queue wait and `applied` on the recovery.
+| State | Run | Asserted next safe action / reason |
+|---|---|---|
+| Working | 103 | Activity "Running" |
+| Waiting (step slot) | 104 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
+| Unverified | 105 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence** |
+| Failed | 106 | Activity "Failed"; reason "The review command exited before producing a result." |
+| Recovery | 107 → 108 | Predecessor history entry "Review recovery · Source: operator · applied · Recovered into run #108 (2 round(s))"; successor shows "Continues run #107 on the same worktree." |
+| Waiting (admission) | 109 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
 
-Inspect `.tmp/1909-history-240.png` and record the result here. Until then the
-live 240px viewport for this change remains unverified; the screenshot is not
-committed.
+Also asserted: `width <= 240`, `tab.scrollWidth <= clientWidth`,
+`body.scrollWidth <= clientWidth`, and no `button`/`select`/`input` clipped
+horizontally.
+
+Inspected captures (ignored `.tmp`, not committed):
+
+- `.tmp/1909-history-240.png` — Activity at 240px.
+- `.tmp/1909-states-activity.png` — Unverified Checkpoint with its **Recheck evidence** action and the recovery successor link.
+- `.tmp/1909-states-history.png` — failed reason and the "Review recovery · Source: operator · applied · Recovered into run #…" entry.
+- `.tmp/1909-states-queue.png` — admission wait row.
+
+This is a synthetic fixture (no agents spawned): it establishes the real-IPC
+read path, the 240px layout, and the operator copy — not a live harness
+lifecycle. The fixture mesh was removed through the bridge after the run.

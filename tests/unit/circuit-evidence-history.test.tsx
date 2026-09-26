@@ -61,6 +61,22 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   expect(capacity.textContent).toContain('attempt 2');
 });
 
+it('renders a freed capacity window as cleared with a resolved disposition, not an active wait', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
+      source: 'circuit_worker.capacity', disposition: 'resolved',
+      detail: JSON.stringify({ before: JSON.stringify({ circuit_limit: true, agent_limit: true }),
+        after: JSON.stringify({ circuit_limit: false, agent_limit: false }) }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(/Step capacity wait cleared/)).toBeTruthy();
+  expect(screen.queryByText(/step slots busy/)).toBeNull();
+  const entry = screen.getByTestId('history-entry-1');
+  expect(entry.dataset.disposition).toBe('resolved');
+  expect(entry.textContent).toContain('Source: circuit_worker.capacity');
+});
+
 it('renders provenance and the entire final response without a JSON wrapper or clipping', async () => {
   const report = `${'A complete review finding.\n'.repeat(1500)}FINAL FINDING PRESERVED`;
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [{ ...entry,kind:'observation',detail:JSON.stringify({

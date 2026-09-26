@@ -38,6 +38,8 @@ pub(super) const SOURCE_OPERATOR: &str = "operator";
 pub(super) const DISPOSITION_APPLIED: &str = "applied";
 /// An unresolved wait (admission, step capacity, or evidence window).
 pub(super) const DISPOSITION_WAITING: &str = "waiting";
+/// A wait whose binding window cleared — no longer active (issue #1909).
+pub(super) const DISPOSITION_RESOLVED: &str = "resolved";
 pub(super) const DISPOSITION_INTENT: &str = "intent";
 pub(super) const DISPOSITION_POSSIBLE_DISPATCH: &str = "possible_dispatch";
 pub(super) const DISPOSITION_ACKNOWLEDGED: &str = "acknowledged";
@@ -61,6 +63,13 @@ fn observation_disposition_str(
         D::Unavailable => "unavailable",
         D::Conflicting => "conflicting",
     }
+}
+
+/// A wait event's disposition: `waiting` while its window still binds,
+/// `resolved` once it clears. Without this, a freed capacity/evidence window
+/// would be recorded as if the wait were still active (issue #1909).
+fn wait_disposition(binding: bool) -> &'static str {
+    if binding { DISPOSITION_WAITING } else { DISPOSITION_RESOLVED }
 }
 
 pub(crate) fn is_observation_freshness_rejection(error: &rusqlite::Error) -> bool {
@@ -726,7 +735,13 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
                 ).optional()?,
                 None => None,
             };
-            append_history(db,run_id,node,attempt,"step_capacity_wait",&serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),Some(SOURCE_CAPACITY),Some(DISPOSITION_WAITING))?;
+            // A freed window (`circuit_limit`/`agent_limit` both false, or the
+            // key gone) is a resolution, not an active wait (issue #1909).
+            let window = next.get(key).and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+            let binding = window.as_ref().is_some_and(|value|
+                value["circuit_limit"].as_bool().unwrap_or(false)
+                    || value["agent_limit"].as_bool().unwrap_or(false));
+            append_history(db,run_id,node,attempt,"step_capacity_wait",&serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),Some(SOURCE_CAPACITY),Some(wait_disposition(binding)))?;
         }
     }
     let nodes: std::collections::BTreeSet<&str> = previous.keys().chain(next.keys()).filter_map(|key| key.strip_prefix("node.")?.strip_suffix(".wait.attempt")).collect();
@@ -740,7 +755,9 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
         let after = project(&next);
         if before != after {
             let attempt = next.get(&format!("{prefix}attempt")).and_then(|value|value.parse().ok());
-            append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string(),Some(SOURCE_RECONCILIATION),Some(DISPOSITION_WAITING))?;
+            // A window with no attempt is a resolution, not an active wait.
+            let binding = after.get("attempt").and_then(|value| value.as_deref()).is_some_and(|value| !value.is_empty());
+            append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string(),Some(SOURCE_RECONCILIATION),Some(wait_disposition(binding)))?;
         }
     }
     Ok(())
@@ -1239,6 +1256,44 @@ mod tests {
         assert_eq!(history[2].source.as_deref(), Some(SOURCE_CAPACITY));
         assert_eq!(history[2].disposition.as_deref(), Some(DISPOSITION_WAITING));
         assert_eq!(history[2].attempt, Some(1));
+    }
+
+    /// Issue #1909: a freed capacity or evidence window is a resolution, not an
+    /// active wait — the history must say so, or the operator surface renders a
+    /// cleared wait as still parked.
+    #[test]
+    fn circuit_wait_history_records_resolution_when_capacity_and_evidence_clear() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
+        let parked = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":true,\"agent_limit\":true}"}).to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&parked),&[]).unwrap();
+        let freed = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}"}).to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&freed),&[]).unwrap();
+        let history = history_inner(&db,1).unwrap();
+        assert_eq!(history.len(),2);
+        assert_eq!(history[0].kind,"step_capacity_wait");
+        assert_eq!(history[0].disposition.as_deref(),Some(DISPOSITION_WAITING));
+        assert_eq!(history[1].kind,"step_capacity_wait");
+        assert_eq!(history[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED),"a freed capacity window is a resolution, not an active wait");
+
+        // The same rule applies to an evidence wait window: opening binds,
+        // clearing resolves. (capacity_wait is held constant so it adds nothing.)
+        let waiting = serde_json::json!({
+            "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
+            "node.spawn.wait.attempt":"1","node.spawn.wait.timeout_ms":"60000","node.spawn.wait.since_ms":"1000"
+        }).to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&waiting),&[]).unwrap();
+        let resolved = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}"}).to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&resolved),&[]).unwrap();
+        let windows: Vec<CircuitHistoryEntry> = history_inner(&db,1).unwrap()
+            .into_iter().filter(|entry| entry.kind == "evidence_window_changed").collect();
+        assert_eq!(windows.len(),2);
+        assert_eq!(windows[0].disposition.as_deref(),Some(DISPOSITION_WAITING));
+        assert_eq!(windows[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED));
     }
 
     #[test]

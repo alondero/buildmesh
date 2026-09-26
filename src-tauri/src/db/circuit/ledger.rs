@@ -2004,6 +2004,42 @@ mod reviewer_tests {
         assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
     }
 
+    /// Issue #1909 acceptance: the recovery entry survives a restart, and the
+    /// predecessor's recorded successor id still agrees with the reopened
+    /// successor's `recovery.from_run_id` after the database is reopened.
+    #[test]
+    fn circuit_recovery_history_survives_reopen_and_matches_successor_context() {
+        use crate::autopilot::circuit::context::CircuitContext;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        let mesh = crate::db::create_mesh_inner(&db, "recovery reopen", "/tmp/recovery-reopen").unwrap();
+        let source = crate::db::create_agent_node_inner(&db, mesh.id, "Source", &mesh.path, "main", crate::models::EnvType::Windows,
+            "codex", None, None, None, None, false, None, None, None).unwrap();
+        crate::db::update_agent_node_status_inner(&db, source.id, crate::models::SessionStatus::Ready).unwrap();
+        let mut preferences = crate::preferences::AppPreferences::default();
+        preferences.reviewer_provider = Some("codex".into());
+        preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
+        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
+        commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
+            node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
+        }]).unwrap();
+        let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
+        let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
+        drop(db);
+
+        // Restart: reopen the same file and read the recovery linkage back.
+        let db = Connection::open(file.path()).unwrap();
+        let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='recovery'",
+            params![first], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["successor_run_id"].as_i64(), Some(successor));
+        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
+        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()), "reopened successor still points back at its predecessor");
+    }
+
     /// Issue #1816: every harness with neither an attention hook nor a
     /// passive turn watcher is rejected as a reviewer provider, with a
     /// reason naming the harness; every eligible harness is accepted.
