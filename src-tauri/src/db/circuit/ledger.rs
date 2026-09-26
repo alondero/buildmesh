@@ -194,6 +194,14 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
 ) -> Result<i64, String> {
+    // Successor-dedupe fence. Re-resolving the lineage here — after the
+    // command's own `existing_review_successor` read, and under the same writer
+    // lock that mints the run — is what makes two overlapping continuation
+    // requests collapse onto one successor. Callers reach this through
+    // `continue_failed_review`, which takes the process-global writer, so the
+    // window between the first read and this one is serialized rather than
+    // racy. The per-source live-run check inside
+    // `create_node_circuit_run_with_recovery_locked` is the second fence.
     let recovery = match super::recovery::continuation_target_inner(db, recovery.run_id)? {
         super::recovery::ContinuationTarget::Existing(id) => return Ok(id),
         super::recovery::ContinuationTarget::Failed(id) if id != recovery.run_id =>
@@ -478,11 +486,13 @@ fn create_node_circuit_run_with_recovery_locked(
     ).map_err(|e| e.to_string())?;
     let run_id = tx.last_insert_rowid();
     super::evidence::pin_graph(&tx, run_id).map_err(|e| e.to_string())?;
-    // The lineage also lands in this run's own append-only history. The
-    // context key is what the Probe reads while the run is live, but
-    // retention empties `context_json` on old terminal rows, so the successor
-    // would otherwise lose the only pointer to the run it continues. The
-    // failed ancestor is never written to — its ledger stays immutable.
+    // The lineage is also written to this run's own append-only history, so an
+    // operator reading Circuit Run History sees which run this one follows
+    // without having to read run context. It is an audit record, not a lookup
+    // path: the successor dedupe reads `recovery.from_run_id` from the context
+    // (see `recovery::continuation_target_inner`), and a sweep deletes a run's
+    // history rows along with the run. The failed ancestor is never written to
+    // — its ledger stays immutable.
     if let Some(continued_from) = continued_from {
         super::evidence::append_history(&tx, run_id, None, None, "review_continuation",
             &serde_json::json!({ "from_run_id": continued_from }).to_string()).map_err(|e| e.to_string())?;

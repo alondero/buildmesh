@@ -23,10 +23,20 @@ Every supported observation strategy needs recorded capabilities, source, freshn
 
 Work for [#1910](https://github.com/alondero/buildmesh/issues/1910). This section
 closes the two items the row above left open — the current-build continuation
-check and the blueprint availability/deletion audit — and records one behaviour
-that was missing: a Review Successor now names the run it continues in its own
-append-only Circuit Run History, not only in the run context that retention
-later empties.
+check and the blueprint availability/deletion audit — and records one addition:
+a continued review's Circuit Run History now names the run it follows, so an
+operator can read the relationship there without opening run context.
+
+That entry is an audit record, not a lookup path. The successor dedupe reads
+`recovery.from_run_id` from the run's own context
+(`db::circuit::recovery::continuation_target_inner`), and a retention sweep
+deletes a run together with its history rows. What keeps a lineage resolvable
+past the sweep is that a continuation's identity is `manual:%` — a family the
+sweep deletes rather than compacts, so the lineage key is never emptied — and
+that a continuation is the newest run on the recovery Circuit it is minted on,
+which the sweep always keeps. `retention_keeps_a_review_successor_resolvable`
+pins both halves. The one case that still breaks is recorded in
+[#1924](https://github.com/alondero/buildmesh/issues/1924).
 
 Environment: Windows, development profile, Codex CLI 0.157.0 (`codex --version`;
 its own TUI banner reads v0.157.1) on `gpt-6-luna` in native Windows PowerShell.

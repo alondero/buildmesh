@@ -227,9 +227,10 @@ Run History records pinned behavior/graph identity and effective reviewer select
 model and effort, evidence-window changes, run and step capacity waits, the run a
 continued review follows, and continuation prompt intent, possible dispatch and
 outcome. Unchanged polling results do not add repeated entries. Arguments,
-endpoints and prompts are excluded from the configuration history summary. A
-continued review names the run it follows in its own history, so the link
-survives retention compacting the run's context.
+endpoints and prompts are excluded from the configuration history summary. The
+"continued a failed review" entry is a record for the operator; the successor
+dedupe itself reads the run's own context, and a retention sweep removes a run
+together with its history.
 
 Conflicts retain their cause and triggering evidence identity. A validated Codex
 foreground pull may resolve only the matching foreground conflict, and its file
