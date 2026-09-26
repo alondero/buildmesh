@@ -52,6 +52,8 @@ The folders below are deliberately separated by purpose:
   implementation notes.
 - [`learning/`](learning/) and [`research/`](research/) — evidence captured
   while investigating a behavior or external integration.
+- [Supported model strings](research/supported-model-strings.md) — model
+  override syntax and discovery commands for every supported harness.
 - [`releases/`](releases/) — versioned drafts and historical release notes.
 - [`specs/`](specs/README.md) — product and technical specifications.
 - [`archive/`](archive/README.md) — retired material that is not current truth.

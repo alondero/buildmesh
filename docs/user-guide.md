@@ -194,6 +194,9 @@ off) and `high` (thinking on), not graded reasoning depth. MiniMax through Claud
 Code has no documented graded effort selector; use the harness's thinking toggle.
 See MiniMax's [Codex guide](https://platform.minimax.io/docs/token-plan/codex) and
 [Claude Code guide](https://platform.minimax.io/docs/token-plan/claude-code).
+Model identifiers and argument formats vary by harness, provider, and account;
+see [Supported model strings](research/supported-model-strings.md) for current
+examples and each harness's live model-list command or picker.
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
