@@ -49,10 +49,17 @@ export default async function ({ page, invoke }) {
       JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }),
       'circuit_worker.capacity', 'waiting');
 
-    // Unverified: a checkpoint with a read-only Recheck action.
+    // Unverified: a checkpoint with a read-only Recheck action, plus a resolved
+    // evidence wait (cleared via the empty attempt the backend writes).
     const unverified = insertRun.run(circuit, mesh.id, 'manual:state-unverified', 'running', '{}').lastInsertRowid;
     insertStep.run(unverified, 'reviewer', 'unverified', 1, null,
       'Evidence is incomplete. Inspect the latest observations before continuing.');
+    insertHistory.run(unverified, 'reviewer', 1, 'evidence_window_changed',
+      JSON.stringify({
+        before: { attempt: '1', timeout_ms: '60000', since_ms: '1767225600000', observed: '0', explicit_budget: '0' },
+        after: { attempt: '', timeout_ms: null, since_ms: null, observed: null, explicit_budget: null },
+      }),
+      'circuit_worker.reconciliation', 'resolved');
 
     // Failed: a terminal failure with a readable reason.
     const failed = insertRun.run(circuit, mesh.id, 'manual:state-failed', 'failed', '{}').lastInsertRowid;
@@ -98,6 +105,9 @@ export default async function ({ page, invoke }) {
     await unverifiedCard.getByText('Circuit Run History').click();
     const recheck = unverifiedCard.getByRole('button', { name: 'Recheck evidence' });
     await expect(recheck).toBeVisible();
+    // The resolved evidence wait renders as cleared, not as an active window.
+    await expect(unverifiedCard.getByText(/Evidence wait cleared/)).toBeVisible();
+    await expect(unverifiedCard.getByText(/Evidence wait — attempt/)).toHaveCount(0);
     await recheck.scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(shotDir, '1909-states-activity.png') });
 

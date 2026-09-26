@@ -754,8 +754,13 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
         let before = project(&previous);
         let after = project(&next);
         if before != after {
-            let attempt = next.get(&format!("{prefix}attempt")).and_then(|value|value.parse().ok());
-            // A window with no attempt is a resolution, not an active wait.
+            // Identity survives a resolution: a cleared window writes an empty
+            // attempt, so fall back to the prior window's attempt rather than
+            // dropping the identity the wait was parked on (issue #1909 review).
+            let attempt = next.get(&format!("{prefix}attempt")).and_then(|value| value.parse::<i32>().ok())
+                .or_else(|| previous.get(&format!("{prefix}attempt")).and_then(|value| value.parse::<i32>().ok()));
+            // A window whose (possibly cleared) attempt is empty is a
+            // resolution, not an active wait.
             let binding = after.get("attempt").and_then(|value| value.as_deref()).is_some_and(|value| !value.is_empty());
             append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string(),Some(SOURCE_RECONCILIATION),Some(wait_disposition(binding)))?;
         }
@@ -1281,19 +1286,25 @@ mod tests {
         assert_eq!(history[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED),"a freed capacity window is a resolution, not an active wait");
 
         // The same rule applies to an evidence wait window: opening binds,
-        // clearing resolves. (capacity_wait is held constant so it adds nothing.)
+        // clearing resolves. The real clear writes an empty attempt string
+        // (`CircuitContext::set(key, "")`), so identity must survive it.
         let waiting = serde_json::json!({
             "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
             "node.spawn.wait.attempt":"1","node.spawn.wait.timeout_ms":"60000","node.spawn.wait.since_ms":"1000"
         }).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&waiting),&[]).unwrap();
-        let resolved = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}"}).to_string();
+        let resolved = serde_json::json!({
+            "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
+            "node.spawn.wait.attempt":""
+        }).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&resolved),&[]).unwrap();
         let windows: Vec<CircuitHistoryEntry> = history_inner(&db,1).unwrap()
             .into_iter().filter(|entry| entry.kind == "evidence_window_changed").collect();
         assert_eq!(windows.len(),2);
         assert_eq!(windows[0].disposition.as_deref(),Some(DISPOSITION_WAITING));
+        assert_eq!(windows[0].attempt,Some(1));
         assert_eq!(windows[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED));
+        assert_eq!(windows[1].attempt,Some(1),"a resolved evidence wait keeps the attempt it was parked on");
     }
 
     #[test]

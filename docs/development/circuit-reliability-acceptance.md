@@ -515,8 +515,12 @@ records the run, step, attempt, source, timestamps, and disposition.
 
 - **Wait** — `queue_wait` (run admission) carries source
   `circuit_worker.admission` / disposition `waiting`; `evidence_window_changed`
-  carries `circuit_worker.reconciliation` / `waiting`. `queue_wait` is run-level,
-  so it has no step identity — honest "where applicable".
+  carries `circuit_worker.reconciliation`. A cleared evidence window records
+  disposition `resolved` and keeps the attempt it was parked on (the clear writes
+  an empty attempt string; the prior attempt is preserved on the entry), and the
+  Probe renders it as "Evidence wait cleared — …" rather than "attempt …".
+  `queue_wait` is run-level, so it has no step identity — honest "where
+  applicable".
 - **Capacity/admission** — `step_capacity_wait` now records the parked step's
   `attempt` (previously NULL) in addition to source `circuit_worker.capacity`. A
   binding window records disposition `waiting`; a freed window (both budgets
@@ -581,23 +585,26 @@ separator):
 
 | State | Run | Asserted next safe action / reason |
 |---|---|---|
-| Working | 103 | Activity "Running" |
-| Waiting (step slot) | 104 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
-| Unverified | 105 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence** |
-| Failed | 106 | Activity "Failed"; reason "The review command exited before producing a result." |
-| Recovery | 107 → 108 | Predecessor history entry "Review recovery · Source: operator · applied · Recovered into run #108 (2 round(s))"; successor shows "Continues run #107 on the same worktree." |
-| Waiting (admission) | 109 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
+| Working | 110 | Activity "Running" |
+| Waiting (step slot) | 111 | Activity "Queued"; reason "Waiting for a slot — this circuit runs one step at a time, and that slot is busy." |
+| Unverified | 112 | Activity "Unverified Checkpoint"; reason "Evidence is incomplete. Inspect the latest observations before continuing."; the card's Circuit Run History offers **Recheck evidence**, and its resolved evidence wait renders as "Evidence wait cleared — …" with the attempt identity preserved (no "attempt …" line) |
+| Failed | 113 | Activity "Failed"; reason "The review command exited before producing a result." |
+| Recovery | 114 → 115 | Predecessor history entry "Review recovery · Source: operator · applied · Recovered into run #115 (2 round(s))"; successor shows "Continues run #114 on the same worktree." |
+| Waiting (admission) | 116 | Queue row "Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy." |
 
 Also asserted: `width <= 240`, `tab.scrollWidth <= clientWidth`,
 `body.scrollWidth <= clientWidth`, and no `button`/`select`/`input` clipped
 horizontally.
 
-Inspected captures (ignored `.tmp`, not committed):
+Inspected captures (committed under `docs/pr-screenshots/issue-1909/`):
 
-- `.tmp/1909-history-240.png` — Activity at 240px.
-- `.tmp/1909-states-activity.png` — Unverified Checkpoint with its **Recheck evidence** action and the recovery successor link.
-- `.tmp/1909-states-history.png` — failed reason and the "Review recovery · Source: operator · applied · Recovered into run #…" entry.
-- `.tmp/1909-states-queue.png` — admission wait row.
+![Activity: working, waiting, Unverified with its Recheck action, resolved evidence wait, and the recovery successor link](../pr-screenshots/issue-1909/activity-states-and-recheck.png)
+
+![History: failed reason and the recovery entry with source/disposition](../pr-screenshots/issue-1909/history-recovery.png)
+
+![Queue: the pending run's admission reason](../pr-screenshots/issue-1909/queue-admission.png)
+
+![The Probe at the 240px minimum width](../pr-screenshots/issue-1909/probe-240px.png)
 
 This is a synthetic fixture (no agents spawned): it establishes the real-IPC
 read path, the 240px layout, and the operator copy — not a live harness

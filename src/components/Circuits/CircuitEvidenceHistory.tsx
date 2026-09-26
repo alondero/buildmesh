@@ -65,7 +65,9 @@ function evidenceWindowText(detail: string): string {
   const change = parseDetail<{ after?: Record<string, string | null> | null }>(detail);
   const after = change?.after;
   const attempt = after?.attempt;
-  if (!after || attempt === null || attempt === undefined) return 'Evidence wait cleared.';
+  // The backend writes an empty attempt string when a window clears; blank is a
+  // resolution, not an active window — never render "attempt …" for it.
+  if (!after || !attempt) return 'Evidence wait cleared — the step is no longer waiting on a fresh report.';
   const timeout = after.timeout_ms ? `${Math.round(Number(after.timeout_ms) / 1000)}s` : 'no explicit budget';
   const since = after.since_ms ? new Date(Number(after.since_ms)).toISOString() : null;
   return `Evidence wait — attempt ${attempt} · timeout ${timeout}${since ? ` · since ${since}` : ''}.`;

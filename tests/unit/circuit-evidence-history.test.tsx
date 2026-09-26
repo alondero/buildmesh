@@ -77,6 +77,26 @@ it('renders a freed capacity window as cleared with a resolved disposition, not 
   expect(entry.textContent).toContain('Source: circuit_worker.capacity');
 });
 
+it('renders a resolved evidence wait as cleared, keeping its attempt identity', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, node_id: 'reviewer', attempt: 1, kind: 'evidence_window_changed',
+      source: 'circuit_worker.reconciliation', disposition: 'resolved',
+      // The real clear writes an empty attempt string, not a removed key.
+      detail: JSON.stringify({
+        before: { attempt: '1', timeout_ms: '60000', since_ms: '1000', observed: '0', explicit_budget: '0' },
+        after: { attempt: '', timeout_ms: null, since_ms: null, observed: null, explicit_budget: null },
+      }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(/Evidence wait cleared/)).toBeTruthy();
+  expect(screen.queryByText(/Evidence wait — attempt/)).toBeNull();
+  const entry = screen.getByTestId('history-entry-1');
+  expect(entry.dataset.disposition).toBe('resolved');
+  // Identity survives the resolution: the entry still names attempt 1.
+  expect(entry.textContent).toContain('attempt 1');
+});
+
 it('renders provenance and the entire final response without a JSON wrapper or clipping', async () => {
   const report = `${'A complete review finding.\n'.repeat(1500)}FINAL FINDING PRESERVED`;
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [{ ...entry,kind:'observation',detail:JSON.stringify({
