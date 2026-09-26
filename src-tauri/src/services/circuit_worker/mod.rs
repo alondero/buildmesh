@@ -846,28 +846,32 @@ fn drive_run(
         // Effects may report a durable outcome only after their external work
         // completes. Feed those outcomes back through the stepper and its
         // normal atomic commit path; effect execution never writes run state.
-        let mut pending_outcomes = std::collections::VecDeque::from(effect_events);
-        while let Some(effect_event) = pending_outcomes.pop_front() {
-            let (outcome, outcome_changed) =
-                persist_effect_outcome(active.run.id, &mut view, &effect_event)?;
-            pending_outcomes.extend(execute_effects(app, active, &mut view, &outcome.effects)?);
-            // A terminal state is emitted once, after the cleanup sweep below,
-            // so a run does not fan out two refetches on the way out.
-            if !view.state.is_terminal()
-                && (!outcome.step_writes.is_empty()
-                    || outcome.run_state_changed
-                    || outcome.context_changed
-                    || outcome_changed)
-            {
-                let _ = app.emit(
-                    "circuit-run-updated",
-                    CircuitRunUpdatedPayload {
-                        run_id: active.run.id,
-                        state: view.state.as_db_str().to_string(),
-                    },
-                );
-            }
-        }
+        let exec_app = app.clone();
+        let emit_app = app.clone();
+        drain_effect_outcomes(
+            active.run.id,
+            &mut view,
+            effect_events,
+            &mut |view, effects| execute_effects(&exec_app, active, view, effects),
+            &mut |view, outcome, outcome_changed| {
+                // A terminal state is emitted once, after the cleanup sweep below,
+                // so a run does not fan out two refetches on the way out.
+                if !view.state.is_terminal()
+                    && (!outcome.step_writes.is_empty()
+                        || outcome.run_state_changed
+                        || outcome.context_changed
+                        || outcome_changed)
+                {
+                    let _ = emit_app.emit(
+                        "circuit-run-updated",
+                        CircuitRunUpdatedPayload {
+                            run_id: active.run.id,
+                            state: view.state.as_db_str().to_string(),
+                        },
+                    );
+                }
+            },
+        )?;
 
         // Live ledger: every step transition or state change refreshes
         // the Probe tab, not just terminal ones — otherwise a long agent
@@ -931,6 +935,37 @@ pub(super) fn persist_effect_outcome(
     let outcome = advance(view, event);
     let changed = persist_transition(run_id, view, &outcome)?;
     Ok((outcome, changed))
+}
+
+/// Executes the follow-on effects a drained outcome collects.
+pub(super) type FollowOnExecutor<'a> = dyn FnMut(
+    &mut RunView,
+    &[crate::autopilot::circuit::stepper::Effect],
+) -> Result<Vec<CircuitEvent>, String> + 'a;
+
+/// Observes each committed outcome while draining.
+pub(super) type OutcomeObserver<'a> = dyn FnMut(&RunView, &Transition, bool) + 'a;
+
+/// Drain outcome events through persistence, executing follow-on effects via
+/// the caller's executor and reporting each commit to its observer. App-free:
+/// `drive_run` passes `execute_effects` plus its progress emit, so the
+/// pending-outcome loop's composition — persist, extend, observe, in that
+/// order — lives here once instead of being reproduced by coverage. A
+/// rejected commit aborts the drain with `Err` before any follow-on runs.
+pub(super) fn drain_effect_outcomes(
+    run_id: i64,
+    view: &mut RunView,
+    initial: Vec<CircuitEvent>,
+    execute_follow_ons: &mut FollowOnExecutor<'_>,
+    on_committed: &mut OutcomeObserver<'_>,
+) -> Result<(), String> {
+    let mut pending = std::collections::VecDeque::from(initial);
+    while let Some(event) = pending.pop_front() {
+        let (outcome, changed) = persist_effect_outcome(run_id, view, &event)?;
+        pending.extend(execute_follow_ons(view, &outcome.effects)?);
+        on_committed(view, &outcome, changed);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

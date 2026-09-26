@@ -543,11 +543,21 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         &["lookup_held", "cancellation_committed", "lookup_returned"],
     );
 
-    // The pending-outcome commit, through the same seam `drive_run` composes
-    // into its outcome loop: the stale completion must be rejected.
+    // The pending-outcome drain, shared with `drive_run`: the stale commit
+    // must be rejected before any follow-on executes or any progress emits.
+    // The stubs panic instead of silently passing, so a regression that
+    // commits the stale result fails loudly right here.
     assert!(
-        super::persist_effect_outcome(view_with_result.run_id, &mut view_with_result, &event)
-            .is_err()
+        super::drain_effect_outcomes(
+            view_with_result.run_id,
+            &mut view_with_result,
+            vec![event],
+            &mut |_, _| -> Result<Vec<CircuitEvent>, String> {
+                panic!("a rejected stale outcome must not execute follow-ons")
+            },
+            &mut |_, _, _| panic!("a rejected stale outcome must not emit progress"),
+        )
+        .is_err()
     );
 
     // A fresh read and the append-only history agree: nothing from the late
