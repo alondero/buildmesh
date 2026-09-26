@@ -197,38 +197,9 @@ fn open_pr_lookup_handoff_commits_acknowledged_result_and_survives_reopen() {
     assert_eq!(stored.state, "completed");
     assert_eq!(context.get("pr.number"), Some("314"));
     assert_eq!(context.get("pr.head_ref"), Some("feature/circuit-recovery"));
-    let path = {
-        let db = crate::db::read_conn();
-        db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
-            .unwrap()
-    };
-    let reopened = rusqlite::Connection::open(path).unwrap();
-    assert_eq!(
-        crate::db::circuit::ledger::list_circuit_run_steps_inner(&reopened, fixture.run_id)
-            .unwrap()[0]
-            .status,
-        "completed"
-    );
-    assert_eq!(
-        reopened
-            .query_row(
-                "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
-                [fixture.run_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "acknowledged"
-    );
-    assert_eq!(
-        reopened
-            .query_row(
-                "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind='effect_reconciled'",
-                [fixture.run_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        1
-    );
+    assert_eq!(open_pr_step_status(fixture.run_id), "completed");
+    assert_eq!(effect_state(fixture.run_id), "acknowledged");
+    assert_eq!(history_count(fixture.run_id, "effect_reconciled"), 1);
     assert!(
         crate::db::circuit::evidence::claim_effect(
             fixture.run_id,
@@ -289,41 +260,12 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     // not update context, acknowledge the effect, or finish the step.
     assert!(persist_effect_result(&mut view_with_result, &event).is_err());
     let stored = reopened_run(fixture.run_id);
-    let path = {
-        let db = crate::db::read_conn();
-        db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
-            .unwrap()
-    };
-    let reopened = rusqlite::Connection::open(path).unwrap();
     let context = CircuitContext::from_json(&stored.context_json).unwrap();
     assert_eq!(stored.state, "cancelled");
     assert_eq!(context.get("pr.number"), None);
-    assert_eq!(
-        crate::db::circuit::ledger::list_circuit_run_steps_inner(&reopened, fixture.run_id)
-            .unwrap()[0]
-            .status,
-        "cancelled"
-    );
-    assert_eq!(
-        reopened
-            .query_row(
-                "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
-                [fixture.run_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "uncertain"
-    );
-    assert_eq!(
-        reopened
-            .query_row(
-                "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind='effect_reconciled'",
-                [fixture.run_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0
-    );
+    assert_eq!(open_pr_step_status(fixture.run_id), "cancelled");
+    assert_eq!(effect_state(fixture.run_id), "uncertain");
+    assert_eq!(history_count(fixture.run_id, "effect_reconciled"), 0);
 }
 
 #[test]
@@ -352,26 +294,12 @@ fn open_pr_missing_or_mismatched_lookup_stays_uncertain_without_replay() {
             CircuitEvent::EffectUncertain { reason, .. } if reason.contains(expected_reason)
         ));
         persist_effect_result(&mut fixture.view, &event).unwrap();
-        let path = {
-            let db = crate::db::read_conn();
-            db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
-                .unwrap()
-        };
-        let reopened = rusqlite::Connection::open(path).unwrap();
-        let stored = crate::db::circuit::ledger::get_circuit_run_inner(&reopened, fixture.run_id)
-            .unwrap()
-            .unwrap();
+        let stored = reopened_run(fixture.run_id);
         let context = CircuitContext::from_json(&stored.context_json).unwrap();
         assert_eq!(stored.state, "running");
         assert_eq!(context.get("pr.number"), None);
         assert_eq!(
-            reopened
-                .query_row(
-                    "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
-                    [fixture.run_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
+            effect_state(fixture.run_id),
             "uncertain",
             "a failed read-only lookup never acknowledges or replays the effect"
         );
@@ -391,7 +319,7 @@ fn open_pr_missing_or_mismatched_lookup_stays_uncertain_without_replay() {
 
 const DISPATCH_OWNER: &str = "example";
 const DISPATCH_REPO: &str = "buildmesh";
-const DISPATCH_HEAD: &str = "circuit-recovery";
+const DISPATCH_HEAD: &str = "feature/circuit-recovery";
 
 /// The wire form the production `record_target` closure persists.
 fn dispatch_target_detail(head: &str) -> String {
@@ -403,9 +331,13 @@ fn dispatch_target_detail(head: &str) -> String {
     .to_string()
 }
 
-/// The percent-encoded `head=OWNER:BRANCH` value the client must emit.
+/// The percent-encoded `head=OWNER:BRANCH` value the client must emit
+/// (the owner separator and any nested ref slash are both escaped).
 fn dispatch_expected_head() -> String {
-    format!("{DISPATCH_OWNER}%3A{DISPATCH_HEAD}")
+    format!(
+        "{DISPATCH_OWNER}%3A{}",
+        DISPATCH_HEAD.replace('/', "%2F")
+    )
 }
 
 fn dispatch_pull_request_json() -> serde_json::Value {
@@ -419,10 +351,12 @@ fn dispatch_pull_request_json() -> serde_json::Value {
 
 /// A run whose OpenPr step is scheduled (implementer completed, open_pr running)
 /// with a claimed GitHub effect — exactly the worker's state just before it
-/// dispatches the create.
+/// dispatches the create. Holds the mesh temp dir so the recorded mesh path
+/// stays valid for the test's lifetime.
 struct DispatchFixture {
     run_id: i64,
     view: RunView,
+    _dir: tempfile::TempDir,
 }
 
 fn dispatch_fixture() -> DispatchFixture {
@@ -518,7 +452,11 @@ fn dispatch_fixture() -> DispatchFixture {
     )
     .unwrap();
     let view = running_view(run_id);
-    DispatchFixture { run_id, view }
+    DispatchFixture {
+        run_id,
+        view,
+        _dir: dir,
+    }
 }
 
 fn active_run(run_id: i64) -> crate::db::ActiveCircuitRun {
@@ -900,15 +838,25 @@ fn open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck() {
     ]);
     let client = GitHubClient::for_test(&base, "fake-token").unwrap();
 
+    // Real create dispatch, then a stop before its result commits.
     assert!(matches!(
         dispatch_open_pr(&fixture, &client),
         Ok(CircuitEvent::GithubActionResult { success: true, .. })
     ));
     let active = active_run(fixture.run_id);
-    // The recheck snapshot is taken after the ambiguous dispatch.
-    let mut stale = view_from_active(&active);
 
-    // Cancellation commits first.
+    // Restart and reach the queued recheck exactly as production does.
+    let mut restarted = view_from_active(&active);
+    reconcile_stuck_github_step(&mut restarted);
+    operator_recheck(fixture.run_id);
+
+    // The worker reschedules the recheck and is about to run the read-only
+    // lookup. This snapshot is what the in-flight lookup is computed against.
+    let mut in_flight = resume_queued_recheck(fixture.run_id);
+    assert_eq!(open_pr_step_status(fixture.run_id), "running");
+    assert_eq!(effect_state(fixture.run_id), "uncertain");
+
+    // Cancellation commits first, while that read-only lookup is in flight.
     crate::db::commit_circuit_advance(
         fixture.run_id,
         Some("cancelled"),
@@ -925,20 +873,15 @@ fn open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck() {
     )
     .unwrap();
 
-    // The lookup still finds the dispatched PR, but the result is stale.
-    let event =
-        github::reconcile_open_pr_for_worker(&active, &mut stale, "open_pr", |owner, repo, head| {
-            client
-                .find_open_pr_for_branch(owner, repo, head)
-                .map_err(|error| error.to_string())
-        });
+    // The lookup still finds the dispatched PR, but its result is stale.
+    let event = recheck_with_client(&active, &mut in_flight, &client);
     assert!(matches!(
         event,
         CircuitEvent::GithubActionResult { success: true, pr_number: Some(314), .. }
     ));
     assert!(
-        persist_effect_result(&mut stale, &event).is_err(),
-        "a result computed before cancellation cannot commit after it"
+        persist_effect_result(&mut in_flight, &event).is_err(),
+        "a recheck computed before cancellation cannot commit after it"
     );
 
     assert_eq!(reopened_run(fixture.run_id).state, "cancelled");
@@ -946,10 +889,14 @@ fn open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck() {
     assert_eq!(run_context(fixture.run_id).get("pr.number"), None);
     assert_eq!(
         effect_state(fixture.run_id),
-        "possible_dispatch",
-        "a fenced late result never acknowledges the ambiguous dispatch"
+        "uncertain",
+        "a fenced late recheck never acknowledges the uncertain effect"
     );
     assert_eq!(history_count(fixture.run_id, "effect_reconciled"), 0);
-    assert_eq!(requests.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        3,
+        "one find plus one create during dispatch, one read-only find during the recheck"
+    );
     endpoint.join().expect("deterministic endpoint");
 }

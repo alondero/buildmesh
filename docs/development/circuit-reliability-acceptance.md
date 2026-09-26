@@ -524,13 +524,15 @@ the result the way a crash would. On restart the stuck GitHub step is
 reconciled to Unverified (`GithubActionRetry`; the effect moves
 `possible_dispatch` → `uncertain`), an explicit operator Recheck parks it as
 `pending_slot`, the next Tick reschedules the read-only call, and the saved
-target lookup commits its result.
+target lookup commits its result. The cancellation scenario runs that same
+chain up to the rescheduled recheck, then commits cancellation while the
+in-flight lookup is still running.
 
 | Scenario | Observed result | Evidence boundary |
 | --- | --- | --- |
 | `open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_second_create` | Passed: the create POST was answered; after restart the read-only lookup committed PR #314 to the same run, the effect moved `possible_dispatch` → `uncertain` → `acknowledged`, exactly one `effect_reconciled` was appended, and the endpoint saw 3 requests total (find, create, find) — no second create | Deterministic loopback endpoint; injected stop before the ledger commit; fresh DB connection for the restart |
 | `open_pr_create_dispatch_crash_keeps_absent_pr_uncertain_without_create` | Passed: an ambiguous create (502) left the effect `possible_dispatch`; after restart the lookup found no PR, the step stayed `unverified` and the effect `uncertain`; recovery issued one read-only find and no create | Same; absence stays uncertain and never auto-creates |
-| `open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck` | Passed: cancellation committed while a read-only lookup that found the PR was in flight; the stale result was rejected at the durable fence — the run stayed `cancelled`, the effect stayed `possible_dispatch`, zero `effect_reconciled` rows, and no `pr.number` | Competing cancellation/recheck order and stale-result fence |
+| `open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck` | Passed: the same restart chain reached the rescheduled Running recheck, then cancellation committed while the read-only lookup that found the PR was in flight; the stale result was rejected at the durable fence — the run stayed `cancelled`, the effect stayed `uncertain`, zero `effect_reconciled` rows, and no `pr.number` | Competing cancellation/recheck order and stale-result fence |
 
 All three assert attempt 1, that `effect_intent` / `effect_possible_dispatch` /
 `effect_target` history survives the reopen, and that the effect can never be
