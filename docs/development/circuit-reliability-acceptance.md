@@ -551,13 +551,41 @@ and a uniform `Source: … · …` line) rather than raw JSON.
 
 | Check | Result | Scope / limitation |
 |---|---|---|
-| `cargo test --locked --lib -- --test-threads=1` (full, current source) | 3,845 passed, 2 failed, 24 ignored | The 2 failures are ambient-environment assertions unrelated to this change: `commands::agent_tests::agent_pty_gets_colour_capable_env` rejects the shell's `TERM_PROGRAM=vscode`, and `sandbox::spawn::curated_env_prepends_git_and_redirects_temp` rejects an `AppData\Local\Temp` value in the ambient env. Neither touches Circuit history |
+| `cargo test --locked --lib -- --test-threads=1` (clean env) | Passed: 3,847 passed, 0 failed, 24 ignored | Green full-library run for this branch, with `TERM_PROGRAM` and `COMMANDCODE_SCRATCHPAD` cleared (see the attribution note below) |
+| Same suite in this agent shell (sets `TERM_PROGRAM=vscode` and `COMMANDCODE_SCRATCHPAD` under `AppData\Local\Temp`) | 3,845 passed, 2 failed, 24 ignored | Both failures are ambient-env assertions, not test regressions — see the attribution note below |
 | Full `npx vitest run --pool=threads tests/unit` | Passed (252 files) | Green once `NODE_ENV` is cleared; this shell sets `production`, which makes React 19's production build leave `React.act` undefined and fails every component test |
 | Full `npx vitest run --pool=threads tests/integration` | Passed (10 files) | Includes the mock-mode 240px Circuit Run History check |
 | `cargo test --locked --lib circuit` | Passed (538) | Includes the reopen/projection-agreement test, the recovery reopen test, and the wait-resolution (cleared) regression |
 | `cargo test --locked --lib init_schema_dump_matches_committed_snapshot` | Passed | Fresh-init schema dump matches the committed `schema_dump.txt` |
 | `npm run lint`, `npm run lint:fixtures`, `npm run build`, documentation gates, README drift, agent diff | Passed | From the `scripts\check.ps1 all` run |
 | Live real WebView2/CDP 240px run | Passed | Real `list_circuit_probe` / `circuit_run_history` / `list_circuit_queue` IPC; every state and its next safe action asserted (see below) |
+
+#### Regression attribution for the two ambient-environment failures
+
+Both failures are caused by variables this agent shell sets, not by this change,
+and both reproduce identically on the base revision. In the full suite the two
+failing tests are the same on `main`'s merge base `41cfdc29` under the same
+environment:
+
+| Test | Base `41cfdc29` (ambient env) | This branch (ambient env) | This branch (clean env) |
+|---|---|---|---|
+| `commands::agent_tests::tests::agent_pty_gets_colour_capable_env` | FAILED — `assertion left != right failed`, `left/right: Some("vscode")` at `agent_tests.rs:1180` | FAILED (same) | passed |
+| `sandbox::spawn::tests::curated_env_prepends_git_and_redirects_temp` | FAILED — `assertion failed: !env.iter().any(... AppData\Local\Temp)` at `spawn.rs:963` | FAILED (same) | passed |
+
+Base reproduction command (a worktree checked out at `41cfdc29`, same shell env):
+
+```
+cargo test --locked --lib -- agent_pty_gets_colour_capable_env curated_env_prepends_git_and_redirects_temp
+→ test result: FAILED. 0 passed; 2 failed; 0 ignored; 3866 filtered out
+```
+
+Cause: both `cmd_for` (agent PTY) and `curated_env` (sandbox) inherit the process
+environment, so a test process started from a VS Code terminal
+(`TERM_PROGRAM=vscode`) or a Command Code agent shell (`COMMANDCODE_SCRATCHPAD` =
+`…\AppData\Local\Temp\commandcode\…`) trips assertions written for an ordinary /
+CI environment. Clearing those two variables makes the full suite green
+(`3,847 passed; 0 failed; 24 ignored`). Neither assertion site is touched by this
+change.
 
 The new Rust test
 `circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection`
