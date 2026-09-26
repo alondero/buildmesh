@@ -848,8 +848,8 @@ fn drive_run(
         // normal atomic commit path; effect execution never writes run state.
         let mut pending_outcomes = std::collections::VecDeque::from(effect_events);
         while let Some(effect_event) = pending_outcomes.pop_front() {
-            let outcome = advance(&mut view, &effect_event);
-            let outcome_changed = persist_transition(active.run.id, &mut view, &outcome)?;
+            let (outcome, outcome_changed) =
+                persist_effect_outcome(active.run.id, &mut view, &effect_event)?;
             pending_outcomes.extend(execute_effects(app, active, &mut view, &outcome.effects)?);
             // A terminal state is emitted once, after the cleanup sweep below,
             // so a run does not fan out two refetches on the way out.
@@ -917,6 +917,20 @@ fn drive_run(
 /// writes, including post-effect delivery outcomes, pass through this seam.
 pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &Transition) -> Result<bool, String> {
     persist_transition_checked(run_id, view, transition).map_err(TransitionPersistFailure::into_message)
+}
+
+/// Commit one effect outcome through the production seam: advance the event,
+/// then persist the transition atomically. `drive_run` composes this into its
+/// pending-outcome loop; the deterministic coverage drives it directly so a
+/// late result meets the same commit path as a live one.
+pub(super) fn persist_effect_outcome(
+    run_id: i64,
+    view: &mut RunView,
+    event: &CircuitEvent,
+) -> Result<(Transition, bool), String> {
+    let outcome = advance(view, event);
+    let changed = persist_transition(run_id, view, &outcome)?;
+    Ok((outcome, changed))
 }
 
 #[derive(Debug)]
@@ -2344,6 +2358,81 @@ pub(super) fn execute_call_github_effect(
         .unwrap_or_else(|reason| CircuitEvent::EffectUncertain { node_id: node_id.to_string(), attempt, reason })])
 }
 
+/// Apply the worker's dispatch gates to one effect and, while open, dispatch
+/// a `CallGithub` effect through [`execute_call_github_effect`]. App-free.
+/// `execute_effects` delegates its `CallGithub` arm here — re-checking the
+/// same predicates the loop just evaluated, the way the InjectPty arms
+/// re-check the batch mid-effect — so the deterministic coverage drives the
+/// identical gate-then-dispatch composition against a controllable endpoint
+/// instead of reproducing it.
+pub(super) fn gated_dispatch_call_github(
+    batch: &CircuitEffectBatchPermit,
+    run_state: Option<&str>,
+    completing_transition: bool,
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effect: &crate::autopilot::circuit::stepper::Effect,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<Vec<CircuitEvent>, String> {
+    use crate::autopilot::circuit::stepper::Effect;
+    if batch.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    if !run_state.is_some_and(|state| {
+        effect_allowed_in_state(state, completing_transition, effect)
+    }) {
+        return Ok(Vec::new());
+    }
+    match effect {
+        Effect::CallGithub {
+            node_id,
+            action,
+            label,
+            comment,
+        } => execute_call_github_effect(
+            active,
+            view,
+            node_id,
+            *action,
+            label.as_deref(),
+            comment.as_deref(),
+            github_client,
+        ),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Drive one GitHub effect through the full worker composition — batch
+/// permit, durable run-state snapshot, gates, dispatch — without the Tauri
+/// handle `execute_effects` requires. Test entry point for the deterministic
+/// cancellation-ordering coverage; production reaches the same gated dispatch
+/// through the loop above. Returns the outcome events plus whether the
+/// batch observed cancellation while in flight (the ordering evidence a
+/// held lookup needs).
+#[cfg(test)]
+pub(super) fn run_github_effect_pass(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    effect: &crate::autopilot::circuit::stepper::Effect,
+    github_client: Option<&crate::services::github::GitHubClient>,
+) -> Result<(Vec<CircuitEvent>, bool), String> {
+    let batch = begin_circuit_effect_batch(active.run.id);
+    let run_state = db::get_circuit_run(active.run.id)
+        .map_err(|e| e.to_string())?
+        .map(|run| run.state);
+    let completing = matches!(view.state, RunState::Completed | RunState::Failed);
+    let outcomes = gated_dispatch_call_github(
+        &batch,
+        run_state.as_deref(),
+        completing,
+        active,
+        view,
+        effect,
+        github_client,
+    )?;
+    Ok((outcomes, batch.is_cancelled()))
+}
+
 pub(super) fn execute_effects(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
@@ -2559,14 +2648,14 @@ pub(super) fn execute_effects(
                     },
                 );
             }
-            Effect::CallGithub { node_id, action, label, comment } => {
-                outcome_events.extend(execute_call_github_effect(
+            Effect::CallGithub { .. } => {
+                outcome_events.extend(gated_dispatch_call_github(
+                    &effect_batch,
+                    run_state.as_deref(),
+                    matches!(view.state, RunState::Completed | RunState::Failed),
                     active,
                     view,
-                    node_id,
-                    *action,
-                    label.as_deref(),
-                    comment.as_deref(),
+                    effect,
                     None,
                 )?);
             }

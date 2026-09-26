@@ -4,7 +4,7 @@ use crate::autopilot::circuit::model::{
     CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, GithubActionKind,
 };
 use crate::autopilot::circuit::stepper::{
-    advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
+    CircuitEvent, RunState, RunView, StepStatus, StepView,
 };
 use crate::db::circuit::evidence::{EffectIntent, EvidenceWrite};
 use crate::db::CircuitStepOp;
@@ -139,8 +139,7 @@ fn open_pr_fixture() -> OpenPrFixture {
 }
 
 fn persist_effect_result(view: &mut RunView, event: &CircuitEvent) -> Result<bool, String> {
-    let transition = advance(view, event);
-    persist_transition(view.run_id, view, &transition)
+    persist_effect_outcome(view.run_id, view, event).map(|(_, changed)| changed)
 }
 
 fn pull_request(head_ref: &str) -> crate::services::github::PullRequest {
@@ -465,49 +464,24 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     let mut view = fixture.view.clone();
     let order_worker = Arc::clone(&order);
     let base_url = endpoint.base_url.clone();
+    let thread_active = active.clone();
     let lookup = std::thread::spawn(move || {
-        // `execute_effects` itself cannot run here: it takes a Tauri
-        // `AppHandle`, which unit tests cannot construct. This thread
-        // composes the same app-free production pieces in the loop's exact
-        // order instead: batch permit, durable run-state snapshot,
-        // per-effect gates, then the `CallGithub` dispatch the loop
-        // delegates to.
-        let batch = super::begin_circuit_effect_batch(run_id);
-        let run_state = crate::db::get_circuit_run(run_id)
-            .expect("read run state")
-            .map(|run| run.state);
-        let completing = matches!(view.state, RunState::Completed | RunState::Failed);
+        // Production orchestration only: `run_github_effect_pass` runs the
+        // same batch, snapshot, gates, and dispatch the `execute_effects`
+        // loop delegates to (`execute_effects` itself needs a Tauri
+        // `AppHandle`, which unit tests cannot construct).
         let effect = Effect::CallGithub {
             node_id: "open_pr".to_string(),
             action: GithubActionKind::OpenPr,
             label: None,
             comment: None,
         };
-        let mut outcomes = Vec::new();
-        if !batch.is_cancelled()
-            && run_state.as_deref().is_some_and(|state| {
-                super::effect_allowed_in_state(state, completing, &effect)
-            })
-        {
-            let client =
-                crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
-                    .expect("test client");
-            outcomes.extend(
-                super::execute_call_github_effect(
-                    &active,
-                    &mut view,
-                    "open_pr",
-                    GithubActionKind::OpenPr,
-                    None,
-                    None,
-                    Some(&client),
-                )
-                .expect("dispatch succeeds"),
-            );
-        }
-        let worker_saw_cancellation = batch.is_cancelled();
+        let client = crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
+            .expect("test client");
+        let (outcomes, worker_saw_cancellation) =
+            super::run_github_effect_pass(&thread_active, &mut view, &effect, Some(&client))
+                .expect("dispatch runs");
         order_worker.lock().unwrap().push("lookup_returned");
-        drop(batch);
         (view, outcomes, worker_saw_cancellation)
     });
 
@@ -569,17 +543,11 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         &["lookup_held", "cancellation_committed", "lookup_returned"],
     );
 
-    // The pending-outcome loop, exactly as `drive_run` composes it: advance
-    // the stale event, then commit through the production seam, which must
-    // reject the stale completion.
-    let outcome = advance(&mut view_with_result, &event);
+    // The pending-outcome commit, through the same seam `drive_run` composes
+    // into its outcome loop: the stale completion must be rejected.
     assert!(
-        persist_transition(
-            view_with_result.run_id,
-            &mut view_with_result,
-            &outcome
-        )
-        .is_err()
+        super::persist_effect_outcome(view_with_result.run_id, &mut view_with_result, &event)
+            .is_err()
     );
 
     // A fresh read and the append-only history agree: nothing from the late
@@ -596,22 +564,14 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         "a cancelled run leaves the active set so a restart cannot redispatch it"
     );
 
-    // Retry: a view rebuilt from durable state still carries dispatch intent,
-    // but the worker's own gates block it before any GitHub request. The
-    // endpoint is still watching, so a stray dispatch would be counted.
-    let restarted = restart_view_from_db(run_id, &fixture.active.circuit_graph_json);
+    // Retry: the rebuilt run goes through production dispatch, which must
+    // block it before any GitHub request. The endpoint is still watching,
+    // so a stray dispatch would be counted.
+    let mut restarted = restart_view_from_db(run_id, &fixture.active.circuit_graph_json);
     assert_eq!(
         restarted.context.get("node.open_pr.recheck_only"),
         Some("1"),
-        "the rebuilt retry still intends a recheck, so the gate below is not vacuous"
-    );
-    let batch = super::begin_circuit_effect_batch(run_id);
-    let run_state = crate::db::get_circuit_run(run_id)
-        .expect("read run state")
-        .map(|run| run.state);
-    let completing = matches!(
-        restarted.state,
-        RunState::Completed | RunState::Failed
+        "the rebuilt retry still intends a recheck, so the blocked dispatch below is not vacuous"
     );
     let effect = Effect::CallGithub {
         node_id: "open_pr".to_string(),
@@ -619,14 +579,15 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         label: None,
         comment: None,
     };
-    let accepted = !batch.is_cancelled()
-        && run_state.as_deref().is_some_and(|state| {
-            super::effect_allowed_in_state(state, completing, &effect)
-        });
-    drop(batch);
+    let retry_client =
+        crate::services::github::GitHubClient::for_test(&endpoint.base_url, "fake-token")
+            .expect("test client");
+    let (retry_outcomes, _) =
+        super::run_github_effect_pass(&active, &mut restarted, &effect, Some(&retry_client))
+            .expect("retry runs");
     assert!(
-        !accepted,
-        "a retry on the cancelled run is gated before any GitHub request"
+        retry_outcomes.is_empty(),
+        "a retry on the cancelled run dispatches nothing"
     );
     assert!(
         !super::run_accepts_effects(run_id).expect("read run state"),
