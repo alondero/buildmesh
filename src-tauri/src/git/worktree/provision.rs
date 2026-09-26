@@ -893,6 +893,14 @@ pub fn provision_for_spawn(
     //      was untouched no-ops). The original entry is moved into the
     //      warm branch and either consumed (warm Ok → forget + name) or
     //      restored for the cleanup block below (warm Err).
+    // Snapshot the target BEFORE this call touches the disk. The warm-failure
+    // cleanup below must only remove a target that THIS call created, and
+    // "the target exists now" is not enough to prove that: a node whose name
+    // collides with an existing node resolves to that node's worktree path, so
+    // the path can pre-exist for reasons that have nothing to do with the move
+    // (see `session_naming::disambiguate_node_name`). Removing it in that case
+    // deletes a live agent's working directory — uncommitted work included.
+    let target_preexisted = std::path::Path::new(&ctx.host_path).exists();
     let warm_entry_for_cleanup = ctx.warm_entry.take();
 
     // Drive adoption from the CLAIM, not the outcome. A Manual warm claim
@@ -1015,12 +1023,16 @@ pub fn provision_for_spawn(
             // The first three cases (a, b, c) leave the pool directory intact —
             // removing it would silently destroy work the user may want to keep
             // (the pre-move-guard test `provision_for_spawn_adopted_refuses_to_clobber_existing_branch`
-            // pins this). Only (d) needs target cleanup. Detect (d) by checking
-            // whether the target path now exists: `move_git_worktree` is the
-            // sole step that populates it, and it's atomic.
+            // pins this). Only (d) needs target cleanup, and only when the
+            // target is one THIS call materialised: `move_git_worktree` is the
+            // sole step that populates it and it is atomic, but a pre-existing
+            // target means another node already owns that path (a name
+            // collision — see `target_preexisted` above). Deleting it would
+            // remove that node's working directory, so the `Reused` branch
+            // below hands the path back instead.
             let row_id = entry.id;
             let target_exists = std::path::Path::new(&ctx.host_path).exists();
-            if target_exists {
+            if target_exists && !target_preexisted {
                 let _ = super::remove_one_worktree(&ctx.host_path);
             }
             // Forget the warm row via the sink — same encapsulation as the
@@ -1450,6 +1462,70 @@ mod tests {
         assert!(
             !host_path.exists(),
             "the target path must not have been materialised by a refused adoption"
+        );
+    }
+
+    /// A refused warm adoption must NOT remove a target that was already there.
+    ///
+    /// The collision case (two nodes deriving the same name, and therefore the
+    /// same worktree path): `adopt_warm_worktree_by_move`'s pre-move guard
+    /// refuses because that branch is already checked out at the target, so the
+    /// disk is untouched. The warm-failure cleanup then used to read "the target
+    /// path exists" as "our move created it" and `remove_one_worktree` it —
+    /// deleting the *other* node's working directory, uncommitted work and all —
+    /// before the cold retry failed anyway on the still-existing branch.
+    #[test]
+    fn provision_for_spawn_refused_adoption_preserves_a_preexisting_target() {
+        let td = TestDir::new("adopted_collision");
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "v1\n")]);
+        let pool_path = make_pool_entry(root, "warm-collision");
+        // The other node's live worktree: same path, same branch on disk.
+        let host_path = root.join(".claude").join("worktrees").join("gh78-collide");
+        super::super::create_git_worktree(
+            root.to_str().unwrap(),
+            host_path.to_str().unwrap(),
+            "gh78-collide",
+            "branched",
+            "HEAD",
+        )
+        .unwrap();
+        // Local-only work the old cleanup would have destroyed.
+        let uncommitted = host_path.join("UNCOMMITTED.txt");
+        std::fs::write(&uncommitted, "work in progress\n").unwrap();
+
+        let mut node = empty_node(root, Some("gh78-collide"));
+        node.source_issue = Some(78);
+        let warm = claimed_warm(&pool_path, "warm-collision");
+        let ctx = make_ctx(
+            node,
+            SpawnSource::Issue,
+            host_path.to_string_lossy().to_string(),
+            Some(warm),
+        );
+
+        let result = provision_for_spawn(ctx, &ProvisionHooks::default(), &NullSink);
+
+        assert!(
+            host_path.exists(),
+            "a pre-existing target belongs to another node and must survive a refused adoption"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&uncommitted).unwrap(),
+            "work in progress\n",
+            "uncommitted work in a pre-existing target must survive"
+        );
+        match result {
+            Ok(ProvisionOutcome::Reused { host_path: reused }) => assert_eq!(
+                reused,
+                host_path.to_string_lossy().as_ref(),
+                "a name collision falls back to reusing the pre-existing path"
+            ),
+            other => panic!("expected Reused at the pre-existing path, got {:?}", other),
+        }
+        assert!(
+            pool_path.exists(),
+            "the refused pool entry must stay intact for the cold retry"
         );
     }
 

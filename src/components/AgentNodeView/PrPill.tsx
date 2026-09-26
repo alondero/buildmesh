@@ -9,28 +9,42 @@ import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { dropdownId } from '../../lib/dropdownId';
 import type { OpenPr } from '../../types/generated/OpenPr';
+import type { SpawnOption } from '../../lib/groups';
+import { PrReviewerSpawnDialog } from './PrReviewerSpawnDialog';
 
 interface PrPillProps {
   nodeId: number;
+  meshId: number;
   gitPath: string | null;
   openPr: OpenPr;
+  /** Spawn Options for the reviewer picker — the shared Spawn Menu
+   *  (`GroupedProviderMenu`), same list the PRs probe's `+ ▾` renders. */
+  providers: SpawnOption[];
   compact?: boolean;
 }
 
 /**
- * PR pill merge menu — the agent-node title's `PR #N` chip.
+ * PR pill menu — the agent-node title's `PR #N` chip.
  *
  * Click opens a menu with Open on GitHub plus Merge (squash and
  * delete branch) behind an inline confirm, matching the Probe Pull
  * Requests tab contract. Drafts expose merge as aria-disabled.
  * A merge failure keeps the menu open with the error; the error
  * persists across close/reopen until the next merge attempt.
+ *
+ * The last row spawns a **reviewer agent** for this PR: the same
+ * `create_pr_node` spawn the Probe Pull Requests tab's `+` performs, but with
+ * `reviewer: true` (own worktree) and grouped onto this node's card as another
+ * Node Activity tab. The provider chooser is the shared Spawn Menu, rendered
+ * in a modal (`PrReviewerSpawnDialog`) rather than a submenu so its own
+ * keyboard handling can't fight this menu's roving focus.
  */
-export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps) {
+export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = false }: PrPillProps) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [merging, setMerging] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+  const [spawnOpen, setSpawnOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -49,10 +63,15 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
 
   // State-machine invariant: confirming and merging are never true
   // together — handleMerge resets confirming the moment merge
-  // starts — so the count always matches the rendered rows:
-  // merging renders Open + Merging (2), confirming renders
-  // Open + Confirm + Cancel (3), otherwise Open + Merge (2).
-  const itemCount = merging ? 2 : confirming ? 3 : 2;
+  // starts — so the count always matches the rendered rows, plus the
+  // trailing "Spawn reviewer agent…" row that is present in every
+  // state: merging renders Open + Merging + Spawn (3), confirming
+  // renders Open + Confirm + Cancel + Spawn (4), otherwise
+  // Open + Merge + Spawn (3).
+  const itemCount = confirming ? 4 : 3;
+  // The spawn row is always last, so the merge rows keep their indices
+  // (handleCancelConfirm re-pins the Merge slot at 1).
+  const spawnIndex = itemCount - 1;
 
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
@@ -64,6 +83,16 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
   const handleDismiss = () => {
     setOpen(false);
     setConfirming(false);
+  };
+
+  // Closing the reviewer dialog must return focus to the pill trigger. The
+  // dialog's own `Modal` restores focus to whatever was focused when it
+  // mounted — the portaled menu row — but that row unmounts in the same commit
+  // that mounts the dialog, so the restore lands on <body>. The trigger is the
+  // persistent control for this flow, so reuse the menu's trigger-return path.
+  const closeSpawnDialog = () => {
+    setSpawnOpen(false);
+    closeAndReturnFocus();
   };
 
   useClickOutside<string>(open ? dropdownId('pr-pill', nodeId) : null, handleDismiss);
@@ -102,6 +131,13 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
     openUrl(openPr.url).catch(console.error);
   };
 
+  const handleSpawnReviewer = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (merging) return;
+    handleDismiss();
+    setSpawnOpen(true);
+  };
+
   const handleArmConfirm = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (merging) return;
@@ -112,13 +148,12 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
   const handleCancelConfirm = (e: React.MouseEvent) => {
     e.stopPropagation();
     setConfirming(false);
-    // After cancel, itemCount drops from 3 back to 2 (Open + Merge).
-    // The previous activeIndex (2 = Cancel) is now out of bounds, so
-    // both menuitems would render with tabIndex=-1 until an arrow key
-    // moved focus — a focus drop. Pin to the Merge slot (1) and pull
-    // focus onto it after the unmount has settled, mirroring the
-    // closeAndReturnFocus trigger-return pattern used elsewhere in
-    // this component.
+    // After cancel the menu is back to Open + Merge + Spawn (itemCount 3), so
+    // index 2 (Cancel) is still in range — pin the caret to the Merge slot (1)
+    // anyway, so focus returns to the action the user just backed out of rather
+    // than landing on the spawn row, and pull focus onto it after the unmount
+    // has settled (mirroring the closeAndReturnFocus trigger-return pattern
+    // used elsewhere in this component).
     setActiveIndex(1);
     requestAnimationFrame(() => {
       menuRef.current
@@ -130,10 +165,9 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
   const handleMerge = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (merging) return;
-    // Reset confirming synchronously with arming merging: from this
-    // render on the menu shows Open + Merging (2 rows) and itemCount
-    // is 2, so arrow navigation can never address a stale index 2.
-    // activeIndex returns to 0 for the same reason (Cancel sat at 2).
+    // Reset confirming synchronously with arming merging: from this render on
+    // the menu shows Open + Merging + Spawn (3 rows), matching itemCount 3, and
+    // the roving index returns to the top row alongside it (Cancel sat at 2).
     setMerging(true);
     setConfirming(false);
     setActiveIndex(0);
@@ -273,6 +307,18 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
               Merge (squash &amp; delete branch)
             </button>
           )}
+          <button
+            role="menuitem"
+            tabIndex={activeIndex === spawnIndex ? 0 : -1}
+            aria-disabled={merging}
+            onClick={handleSpawnReviewer}
+            data-testid="pr-spawn-reviewer"
+            aria-label={`Spawn reviewer agent for pull request #${openPr.number}`}
+            title={merging ? 'Merge in progress' : 'Spawn a reviewer agent for this PR in its own worktree'}
+            className="w-full border-t border-border-subtle px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent aria-disabled:hover:text-text-primary"
+          >
+            Spawn reviewer agent…
+          </button>
           {mergeError && (
             <p role="alert" className="text-2xs text-status-error px-3 py-1 max-w-[240px] break-words">
               {mergeError}
@@ -280,6 +326,15 @@ export function PrPill({ nodeId, gitPath, openPr, compact = false }: PrPillProps
           )}
         </div>,
         document.body,
+      )}
+      {spawnOpen && (
+        <PrReviewerSpawnDialog
+          nodeId={nodeId}
+          meshId={meshId}
+          openPr={openPr}
+          providers={providers}
+          onClose={closeSpawnDialog}
+        />
       )}
     </div>
   );

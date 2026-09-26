@@ -201,7 +201,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
       </button>}
       <div className="flex shrink-0 items-center gap-0.5" onPointerDown={event => event.stopPropagation()}
         onDoubleClick={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
-        {openPr && <PrPill nodeId={node.id} gitPath={gitPath} openPr={openPr} compact={compactHeader} />}
+        {openPr && <PrPill nodeId={node.id} meshId={node.mesh_id} gitPath={gitPath} openPr={openPr} providers={providerList} compact={compactHeader} />}
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <AgentReviewButton node={node} providerList={providerList} />
         {canResume && <button type="button" onClick={handleResume} aria-label="Resume agent" title="Resume agent"

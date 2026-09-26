@@ -5,5 +5,31 @@
  *
  * Generated to src/types/generated/OpenPr.ts (issue #404). `i64` carries
  * `#[ts(as = "i32")]` so it emits `number` (matches `GitHubIssue.number`).
+ *
+ * The four `head_*` fields are the spawn inputs the PR pill's
+ * "Spawn reviewer agent" path forwards to `create_pr_node` (the same values
+ * the Pull Requests probe's `+` passes from `get_repo_pulls`). They ride
+ * along on the already-fetched `PullRequest`, so the spawn needs no second
+ * GitHub call. Empty strings keep their existing "unknown / skip" semantics
+ * on the spawn path (see `validate_pr_spawn_inputs` and `head_sha`).
  */
-export type OpenPr = { number: number, url: string, title: string, draft: boolean, };
+export type OpenPr = { number: number, url: string, title: string, draft: boolean, 
+/**
+ * PR's source-branch ref name (GitHub `head.ref`). Empty when unknown.
+ */
+head_ref: string, 
+/**
+ * PR's head commit SHA (GitHub `head.sha`) — the exact-pinning handle
+ * (issue #444). Empty when unknown, which skips the drift check.
+ */
+head_sha: string, 
+/**
+ * Owner login of the PR's head repo (`head.repo.owner.login`). For
+ * same-repo PRs this is the destination owner; empty when unknown.
+ */
+head_repo_owner: string, 
+/**
+ * Clone URL of the PR's head repo (`head.repo.clone_url`). Paired with
+ * `head_repo_owner` for fork PRs (issue #443); empty when unknown.
+ */
+head_repo_clone_url: string, };
