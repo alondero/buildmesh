@@ -139,6 +139,13 @@ pub struct TurnTracker {
     deferred_assistant_response: bool,
 }
 
+pub(crate) fn report_turn_finished(lines: &[String]) -> bool {
+    let mut tracker = TurnTracker::default();
+    for line in lines { tracker.observe_transcript_line(line); }
+    !tracker.pending_tool_calls && !tracker.deferred_assistant_response
+        && matches!(tracker.state, Some(TranscriptActivity::TurnCompleted | TranscriptActivity::AssistantResponse))
+}
+
 /// Incremental reader for an append-only Command Code JSONL transcript.
 ///
 /// It leaves an unterminated final line in place for a later retry: `notify`

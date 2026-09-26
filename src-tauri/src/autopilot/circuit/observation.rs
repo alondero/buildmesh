@@ -206,7 +206,10 @@ impl WorkEvidence {
     }
 
     pub fn has_human_wait(&self) -> bool {
-        self.human_waits.iter().any(|wait| wait.resolved_at_ms.is_none())
+        // Old ledgers also contain inferred waits from AwaitingInput, which
+        // several harnesses use for ordinary yields. Only a request can wait
+        // indefinitely; a status projection has no request to answer.
+        self.human_waits.iter().any(|wait| wait.resolved_at_ms.is_none() && wait.source != "agent_status_projection")
     }
 
     pub fn completion_verified(&self) -> bool {
@@ -382,7 +385,7 @@ impl WorkEvidence {
             }
             _ => None,
         };
-        if let Some((wait_kind, request_id)) = requested {
+        if let Some((wait_kind, request_id)) = requested.filter(|_| event.source != "agent_status_projection") {
             let same_agent = |wait: &HumanWait| {
                 wait.identity.run_id == observed.run_id && wait.identity.step_id == observed.step_id
                     && wait.identity.attempt == observed.attempt && wait.identity.agent_node_id == observed.agent_node_id
@@ -496,6 +499,21 @@ impl WorkEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_projection_is_not_an_indefinite_human_request() {
+        let mut state = WorkEvidence::default();
+        let mut projected = event(ObservedWorkFact::NeedsInput, 1);
+        projected.source = "agent_status_projection".into();
+        projected.authoritative = false;
+        projected.identity.turn_id = None;
+        state.observe(&identity(), &projected);
+        assert!(!state.has_human_wait());
+        assert!(!state.completion_verified());
+
+        state.observe(&identity(), &event(ObservedWorkFact::PermissionRequested, 2));
+        assert!(state.has_human_wait(), "native requests still require a response");
+    }
 
     #[test]
     fn circuit_human_wait_response_requires_request_kind_and_full_identity() {

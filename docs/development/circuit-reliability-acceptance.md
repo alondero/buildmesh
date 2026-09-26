@@ -1,5 +1,10 @@
 # Circuit reliability acceptance
 
+This records the strict native-proof acceptance work before the September 26
+recovery change. The current guarded report-based progress policy and the queue
+stall evidence are documented in [the failure investigation](circuit-failures-2026-09-26.md).
+The live checks below remain historical evidence, not verification of that change.
+
 Implementation evidence for [#1889](https://github.com/alondero/buildmesh/issues/1889), governed by [#1850](https://github.com/alondero/buildmesh/issues/1850). This is a working acceptance record, not a claim that the specification is implemented. Baseline: `d8e3a1a780599cbdcece4710df2b603860065e7a`.
 
 Source inspection, deterministic automated checks, and live delivery are separate evidence tiers. No aggregate reliability percentage is asserted. Unless recorded otherwise below, platform evidence is Windows, development configuration; harness versions and live delivery are recorded per scenario.

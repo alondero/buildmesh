@@ -75,7 +75,8 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
     };
     CircuitObserverCapabilities {
         harness: id.into(), foreground: foreground.into(), owned_work: owned_work.into(),
-        final_report: final_report.into(), reconciliation: reconciliation.into(),
+        final_report: final_report.into(),
+        reconciliation: format!("{reconciliation}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage."),
         yielded_budget_ms, active_budget_ms: super::ACTIVE_WAIT_MS as u32,
     }
 }

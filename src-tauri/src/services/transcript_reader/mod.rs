@@ -38,6 +38,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod types;
+pub(crate) mod report_snapshot;
 // `TranscriptTail` and `UnavailableReason` are used by the reader's
 // own entry points below (return types of the public fns); re-exported
 // at `pub` so the public surface `crate::services::transcript_reader::TranscriptTail`
@@ -126,7 +127,7 @@ mod native_completion_tests {
         let snapshot = native_turn_snapshot_from_file(&path,TranscriptFormat::Codex).unwrap();
         assert!(snapshot.is_current());
         let guard = crate::autopilot::circuit::stepper::ObservationInputFence {
-            transcript_guard: Some(snapshot), agent_node_id: 9, input_stamp: "input".into(),
+            transcript_guard: Some(snapshot), report_guard: None, agent_node_id: 9, input_stamp: "input".into(),
             observed_at_ms: 1, session_id: "session".into(), session_incarnation: "incarnation".into(),
         };
         fs::write(&path,completed + &serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"next"}}).to_string() + "\n").unwrap();
