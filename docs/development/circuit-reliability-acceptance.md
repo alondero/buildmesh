@@ -6,7 +6,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 
 | Scenario / stories | Contract and invariant | Owning seam / automated layer | Evidence and result | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex 0.156.1 / Luna live foreground pull and SessionStart, UserPromptSubmit, Stop callback delivery are recorded below | Live question request/reply and a no-ID permission receipt are recorded below; authoritative permission resolution and delayed-hook recovery remain unverified. Claude production submission correlation is unavailable; other harness strategies remain explicitly unsupported |
+| Lost/delayed hooks, missing optional tokens, stale/late observations (1-8, 14) | #1845: identity fences, stable deduplication, bounded reconciliation | `observation`, native receipts, Codex observer; pure and private DB tests | Windows deterministic tests pass; native request receipt/commit/reopen and delayed start/stop regressions exercised. Codex foreground pull, request callbacks, missing-hook bounded recovery and stale-turn rejection are recorded below | A missing Stop reaches actionable Unverified after the evidence window; rollout-based completion reconciliation remains unverified. Authoritative permission resolution and Claude production submission correlation are unavailable; other harness strategies remain explicitly unsupported |
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
@@ -26,6 +26,85 @@ The clean checkout and GitHub state were checked before this work: PR #1893 was
 open, draft and mergeable; issue #1889 was open. The earlier implementation and
 full Windows gate remain approved. Historical checkpoints below describe their
 own snapshots; the results here describe additional work, not full acceptance.
+
+### Live lost and delayed Codex hooks (#1905)
+
+The issue-specific Windows smoke used Codex CLI 0.157.0 / `gpt-6-luna` with a
+real development Buildmesh app, Tauri IPC, Circuit worker and durable history.
+An opt-in loopback relay sat on the actual Codex hook URL and duplicated,
+dropped, or held real callback requests before forwarding them to the app.
+The app used a unique identifier (`com.alond.buildmesh.issue1905.dev`) and
+ports 2991/2992/9224; it did not use the stable app profile. Codex approval was
+`never`, the smoke relay mode selected a read-only sandbox, and prompts asked
+for exact text with no tools or external effects. Project hook trust was
+provisioned for Buildmesh's managed process.
+
+| Run / controlled delivery | Durable result | Evidence boundary |
+| --- | --- | --- |
+| Run 1, Circuit 1, Agent Node 1: duplicate the first `UserPromptSubmit`, drop `Stop` | Both duplicate HTTP forwards returned 200; one native start receipt and one spawn effect were recorded. After the authored 60-second Codex evidence window, attempt 1 remained Unverified with the `recheck` action. The smoke evidence records source `60_second_evidence_window` and disposition `unverified_actionable`. | Real Codex callbacks traversed the loopback relay and native app route. The rollout contained task completion, but the app did not record a `codex_rollout_task_complete` observation in this run; this proves bounded missing-hook recovery to actionable uncertainty, not completion reconciliation. |
+| Run 2, Circuit 1, Agent Node 2: hold the first turn's `Stop`, send a second turn, then release the held callback | The old-turn callback was persisted with disposition `rejected`; attempt 1 remained attached to the same node and Unverified with `recheck`. One spawn effect remained. Exactly two deliberate `UserPromptSubmit` turns were observed. | The delayed callback crossed the real relay and app route after the new turn began. No replay, tool callback, or permission callback was observed. |
+
+The run cancelled both Runs 3 and 4, deleted the disposable Mesh, shut down the
+isolated app, and removed its profile. JSON evidence is in
+`.tmp/codex-hook-recovery-2026-09-25T16-48-39-815Z/evidence.json`; it records
+the commit, CLI version, Windows version, model, launch/trust configuration,
+callback actions and results, run history summaries, and cleanup state without
+recording prompt text. The smoke and relay can be rerun with
+`npm run tauri:build:dev:codex-hook-smoke` followed by
+`npm run smoke:codex-hook-recovery`. This is Windows-only evidence; native
+Linux, WSL, and macOS callback delivery remain unverified. The smoke runner
+requires Node.js 22.13+, 23.4+, or 24+ because it uses the built-in
+`node:sqlite` API without an experimental flag ([Node.js SQLite API](https://nodejs.org/api/sqlite.html)).
+
+#### Review follow-up: evidence capture and gate attribution
+
+The review found that the duplicate-forward wait returned a boolean and the
+smoke then read `forwardCount` from that boolean. The runner now snapshots
+`start.forwardCount` after the wait and asserts the recorded count is two. The
+first-hook waits now allow 150 seconds for Codex startup and its first token.
+An initial attempt at commit `4ab71692` timed out after 30 seconds with no
+relay events; it cancelled the run, deleted the disposable Mesh, and shut down
+the isolated app. After extending both waits and hardening profile isolation, the
+smoke passed at pushed commit `8ab3d85e`: duplicate delivery recorded two
+forwards and one durable receipt, the dropped Stop reached actionable Unverified
+with Recheck, and the delayed prior-turn Stop was rejected while the attempt
+stayed Unverified. The artifact is
+`.tmp/codex-hook-recovery-2026-09-26T09-03-35-449Z/evidence.json`; both runs
+were cancelled, the disposable Mesh was deleted, and the app and run-owned
+profile were cleaned up.
+
+The smoke resolves Tauri's Windows data directory from the Application Data
+known folder rather than trusting a child-process `APPDATA` override. It refuses
+to reuse a profile that existed before the run, checks that the opened database
+contains the expected schema, and removes only the issue-specific profile it
+created after a successful run. The child `APPDATA` points to the scratch folder
+for early panic logs.
+
+If a run fails, the runner preserves its JSON evidence and any profile it
+created so the failed state can be inspected. It refuses to reuse an existing
+issue profile. After confirming the isolated app has exited and the exact
+profile belongs to that failed run, inspect and remove it before retrying:
+
+```powershell
+$issue1905Profile = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) 'com.alond.buildmesh.issue1905.dev'
+Get-ChildItem -LiteralPath $issue1905Profile
+```
+
+After inspection confirms this exact profile belongs to the failed smoke and
+the isolated app has exited, remove it before retrying:
+
+```powershell
+Remove-Item -LiteralPath $issue1905Profile -Recurse
+```
+
+| Check / revision | Result | Attribution / scope |
+| --- | --- | --- |
+| `npm run test:ci -- --project=verify-smoke` on commit `4ab71692` | 3,576 passed, 1 skipped, 1 failed: `UsageTab > clears the label ticker on unmount` expected one timer and saw zero. Vitest stopped the command before Playwright. | The UsageTab test is outside the changed files; attribution was not established by this run. |
+| Focused UsageTab test on merge-base `91118ebc` | Passed: 1 passed, 23 skipped. | The reviewed PR failure did not reproduce when run alone on the base. |
+| Full Vitest unit/integration suite on merge-base `91118ebc` | 3,574 passed, 1 skipped, 3 failed: ui-shot timed out at 60 seconds, mobile ProviderPicker timed out at 5 seconds, and ProbePanel could not find `Changed Files`. The UsageTab timer test passed. | No matching UsageTab failure reproduced on the base; attribution of the PR-run failure remains unverified. Playwright was not run on the base. |
+| `npm run tauri:build:dev:codex-hook-smoke`; `npm run smoke:codex-hook-recovery` on commit `8ab3d85e` | Passed: two live Codex scenarios. Duplicate callback forward count 2; one durable prompt receipt; dropped Stop remained actionable Unverified; delayed old-turn Stop was rejected. | Windows, Codex CLI 0.157.0 / `gpt-6-luna`; no `codex_rollout_task_complete` observation, so completion reconciliation remains unverified. Artifact: `.tmp/codex-hook-recovery-2026-09-26T09-03-35-449Z/evidence.json`. |
+| `cargo test --locked --lib http::routes::attention -- --test-threads=1` after review fixes | Passed: 87 tests. | Includes route-gate coverage for stale receipt persistence and skipped projection, plus a matching current-turn Stop that reaches the accepted path and persists `turn_fenced=true`, `explicit_turn_mismatch=false`. |
+| `node --test tests/agent-infra/codex-hook-relay.test.mjs`; `node --check` on both smoke scripts | Passed: relay test 1/1; both scripts parse. | Relay forwarding behavior and smoke script syntax. |
 
 ### Live OpenPr recovery
 

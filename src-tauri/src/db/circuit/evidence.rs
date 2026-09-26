@@ -1185,7 +1185,7 @@ mod tests {
             [graph.to_json().unwrap()],
         )
         .unwrap();
-        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, submission_correlated: false,
+        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: false,
             hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"prompt","hook_event_name":"Stop","background_tasks":[],"session_crons":[],"last_assistant_message":"Complete final report"}"#).unwrap() };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         drop(db);
@@ -1239,7 +1239,7 @@ mod tests {
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
         db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
         let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-a".into()), session_incarnation: Some("1000".into()),
-            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, submission_correlated: true,
+            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true,
             hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"UserPromptSubmit"}"#).unwrap() };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         drop(db);
