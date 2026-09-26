@@ -771,11 +771,13 @@ pub fn create_pr_node(
     head_repo_clone_url: Option<String>,
     configuration_id: Option<String>,
     // `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
-    // reviewer agent" row): same intent and head pinning as the implementation
-    // spawn, but named distinctly so it cuts its **own** worktree instead of
-    // adopting the implementation node's (`provision_for_spawn` reuses an
-    // existing path). `None`/`false` is the Pull Requests probe's `+`
-    // behaviour, byte-for-byte unchanged.
+    // reviewer agent" row). Same intent and head pinning as the implementation
+    // spawn, but named distinctly — see the naming block in the body, and
+    // `git::worktree::provision_for_spawn` for why a shared worktree name is
+    // destructive rather than merely inconvenient. On a Root-Node mesh
+    // (`use_worktree = false`) there is no worktree to separate, so the
+    // distinct name only keeps the two rows distinguishable. `None`/`false` is
+    // the Pull Requests probe's `+` behaviour, byte-for-byte unchanged.
     reviewer: Option<bool>,
 ) -> Result<IssueNodeDraft, String> {
     // Issue #1180 — the impl now returns the `SpawnIntent::PullRequest`
@@ -940,13 +942,16 @@ pub(crate) fn create_pr_node_impl_configured(
     // originating PR at a glance.
     //
     // A reviewer sibling (`reviewer = true`, the PR pill's "Spawn reviewer
-    // agent" row) instead gets a distinct `pr{N}-review-{slug}` name, because
-    // the node name IS its worktree directory name: an identical name resolves
-    // to the implementation node's existing worktree path and
-    // `git::worktree::provision_for_spawn` returns `Reused` for an existing
-    // path, which would hand the reviewer the implementation agent's
-    // directory. Repeat reviewer spawns are disambiguated against the mesh's
-    // existing worktree names so each reviewer also gets its own directory.
+    // agent" row) instead gets a distinct `pr{N}-review-{slug}` name, because a
+    // worktree node's name IS its worktree directory name (and, on a branched
+    // spawn, its branch name). Two nodes sharing a name therefore share a
+    // worktree path, and `git::worktree::provision_for_spawn` handles that path
+    // badly: on the warm-pool branch the pre-move branch guard refuses the
+    // adoption and the failure cleanup used to delete the target directory —
+    // the other node's live worktree, uncommitted work included — and on the
+    // cold branch the path-exists short-circuit silently hands the same
+    // directory to both nodes. Repeat reviewer spawns are disambiguated against
+    // the mesh's existing worktree names so each reviewer gets its own.
     let initial_name = if reviewer {
         let taken: std::collections::HashSet<String> = db::list_agent_nodes_by_mesh(mesh_id)
             .map_err(|e| e.to_string())?
@@ -1367,13 +1372,14 @@ mod tests {
     }
 
     /// The PR pill's "Spawn reviewer agent" row spawns a *sibling* of the
-    /// implementation node for the same PR. A PR node's name IS its worktree
-    /// directory name, so an identical name would resolve to the
-    /// implementation node's existing worktree path and
-    /// `git::worktree::provision_for_spawn` would hand the reviewer that
-    /// directory (`Reused`). Pin that the reviewer takes the distinct
-    /// `review`-marked name, and that a repeat reviewer spawn disambiguates so
-    /// it, too, gets its own worktree.
+    /// implementation node for the same PR. A worktree node's name IS its
+    /// worktree directory (and branch) name, so an identical name puts both
+    /// nodes on one worktree path — which `git::worktree::provision_for_spawn`
+    /// resolves by refusing the warm adoption and (before `target_preexisted`)
+    /// deleting the other node's worktree, or by sharing the directory on the
+    /// cold path. Pin that the reviewer takes the distinct `review`-marked
+    /// name, and that a repeat reviewer spawn disambiguates so it, too, gets
+    /// its own worktree.
     #[test]
     fn create_pr_reviewer_node_impl_names_uniquely_per_spawn() {
         let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());

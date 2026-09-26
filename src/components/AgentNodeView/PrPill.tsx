@@ -85,6 +85,16 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
     setConfirming(false);
   };
 
+  // Closing the reviewer dialog must return focus to the pill trigger. The
+  // dialog's own `Modal` restores focus to whatever was focused when it
+  // mounted — the portaled menu row — but that row unmounts in the same commit
+  // that mounts the dialog, so the restore lands on <body>. The trigger is the
+  // persistent control for this flow, so reuse the menu's trigger-return path.
+  const closeSpawnDialog = () => {
+    setSpawnOpen(false);
+    closeAndReturnFocus();
+  };
+
   useClickOutside<string>(open ? dropdownId('pr-pill', nodeId) : null, handleDismiss);
 
   useAnchoredPosition(triggerRef, menuRef, open);
@@ -138,13 +148,12 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
   const handleCancelConfirm = (e: React.MouseEvent) => {
     e.stopPropagation();
     setConfirming(false);
-    // After cancel, itemCount drops from 3 back to 2 (Open + Merge).
-    // The previous activeIndex (2 = Cancel) is now out of bounds, so
-    // both menuitems would render with tabIndex=-1 until an arrow key
-    // moved focus — a focus drop. Pin to the Merge slot (1) and pull
-    // focus onto it after the unmount has settled, mirroring the
-    // closeAndReturnFocus trigger-return pattern used elsewhere in
-    // this component.
+    // After cancel the menu is back to Open + Merge + Spawn (itemCount 3), so
+    // index 2 (Cancel) is still in range — pin the caret to the Merge slot (1)
+    // anyway, so focus returns to the action the user just backed out of rather
+    // than landing on the spawn row, and pull focus onto it after the unmount
+    // has settled (mirroring the closeAndReturnFocus trigger-return pattern
+    // used elsewhere in this component).
     setActiveIndex(1);
     requestAnimationFrame(() => {
       menuRef.current
@@ -156,10 +165,9 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
   const handleMerge = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (merging) return;
-    // Reset confirming synchronously with arming merging: from this
-    // render on the menu shows Open + Merging (2 rows) and itemCount
-    // is 2, so arrow navigation can never address a stale index 2.
-    // activeIndex returns to 0 for the same reason (Cancel sat at 2).
+    // Reset confirming synchronously with arming merging: from this render on
+    // the menu shows Open + Merging + Spawn (3 rows), matching itemCount 3, and
+    // the roving index returns to the top row alongside it (Cancel sat at 2).
     setMerging(true);
     setConfirming(false);
     setActiveIndex(0);
@@ -325,7 +333,7 @@ export function PrPill({ nodeId, meshId, gitPath, openPr, providers, compact = f
           meshId={meshId}
           openPr={openPr}
           providers={providers}
-          onClose={() => setSpawnOpen(false)}
+          onClose={closeSpawnDialog}
         />
       )}
     </div>

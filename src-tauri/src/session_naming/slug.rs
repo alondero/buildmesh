@@ -59,16 +59,17 @@ pub fn pr_node_name(pr_number: i64, title: &str) -> String {
 /// Build the initial node name for the **reviewer sibling** of a PR spawn.
 ///
 /// The PR pill's "Spawn reviewer agent" path uses this instead of
-/// [`pr_node_name`] so the reviewer gets a different name — and therefore a
-/// different worktree directory — than the implementation node it reviews.
-/// Without the distinction both nodes derive the same `pr{N}-{slug}` name,
-/// which lands them in one shared worktree (see `provision_for_spawn`'s
-/// path-exists short-circuit). The `review` token keeps the PR association
-/// readable, e.g. PR #123 "add pr chip" → `pr123-review-add-pr-chip`.
+/// [`pr_node_name`] so the reviewer does not derive the implementation node's
+/// name. A worktree node's name is also its worktree directory (and branch)
+/// name, so sharing one means sharing a worktree path — which
+/// `git::worktree::provision_for_spawn` handles destructively on the warm-pool
+/// branch and by silent directory-sharing on the cold branch. The `review`
+/// token keeps the PR association readable, e.g. PR #123 "add pr chip" →
+/// `pr123-review-add-pr-chip`.
 ///
 /// Callers must still disambiguate against the mesh's existing names (see
-/// [`disambiguate_node_name`]) — repeat reviewer spawns would otherwise reuse
-/// the previous reviewer's name.
+/// [`disambiguate_node_name`]) — repeat reviewer spawns would otherwise collide
+/// with the previous reviewer.
 pub fn pr_reviewer_node_name(pr_number: i64, title: &str) -> String {
     prefixed_node_name("pr", pr_number, &format!("review {title}"))
 }
@@ -83,8 +84,13 @@ const MAX_DISAMBIGUATION_ATTEMPTS: u32 = 50;
 ///
 /// `taken` is the set of names already in use — callers pass the target mesh's
 /// `worktree_name`s, since that is what determines the on-disk worktree path.
-/// The result always satisfies `SLUG_REGEX` and the 50-char cap: the suffix is
-/// carved out of `base` rather than appended past the limit.
+/// (`db::list_agent_nodes_by_mesh` does not filter archived rows, so a closed
+/// node keeps its name reserved; harmless, just surprising.)
+///
+/// `base` is assumed to be a valid slug — it is returned verbatim when free —
+/// which `pr_reviewer_node_name` guarantees by construction. Generated
+/// suffixes do satisfy `SLUG_REGEX` and the 50-char cap: the suffix is carved
+/// out of `base` rather than appended past the limit.
 pub fn disambiguate_node_name(base: &str, taken: &HashSet<String>) -> String {
     if !taken.contains(base) {
         return base.to_string();

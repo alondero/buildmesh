@@ -21,11 +21,17 @@ interface PrReviewerSpawnDialogProps {
  * "Spawn reviewer agent" dialog for the agent-node PR pill.
  *
  * Picking a harness does exactly what the Pull Requests probe's `+` does — a
- * `create_pr_node` for the PR's head ref — with one difference: the reviewer is
+ * `create_pr_node` for the PR's head ref — with one difference: the spawn is
  * asked for as a *reviewer* (`reviewer: true`), so the backend names it
- * distinctly and it cuts its **own** worktree instead of adopting the
- * implementation node's. Once created, the node is grouped onto the clicked
- * node's card (`groupNodes`) so it opens as another Node Activity tab.
+ * distinctly and the reviewer does not derive the implementation node's
+ * worktree name. (Sharing that name shares the worktree path, which
+ * `provision_for_spawn` resolves destructively — see the Rust `reviewer`
+ * parameter.) Once created, the node is grouped onto the clicked node's card
+ * (`groupNodes`) so it opens as another Node Activity tab.
+ *
+ * Terminal stays in the picker, unlike `AgentReviewButton`'s reviewer picker:
+ * this spawns a plain agent node on the PR rather than a review-circuit
+ * reviewer, and a shell on the PR branch is a legitimate thing to open.
  *
  * The provider picker is the shared Spawn Menu (ADR-0016), rendered inline the
  * way `CanvasSpawnMenu` does it — no `onClose` is forwarded, because
@@ -83,11 +89,18 @@ export function PrReviewerSpawnDialog({ nodeId, meshId, openPr, providers, onClo
         <ModalCloseButton onClose={() => { if (!busy) onClose(); }} />
       </div>
       <p className="text-2xs text-text-muted mb-3">
-        Launches an agent on this PR's head commit with its own worktree, then opens it as
-        another tab on this node.
+        Launches an agent on this PR's head commit in its own worktree (on meshes that use
+        worktrees), then opens it as another tab on this node.
       </p>
       <div className="border border-border-subtle rounded-md bg-bg-overlay max-h-64 overflow-y-auto mb-3">
-        <GroupedProviderMenu providers={providers} onSelect={handlePick} />
+        {providers.length === 0 ? (
+          <p data-testid="pr-reviewer-no-providers" className="px-3 py-2.5 text-xs text-text-muted">
+            No harnesses available yet — provider detection may still be loading, or none is
+            installed. Close this and try again in a moment.
+          </p>
+        ) : (
+          <GroupedProviderMenu providers={providers} onSelect={handlePick} />
+        )}
       </div>
       {error && <p role="alert" className="text-xs text-status-error break-words mb-3">{error}</p>}
       <div className="flex justify-end gap-2">

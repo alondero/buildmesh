@@ -451,6 +451,45 @@ describe('PrPill reviewer spawn', () => {
     });
   });
 
+  it('returns focus to the PR pill when the dialog is dismissed', async () => {
+    renderPill();
+    openReviewerDialog();
+    // The Modal moves focus into the dialog on mount…
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // …and the pill — not <body> — must own it again. The dialog's own Modal
+    // restore cannot do this: the row that opened it unmounts in the same
+    // commit, so its captured `previouslyFocused` is already detached.
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        expect(document.activeElement).toBe(screen.getByTestId('pr-pill-trigger'));
+        resolve();
+      }),
+    );
+  });
+
+  it('returns focus to the PR pill after a successful spawn', async () => {
+    renderPill();
+    openReviewerDialog();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        expect(document.activeElement).toBe(screen.getByTestId('pr-pill-trigger'));
+        resolve();
+      }),
+    );
+  });
+
+  it('shows an empty state instead of an empty menu when no harnesses are available', () => {
+    renderPill({ providers: [] });
+    openReviewerDialog();
+    expect(screen.getByTestId('pr-reviewer-no-providers')).toBeTruthy();
+    expect(screen.queryByRole('menu', { name: 'Select a provider' })).toBeNull();
+  });
+
   it('keeps the dialog open with an error when the spawn fails', async () => {
     createPrNodeMock.mockRejectedValueOnce(new Error('PR head is unfetchable'));
     renderPill();

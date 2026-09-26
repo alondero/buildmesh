@@ -729,11 +729,10 @@ export const createPrNode = (
   headRepoOwner?: string,
   headRepoCloneUrl?: string,
   configurationId?: string,
-  // `true` spawns a *reviewer sibling* for the PR (the PR pill's "Spawn
-  // reviewer agent" row). Same intent and head pinning as the probe spawn, but
-  // the backend names the node distinctly (`pr{N}-review-{slug}`, disambiguated)
-  // so it cuts its own worktree instead of adopting the implementation node's.
-  // Omit/`false` for the Pull Requests probe's `+` behaviour.
+  // Spawn a *reviewer sibling* for the PR (the PR pill's "Spawn reviewer
+  // agent" row): a distinct name so it does not share the implementation
+  // node's worktree — see `commands::agent::create_pr_node`'s `reviewer`
+  // parameter for why sharing one is destructive. Omit for the probe's `+`.
   reviewer?: boolean,
 ) =>
   _invoke<IssueNodeDraft>('create_pr_node', {
