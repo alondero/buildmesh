@@ -26,13 +26,11 @@ import type { ProviderInfo } from '../../lib/tauri';
  * applies the persisted id order). `Terminal` is excluded — it's pinned last by
  * the backend and isn't user-orderable.
  *
- * **Issue #575 fix** (user-reported): Proxied Provider rows (`claude:minimax`,
- * `claude:kimi`) are NOT orderable harnesses — they're a credential pairing
- * attached to a harness, not the executor itself. The previous filter
- * (`p.id !== 'terminal'`) accidentally included them after the composite-id
- * rename. The corrected filter is `!p.is_proxied && p.id !== 'terminal'`,
- * so only the native Agent Harnesses (Claude Code, Codex, Antigravity,
- * OpenCode, plus any user-defined custom harness profile) appear here.
+ * Proxied Provider rows (`claude:minimax`, `claude:kimi`) are not orderable
+ * harnesses because they are pairings, not executors. Saved launch
+ * configurations also appear in the backend list, but carry configuration
+ * metadata and are not harness rows. Both are excluded so this list shows
+ * only native Agent Harnesses plus any user-defined custom harness profile.
  */
 
 /** Pure: move `activeId` to where `overId` sits, returning the new id order.
@@ -85,6 +83,10 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
   );
 }
 
+export function isOrderableHarness(provider: ProviderInfo): boolean {
+  return !provider.configuration && !provider.is_proxied && provider.harness_id !== 'terminal';
+}
+
 export function HarnessOrderList({
   providers,
   onReorder,
@@ -120,7 +122,11 @@ export function HarnessOrderList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const rows = [...new Map(providers.filter(p => !p.is_proxied && p.harness_id !== 'terminal')
+  // The backend also includes saved launch configurations in this list. A
+  // native configuration row is non-proxied and shares its harness_id with
+  // the parent, so it must be removed before deduplication or its saved name
+  // can replace the harness label in Settings.
+  const rows = [...new Map(providers.filter(isOrderableHarness)
     .map(p => [p.harness_id, { ...p, id: p.harness_id }])).values()];
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
