@@ -23,6 +23,7 @@ import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';
 import type { CircuitQueueEntry } from '../../src/types/generated/CircuitQueueEntry';
+import type { CircuitHistoryEntry } from '../../src/types/generated/CircuitHistoryEntry';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 // Direct wrapper access for the IPC-contract block below.
@@ -133,6 +134,19 @@ const QUEUE: CircuitQueueEntry[] = [
   },
 ];
 
+/** One entry per wait/capacity/configuration/recovery kind (issue #1909). */
+const HISTORY_ENTRIES: CircuitHistoryEntry[] = [
+  { id: 1, node_id: null, attempt: null, kind: 'queue_wait',
+    detail: '{"reason":"mesh_capacity","capacity":2}', source: 'circuit_worker.admission',
+    disposition: 'waiting', observed_at: '2026-08-22 10:05:00' },
+  { id: 2, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
+    detail: '{"before":null,"after":"{\\"circuit_limit\\":true,\\"agent_limit\\":false}"}',
+    source: 'circuit_worker.capacity', disposition: 'waiting', observed_at: '2026-08-22 10:05:10' },
+  { id: 3, node_id: null, attempt: null, kind: 'recovery',
+    detail: '{"successor_run_id":88,"rounds":2}', source: 'operator',
+    disposition: 'applied', observed_at: '2026-08-22 10:06:00' },
+];
+
 function mockBackend(overrides: {
   circuits?: AutopilotCircuit[];
   runs?: CircuitRunDetail[];
@@ -145,6 +159,9 @@ function mockBackend(overrides: {
     if (cmd === 'list_circuits') return Promise.resolve(circuits);
     if (cmd === 'list_circuit_runs') return Promise.resolve(runs);
     if (cmd === 'list_circuit_queue') return Promise.resolve(queue);
+    if (cmd === 'circuit_run_history') {
+      return Promise.resolve({ entries: HISTORY_ENTRIES, checkpoints: [], coverage: [] });
+    }
     if (cmd === 'list_circuit_probe') {
       return Promise.resolve({
         circuits: circuits.map((circuit) => ({
@@ -1277,6 +1294,23 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(await screen.findByTestId('run-card-11')).toBeTruthy();
     expect((screen.getByTestId('history-search-input') as HTMLInputElement).value).toBe('');
     expect((screen.getByTestId('history-attention-toggle') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('renders wait, capacity and recovery history with provenance in the expanded run', async () => {
+    mockBackend({ runs: [RUN_DONE, RUN_RUNNING] });
+    openProbeDestination('circuits');
+    fireEvent.click(await screen.findByTestId('circuits-view-history'));
+    await screen.findByTestId('run-card-11');
+    fireEvent.click(screen.getByTestId('run-toggle-11'));
+
+    fireEvent.click(await screen.findByText('Circuit Run History'));
+
+    const recovery = await screen.findByTestId('history-entry-3');
+    expect(recovery.dataset.historyKind).toBe('recovery');
+    expect(recovery.dataset.disposition).toBe('applied');
+    expect(recovery.textContent).toContain('Recovered into run #88');
+    expect(screen.getByTestId('history-entry-1').dataset.disposition).toBe('waiting');
+    expect(screen.getByText('Source: circuit_worker.admission · waiting')).toBeTruthy();
   });
 
   it('reports an unavailable agent node instead of a dead click', async () => {

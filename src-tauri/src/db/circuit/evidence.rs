@@ -5,6 +5,64 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
 
+// ---------------------------------------------------------------------------
+// Circuit Run History provenance vocabulary (issue #1909 / #1847).
+//
+// Every append carries a `source` (who/what produced the event) and a
+// `disposition` (what Buildmesh recorded doing with it), alongside the
+// existing identity (`node_id`/`attempt`) and time (`observed_at`). This is
+// the single vocabulary: the Probe renders these values and tests pin them,
+// so add here rather than inlining literals at call sites.
+// ---------------------------------------------------------------------------
+
+/// The circuit worker's stepper committed a run/step transition or effect.
+pub(super) const SOURCE_CIRCUIT_WORKER: &str = "circuit_worker";
+/// The worker's admission gate parked a pending run on a capacity reason.
+pub(super) const SOURCE_ADMISSION: &str = "circuit_worker.admission";
+/// The worker's step-capacity gate parked a step.
+pub(super) const SOURCE_CAPACITY: &str = "circuit_worker.capacity";
+/// The worker reconciled an evidence window against its projection.
+pub(super) const SOURCE_RECONCILIATION: &str = "circuit_worker.reconciliation";
+/// The run pinned its configuration snapshot.
+pub(super) const SOURCE_RUN_CONFIGURATION: &str = "run.configuration";
+/// A native harness hook receipt.
+pub(super) const SOURCE_NATIVE_HOOK: &str = "native_hook";
+/// The report classifier interpreted a report.
+pub(super) const SOURCE_CLASSIFIER: &str = "classifier";
+/// A GitHub read-only lookup or recorded action target.
+pub(super) const SOURCE_GITHUB: &str = "github";
+/// An operator action: attestation, evidence recheck, or continuation.
+pub(super) const SOURCE_OPERATOR: &str = "operator";
+
+/// A committed projection or operator action took effect.
+pub(super) const DISPOSITION_APPLIED: &str = "applied";
+/// An unresolved wait (admission, step capacity, or evidence window).
+pub(super) const DISPOSITION_WAITING: &str = "waiting";
+pub(super) const DISPOSITION_INTENT: &str = "intent";
+pub(super) const DISPOSITION_POSSIBLE_DISPATCH: &str = "possible_dispatch";
+pub(super) const DISPOSITION_ACKNOWLEDGED: &str = "acknowledged";
+pub(super) const DISPOSITION_RECONCILED: &str = "reconciled";
+pub(super) const DISPOSITION_RECORDED: &str = "recorded";
+pub(super) const DISPOSITION_RECEIVED: &str = "received";
+pub(super) const DISPOSITION_INTERPRETED: &str = "interpreted";
+pub(super) const DISPOSITION_REQUESTED: &str = "requested";
+
+/// Buildmesh's recorded disposition for one observation, matching the
+/// snake_case serde form of [`ObservationDisposition`].
+fn observation_disposition_str(
+    value: crate::autopilot::circuit::observation::ObservationDisposition,
+) -> &'static str {
+    use crate::autopilot::circuit::observation::ObservationDisposition as D;
+    match value {
+        D::Accepted => "accepted",
+        D::ReducedConfidence => "reduced_confidence",
+        D::Duplicate => "duplicate",
+        D::Rejected => "rejected",
+        D::Unavailable => "unavailable",
+        D::Conflicting => "conflicting",
+    }
+}
+
 pub(crate) fn is_observation_freshness_rejection(error: &rusqlite::Error) -> bool {
     matches!(error, rusqlite::Error::InvalidParameterName(message)
         if message.starts_with(OBSERVATION_FRESHNESS_REJECTION_PREFIX))
@@ -25,6 +83,10 @@ pub struct CircuitHistoryEntry {
     pub attempt: Option<i32>,
     pub kind: String,
     pub detail: String,
+    /// Who/what produced the event (issue #1909 / #1847). Null on pre-v45 rows.
+    pub source: Option<String>,
+    /// What Buildmesh recorded doing with the event. Null on pre-v45 rows.
+    pub disposition: Option<String>,
     pub observed_at: String,
 }
 
@@ -162,7 +224,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
 }
 
 fn history_inner(db: &Connection, run_id: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
-    let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,observed_at FROM circuit_run_history WHERE run_id=?1 ORDER BY id")?;
+    let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,source,disposition,observed_at FROM circuit_run_history WHERE run_id=?1 ORDER BY id")?;
     let rows = stmt
         .query_map([run_id], |r| {
             Ok(CircuitHistoryEntry {
@@ -171,7 +233,9 @@ fn history_inner(db: &Connection, run_id: i64) -> SqlResult<Vec<CircuitHistoryEn
                 attempt: r.get(2)?,
                 kind: r.get(3)?,
                 detail: r.get(4)?,
-                observed_at: r.get(5)?,
+                source: r.get(5)?,
+                disposition: r.get(6)?,
+                observed_at: r.get(7)?,
             })
         })?
         .collect();
@@ -274,6 +338,8 @@ pub(crate) fn receive_native_hook_locked(
                 Some(attempt),
                 "native_hook_received",
                 &detail,
+                Some(SOURCE_NATIVE_HOOK),
+                Some(DISPOSITION_RECEIVED),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -283,7 +349,7 @@ pub(crate) fn receive_native_hook_locked(
 
 pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<CircuitHistoryEntry>> {
     let db = crate::db::read_conn();
-    let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,observed_at FROM circuit_run_history WHERE run_id=?1 AND id>?2 AND kind='native_hook_received' ORDER BY id LIMIT 512")?;
+    let mut stmt = db.prepare("SELECT id,node_id,attempt,kind,detail,source,disposition,observed_at FROM circuit_run_history WHERE run_id=?1 AND id>?2 AND kind='native_hook_received' ORDER BY id LIMIT 512")?;
     let rows = stmt.query_map(params![run_id, after], |r| {
         Ok(CircuitHistoryEntry {
             id: r.get(0)?,
@@ -291,7 +357,9 @@ pub(crate) fn native_hook_receipts(run_id: i64, after: i64) -> SqlResult<Vec<Cir
             attempt: r.get(2)?,
             kind: r.get(3)?,
             detail: r.get(4)?,
-            observed_at: r.get(5)?,
+            source: r.get(5)?,
+            disposition: r.get(6)?,
+            observed_at: r.get(7)?,
         })
     })?;
     rows.collect()
@@ -420,6 +488,8 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             Some(request.attempt),
             "evidence_recheck",
             request.reason.trim(),
+            Some(SOURCE_OPERATOR),
+            Some(DISPOSITION_REQUESTED),
         )
         .map_err(|e| e.to_string())?;
         return tx.commit().map_err(|e| e.to_string());
@@ -513,6 +583,13 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         request.action,
         request.reason.trim()
     );
+    // The attestation's disposition is the action the operator recorded.
+    let disposition = match request.action {
+        CheckpointAction::Completed => "completed",
+        CheckpointAction::NotPerformed => "not_performed",
+        CheckpointAction::Retry => "retry",
+        CheckpointAction::Recheck => "recheck",
+    };
     let op = super::CircuitStepOp {
         node_id: request.node_id.clone(),
         status: status.into(),
@@ -537,6 +614,8 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         Some(request.attempt),
         "operator_attestation",
         &reason,
+        Some(SOURCE_OPERATOR),
+        Some(disposition),
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
@@ -575,13 +654,17 @@ fn record_queue_wait_locked(db: &mut Connection, run_id: i64, reason: QueueWaitR
     let detail = serde_json::to_string(&reason).expect("queue wait fields");
     let previous: Option<String> = tx.query_row("SELECT detail FROM circuit_run_history WHERE run_id=?1 AND kind='queue_wait' ORDER BY id DESC LIMIT 1", [run_id], |row|row.get(0)).optional()?;
     if previous.as_deref() != Some(&detail) {
-        append_history(&tx,run_id,None,None,"queue_wait",&detail)?;
+        append_history(&tx,run_id,None,None,"queue_wait",&detail,Some(SOURCE_ADMISSION),Some(DISPOSITION_WAITING))?;
     }
     tx.commit()
 }
 
 pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
     use sha2::{Digest, Sha256};
+    // `behavior_revision` is a recorded placeholder constant (issue #1909); it
+    // is not a live revision counter. Graph identity is pinned by the
+    // `graph_sha256` in the history entry, which is what the operator surface
+    // relies on. Redefining the revision scheme is a separate decision.
     let inserted = db.execute("INSERT OR IGNORE INTO circuit_run_snapshots (run_id,graph_json,behavior_revision)
         SELECT r.id,c.graph_json,1 FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id WHERE r.id=?1", [run_id])?;
     if inserted == 0 { return Ok(()); }
@@ -600,7 +683,7 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
     append_history(db,run_id,None,None,"configuration_pinned", &serde_json::json!({
         "behavior_revision":1,"graph_sha256":hex::encode(Sha256::digest(graph.as_bytes())),
         "reviewers":reviewers
-    }).to_string())?;
+    }).to_string(), Some(SOURCE_RUN_CONFIGURATION), Some(DISPOSITION_APPLIED))?;
     Ok(())
 }
 
@@ -623,18 +706,27 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
             if state == "possible_dispatch" && previous.get(key).map(String::as_str) != Some("pending") {
                 append_history(db,run_id,Some(node),attempt,"continuation_effect",&serde_json::json!({
                     "effect":"continuation_prompt","state":"intent","ordinal":next.get(&count_key)
-                }).to_string())?;
+                }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(DISPOSITION_INTENT))?;
             }
             append_history(db,run_id,Some(node),attempt,"continuation_effect",&serde_json::json!({
                 "effect":"continuation_prompt","state":state,"ordinal":next.get(&count_key)
-            }).to_string())?;
+            }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(state))?;
         }
     }
     let capacity_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys()).filter(|key|key.starts_with("node.") && key.ends_with(".capacity_wait")).collect();
     for key in capacity_keys {
         if previous.get(key) != next.get(key) {
             let node = key.strip_prefix("node.").and_then(|key|key.strip_suffix(".capacity_wait"));
-            append_history(db,run_id,node,None,"step_capacity_wait",&serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string())?;
+            // Identity: the parked step's current attempt, so the operator
+            // surface can name which execution is waiting (issue #1909).
+            let attempt = match node {
+                Some(node) => db.query_row(
+                    "SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
+                    params![run_id, node], |r| r.get::<_, i32>(0),
+                ).optional()?,
+                None => None,
+            };
+            append_history(db,run_id,node,attempt,"step_capacity_wait",&serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),Some(SOURCE_CAPACITY),Some(DISPOSITION_WAITING))?;
         }
     }
     let nodes: std::collections::BTreeSet<&str> = previous.keys().chain(next.keys()).filter_map(|key| key.strip_prefix("node.")?.strip_suffix(".wait.attempt")).collect();
@@ -648,7 +740,7 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
         let after = project(&next);
         if before != after {
             let attempt = next.get(&format!("{prefix}attempt")).and_then(|value|value.parse().ok());
-            append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string())?;
+            append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string(),Some(SOURCE_RECONCILIATION),Some(DISPOSITION_WAITING))?;
         }
     }
     Ok(())
@@ -670,6 +762,10 @@ pub(super) fn run_graph(
     crate::autopilot::circuit::model::CircuitGraph::from_json(&json)
 }
 
+/// Append one Circuit Run History event. `source` and `disposition` are the
+/// provenance vocabulary above; both are nullable for pre-v45 rows (issue
+/// #1909 / #1847). `observed_at` defaults to the append time, which for these
+/// synchronous events is the observed time.
 pub(super) fn append_history(
     db: &Connection,
     run_id: i64,
@@ -677,9 +773,11 @@ pub(super) fn append_history(
     attempt: Option<i32>,
     kind: &str,
     detail: &str,
+    source: Option<&str>,
+    disposition: Option<&str>,
 ) -> SqlResult<()> {
-    db.execute("INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail) VALUES (?1,?2,?3,?4,?5)",
-        params![run_id, node_id, attempt, kind, crate::secret_scrubber::SecretScrubber::scrub(detail)])?;
+    db.execute("INSERT INTO circuit_run_history (run_id,node_id,attempt,kind,detail,source,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![run_id, node_id, attempt, kind, crate::secret_scrubber::SecretScrubber::scrub(detail), source, disposition])?;
     Ok(())
 }
 
@@ -829,11 +927,13 @@ fn commit_transition_locked(
             Some(identity.attempt),
             "observation",
             &detail,
+            Some(observation.observation.source.as_str()),
+            Some(observation_disposition_str(observation.disposition)),
         )?;
     }
     for classification in evidence.classifications {
         let detail = serde_json::to_string(classification).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        append_history(&tx, run_id, Some(&classification.step_id), Some(classification.attempt), "classification", &detail)?;
+        append_history(&tx, run_id, Some(&classification.step_id), Some(classification.attempt), "classification", &detail, Some(SOURCE_CLASSIFIER), Some(DISPOSITION_INTERPRETED))?;
     }
     for effect in evidence.reconciled_effects {
         let completed = steps.iter().any(|step| {
@@ -871,6 +971,8 @@ fn commit_transition_locked(
                 Some(effect.intent.attempt),
                 "effect_reconciled",
                 &effect.detail,
+                Some(SOURCE_GITHUB),
+                Some(DISPOSITION_RECONCILED),
             )?;
         } else {
             return Err(rusqlite::Error::InvalidQuery);
@@ -890,6 +992,8 @@ fn commit_transition_locked(
                 Some(intent.attempt),
                 "effect_intent",
                 &intent.kind,
+                Some(SOURCE_CIRCUIT_WORKER),
+                Some(DISPOSITION_INTENT),
             )?;
         }
     }
@@ -925,7 +1029,8 @@ fn acknowledge_spawn_attachment_locked(
         append_history(&tx, run_id, Some(node_id), Some(attempt), "effect_result",
             &serde_json::json!({"effect":"spawn","state":"acknowledged","agent_node_id":agent_node_id,
                 "meaning":if expected_agent_node_id == Some(agent_node_id) { "Prompt delivered to retained agent; completion still requires evidence" }
-                    else { "Agent allocation attached; foreground and owned work completion still require evidence" }}).to_string())?;
+                    else { "Agent allocation attached; foreground and owned work completion still require evidence" }}).to_string(),
+            Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_ACKNOWLEDGED))?;
     }
     let revision = revision_inner(&tx, run_id)?;
     tx.commit()?;
@@ -987,6 +1092,8 @@ fn record_effect_target_locked(
         Some(attempt),
         "effect_target",
         detail,
+        Some(SOURCE_GITHUB),
+        Some(DISPOSITION_RECORDED),
     )
     .map_err(|error| error.to_string())?;
     let revision = revision_inner(&tx, run_id).map_err(|error| error.to_string())?;
@@ -1051,6 +1158,8 @@ fn claim_effect_locked(
             Some(intent.attempt),
             "effect_possible_dispatch",
             &intent.kind,
+            Some(SOURCE_CIRCUIT_WORKER),
+            Some(DISPOSITION_POSSIBLE_DISPATCH),
         )?;
     }
     let revision = revision_inner(&tx, run_id)?;
@@ -1100,7 +1209,8 @@ mod tests {
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
-            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'pending');").unwrap();
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'pending');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
         record_queue_wait_locked(&mut db,1,QueueWaitReason::CircuitDisabled).unwrap();
         record_queue_wait_locked(&mut db,1,QueueWaitReason::CircuitDisabled).unwrap();
         record_queue_wait_locked(&mut db,1,QueueWaitReason::MeshCapacity { capacity: 3 }).unwrap();
@@ -1117,6 +1227,18 @@ mod tests {
         assert_eq!(history.len(),3);
         assert_eq!(history[2].kind,"step_capacity_wait");
         assert_eq!(history[2].node_id.as_deref(),Some("spawn"));
+        // Provenance and identity (issue #1909): the run-level admission wait
+        // names its source and disposition but has no step identity, while the
+        // step capacity wait names the parked step's attempt.
+        for entry in &history[..2] {
+            assert_eq!(entry.kind, "queue_wait");
+            assert_eq!(entry.source.as_deref(), Some(SOURCE_ADMISSION));
+            assert_eq!(entry.disposition.as_deref(), Some(DISPOSITION_WAITING));
+            assert_eq!((entry.node_id.as_deref(), entry.attempt), (None, None));
+        }
+        assert_eq!(history[2].source.as_deref(), Some(SOURCE_CAPACITY));
+        assert_eq!(history[2].disposition.as_deref(), Some(DISPOSITION_WAITING));
+        assert_eq!(history[2].attempt, Some(1));
     }
 
     #[test]
@@ -1139,6 +1261,9 @@ mod tests {
         assert_eq!(history[0].kind,"configuration_pinned");
         assert!(history[0].detail.contains("gpt-6-luna"));
         assert!(!history[0].detail.contains("private-secret"));
+        // Configuration revision provenance (issue #1909).
+        assert_eq!(history[0].source.as_deref(),Some(SOURCE_RUN_CONFIGURATION));
+        assert_eq!(history[0].disposition.as_deref(),Some(DISPOSITION_APPLIED));
         let mut next: serde_json::Value = serde_json::from_str(&context).unwrap();
         next["node.spawn.wait.attempt"] = "1".into();
         next["node.spawn.wait.since_ms"] = "1000".into();
@@ -1158,6 +1283,74 @@ mod tests {
         assert_eq!(history[1].kind,"evidence_window_changed");
         assert_eq!(history[1].attempt,Some(1));
         assert!(history[1].detail.contains("60000"));
+        assert_eq!(history[1].source.as_deref(),Some(SOURCE_RECONCILIATION));
+        assert_eq!(history[1].disposition.as_deref(),Some(DISPOSITION_WAITING));
+    }
+
+    /// Issue #1909 acceptance: the wait / capacity / configuration history
+    /// survives an app restart and agrees with the materialized projection.
+    #[test]
+    fn circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name,graph_json) VALUES(1,1,'test','{}');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'pending');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',2,'pending_slot');").unwrap();
+        // A pending run parked on mesh admission, then admitted.
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::MeshCapacity { capacity: 2 }).unwrap();
+        // The pinned configuration is written on run creation; pin it here and
+        // assert the entry agrees with `circuit_run_snapshots` after reopen.
+        { let tx = db.transaction().unwrap(); pin_graph(&tx, 1).unwrap(); tx.commit().unwrap(); }
+        let context = serde_json::json!({
+            "node.spawn.capacity_wait": "{\"circuit_limit\":true,\"agent_limit\":false}",
+            "node.spawn.wait.attempt": "2",
+            "node.spawn.wait.timeout_ms": "60000",
+            "node.spawn.wait.since_ms": "1000"
+        }).to_string();
+        // Queue exit: pending -> running commits the `run_transition` entry.
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, Some("running"), Some(&context), &[]).unwrap();
+        drop(db);
+
+        // Restart: reopen the same file and read the history back.
+        let db = Connection::open(file.path()).unwrap();
+        let history = history_inner(&db, 1).unwrap();
+        let entry = |kind: &str| history.iter().find(|entry| entry.kind == kind)
+            .unwrap_or_else(|| panic!("{kind} history retained across reopen"));
+        // Identity, time, source and disposition on every retained event.
+        assert!(history.iter().all(|entry| entry.source.is_some() && entry.disposition.is_some() && !entry.observed_at.is_empty()));
+        assert_eq!(
+            (entry("queue_wait").source.as_deref(), entry("queue_wait").disposition.as_deref(), entry("queue_wait").attempt),
+            (Some(SOURCE_ADMISSION), Some(DISPOSITION_WAITING), None),
+        );
+        assert_eq!(
+            (entry("step_capacity_wait").node_id.as_deref(), entry("step_capacity_wait").attempt),
+            (Some("spawn"), Some(2)),
+        );
+        assert_eq!(
+            (entry("evidence_window_changed").node_id.as_deref(), entry("evidence_window_changed").attempt),
+            (Some("spawn"), Some(2)),
+        );
+        let configuration = entry("configuration_pinned");
+        assert_eq!((configuration.source.as_deref(), configuration.disposition.as_deref()), (Some(SOURCE_RUN_CONFIGURATION), Some(DISPOSITION_APPLIED)));
+        let run_transition = entry("run_transition");
+        assert_eq!(run_transition.detail, "running");
+        assert_eq!((run_transition.source.as_deref(), run_transition.disposition.as_deref()), (Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_APPLIED)));
+
+        // Agreement with the materialized projection: the parked step, the
+        // admitted run state and the pinned snapshot all match their history.
+        let (state, step_attempt, step_status): (String, i32, String) = db.query_row(
+            "SELECT r.state, s.attempt, s.status FROM autopilot_circuit_runs r
+             JOIN autopilot_circuit_run_steps s ON s.run_id=r.id WHERE r.id=1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((state.as_str(), step_attempt, step_status.as_str()), ("running", 2, "pending_slot"));
+        let snapshot_revision: i64 = db.query_row("SELECT behavior_revision FROM circuit_run_snapshots WHERE run_id=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&configuration.detail).unwrap()["behavior_revision"].as_i64(),
+            Some(snapshot_revision),
+        );
     }
 
     #[test]

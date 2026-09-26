@@ -142,7 +142,10 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// v43 adds the durable node lifecycle lease table. Cleanup intent and
 /// transient spawn/cleanup ownership no longer live in historical run JSON.
 /// v44 adds the nullable saved spawn-configuration snapshot to agent nodes.
-pub(crate) const SCHEMA_VERSION: u32 = 44;
+/// v45 adds nullable `circuit_run_history.source` / `.disposition` so every
+/// causal-trace event names its provenance and what Buildmesh did with it
+/// (issue #1909 / #1847).
+pub(crate) const SCHEMA_VERSION: u32 = 45;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -476,6 +479,14 @@ const SPECS: &[ColumnSpec] = &[
     // The worker derives this from the circuit graph once, at step attach
     // time; reads never inspect graph JSON or infer step names.
     ColumnSpec { version: 42, table: "autopilot_circuit_run_steps", column: "parent_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
+
+    // v45 - Circuit Run History provenance/disposition (issue #1909 / #1847).
+    // Each event names the source that produced it and the disposition
+    // Buildmesh recorded, so waits, capacity waits, configuration pins and
+    // recovery are diagnosable uniformly. Nullable: pre-v45 rows carry
+    // neither and must keep reading.
+    ColumnSpec { version: 45, table: "circuit_run_history", column: "source", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec { version: 45, table: "circuit_run_history", column: "disposition", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // coordinator_drive_prompts

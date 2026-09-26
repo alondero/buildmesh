@@ -225,7 +225,11 @@ an individual Circuit; deleting its entire Mesh remains a separate operation.
 
 Run History records pinned behavior/graph identity and effective reviewer selection,
 model and effort, evidence-window changes, run and step capacity waits, and
-continuation prompt intent, possible dispatch and outcome. Unchanged polling
+continuation prompt intent, possible dispatch and outcome. Every entry names its
+source (who/what produced the event) and disposition (what Buildmesh did with it)
+beside its identity and time, so waits, capacity waits, configuration pins and
+recovery are diagnosable uniformly. Continuing a failed review appends a recovery
+entry to the failed predecessor naming the successor run. Unchanged polling
 results do not add repeated entries. Arguments, endpoints and prompts are excluded
 from the configuration history summary.
 

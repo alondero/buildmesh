@@ -463,7 +463,11 @@ fn create_node_circuit_run_with_recovery_locked(
         pin_review_launches(&tx, circuit_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
     }
     context.set("retry.attempt", "1");
-    if let Some(recovery) = recovery {
+    // Capture the failed run before `recovery` is consumed: the successor's
+    // `recovery.from_run_id` context and the predecessor's recovery history
+    // entry must agree (issue #1909).
+    let predecessor_run_id = recovery.as_ref().map(|recovery| recovery.run_id);
+    if let Some(recovery) = &recovery {
         context.set("recovery.from_run_id", recovery.run_id.to_string());
     }
     context.set("retry.max_retries", max_rounds.to_string());
@@ -476,6 +480,21 @@ fn create_node_circuit_run_with_recovery_locked(
         params![circuit_id, node.mesh_id, format!("manual:agent:{node_id}:{}", uuid::Uuid::new_v4()), context.to_json()?, node_id],
     ).map_err(|e| e.to_string())?;
     let run_id = tx.last_insert_rowid();
+    // A continuation is an operator recovery action; record it on the failed
+    // predecessor so its history names the successor run and disposition.
+    if let Some(predecessor) = predecessor_run_id {
+        super::evidence::append_history(
+            &tx,
+            predecessor,
+            None,
+            None,
+            "recovery",
+            &serde_json::json!({"successor_run_id": run_id, "rounds": max_rounds}).to_string(),
+            Some(super::evidence::SOURCE_OPERATOR),
+            Some(super::evidence::DISPOSITION_APPLIED),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     super::evidence::pin_graph(&tx, run_id).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run_id)
@@ -1586,7 +1605,8 @@ pub(crate) fn commit_circuit_advance_inner(
     let mut terminal_woke = false;
     if let Some(state) = run_state {
         if durable_state.as_deref() != Some(state) {
-            super::evidence::append_history(tx, run_id, None, None, "run_transition", state)?;
+            super::evidence::append_history(tx, run_id, None, None, "run_transition", state,
+                Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
         }
     }
     if let Some(context) = context_json {
@@ -1627,7 +1647,8 @@ pub(crate) fn commit_circuit_advance_inner(
         (None, None) => {}
     }
     for op in step_ops {
-        super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status)?;
+        super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status,
+            Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
         let effect_state = match op.status.as_str() {
             "completed" => Some("acknowledged"),
             "unverified" => Some("uncertain"),
@@ -1637,7 +1658,8 @@ pub(crate) fn commit_circuit_advance_inner(
             let changed = tx.execute("UPDATE circuit_effects SET state=?4 WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='possible_dispatch'",
                 params![run_id, op.node_id, op.attempt, state])?;
             if changed > 0 {
-                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "effect_result", state)?;
+                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "effect_result", state,
+                    Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(state))?;
             }
         }
         let outcome_val = op.outcome.clone().flatten();
@@ -1965,6 +1987,16 @@ mod reviewer_tests {
         }]).unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
+        // Recovery history (issue #1909): the failed predecessor records the
+        // continuation as an operator action naming the successor run.
+        let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
+            "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='recovery'",
+            params![first], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["successor_run_id"].as_i64(), Some(successor));
+        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
+        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()));
         assert_eq!(serde_json::to_value(read_snapshot(&db, successor)).unwrap(), serde_json::to_value(&frozen).unwrap());
         assert_eq!(serde_json::to_value(read_snapshot(&db, first)).unwrap(), serde_json::to_value(&frozen).unwrap());
         cancel_circuit_run_locked(&mut db, successor).unwrap();

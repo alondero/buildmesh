@@ -21,6 +21,19 @@ export default async function ({ page }) {
   await expect(page.getByTestId('run-toggle-1001')).toHaveAttribute('aria-expanded', 'true');
   await expect(page.getByTestId('run-error-1001')).toBeVisible();
   await expect(page.getByTestId('run-step-1001-reviewer').locator('pre')).toBeVisible();
+  // Wait / capacity / configuration / recovery history renders readably at the
+  // 240px minimum width (issue #1909): the reason, identity and provenance must
+  // stay visible and wrap rather than escape sideways.
+  await page.getByText('Circuit Run History').click();
+  await expect(page.getByTestId('history-entry-9002')).toBeVisible();
+  await expect(page.getByText(/all 2 circuit-run slot/)).toBeVisible();
+  await expect(page.getByText(/Recovered into run #88/)).toBeVisible();
+  await expect(page.getByText('Source: circuit_worker.admission · waiting')).toBeVisible();
+  const historyOverflow = await page.getByTestId('circuits-probe-body').evaluate((body) => ({
+    scroll: body.scrollWidth,
+    client: body.clientWidth,
+  }));
+  expect(historyOverflow.scroll).toBeLessThanOrEqual(historyOverflow.client);
   for (const view of ['activity', 'history', 'manage', 'queue']) {
     await page.getByTestId(`circuits-view-${view}`).click();
     if (view === 'manage') {

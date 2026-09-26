@@ -11,7 +11,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
 | Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
-| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
+| Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45); a reopen test proves the history survives restart and agrees with the run/step projection; the 240px Probe renders them readably (mock-mode CI check). Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | The live real-IPC 240px screenshot for this change (working / waiting / Unverified / failed / recovery) is not yet captured; the steps script and exact checks are recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
@@ -502,3 +502,81 @@ the newly added path has not been repeated in the live app.
 | Clippy | Passed, exit 0 | Two existing warnings remain in `environment.rs` and `harness_catalog.rs`; neither file was changed |
 | Documentation gates | Passed | `npm run test:docs`: 19 passed; `npm run check:docs`: 119 Markdown files |
 | Agent diff gate | Passed | `npm run check:agent -- --base d8e3a1a780599cbdcece4710df2b603860065e7a` covered the committed diff before push |
+
+
+## Wait, capacity, configuration and recovery history (#1909)
+
+Closes the row-14 "under audit" gap: the append-only Circuit Run History now
+records a first-class `source` (who/what produced the event) and `disposition`
+(what Buildmesh did with it) on every entry, alongside the existing identity
+(`node_id`/`attempt`) and time (`observed_at`). Schema v45 adds the two nullable
+columns; pre-v45 rows keep reading. This is the #1847 contract — each event
+records the run, step, attempt, source, timestamps, and disposition.
+
+- **Wait** — `queue_wait` (run admission) carries source
+  `circuit_worker.admission` / disposition `waiting`; `evidence_window_changed`
+  carries `circuit_worker.reconciliation` / `waiting`. `queue_wait` is run-level,
+  so it has no step identity — honest "where applicable".
+- **Capacity/admission** — `step_capacity_wait` now records the parked step's
+  `attempt` (previously NULL) in addition to source `circuit_worker.capacity` /
+  disposition `waiting`. Queue exit is the existing `run_transition` → `running`
+  entry, now carrying source/disposition.
+- **Configuration revision** — `configuration_pinned` carries source
+  `run.configuration` / disposition `applied`; its `detail` already pins the
+  behavior revision, graph SHA-256 and reviewer allowlist. (`behavior_revision`
+  remains the recorded placeholder `1`; the graph hash is the identity the Probe
+  shows. Redefining the revision scheme is out of scope.)
+- **Recovery** — a new `recovery` entry is appended to the failed predecessor
+  run when Continue review mints its successor, recording the successor run id
+  and round count with source `operator` / disposition `applied`, in the same
+  transaction that sets the successor's `recovery.from_run_id` context. Existing
+  `operator_attestation` / `evidence_recheck` entries now carry source `operator`
+  and the recorded action as disposition.
+
+The Probe renders these entries as structured, wrap-first text (reason, identity,
+and a uniform `Source: … · …` line) rather than raw JSON.
+
+### Automated evidence
+
+| Check | Result | Scope / limitation |
+|---|---|---|
+| `scripts\check.ps1 all -SerialRust` — full `cargo test --locked --lib` | 3,843 passed, 2 failed, 24 ignored | The 2 failures are ambient-environment assertions unrelated to this change: `commands::agent_tests::agent_pty_gets_colour_capable_env` rejects the shell's `TERM_PROGRAM=vscode`, and `sandbox::spawn::curated_env_prepends_git_and_redirects_temp` rejects an `AppData\Local\Temp` value in the ambient env. Neither touches Circuit history |
+| Full `npx vitest run --pool=threads tests/unit` | 249 files passed, 3 failed | `conpty-runtime`, `mesh-properties-tab` and `circuits-probe-tab` pass in isolation; the parallel-run failures are load/ordering flakes, matching the recorded full-suite flakiness. The run must clear `NODE_ENV` (this shell sets `production`), or React 19's production build leaves `React.act` undefined and every component test fails |
+| Full `npx vitest run --pool=threads tests/integration` | Passed (10 files) | Includes the mock-mode 240px Circuit Run History check |
+| `cargo test --locked --lib circuit` | Passed (536) | Includes the new reopen/projection-agreement test and the extended queue/config/recovery provenance tests |
+| `cargo test --locked --lib init_schema_dump_matches_committed_snapshot` | Passed | Fresh-init schema dump matches the committed `schema_dump.txt` |
+| `npm run lint`, `npm run lint:fixtures`, `npm run build`, documentation gates, README drift, agent diff | Passed | From the same `scripts\check.ps1 all` run |
+
+The new Rust test
+`circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection`
+(file-backed DB) reopens the database and asserts every retained event has a
+source/disposition/identity/time, that the `queue_wait` / `step_capacity_wait` /
+`evidence_window_changed` identities agree with the step projection, that
+`configuration_pinned` agrees with `circuit_run_snapshots.behavior_revision`, and
+that the admitted run's `run_transition` records the queue exit.
+
+### Live 240px real-IPC check (operator-run)
+
+The real-backend check needs the Windows dev app (WebView2/CDP), so it is left
+for an operator:
+
+```
+powershell -File scripts\run-dev.ps1 -CdpPort 9223
+node scripts/ui-shot.mjs --out .tmp/1909-history-240.png --steps tests/integration/ui-shot-circuit-history.steps.mjs
+```
+
+`ui-shot-circuit-history.steps.mjs` seeds durable history rows for every causal
+kind through the dev DB, opens the Probe at 240px (`End` on the resize separator),
+and asserts, against the real `circuit_run_history` IPC:
+
+- the panel width is `<= 240` and neither the tab nor the history body overflows
+  sideways (`scrollWidth <= clientWidth`);
+- no `button`/`select`/`input` is clipped horizontally;
+- the admission reason ("all 2 circuit-run slot …"), the step-capacity binding,
+  and "Recovered into run #88" are visible;
+- the `Source: circuit_worker.admission · waiting` provenance line is visible, and
+  `data-disposition` is `waiting` on the queue wait and `applied` on the recovery.
+
+Inspect `.tmp/1909-history-240.png` and record the result here. Until then the
+live 240px viewport for this change remains unverified; the screenshot is not
+committed.
