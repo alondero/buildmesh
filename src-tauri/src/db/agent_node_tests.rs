@@ -51,6 +51,77 @@ mod tests {
         }
     }
 
+    fn circuit_recovery_fixture() -> (Connection, crate::db::agent_node::CircuitRecoveryFence) {
+        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        let conn = conn_with_agent_nodes();
+        conn.execute_batch("CREATE TABLE autopilot_circuit_runs(id INTEGER PRIMARY KEY,state TEXT,context_json TEXT);
+            CREATE TABLE autopilot_circuit_run_steps(run_id INTEGER,node_id TEXT,status TEXT,attempt INTEGER,agent_node_id INTEGER);
+            INSERT INTO agent_nodes(id,status,session_started_at,status_changed_at) VALUES(77,'running',100,'2000-01-01T00:00:00Z');
+            INSERT INTO autopilot_circuit_runs VALUES(1,'running','{\"source.agent_id\":\"77\"}');
+            INSERT INTO autopilot_circuit_run_steps VALUES(1,'gate','unverified',1,NULL);").unwrap();
+        let fence = crate::db::agent_node::CircuitRecoveryFence {
+            run_id: 1, step_id: "gate".into(), attempt: 1, agent_node_id: 77,
+            graph: CircuitGraph { version: 3, blueprint: None, edges: vec![], nodes: vec![CircuitNode {
+                id: "gate".into(), kind: CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) },
+            }] },
+        };
+        (conn, fence)
+    }
+
+    #[test]
+    fn circuit_recovery_waiting_for_writer_rechecks_paused_and_cancelled_borrowed_run() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+        for state in ["paused", "cancelled"] {
+            for recovery_status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
+                let (conn, fence) = circuit_recovery_fixture();
+                let writer = Arc::new(Mutex::new(conn));
+                // Recovery already passed its observational Running check.
+                let lock = writer.lock().unwrap();
+                assert_eq!(lock.query_row("SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, String>(0)).unwrap(), "running");
+                let worker_writer = writer.clone();
+                let (waiting_tx, waiting_rx) = mpsc::channel();
+                let recovery = std::thread::spawn(move || {
+                    waiting_tx.send(()).unwrap();
+                    let mut conn = worker_writer.lock().unwrap();
+                    let transaction = conn.transaction().unwrap();
+                    let committed = crate::db::agent_node::recover_circuit_agent_turn_inner(
+                        &transaction, &fence, "100:2000-01-01T00:00:00Z", recovery_status).unwrap();
+                    transaction.commit().unwrap();
+                    committed
+                });
+                waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                lock.execute("UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1", [state]).unwrap();
+                drop(lock);
+                assert!(!recovery.join().unwrap(), "{state} must suppress {recovery_status:?} and its lifecycle publication");
+                assert_eq!(current_status(&writer.lock().unwrap(), 77), "running", "borrowed source is untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn circuit_recovery_atomically_checks_attempt_target_and_lifecycle() {
+        for change in ["UPDATE autopilot_circuit_run_steps SET attempt=2",
+            "UPDATE autopilot_circuit_runs SET context_json='{\"source.agent_id\":\"88\"}'",
+            "UPDATE agent_nodes SET session_started_at=101"] {
+            let (mut conn, fence) = circuit_recovery_fixture();
+            conn.execute_batch(change).unwrap();
+            let transaction = conn.transaction().unwrap();
+            assert!(!crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
+                "100:2000-01-01T00:00:00Z", SessionStatus::Ready).unwrap(), "{change}");
+            transaction.commit().unwrap();
+            assert_eq!(current_status(&conn, 77), "running");
+        }
+        for recovery_status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
+            let (mut conn, fence) = circuit_recovery_fixture();
+            let transaction = conn.transaction().unwrap();
+            assert!(crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
+                "100:2000-01-01T00:00:00Z", recovery_status).unwrap());
+            transaction.commit().unwrap();
+            assert_eq!(current_status(&conn, 77), recovery_status.to_db_str());
+        }
+    }
+
     fn insert_node(conn: &Connection, status: &str) -> i64 {
         conn.execute(
             "INSERT INTO agent_nodes (status) VALUES (?1)",

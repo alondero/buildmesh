@@ -13,6 +13,9 @@ pub(crate) struct ReportSnapshot {
     pub text: String,
     pub revision: String,
     pub published_at_ms: i64,
+    /// Native turn boundary, independent of the displayed agent status.
+    /// This says nothing about task correctness or complete owned-work coverage.
+    pub turn_finished: bool,
     source: ReportSource,
 }
 
@@ -27,70 +30,110 @@ impl ReportSnapshot {
     }
 }
 
-pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) -> Option<ReportSnapshot> {
-    if format == TranscriptFormat::OpenCode {
-        let (path, session_id) = opencode_resolve(Some(session_id), node_path).ok()?;
-        let rows = read_opencode_message_rows(&path, session_id, OPENCODE_DIGEST_WINDOW)?;
-        let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
-        let last = parsed.turns.last()?;
-        if last.role != "assistant" || !last.tool_calls.is_empty() { return None; }
-        let report = opencode_assistant_report(&path, session_id)?;
-        let published_at_ms = rows.last()?.1.pointer("/info/time/completed")?.as_i64()?;
-        let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision, published_at_ms,
-            source: ReportSource::OpenCode { path, session_id: session_id.into(), rows } };
-        return snapshot.is_current().then_some(snapshot);
-    }
-    from_file(&locate_transcript(format, session_id, node_path)?, format)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportReadError {
+    Unsupported, NoSession, NoTranscript, Unreadable, PartialPublication,
+    MalformedRecord, NoReport, WorkInProgress, NoNativeCompletion,
+    NoTimestamp, ChangedDuringRead,
 }
 
+impl ReportReadError {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Unsupported => "this harness has no readable report adapter",
+            Self::NoSession => "the harness session identity has not been captured",
+            Self::NoTranscript => "the current session transcript has not been found",
+            Self::Unreadable => "the transcript could not be read",
+            Self::PartialPublication => "the harness is still publishing a transcript record",
+            Self::MalformedRecord => "the transcript contains an unrecognised or malformed record",
+            Self::NoReport => "the current turn has not published an assistant report",
+            Self::WorkInProgress => "newer input or tool activity follows the assistant report",
+            Self::NoNativeCompletion => "the harness has not recorded a current finished turn",
+            Self::NoTimestamp => "the report has no usable publication timestamp",
+            Self::ChangedDuringRead => "the transcript changed while it was being read",
+        }
+    }
+}
+
+pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) -> Result<ReportSnapshot, ReportReadError> {
+    use ReportReadError as E;
+    if format == TranscriptFormat::OpenCode {
+        let (path, session_id) = opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
+        let rows = read_opencode_message_rows(&path, session_id, OPENCODE_DIGEST_WINDOW).ok_or(E::Unreadable)?;
+        let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
+        let last = parsed.turns.last().ok_or(E::NoReport)?;
+        if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
+        let report = opencode_assistant_report(&path, session_id).ok_or(E::NoReport)?;
+        let published_at_ms = rows.last().and_then(|row| row.1.pointer("/info/time/completed"))
+            .and_then(|time| time.as_i64()).ok_or(E::NoTimestamp)?;
+        let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision, published_at_ms,
+            // Message completion is not a native session-idle boundary.
+            turn_finished: false,
+            source: ReportSource::OpenCode { path, session_id: session_id.into(), rows } };
+        return if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) };
+    }
+    read_file(&locate_transcript(format, session_id, node_path).ok_or(E::NoTranscript)?, format)
+}
+
+#[cfg(test)]
 fn from_file(path: &Path, format: TranscriptFormat) -> Option<ReportSnapshot> {
-    let metadata = fs::metadata(path).ok()?;
-    // A partial trailing record can be a new prompt/tool call. The ordinary
-    // digest may display the preceding report, but a Circuit cannot act on it.
-    let mut file = fs::File::open(path).ok()?;
-    file.seek(SeekFrom::End(-1)).ok()?;
+    read_file(path, format).ok()
+}
+
+fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, ReportReadError> {
+    use ReportReadError as E;
+    let metadata = fs::metadata(path).map_err(|_| E::Unreadable)?;
+    let mut file = fs::File::open(path).map_err(|_| E::Unreadable)?;
+    if metadata.len() == 0 { return Err(E::NoReport); }
+    file.seek(SeekFrom::End(-1)).map_err(|_| E::Unreadable)?;
     let mut last_byte = [0];
-    file.read_exact(&mut last_byte).ok()?;
-    if last_byte[0] != b'\n' { return None; }
+    file.read_exact(&mut last_byte).map_err(|_| E::Unreadable)?;
+    if last_byte[0] != b'\n' { return Err(E::PartialPublication); }
     let start = metadata.len().saturating_sub(256 * 1024);
-    file.seek(SeekFrom::Start(start)).ok()?;
+    file.seek(SeekFrom::Start(start)).map_err(|_| E::Unreadable)?;
     let mut reader = BufReader::new(file.take(metadata.len() - start));
-    if start > 0 { reader.read_until(b'\n', &mut Vec::new()).ok()?; }
-    let lines = reader.lines().collect::<Result<Vec<_>, _>>().ok()?;
+    if start > 0 { reader.read_until(b'\n', &mut Vec::new()).map_err(|_| E::Unreadable)?; }
+    let lines = reader.lines().collect::<Result<Vec<_>, _>>().map_err(|_| E::Unreadable)?;
     let mut last = None;
     let mut published_at_ms = None;
     for line in &lines {
         if line.trim().is_empty() { continue; }
-        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        // Whole-turn parsing coalesces earlier tool calls into a later final
-        // answer. Here only the last dialogue record decides report readiness.
+        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|_| E::MalformedRecord)?;
+        // Only the last dialogue record decides readiness; full-turn parsing
+        // coalesces earlier tool calls with a later final answer.
         let parsed = parse_transcript(format, std::iter::once(line.clone()), 1);
-        if parsed.saw_malformed { return None; }
+        if parsed.saw_malformed { return Err(E::MalformedRecord); }
         if let Some(turn) = parsed.turns.into_iter().last() {
             published_at_ms = record_time(format, &value);
             last = Some(turn);
         }
     }
-    let last = last?;
-    if last.role != "assistant" || !last.tool_calls.is_empty() { return None; }
-    match format {
+    let last = last.ok_or(E::NoReport)?;
+    if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
+    let turn_finished = match format {
         TranscriptFormat::Codex => {
-            // Display parsing ignores native task_started/reasoning records.
-            // Require the native current-turn boundary, not a prior final text.
-            let completion = adapter::dispatch("codex")?.completed_turn(&lines.join("\n"))?;
+            let completion = adapter::dispatch("codex").and_then(|adapter| adapter.completed_turn(&lines.join("\n")))
+                .ok_or(E::NoNativeCompletion)?;
             published_at_ms = Some(completion.completed_at_ms);
+            true
         }
-        TranscriptFormat::Muse if !crate::services::muse_watcher::report_turn_finished(&lines) => return None,
-        TranscriptFormat::CommandCode if !crate::services::commandcode_watcher::report_turn_finished(&lines) => return None,
-        _ => {}
-    }
-    let report = assistant_report_from_file(path, format)?;
+        TranscriptFormat::Muse => {
+            if !crate::services::muse_watcher::report_turn_finished(&lines) { return Err(E::NoNativeCompletion); }
+            true
+        }
+        TranscriptFormat::CommandCode => {
+            if !crate::services::commandcode_watcher::report_turn_finished(&lines) { return Err(E::NoNativeCompletion); }
+            true
+        }
+        _ => false,
+    };
+    let report = assistant_report_from_file(path, format).ok_or(E::NoReport)?;
     let snapshot = ReportSnapshot {
         text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision,
-        published_at_ms: published_at_ms?,
-        source: ReportSource::File { path: path.into(), length: metadata.len(), modified: metadata.modified().ok()? },
+        published_at_ms: published_at_ms.ok_or(E::NoTimestamp)?, turn_finished,
+        source: ReportSource::File { path: path.into(), length: metadata.len(), modified: metadata.modified().map_err(|_| E::Unreadable)? },
     };
-    snapshot.is_current().then_some(snapshot)
+    if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) }
 }
 
 fn record_time(format: TranscriptFormat, value: &serde_json::Value) -> Option<i64> {
@@ -135,6 +178,61 @@ mod tests {
             }),
         };
         (run, event)
+    }
+
+    #[test]
+    fn native_report_preflight_recovers_running_projection_and_unverified_checkpoint() {
+        use crate::services::circuit_worker::readiness;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::agent::process::InputUnavailable;
+        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        // Minimal replay of run 239's native final-answer/task_complete pair.
+        let lines = concat!(
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-09-26T21:31:29.928Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Raised the PR. Checks passed.\"}]}}\n",
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-09-26T21:31:31.048Z\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn\",\"last_agent_message\":\"Raised the PR. Checks passed.\"}}\n"
+        );
+        fs::write(&path, lines).unwrap();
+        let report = read_file(&path, TranscriptFormat::Codex).unwrap();
+        assert!(report.turn_finished);
+        let (mut run, _) = classified_run(report.clone());
+        let agent = AgentNode { id: 900, provider: "codex".into(), cli_session_id: Some("session".into()),
+            status: SessionStatus::Running, ..Default::default() };
+        for status in [StepStatus::Running, StepStatus::Unverified] {
+            run.step_mut("await_source").unwrap().status = status;
+            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(report.clone())).unwrap().unwrap();
+            assert_eq!(candidate.status, SessionStatus::Ready);
+            let mut recovered = run.clone();
+            let transition = advance(&mut recovered, &CircuitEvent::TurnClassified {
+                node_id: "await_source".into(), classification: Some(crate::autopilot::evaluator::Classification::Completed),
+                output: Some(candidate.output), binding: Some(candidate.binding),
+            });
+            assert_eq!(recovered.state, RunState::Completed);
+            assert!(!transition.classifications[0].lifecycle_verified, "report handoff must not fabricate owned-work proof");
+        }
+        for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft), (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {
+            assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Err(input), Ok(report.clone())).err(), Some(blocker));
+        }
+        run.context.set("agent.900.previous_report_revision", &report.revision);
+        assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(report)).err(), Some(B::ReportSuperseded));
+        fs::write(&path, format!("{lines}{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"next\"}}}}\n")).unwrap();
+        assert_eq!(read_file(&path, TranscriptFormat::Codex).unwrap_err(), ReportReadError::NoNativeCompletion);
+    }
+
+    #[test]
+    fn report_read_failures_preserve_the_actual_observation_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        for (body, reason) in [
+            ("", ReportReadError::NoReport),
+            ("{\"type\":", ReportReadError::PartialPublication),
+            ("not json\n", ReportReadError::MalformedRecord),
+            ("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Next task\"}}\n", ReportReadError::WorkInProgress),
+        ] {
+            fs::write(&path, body).unwrap();
+            assert_eq!(read_file(&path, TranscriptFormat::CommandCode).unwrap_err(), reason);
+        }
     }
 
     #[test]

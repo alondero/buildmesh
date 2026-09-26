@@ -60,11 +60,11 @@ pub fn publish_ready(
 pub(crate) fn recover_ready(
     node_id: i64, app: &AppHandle,
     detail: crate::agent::session_lifecycle::HookSignalDetail,
-    stamp: &str, input: &str, completed_at_ms: i64,
+    recovery: &crate::agent::session_lifecycle::CircuitTurnRecovery<'_>,
 ) {
     match crate::agent::session_lifecycle::recover_turn_completed(
         &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
-        node_id, &detail, stamp, input, completed_at_ms,
+        node_id, &detail, recovery,
     ) {
         Ok(true) => publish_passive(node_id, app),
         Ok(false) => {},

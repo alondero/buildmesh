@@ -873,6 +873,46 @@ pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, s
         params![id, stamp, chrono::Utc::now().to_rfc3339()])? == 1)
 }
 
+/// Immutable ownership of a Circuit recovery request. Validate it under the
+/// same writer transaction as the node mutation, after any writer contention.
+pub(crate) struct CircuitRecoveryFence {
+    pub run_id: i64,
+    pub step_id: String,
+    pub attempt: i32,
+    pub agent_node_id: i64,
+    pub graph: crate::autopilot::circuit::model::CircuitGraph,
+}
+
+pub(crate) fn recover_circuit_agent_turn_inner(
+    conn: &Connection, fence: &CircuitRecoveryFence, stamp: &str, status: SessionStatus,
+) -> SqlResult<bool> {
+    use rusqlite::OptionalExtension;
+    use crate::autopilot::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
+    if !matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
+    let Some((state, context)) = conn.query_row(
+        "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1", [fence.run_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional()? else { return Ok(false); };
+    if state != "running" { return Ok(false); }
+    let Ok(context) = CircuitContext::from_json(&context) else { return Ok(false); };
+    let mut statement = conn.prepare("SELECT node_id,status,attempt,agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1")?;
+    let steps = statement.query_map([fence.run_id], |row| Ok(StepView {
+        node_id: row.get(0)?, status: StepStatus::from_db_str(&row.get::<_, String>(1)?),
+        attempt: row.get(2)?, agent_node_id: row.get(3)?, outcome: None, error: None,
+    }))?.collect::<SqlResult<Vec<_>>>()?;
+    let view = RunView { run_id: fence.run_id, state: RunState::Running, context, steps, graph: fence.graph.clone() };
+    let Some(step) = view.step(&fence.step_id) else { return Ok(false); };
+    if step.attempt != fence.attempt || !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+        || step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) != Some(fence.agent_node_id) {
+        return Ok(false);
+    }
+    if status == SessionStatus::Ready { return complete_agent_turn_if_current_inner(conn, fence.agent_node_id, stamp); }
+    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4
+        WHERE id=?1 AND status='running'
+        AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at,'')=?2",
+        params![fence.agent_node_id, stamp, status.to_db_str(), chrono::Utc::now().to_rfc3339()])? == 1)
+}
+
 /// Parse an `agent_nodes.status_changed_at` value to epoch milliseconds.
 ///
 /// Rows carry either RFC3339 (every status write since migration v14) or

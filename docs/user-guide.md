@@ -69,6 +69,25 @@ The first successful loop is: **install → configure → spawn → inspect → 
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
 
+## Understand a circuit checkpoint
+
+An **Unverified Checkpoint** means Buildmesh cannot currently establish the
+evidence needed for the next circuit step. It does not mean the agent failed,
+and a Done label on the agent does not by itself prove the circuit can advance.
+
+Expand the run and inspect its reason and Circuit Run History. The reason can
+identify missing session/report evidence, changed input, or uncertain input
+tracking. Finish or clear a real draft before rechecking; answer an actual
+question or permission request in its session. **Recheck evidence** asks
+Buildmesh to inspect again without repeating an uncertain external action.
+Unverified agent steps also continue observing for fresh evidence automatically.
+
+A finished report can hand work to the next gate even when a harness cannot
+expose all background-task ownership. Known unfinished work and actual input
+requests still block progress. Review approval and merge requirements remain
+separate. A slow classification or verification operation is queued independently
+so other sessions can continue being observed.
+
 ## Group nodes into tabs
 
 In a grid with **Custom** ordering, drag a node by its title onto another node

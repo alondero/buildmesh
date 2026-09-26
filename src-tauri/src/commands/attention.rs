@@ -52,6 +52,17 @@ pub fn mark_attention(node_id: i64, app: &AppHandle) {
     mark_attention_with_signal(node_id, app, None, &crate::agent::session_lifecycle::HookSignalDetail::default());
 }
 
+pub(crate) fn recover_attention(
+    node_id: i64, app: &AppHandle, recovery: &crate::agent::session_lifecycle::CircuitTurnRecovery<'_>,
+) {
+    match crate::agent::session_lifecycle::recover_attention(&AppSessionLifecycleSink { app },
+        node_id, recovery) {
+        Ok(true) => crate::attention_autoclear::on_signal_marked(node_id, None, None),
+        Ok(false) => {},
+        Err(error) => tracing::warn!(node_id, %error, "failed to recover attention"),
+    }
+}
+
 /// [`mark_attention`] with a full provider envelope (issue #1364). One call
 /// performs the single transition: status write, `attention-needed` (legacy)
 /// and `agent-lifecycle` (both transports), plus the autoclear arm.

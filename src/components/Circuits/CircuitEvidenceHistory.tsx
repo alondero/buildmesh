@@ -11,7 +11,7 @@ import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 
 const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
-  review_continuation: 'Continued a failed review',
+  review_continuation: 'Continued a failed review', observation_readiness: 'Session observation',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
@@ -152,6 +152,11 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
     switch (entry.kind) {
       case 'queue_wait': return <p className="text-text-secondary break-words">{queueWaitText(entry.detail)}</p>;
       case 'step_capacity_wait': return <p className="text-text-secondary break-words">{stepCapacityWaitText(entry.detail)}</p>;
+      case 'observation_readiness': {
+        const detail = parseDetail<Record<string, unknown>>(entry.detail);
+        return <p className="text-text-secondary break-words">{typeof detail?.message === 'string'
+          ? detail.message : entry.disposition === 'resolved' ? 'Observation blocker cleared; the current report can be checked.' : 'Observation is waiting for fresh evidence.'}</p>;
+      }
       case 'evidence_window_changed': return <p className="text-text-secondary break-words">{evidenceWindowText(entry.detail)}</p>;
       case 'configuration_pinned': return <p className="text-text-secondary break-words">{configurationText(entry.detail)}</p>;
       case 'review_continuation': return <p className="text-text-secondary break-words">{reviewContinuationText(entry.detail)}</p>;

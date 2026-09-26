@@ -3,6 +3,41 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Why interpretation cannot yet drive a Circuit. These are observation
+/// failures, not model verdicts or failed external effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "CircuitObservationBlocker.ts")]
+pub enum CircuitObservationBlocker {
+    SessionIdentityUnavailable,
+    ProcessUnavailable,
+    InputDraft,
+    InputUncertain,
+    InputPaste,
+    ReportUnavailable { reason: String },
+    ReportSuperseded,
+    KnownWorkOutstanding,
+    HumanResponseRequired,
+    EvidenceConflict,
+}
+
+impl CircuitObservationBlocker {
+    pub fn message(&self) -> String {
+        match self {
+            Self::SessionIdentityUnavailable => "Waiting for the harness session identity. Buildmesh will retry discovery automatically.".into(),
+            Self::ProcessUnavailable => "The agent process is unavailable. Inspect or resume the agent; process reconciliation remains active.".into(),
+            Self::InputDraft => "The terminal contains an unsubmitted draft. Submit or clear it; Buildmesh will recheck the finished report without sending a prompt.".into(),
+            Self::InputUncertain => "Terminal input tracking is uncertain. Submit or clear the prompt to re-establish its input boundary; Buildmesh will recheck automatically.".into(),
+            Self::InputPaste => "A terminal paste is still open. Finish or cancel the paste; Buildmesh will recheck automatically.".into(),
+            Self::ReportUnavailable { reason } => format!("Waiting for a usable harness report: {reason}. Buildmesh will recheck automatically; no classifier call is needed yet."),
+            Self::ReportSuperseded => "The available report precedes the current session or assigned prompt. Waiting for a fresh report from this turn.".into(),
+            Self::KnownWorkOutstanding => "The harness reports unfinished child or background work. Waiting for its completion evidence.".into(),
+            Self::HumanResponseRequired => "The harness has an unresolved question or permission request. Respond in the agent session; a completion report cannot answer it.".into(),
+            Self::EvidenceConflict => "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitObservationIdentity.ts")]
 pub struct ObservationIdentity {

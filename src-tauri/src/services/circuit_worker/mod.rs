@@ -56,9 +56,11 @@ use crate::autopilot::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod github;
+mod jobs;
 #[cfg(test)]
 mod github_recovery_tests;
 mod codex_observer;
+pub(crate) mod readiness;
 pub(crate) mod observer_policy;
 pub(crate) mod native_hooks;
 mod spawn;
@@ -167,6 +169,8 @@ pub fn mark_circuit_run_cancelled(run_id: i64) {
     });
     entry.cancelled.store(true, Ordering::Release);
     entry.finished = false;
+    drop(active);
+    jobs::cancel_run(run_id);
 }
 
 /// Release a cancellation marker once the run's durable state is terminal.
@@ -390,7 +394,7 @@ pub fn start_circuit_worker(app: AppHandle) {
                 });
                 run_worker_pass("circuits:drive", || run_pass(&app));
                 run_worker_pass("circuits:watchdog", || {
-                    lost_turn_watchdog_pass(&app);
+                    jobs::watchdog(app.clone());
                 });
                 // Issue #1793: reap piloted nodes stuck `running` with no
                 // session identity or readable report. Self-throttled, so this
@@ -556,6 +560,7 @@ fn run_pass(app: &AppHandle) {
     // Borrows the already-loaded active-run slice so the sweep costs
     // zero heap on the hot 2-second tick.
     sweep_stale_approvals(&runs);
+    jobs::retain_runs(&runs);
 
     // Issue #1467: cache the mesh row per unique mesh id so a mesh with
     // N pending runs but only 1 row read is the common case in the
@@ -761,6 +766,7 @@ fn drive_run(
         context: context.clone(),
         steps: load_steps(active.run.id)?,
     };
+    jobs::reconcile(&view);
 
     if let Some(source) = active.run.source_agent_node_id {
         let lost = db::get_agent_node_by_id(source).map(|n|
@@ -1724,8 +1730,8 @@ fn observe_close_agent_retries(view: &RunView, events: &mut Vec<CircuitEvent>) {
 
 /// Gate observation (#1207): for each Running gate step, perform the
 /// impure part of the gate (LLM classification / deterministic command)
-/// and feed the result back as a pure event in THIS pass — so a gate
-/// decision lands without waiting another tick.
+/// on bounded background jobs. Pending work is not a classifier failure;
+/// completed results return through the ordinary single-writer transition.
 fn observe_gates(
     active: &db::ActiveCircuitRun,
     view: &RunView,
@@ -1754,11 +1760,18 @@ fn observe_gates(
                     events.push(CircuitEvent::ContinuationRetry { node_id: step.node_id.clone(), attempt: step.attempt });
                     continue;
                 }
-                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn, binding }) =
-                    classify_step_turn(active, view, &step.node_id)
+                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn, binding, observation_blocker }) =
+                    jobs::classify(active, view, step)
                 {
+                    if let Some(blocker) = observation_blocker {
+                        events.push(CircuitEvent::ObservationDeferred {
+                            node_id: step.node_id.clone(), attempt: step.attempt, agent_node_id, blocker,
+                        });
+                        continue;
+                    }
                     if waiting_for_a_finished_turn {
                         events.push(CircuitEvent::TurnParked {
+                            report_revision: binding.as_ref().map(|binding| binding.report_revision.clone()),
                             node_id: step.node_id.clone(),
                             output,
                         });
@@ -1790,21 +1803,12 @@ fn observe_gates(
                 }
             }
             Some(CircuitNodeKind::DeterministicVerification { command }) if step.status == StepStatus::Running => {
-                let resolved = view.context.resolve(command);
-                let mesh_path = db::get_mesh_by_id(active.run.mesh_id)
-                    .map(|m| m.path)
-                    .unwrap_or_default();
-                let green = run_verification_command(&mesh_path, &resolved);
-                tracing::info!(
-                    "circuits: verification '{}' → {} for run {}",
-                    resolved,
-                    if green { "green" } else { "red" },
-                    active.run.id
-                );
-                events.push(CircuitEvent::VerificationResult {
-                    node_id: step.node_id.clone(),
-                    green,
-                });
+                if let Some(green) = jobs::verify(active, view, step, command) {
+                    events.push(CircuitEvent::VerificationResult {
+                        node_id: step.node_id.clone(),
+                        green,
+                    });
+                }
             }
             _ => {}
         }
@@ -1814,6 +1818,7 @@ fn observe_gates(
 /// Classify a yielded agent's report once per gate attempt. A readable
 /// transcript also recovers turns produced before restart restored buffering.
 struct ClassifiedTurn {
+    observation_blocker: Option<crate::autopilot::circuit::observation::CircuitObservationBlocker>,
     binding: Option<crate::autopilot::circuit::stepper::ClassificationBinding>,
     agent_node_id: i64,
     classification: Option<crate::autopilot::evaluator::Classification>,
@@ -1832,178 +1837,69 @@ fn classify_step_turn(
     use crate::autopilot::evaluator;
     let step = view.step(node_id)?;
     let agent_node_id = step.agent_node_id.or_else(|| view.resolve_target_agent(node_id))?;
-    if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
-        || view.report_has_known_blockers(node_id) {
+    if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
         return None;
     }
-    let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
-    let prefix = format!("node.{node_id}");
-    let retry_due = view.context.get(&format!("{prefix}.evaluated_attempt"))
-        .and_then(|attempt| attempt.parse::<i32>().ok()) == Some(step.attempt)
-        && view.context.get(&format!("{prefix}.classification")) == Some("unavailable")
-        && since_evaluation_ms.is_some_and(|elapsed| elapsed >= 60_000);
-    let observed_stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
-    let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id);
-    let mut agent_node = db::get_agent_node_by_id(agent_node_id).ok()?;
-    let evidence = view.classifier_evidence(node_id);
-    let mut binding = evidence.as_ref().and_then(|evidence| {
-        let owner = evidence.identity.clone()?;
-        let report = evidence.report.as_ref()?;
-        let input = input_stamp.as_ref()?;
-        let incarnation = observed_stamp.as_deref()?.split_once(':')?.0;
-        if report.input_stamp.as_ref() != Some(input)
-            || owner.session_id != agent_node.cli_session_id
-            || owner.session_incarnation.as_deref() != Some(incarnation) { return None; }
-        Some(crate::autopilot::circuit::stepper::ClassificationBinding {
-            owner,
-            report_revision: report.revision.clone(),
-            input_guard: crate::autopilot::circuit::stepper::ObservationInputFence {
-                transcript_guard: None, report_guard: None,
-                agent_node_id, input_stamp: input.clone(), observed_at_ms: report.observed_at_ms,
-                session_id: agent_node.cli_session_id.clone()?, session_incarnation: incarnation.into(),
-            },
-        })
-    });
-    let yielded = matches!(
-        agent_node.status,
-        SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
-    );
-    if !yielded {
-        return None;
-    }
-    // Do not open a transcript, clone/scrub the PTY tail, or hit the regex
-    // cleaner unless this gate/attempt has fresh output, needs its one
-    // post-restart recovery probe, or is due for the bounded backend retry.
-    // Probe ownership is per gate attempt, not per agent: two downstream
-    // classifiers may legitimately consume one unchanged assistant report.
-    let probe_key = format!("run:{}:node:{node_id}:attempt:{}", active.run.id, step.attempt);
-    let probe_generation = evaluator::begin_circuit_probe(
-        agent_node_id,
-        &probe_key,
-        retry_due || has_unconsumed_classifier_evidence(view, node_id)
-            || (step.status == StepStatus::Unverified && since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000)),
-    )?;
-    if agent_node.cli_session_id.as_deref().is_none_or(str::is_empty) {
+    let probe_key = format!("report:{}:{node_id}:{}", active.run.id, step.attempt);
+    // A bounded pull runs even without PTY bytes or a correct display status.
+    // Polling evidence does not spend classifier budget.
+    let generation = evaluator::begin_circuit_probe(agent_node_id, &probe_key, false)?;
+    evaluator::note_circuit_probe(agent_node_id, &probe_key, generation);
+    let mut agent = db::get_agent_node_by_id(agent_node_id).ok()?;
+    if agent.cli_session_id.as_deref().is_none_or(str::is_empty) {
         match crate::services::session_recovery::recover_live_node(agent_node_id) {
-            Ok(Some(_)) => agent_node = db::get_agent_node_by_id(agent_node_id).ok()?,
+            Ok(Some(_)) => agent = db::get_agent_node_by_id(agent_node_id).ok()?,
             Ok(None) => {},
             Err(error) => tracing::warn!("circuits: session recovery for agent {agent_node_id}: {error}"),
         }
     }
     let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
-    if stamp != observed_stamp { return None; }
-    let transcript = crate::coordinator::enrichment::assistant_report(&agent_node);
-    let revision = transcript.as_ref().map(|r| r.revision.clone());
-    let report_snapshot = crate::coordinator::enrichment::circuit_report_snapshot(&agent_node);
-    if binding.is_none() {
-        binding = report_snapshot.as_ref().and_then(|report| {
-            if view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")) == Some(report.revision.as_str()) {
-                return None;
-            }
-            let incarnation = observed_stamp.as_deref()?.split_once(':')?.0.to_owned();
-            if report.published_at_ms < incarnation.parse::<i64>().ok()? { return None; }
-            let session_id = agent_node.cli_session_id.clone()?;
-            Some(crate::autopilot::circuit::stepper::ClassificationBinding {
-                owner: crate::autopilot::circuit::observation::ObservationIdentity {
-                    run_id: view.run_id, step_id: node_id.into(), attempt: step.attempt, agent_node_id,
-                    session_incarnation: Some(incarnation.clone()), session_id: Some(session_id.clone()),
-                    turn_id: None, report_revision: Some(report.revision.clone()),
-                },
-                report_revision: report.revision.clone(),
-                input_guard: crate::autopilot::circuit::stepper::ObservationInputFence {
-                    transcript_guard: None, report_guard: Some(report.clone()), agent_node_id,
-                    input_stamp: input_stamp.clone()?, observed_at_ms: report.published_at_ms,
-                    session_id, session_incarnation: incarnation,
-                },
-            })
-        });
-    }
-    let native_report = binding.as_ref().and_then(|_| evidence.as_ref()?.report.as_ref().map(|report| report.text.clone()));
-    let bound_report = binding.as_ref().and_then(|binding| binding.input_guard.report_guard.as_ref().map(|report| report.text.clone()));
-    let Some(output) = bound_report.or(native_report).or_else(|| select_turn_report(
-        transcript,
-        view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
-        crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id) && evaluator::has_turn_start(agent_node_id),
-        || evaluator::cleaned_turn_tail(agent_node_id),
-    )) else {
-        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
-        return None;
+    let input = crate::agent::process::PROCESS_REGISTRY.input_stamp_result(agent_node_id);
+    let snapshot = crate::coordinator::enrichment::circuit_report_snapshot(&agent);
+    let candidate = match readiness::prepare(view, node_id, &agent, stamp.as_deref(), input, snapshot) {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => return None,
+        Err(blocker) => return Some(ClassifiedTurn {
+            observation_blocker: Some(blocker), agent_node_id, classification: None,
+            binding: None, output: String::new(), continuation: None, waiting_for_a_finished_turn: false,
+        }),
     };
-    // A redraw suppression or a yielded agent with no published report is not
-    // a classifier failure. It must not reach an LLM or emit a stepper event.
-    if output.trim().is_empty() {
-        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
-        return None;
-    }
-    if !should_classify_report(view, node_id, agent_node.status, &output, since_evaluation_ms) {
-        evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
-        return None;
-    }
+    let readiness::Candidate { binding, output, status } = candidate;
+    let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
+    let changed_revision = view.context.get(&format!("node.{node_id}.evaluated_report_revision"))
+        .is_some_and(|previous| previous != binding.report_revision);
+    if !changed_revision && !should_classify_report(view, node_id, status, &output, since_evaluation_ms) { return None; }
     let classify = |prompt: &str| {
-        // Clean review turns need neither a classifier nor its credentials.
-        // Other gates use the mesh Autopilot side-channel, not the node model.
-        let backend_provider = db::get_mesh_by_id(active.run.mesh_id)
-            .ok()
+        let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
             .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
-            .unwrap_or_else(|| "claude".to_string());
-        let backend_env = crate::session_naming::naming_backend_env(&backend_provider).ok()?;
-        evaluator::classify_with_prompt(agent_node_id, &backend_env, prompt)
+            .unwrap_or_else(|| "claude".into());
+        let backend = crate::session_naming::naming_backend_env(&provider).ok()?;
+        evaluator::classify_with_prompt(agent_node_id, &backend, prompt)
     };
-    // A `verdict` gate consumes its report as the reviewer's verdict, so a
-    // reviewer that yielded mid-work must be left running rather than judged.
-    let readiness = reviewer_readiness(view, node_id, agent_node.status, &output, classify);
-    // The clock is stamped on every path: the readiness question is an LLM
-    // evaluation like any other, and `retry_due` reads this clock to bound how
-    // often a silent gate is re-observed.
-    evaluator::note_circuit_probe(agent_node_id, &probe_key, probe_generation);
+    let readiness = reviewer_readiness(view, node_id, status, &output, classify);
     evaluator::note_evaluation(agent_node_id);
-    let (classification, waiting_for_a_finished_turn) = match readiness {
-        // The reviewer is working. Record the observation and publish no verdict;
-        // the gate is judged when the report changes. Recording the observation
-        // is what stops an unchanged report from being re-observed, so this
-        // consumes no classifier budget — nothing failed.
-        ReviewerReadiness::Working => {
-            tracing::info!(
-                "circuits: run {} step {} agent {} yielded without a finished report — \
-                 waiting for the reviewer's next turn",
-                active.run.id,
-                node_id,
-                agent_node_id
-            );
-            (None, readiness.parks())
-        }
-        // We could not tell whether the report is finished, so no verdict is
-        // taken from it. Reporting the outage (rather than parking) is what
-        // admits the 60-second retry: a finished reviewer produces no further
-        // output, so an unchanged parked report would never be re-observed.
-        ReviewerReadiness::Unavailable => (None, readiness.parks()),
-        ReviewerReadiness::Reportable => (
-            classify_gate_report(view, node_id, agent_node.status, &output, classify),
-            readiness.parks(),
-        ),
+    let classification = match readiness {
+        ReviewerReadiness::Working | ReviewerReadiness::Unavailable => None,
+        ReviewerReadiness::Reportable => classify_gate_report(view, node_id, status, &output, classify),
     };
-    if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten() { return None; }
-    if input_stamp != crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id) { return None; }
-    if revision != crate::coordinator::enrichment::assistant_report(&agent_node).map(|r| r.revision) { return None; }
-    if report_snapshot.as_ref().is_some_and(|snapshot| !snapshot.is_current()) { return None; }
-    let mut classification = classification.filter(|c|
-        *c != evaluator::Classification::Continue || matches!(view.graph.node(node_id).map(|n| &n.kind),
+    if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
+        || crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_node_id).as_deref() != Some(binding.input_guard.input_stamp.as_str())
+        || binding.input_guard.report_guard.as_ref().is_some_and(|report| !report.is_current()) {
+        return None;
+    }
+    let mut classification = classification.filter(|value| *value != evaluator::Classification::Continue
+        || matches!(view.graph.node(node_id).map(|node| &node.kind),
             Some(CircuitNodeKind::LlmTurnClassifier { .. } | CircuitNodeKind::AwaitAgentTurn { .. })));
     let continuation = if classification == Some(evaluator::Classification::Continue) {
-        let evidence = stamp.zip(revision).zip(input_stamp).filter(|((_, revision), _)|
-            crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
-                && crate::coordinator::enrichment::assistant_report(&agent_node).is_some_and(|r| r.revision == *revision));
-        if evidence.is_none() { classification = Some(evaluator::Classification::Working); }
-        evidence.map(|((stamp, revision), input)| (stamp, revision, input))
+        let revision = crate::coordinator::enrichment::assistant_report(&agent).map(|report| report.revision);
+        let fresh = revision.as_deref() == Some(binding.report_revision.as_str())
+            && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id);
+        if !fresh { classification = Some(evaluator::Classification::Working); }
+        fresh.then(|| stamp.map(|stamp| (stamp, binding.report_revision.clone(), binding.input_guard.input_stamp.clone()))).flatten()
     } else { None };
-    tracing::info!(
-        "circuits: turn classifier for run {} step {} agent {} → {:?}",
-        active.run.id,
-        node_id,
-        agent_node_id,
-        classification
-    );
-    Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn, binding })
+    tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {classification:?}", active.run.id);
+    Some(ClassifiedTurn { observation_blocker: None, agent_node_id, classification, output, continuation,
+        waiting_for_a_finished_turn: readiness.parks(), binding: Some(binding) })
 }
 
 fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
@@ -2257,13 +2153,17 @@ fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, 
         .and_then(|attempt| attempt.parse::<i32>().ok()) == Some(step.attempt);
     let same_output = view.context.get(&format!("{prefix}.evaluated_output")) == Some(output);
     if same_attempt && same_output {
-        if step.status == StepStatus::Unverified { return since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000); }
+        // An unavailable interpretation did not consume the native owner as a
+        // verdict. That is not new evidence: retry the same report on the
+        // outage budget. Changed report revisions are admitted by the caller.
+        if view.context.get(&format!("{prefix}.classification")) == Some("unavailable") {
+            return since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000);
+        }
+        if step.status == StepStatus::Unverified
+            && view.context.get(&format!("{prefix}.evaluated_report_revision")).is_none_or(str::is_empty)
+            && view.context.get(&format!("{prefix}.classified_evidence_owner")).is_none_or(str::is_empty) { return true; }
         if has_unconsumed_classifier_evidence(view, node_id) { return true; }
-        // A failed backend must retry even when the ready agent stays silent.
-        // The cooldown uses the existing evaluator clock; restarting permits
-        // one immediate retry rather than losing the report indefinitely.
-        return view.context.get(&format!("{prefix}.classification")) == Some("unavailable")
-            && since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000);
+        return false;
     }
     true
 }
@@ -2271,11 +2171,25 @@ fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, 
 /// Run a DeterministicVerification command in the mesh directory and
 /// report green (exit 0) / red. Bounded wait (2 minutes), then kill and
 /// call it red — a hung check must not wedge the worker thread.
-fn run_verification_command(mesh_path: &str, command: &str) -> bool {
-    let (program, prefix): (&str, &[&str]) =
-        if cfg!(windows) { ("cmd", &["/C"]) } else { ("sh", &["-c"]) };
-    let mut cmd = crate::process_util::command_no_window(program);
-    cmd.args(prefix).arg(command).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+fn run_verification_command(mesh_path: &str, command: &str, cancelled: &AtomicBool, run_cancelled: &AtomicBool) -> bool {
+    if cancelled.load(Ordering::Acquire) || run_cancelled.load(Ordering::Acquire) { return false; }
+    let mut cmd = crate::process_util::command_no_window(if cfg!(windows) { "cmd" } else { "sh" });
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // This is shell source, not an argv value. Rust's ordinary escaping
+        // can turn nested PowerShell quotes into a successful string literal.
+        // /S removes exactly the outer quotes while preserving the source.
+        cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{command}\""));
+    }
+    #[cfg(not(windows))]
+    cmd.args(["-c", command]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     if !mesh_path.is_empty() {
         cmd.current_dir(mesh_path);
     }
@@ -2286,22 +2200,37 @@ fn run_verification_command(mesh_path: &str, command: &str) -> bool {
             return false;
         }
     };
+    let job = crate::process_util::JobHandle::contain(child.id());
+    let terminate = |child: &mut std::process::Child| {
+        if let Some(job) = &job { job.terminate(); }
+        crate::process_util::kill_process_tree(child.id());
+        #[cfg(unix)]
+        {
+            let group = format!("-{}", child.id());
+            let _ = crate::process_util::command_no_window("kill").args(["-KILL", &group]).status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
+        if cancelled.load(Ordering::Acquire) || run_cancelled.load(Ordering::Acquire) {
+            terminate(&mut child);
+            return false;
+        }
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     tracing::warn!("circuits: verification '{command}' timed out after 120s");
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate(&mut child);
                     return false;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             Err(e) => {
                 tracing::warn!("circuits: verification '{command}' wait failed: {}", e);
-                let _ = child.kill();
+                terminate(&mut child);
                 return false;
             }
         }
@@ -3067,7 +2996,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
         let (Ok(graph), Ok(context)) = (CircuitGraph::from_json(&active.circuit_graph_json), CircuitContext::from_json(&active.run.context_json)) else { continue; };
         let view = RunView { run_id: active.run.id, graph, context, steps, state: RunState::Running };
         let mut observed = HashSet::new();
-        for step in view.steps.iter().filter(|s| s.status == StepStatus::Running) {
+        for step in view.steps.iter().filter(|s| matches!(s.status, StepStatus::Running | StepStatus::Unverified)) {
             let Some(agent_node_id) = observed_agent_for_step(
                 step,
                 &view.graph,
@@ -3077,6 +3006,10 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 continue;
             };
             if !observed.insert(agent_node_id) { continue; }
+            let recovery_permit = begin_circuit_effect_batch(active.run.id);
+            if recovery_permit.is_cancelled() { continue; }
+            let recovery_target = jobs::RecoveryTarget::new(&view, step, agent_node_id);
+            let recovery_fence = recovery_target.database_fence(&view.graph);
             let Ok(node) = db::get_agent_node_by_id(agent_node_id) else {
                 continue;
             };
@@ -3098,6 +3031,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 let completion = snapshot.as_ref().map(|snapshot| snapshot.completion.clone());
                 let completed_at_ms = completion.as_ref().map(|c| c.completed_at_ms).unwrap_or_default();
                 if recover_native_turn(completion, Some(&stamp), |_| {
+                    if recovery_permit.is_cancelled() { return false; }
                     let Ok(current) = db::get_agent_node_by_id(agent_node_id) else { return false; };
                     current.status == SessionStatus::Running
                         && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id)
@@ -3106,13 +3040,18 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                         && current.cli_session_id == node.cli_session_id
                         && snapshot.as_ref().is_some_and(|snapshot| snapshot.is_current())
                 }, || {
-                    crate::node_turn::recover_ready(agent_node_id, app,
-                        crate::agent::session_lifecycle::HookSignalDetail {
-                            provider: Some(node.provider.clone()),
-                            provider_event: Some("transcript:turn_complete".into()),
-                            provider_session_id: node.cli_session_id.clone(),
-                            ..Default::default()
-                        }, &stamp, &input, completed_at_ms);
+                    recovery_target.publish(&recovery_permit, &active, || {
+                        crate::node_turn::recover_ready(agent_node_id, app,
+                            crate::agent::session_lifecycle::HookSignalDetail {
+                                provider: Some(node.provider.clone()),
+                                provider_event: Some("transcript:turn_complete".into()),
+                                provider_session_id: node.cli_session_id.clone(),
+                                ..Default::default()
+                            }, &crate::agent::session_lifecycle::CircuitTurnRecovery {
+                                stamp: &stamp, input: &input, observed_at_ms: completed_at_ms,
+                                fence: &recovery_fence, cancelled: &recovery_permit.cancelled,
+                            });
+                    });
                 }) { continue; }
             }
             let quiet_ms = crate::autopilot::evaluator::millis_since_last_output(agent_node_id);
@@ -3139,6 +3078,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 input: input_stamp,
                 report: report.as_ref().map(|report| report.revision.clone()),
             };
+            let observed_at_ms = chrono::Utc::now().timestamp_millis();
             let Some(output) = select_turn_report(
                 report,
                 view.context.get(&format!("agent.{agent_node_id}.previous_report_revision")),
@@ -3146,6 +3086,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 || evaluator::cleaned_turn_tail(agent_node_id),
             ) else { continue; };
             recover_quiet_turn(&output, |prompt| {
+                if recovery_permit.is_cancelled() { return None; }
                 let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
                     .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
                     .unwrap_or_else(|| "claude".into());
@@ -3154,6 +3095,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             }, || {
                 // Classification can take 30s. A hook, user input, or resumed
                 // output during that interval invalidates the quiet observation.
+                if recovery_permit.is_cancelled() { return false; }
                 let Ok(current) = db::get_agent_node_by_id(agent_node_id) else { return false; };
                 quiet_turn_is_current(&evidence, &QuietTurnEvidence {
                     lifecycle: db::agent_turn_stamp(agent_node_id).ok().flatten(),
@@ -3162,8 +3104,15 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 }, crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
                     evaluator::millis_since_last_output(agent_node_id), current.status)
             }, || {
-                tracing::warn!("circuits: run {} agent {} has a confirmed quiet turn; recovering missed webhook", active.run.id, agent_node_id);
-                crate::commands::attention::mark_attention(agent_node_id, app);
+                recovery_target.publish(&recovery_permit, &active, || {
+                    tracing::warn!("circuits: run {} agent {} has a confirmed quiet turn; recovering missed webhook", active.run.id, agent_node_id);
+                    if let (Some(stamp), Some(input)) = (&evidence.lifecycle, &evidence.input) {
+                        crate::commands::attention::recover_attention(agent_node_id, app,
+                            &crate::agent::session_lifecycle::CircuitTurnRecovery {
+                                stamp, input, observed_at_ms, fence: &recovery_fence, cancelled: &recovery_permit.cancelled,
+                            });
+                    }
+                });
             });
         }
     }
@@ -3677,16 +3626,16 @@ mod tests {
         crate::autopilot::evaluator::register_circuit(node.id);
         for status in ["ready", "completed"] {
             db::write_conn().execute("UPDATE agent_nodes SET status=?2 WHERE id=?1", rusqlite::params![node.id, status]).unwrap();
-            assert!(classify_step_turn(&active_run(85), &view, "await_source").is_none(),
+            assert!(classify_step_turn(&active_run(85), &view, "await_source").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
                 "Ready or Completed without identity-bound evidence cannot establish a handoff");
         }
         let mut after_feedback = view.clone();
         after_feedback.context.set(&format!("agent.{}.previous_report_revision", node.id), "previous-turn");
-        assert!(classify_step_turn(&active_run(85), &after_feedback, "await_source").is_none(),
+        assert!(classify_step_turn(&active_run(85), &after_feedback, "await_source").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
             "an injected prompt still requires a fresh report");
         let mut permission = view.clone();
         db::write_conn().execute("UPDATE agent_nodes SET status='awaiting_input' WHERE id=?1", [node.id]).unwrap();
-        assert!(classify_step_turn(&active_run(85), &permission, "await_source").is_none(),
+        assert!(classify_step_turn(&active_run(85), &permission, "await_source").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
             "missing evidence must not authorize a permission request");
         permission.state = RunState::Cancelled;
         db::write_conn().execute("UPDATE agent_nodes SET status='completed' WHERE id=?1", [node.id]).unwrap();
@@ -3698,7 +3647,7 @@ mod tests {
             if edge.to == "await_source" { edge.to = "handoff".into(); }
         }
         renamed.steps.iter_mut().find(|step| step.node_id == "await_source").unwrap().node_id = "handoff".into();
-        assert!(classify_step_turn(&active_run(85), &renamed, "handoff").is_none(),
+        assert!(classify_step_turn(&active_run(85), &renamed, "handoff").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
             "renaming a step cannot bypass the evidence requirement");
         let transition = advance(&mut view, &CircuitEvent::TurnClassified { binding: None, node_id: "await_source".into(),
             classification: Some(crate::autopilot::evaluator::Classification::Completed), output: Some("Looks done".into()) });
@@ -3917,7 +3866,7 @@ mod tests {
                 agent_node_id: Some(1), attempt: 1, outcome: None, error: None,
             }],
         };
-        advance(&mut parked, &CircuitEvent::TurnParked {
+        advance(&mut parked, &CircuitEvent::TurnParked { report_revision: None,
             node_id: "verdict".into(),
             output: report.into(),
         });
@@ -3932,6 +3881,41 @@ mod tests {
     /// an unchanged report is not observed again, so a reviewer that sits
     /// mid-turn is not re-classified on every tick. The next report is.
     #[test]
+    fn unverified_classifier_outage_keeps_its_retry_cooldown() {
+        let mut view = report_gate_view();
+        let step = view.steps.iter_mut().find(|step| step.node_id == "finish_classifier").unwrap();
+        step.status = StepStatus::Unverified;
+        view.context.set("node.finish_classifier.evaluated_attempt", step.attempt.to_string());
+        view.context.set("node.finish_classifier.evaluated_output", "Finished.");
+        view.context.set("node.finish_classifier.classification", "unavailable");
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, "Finished.", Some(10_000)));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, "Finished.", Some(60_001)));
+    }
+
+    #[test]
+    fn native_report_outage_keeps_cooldown_without_consuming_a_verdict() {
+        let mut view = report_gate_view();
+        view.step_mut("finish_classifier").unwrap().status = StepStatus::Unverified;
+        let report = "Finished.";
+        let binding = crate::autopilot::circuit::test_support::record_report_evidence_for_turn(
+            &mut view, "finish_classifier", report, "finished-native-turn");
+        let transition = advance(&mut view, &CircuitEvent::TurnClassified {
+            binding: Some(binding.clone()), node_id: "finish_classifier".into(),
+            classification: None, output: Some(report.into()),
+        });
+        assert!(transition.classifications[0].lifecycle_verified);
+        assert_eq!(view.context.get("node.finish_classifier.classification"), Some("unavailable"));
+        assert_eq!(view.context.get("node.finish_classifier.evaluated_report_revision"), Some(binding.report_revision.as_str()));
+        assert!(view.context.get("node.finish_classifier.classified_evidence_owner").is_none());
+        assert!(has_unconsumed_classifier_evidence(&view, "finish_classifier"));
+        assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::Ready, report, Some(10_000)));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::Ready, report, Some(60_000)));
+        view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::Ready, report, None));
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::Ready, "A different report", Some(10_000)));
+    }
+
+    #[test]
     fn parked_observation_is_not_reclassified_until_the_report_changes() {
         let mut view = RunView {
             run_id: 27,
@@ -3944,7 +3928,7 @@ mod tests {
             }],
         };
         let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim.";
-        advance(&mut view, &CircuitEvent::TurnParked {
+        advance(&mut view, &CircuitEvent::TurnParked { report_revision: None,
             node_id: "verdict".into(),
             output: progress.into(),
         });

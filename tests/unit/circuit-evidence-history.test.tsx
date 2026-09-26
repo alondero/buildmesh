@@ -256,3 +256,21 @@ it.each([true, false])('keeps wait provenance distinct when active=%s', async (a
   expect(screen.getByText(/Request correlation unavailable/)).toBeTruthy();
   expect(screen.queryByText(/Evidence deadline:/)).toBeNull();
 });
+
+
+it('explains an observation blocker and its resolution without showing raw JSON', async () => {
+  const message = 'Terminal input tracking is uncertain. Submit or clear the prompt; Buildmesh will recheck automatically.';
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 101, node_id: 'await_source', attempt: 1, kind: 'observation_readiness',
+      source: 'circuit_worker.reconciliation', disposition: 'waiting',
+      detail: JSON.stringify({ blocker: { kind: 'input_uncertain' }, message }) }),
+    historyEntry({ id: 102, node_id: 'await_source', attempt: 1, kind: 'observation_readiness',
+      source: 'circuit_worker.reconciliation', disposition: 'resolved',
+      detail: JSON.stringify({ blocker: null, message: null }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={239} updatedAt="ready" />);
+  fireEvent.click(container.querySelector('summary')!);
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(screen.getByText('Observation blocker cleared; the current report can be checked.')).toBeTruthy();
+  expect(screen.getByTestId('history-entry-101').querySelector('pre')).toBeNull();
+});
