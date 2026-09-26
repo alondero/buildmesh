@@ -12,16 +12,96 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
 | Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. Actual create-crash and live cancellation races remain unverified; other effect kinds and continuation still need a complete typed journal audit |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Wait/capacity/configuration history completeness remains under audit; current live viewport was not the 240px Probe check |
-| Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected | Current build continuation live check, blueprint availability/deletion audit pending |
+| Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
 
 
 Every supported observation strategy needs recorded capabilities, source, freshness bounds, child/background coverage, degraded cases, harness version, platform and launch/trust configuration. Fixture parsing alone cannot establish live delivery. Unsupported or untested combinations remain unverified.
 
-## Continued acceptance: 2026-09-25
+## Continued acceptance: 2026-09-26: Review Blueprint copy, deletion and continuation
 
-Continuation baseline: `25308d3326f69855bd8a73cadeef8be34276d397`.
+Work for [#1910](https://github.com/alondero/buildmesh/issues/1910). This section
+closes the two items the row above left open — the current-build continuation
+check and the blueprint availability/deletion audit — and records one behaviour
+that was missing: a Review Successor now names the run it continues in its own
+append-only Circuit Run History, not only in the run context that retention
+later empties.
+
+Environment: Windows, development profile, Codex CLI 0.157.1 on `gpt-6-luna` in
+native Windows PowerShell. Pre-launch log counts were `buildmesh.log` 51584,
+`panic.log` 132, `panic_early.log` 48; the panic files did not grow and the
+stable hub was never stopped. The only new `ERROR` lines are the pre-existing
+`resize_agent: Agent not running` noise and health probes for a long-deleted
+#1889 fixture directory.
+
+### What the live run did
+
+An isolated Mesh on a scratch repository, one real Codex implementation turn
+delivered through the production `write_to_agent` command body, then a
+two-generation failed lineage built by the new bridge fixture through
+production seams only (`list_circuit_probe`'s blueprint ensure,
+`copy_review_blueprint`, `create_node_circuit_run`, `continue_failed_review`,
+`commit_circuit_advance`). Everything after that was the real app: Probe
+buttons, canvas editor, the circuit worker, and durable SQLite rows read back
+afterwards.
+
+| Check | Observed result | Evidence boundary |
+| --- | --- | --- |
+| Built-in Review Blueprint availability | Present, `is_preset = 1`, `enabled = 0`, matching the local review contract; Probe row titled "Review Blueprint" with **only** "Inspect Review Blueprint" — no enable, trigger or delete control | Real IPC `list_circuit_probe` and rendered Probe. The absence of the controls *is* the read-only proof; the refusal messages themselves are deterministic-only |
+| Blueprint inspector | "Read-only Review Blueprint", Copy control present, no Save, no palette | Real canvas editor. `1910-blueprint-read-only.png` |
+| Copy through the UI | Real `copy_review_blueprint` minted `Review Blueprint copy` as `is_preset = 0`, `enabled = 0`, all entry points `manual`, `concurrency_limit` 2 inherited, zero runs; the blueprint's `graph_json` stayed byte-identical | Real IPC. `1910-blueprint-copy.png` |
+| Copy is editable and independent | Changing the reviewer prompt in the canvas and saving persisted to the copy; the blueprint's `graph_json` stayed byte-identical | Real `update_circuit_graph` |
+| Disabling the source Circuit | `set_circuit_enabled(copy, false)` through the Probe checkbox; the follow-up still continued from the retained run's pinned graph and frozen launch plan | Real IPC. The pinned-scope assertions are the same ones the deterministic test makes after a delete |
+| Concurrent continuation | Two genuinely overlapping calls into the production `continue_circuit_review` body returned the **same** successor and created exactly one run row | The Probe serialises its Continue button behind one busy flag, so the wire race is driven by a bridge command that calls the same command body from two threads — production code, not the UI |
+| Lineage | The live successor's `recovery.from_run_id` is the **failed first successor**, not the original run, and its own `review_continuation` history entry names that run | Durable rows after the real call |
+| Pinned scope | The successor's pinned snapshot contains no `github_action` and no `implementer`; `reviewer` is the only `spawn_agent_node`; its prompt is the retained run's, not the copy's post-hoc edit | Durable snapshot read back |
+| Repeated real-IPC continuation | A second Continue review from the failed successor's card minted nothing (run count unchanged) | Real IPC |
+| Effect journal and history | The follow-up claimed **no** effect rows at all; its history is `configuration_pinned`, `review_continuation`, `run_transition`, three `step_transition` entries, one `observation` and one `classification` — no GitHub action and no `open_pr` node | Durable rows |
+| Ownership | The follow-up has no step owning the implementation agent, and the Mesh contains only the source agent | Durable rows |
+| Cancellation | Real Probe cancel left the follow-up `cancelled` with 8 history entries retained and the ancestor still `failed`; two further continuations of the ancestor were both refused with "The continued review was cancelled. Start a fresh review." and minted nothing | Real IPC |
+| Reviewer dispatch | **Unverified.** The borrowed-source `await_source` gate parked Unverified ("The report was interpreted, but foreground or owned-work completion remains unverified"), a fresh source turn inside the follow-up window did not clear it, and a reasoned Recheck through `record_circuit_outcome` did not either. The reviewer was never dispatched | This is the parent issue's open Codex owned-work/foreground-termination gap, reproduced in a new place. The bound on *what may be dispatched* is asserted deterministically instead: a full review round emits a `SpawnAgentNode` only for `reviewer` and never a `CallGithub` |
+| Cleanup | The fixture Mesh, its runs, circuits, agents and scratch repository were removed; the dev profile is back to its prior fixture set | Bridge teardown |
+
+### Findings that are not defects in this issue
+
+- **A run on a copied Review Blueprint has no Continue review control.** The
+  Probe's `canContinueReview` recognises only the built-in preset
+  (`source.review_preset`), an earlier continuation
+  (`recovery.from_run_id`) or the issue-driven blueprint. A Review-derived
+  Circuit's run gets none of those, so the affordance is hidden — even though
+  the backend will continue it and the deterministic suite proves it
+  (`copied_review_continuation_requires_the_frozen_review_contract`). #1848
+  owns that policy, and #1910's scope is "continuation of an existing review
+  successor", so this is recorded rather than changed.
+- **Every continuation mints a visible "Continued review" Circuit.** The
+  recovery Circuit is `is_preset = 0`, so it appears in the user's Circuit list
+  next to their own. Reuse is keyed on the frozen graph, so one Mesh shows at
+  most one per distinct frozen scope. It is existing behaviour and is visible in
+  the History screenshot.
+
+### Added deterministic coverage
+
+- `review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_source_disable`
+  — a blank name and a user Circuit are both refused as copy sources; then
+  disabling, rewriting **and deleting** the Circuit the run was started from
+  leaves the retained run's pinned reviewer scope and frozen launch plan intact
+  and continuable.
+- `continued_review_dispatches_only_review_work_and_records_the_run_it_continues`
+  — a failed issue-driven run that owned an `implementer` step and an `open_pr`
+  step yields a follow-up with neither; the successor claims no effect, borrows
+  rather than owns the implementation agent, records its parent in its own
+  history, leaves the ancestor's history byte-identical, and a cancelled
+  successor closes the lineage. This test failed before the fix.
+- `a_full_review_loop_dispatches_only_the_reviewer` — across findings, feedback
+  to the borrowed source, a fresh reviewer and approval, the only spawned node
+  is `reviewer` and no `CallGithub` effect is ever emitted.
+- `the_built_in_review_blueprint_cannot_be_triggered_on_its_own` — Trigger Now
+  on the built-in Review Blueprint is refused and leaves no run, so an
+  unattended row can never mint a run.
+- Vitest: the `review_continuation` history entry renders as "Continued a
+  failed review" with the run id it names.
+
 The clean checkout and GitHub state were checked before this work: PR #1893 was
 open, draft and mergeable; issue #1889 was open. The earlier implementation and
 full Windows gate remain approved. Historical checkpoints below describe their

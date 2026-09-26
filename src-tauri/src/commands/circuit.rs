@@ -896,4 +896,28 @@ mod tests {
         assert_eq!(attempted, vec![11, 12, 13]);
         assert!(error.contains("agent node 12: worktree busy"));
     }
+
+    /// #1910: the built-in Review Blueprint is present and inspectable but is
+    /// never a trigger source of its own — a run only exists once a user
+    /// starts it from an implementation agent's title bar. Trigger Now is the
+    /// one IPC path that would otherwise mint a run on an unattended row.
+    #[test]
+    fn the_built_in_review_blueprint_cannot_be_triggered_on_its_own() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let mesh = crate::db::create_mesh_inner(&conn, "trigger guard", "/tmp/trigger-guard").unwrap();
+        crate::db::circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
+        let mut conn = conn;
+        let blueprint = crate::db::circuit::list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()[0].0.id;
+
+        assert_eq!(
+            super::trigger_circuit_now_locked(&mut conn, blueprint).unwrap_err(),
+            "Start this Circuit from the source agent's title bar."
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0,
+            "the refused trigger left no run behind"
+        );
+    }
 }

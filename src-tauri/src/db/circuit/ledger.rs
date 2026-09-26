@@ -327,6 +327,7 @@ fn create_node_circuit_run_with_recovery_locked(
     recovery: Option<super::recovery::ReviewRecovery>,
     allow_unobserved: bool,
 ) -> Result<i64, String> {
+    let continued_from = recovery.as_ref().map(|recovery| recovery.run_id);
     let (reviewer_provider, preferences) = reviewer;
     let app_reviewer = preferences.and_then(|p| p.reviewer_provider.clone());
     let reviewer_override = if selected_circuit_id.is_none() && recovery.is_none() {
@@ -477,6 +478,15 @@ fn create_node_circuit_run_with_recovery_locked(
     ).map_err(|e| e.to_string())?;
     let run_id = tx.last_insert_rowid();
     super::evidence::pin_graph(&tx, run_id).map_err(|e| e.to_string())?;
+    // The lineage also lands in this run's own append-only history. The
+    // context key is what the Probe reads while the run is live, but
+    // retention empties `context_json` on old terminal rows, so the successor
+    // would otherwise lose the only pointer to the run it continues. The
+    // failed ancestor is never written to — its ledger stays immutable.
+    if let Some(continued_from) = continued_from {
+        super::evidence::append_history(&tx, run_id, None, None, "review_continuation",
+            &serde_json::json!({ "from_run_id": continued_from }).to_string()).map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run_id)
 }

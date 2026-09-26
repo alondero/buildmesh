@@ -205,11 +205,16 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
             "create_test_review_fixture" => handle_create_test_review_fixture(&rpc_req.args),
             "delete_test_review_fixture" => handle_delete_test_review_fixture(&rpc_req.args),
+            "create_test_review_continuation_fixture" => {
+                handle_create_test_review_continuation_fixture(&rpc_req.args)
+            }
+            "concurrent_continue_review" => handle_concurrent_continue_review(&rpc_req.args, app.clone()),
             "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
             "list_meshes" => handle_list_meshes(),
             "list_agent_nodes" => handle_list_agent_nodes(),
             "get_agent_node" => handle_get_agent_node(&rpc_req.args),
             "spawn_agent" => handle_spawn_agent(&rpc_req.args, app),
+            "write_to_agent" => handle_write_to_agent(&rpc_req.args, app.clone()),
             "kill_agent" => handle_kill_agent(&rpc_req.args),
             "delete_mesh" => handle_delete_mesh(&rpc_req.args),
             "delete_agent_node" => handle_delete_agent_node(&rpc_req.args),
@@ -252,8 +257,15 @@ fn handle_create_test_mesh(args: &serde_json::Value) -> String {
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("Test Mesh");
+    // An explicit `path` lets a check point the Mesh at a scratch repository it
+    // prepared; the default keeps the historical temp-directory Mesh.
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
 
-    match crate::db::create_mesh(name, &std::env::temp_dir().to_string_lossy()) {
+    match crate::db::create_mesh(name, &path) {
         Ok(mesh) => JsonRpcResponse::success(&mesh),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
@@ -281,6 +293,51 @@ fn handle_delete_test_review_fixture(args: &serde_json::Value) -> String {
     }
 }
 
+fn handle_create_test_review_continuation_fixture(args: &serde_json::Value) -> String {
+    let source_node_id = args
+        .get("sourceNodeId")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    match crate::services::test_fixtures::create_review_continuation_fixture(source_node_id) {
+        Ok(data) => JsonRpcResponse::success(&data),
+        Err(error) => JsonRpcResponse::error(&error),
+    }
+}
+
+/// #1910: two genuinely overlapping invocations of the production
+/// `continue_circuit_review` command body. The UI serialises the button
+/// behind one busy flag, so the wire-level race the successor dedupe exists
+/// to survive cannot be produced from the Probe; this calls the same command
+/// body from two threads and returns both outcomes for comparison.
+fn handle_concurrent_continue_review(args: &serde_json::Value, app: AppHandle) -> String {
+    let run_id = args
+        .get("runId")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let max_rounds = args
+        .get("maxRounds")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(1) as i32;
+    let threads: Vec<_> = (0..2)
+        .map(|attempt| {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                tauri::async_runtime::block_on(crate::commands::circuit::continue_circuit_review(
+                    app,
+                    run_id,
+                    max_rounds,
+                ))
+                .map_err(|error| format!("attempt {attempt}: {error}"))
+            })
+        })
+        .collect();
+    let results: Vec<Result<i64, String>> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap_or_else(|_| Err("continuation thread panicked".into())))
+        .collect();
+    JsonRpcResponse::success(&serde_json::json!({ "results": results }))
+}
+
 fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String {
     let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Node");
@@ -289,6 +346,16 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
         .get("branch")
         .and_then(|v| v.as_str())
         .unwrap_or("main");
+    // A check that only needs a live process can keep the agent in the Mesh
+    // directory instead of provisioning a worktree for it.
+    let use_worktree = args
+        .get("useWorktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let provider = args
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anthropic");
 
     use crate::models::EnvType;
 
@@ -298,12 +365,12 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
         path,
         branch,
         EnvType::Windows,
-        "anthropic",
+        provider,
         Some(name),
         None,
         None,
         None, // source_pr_pinned_sha — test fixture; no PR SHA
-        true,
+        use_worktree,
         None,
         None,
         None,
@@ -453,6 +520,27 @@ fn handle_kill_agent(args: &serde_json::Value) -> String {
     match result {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),
         Err(e) => JsonRpcResponse::error(&e),
+    }
+}
+
+/// Deliver a prompt through the production `write_to_agent` command body so a
+/// real-runtime check can start a turn without synthesising keystrokes in the
+/// terminal widget.
+fn handle_write_to_agent(args: &serde_json::Value, app: AppHandle) -> String {
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let data = args
+        .get("data")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let result = tauri::async_runtime::block_on(crate::agent::process::write_to_agent(
+        app, node_id, data,
+    ));
+
+    match result {
+        Ok(()) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),
+        Err(error) => JsonRpcResponse::error(&error),
     }
 }
 
