@@ -52,7 +52,9 @@ callback actions and results, run history summaries, and cleanup state without
 recording prompt text. The smoke and relay can be rerun with
 `npm run tauri:build:dev:codex-hook-smoke` followed by
 `npm run smoke:codex-hook-recovery`. This is Windows-only evidence; native
-Linux, WSL, and macOS callback delivery remain unverified.
+Linux, WSL, and macOS callback delivery remain unverified. The smoke runner
+requires Node.js 22.13+, 23.4+, or 24+ because it uses the built-in
+`node:sqlite` API without an experimental flag ([Node.js SQLite API](https://nodejs.org/api/sqlite.html)).
 
 #### Review follow-up: evidence capture and gate attribution
 
@@ -69,6 +71,13 @@ prior-turn Stop was rejected while the attempt stayed Unverified. The successful
 artifact is `.tmp/codex-hook-recovery-2026-09-25T22-35-17-219Z/evidence.json`;
 both runs were cancelled, the disposable Mesh was deleted, and the isolated app
 and profile were cleaned up.
+
+The smoke resolves Tauri's Windows data directory from the Application Data
+known folder rather than trusting a child-process `APPDATA` override. It refuses
+to reuse a profile that existed before the run, checks that the opened database
+contains the expected schema, and removes only the issue-specific profile it
+created after a successful run. The child `APPDATA` points to the scratch folder
+for early panic logs.
 
 | Check / revision | Result | Attribution / scope |
 | --- | --- | --- |
