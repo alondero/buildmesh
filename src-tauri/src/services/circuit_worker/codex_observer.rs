@@ -162,7 +162,7 @@ fn normalize(
         .zip(identity.session_incarnation.clone())
         .map(
             |((input_stamp, session_id), session_incarnation)| ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
                 agent_node_id: identity.agent_node_id,
                 input_stamp,
                 observed_at_ms: completed_at_ms,

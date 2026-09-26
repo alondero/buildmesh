@@ -96,7 +96,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                         waits_active: run.state == "running" && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
                         human_waits: context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
                             .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok())
-                            .map(|evidence| evidence.human_waits).unwrap_or_default(),
+                            .map(|evidence| evidence.human_waits.into_iter().filter(|wait| wait.source != "agent_status_projection").collect()).unwrap_or_default(),
                     });
                 }
             }
@@ -716,6 +716,9 @@ pub fn commit_transition(
             "Native transcript changed before evidence commit; recheck required",
         ));
     }
+    if evidence.input_guard.and_then(|guard| guard.report_guard.as_ref()).is_some_and(|snapshot| !snapshot.is_current()) {
+        return Err(observation_freshness_rejection("Agent report changed before evidence commit; recheck required"));
+    }
     let mut db = crate::db::write_conn();
     let result = if let Some(guard) = evidence.input_guard {
         let mut revision = None;
@@ -779,11 +782,13 @@ fn commit_transition_locked(
     if let Some(guard) = evidence.input_guard {
         let current: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id=?1 AND cli_session_id=?2
-            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost'))",
+            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost')
+            AND (?4=0 OR status IN ('ready','awaiting_input','completed')))",
             params![
                 guard.agent_node_id,
                 guard.session_id,
-                guard.session_incarnation
+                guard.session_incarnation,
+                guard.report_guard.is_some()
             ],
             |r| r.get(0),
         )?;
@@ -1428,7 +1433,7 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');").unwrap();
         let guard = ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
             agent_node_id: 9,
             input_stamp: "1:2".into(),
             observed_at_ms: 2000,

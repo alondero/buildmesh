@@ -158,6 +158,12 @@ pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::As
     Some(report)
 }
 
+pub(crate) fn circuit_report_snapshot(node: &AgentNode) -> Option<transcript_reader::report_snapshot::ReportSnapshot> {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    let format = TranscriptFormat::for_harness(adapter.id())?;
+    transcript_reader::report_snapshot::read(format, node.cli_session_id.as_deref()?, &transcript_dir(node))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

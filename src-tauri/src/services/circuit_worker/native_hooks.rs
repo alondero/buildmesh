@@ -502,7 +502,7 @@ fn normalize(
     super::CircuitEvent::ObservationBatch {
         input_guard: authoritative.then(|| {
             crate::autopilot::circuit::stepper::ObservationInputFence {
-                transcript_guard: None,
+                transcript_guard: None, report_guard: None,
                 agent_node_id: identity.agent_node_id,
                 input_stamp: current_input.expect("authoritative input stamp"),
                 observed_at_ms: if child_terminal {
@@ -651,7 +651,7 @@ mod tests {
             observed_at_ms: 14, authoritative: false, fact: Fact::Working,
         };
         evidence.observe(&expected, &working_projection);
-        assert_eq!(evidence.human_waits.len(), 2, "status may add a generic aggregate wait but cannot replace the permission request");
+        assert_eq!(evidence.human_waits.len(), 1, "status cannot invent another request or replace the permission request");
         assert!(evidence.human_waits.iter().any(|wait| wait.wait_kind == HumanWaitKind::Permission && wait.request_id.is_none()));
         assert!(evidence.has_human_wait(), "status projections cannot clear the permission wait");
         assert!(!evidence.completion_verified());
@@ -721,7 +721,7 @@ mod tests {
                 late_projection.source_id = Some("new-status-transition".into());
                 late_projection.observed_at_ms = 7;
                 state.observe(&projection_identity,&late_projection);
-                assert!(state.has_human_wait(),"a genuinely newer input wait is retained");
+                assert!(!state.has_human_wait(),"a newer status projection is still not a native request");
                 assert!(!state.completion_verified());
             }
         }
