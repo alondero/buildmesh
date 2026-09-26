@@ -72,10 +72,15 @@ fn open_pr_fixture() -> OpenPrFixture {
         attempt: 1,
         fresh_attempt: false,
     };
+    // Seed the durable recheck mode production establishes through its
+    // evidence-recheck path, so views rebuilt from the database (restarts)
+    // observe the same dispatch intent as the live view.
+    let mut seed = CircuitContext::default();
+    seed.set("node.open_pr.recheck_only", "1");
     crate::db::circuit::evidence::commit_transition(
         run_id,
         Some("running"),
-        "{}",
+        &seed.to_json().unwrap(),
         &[step],
         EvidenceWrite {
             intents: std::slice::from_ref(&intent),
@@ -286,7 +291,14 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     // revision changed when cancellation committed, so the late result must
     // not update context, acknowledge the effect, or finish the step.
     assert!(persist_effect_result(&mut view_with_result, &event).is_err());
-    let stored = reopened_run(fixture.run_id);
+    assert_cancelled_open_pr_without_reconcile(fixture.run_id);
+}
+
+/// Fresh-read agreement shared by the cancellation-ordering tests: a
+/// rejected late result leaves the run terminal with no `pr.*` context, a
+/// cancelled step, an uncertain effect, and no reconciled history.
+fn assert_cancelled_open_pr_without_reconcile(run_id: i64) {
+    let stored = reopened_run(run_id);
     let path = {
         let db = crate::db::read_conn();
         db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
@@ -297,8 +309,7 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     assert_eq!(stored.state, "cancelled");
     assert_eq!(context.get("pr.number"), None);
     assert_eq!(
-        crate::db::circuit::ledger::list_circuit_run_steps_inner(&reopened, fixture.run_id)
-            .unwrap()[0]
+        crate::db::circuit::ledger::list_circuit_run_steps_inner(&reopened, run_id).unwrap()[0]
             .status,
         "cancelled"
     );
@@ -306,7 +317,7 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
         reopened
             .query_row(
                 "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
-                [fixture.run_id],
+                [run_id],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
@@ -316,12 +327,368 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
         reopened
             .query_row(
                 "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind='effect_reconciled'",
-                [fixture.run_id],
+                [run_id],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
         0
     );
+}
+
+/// Rebuild a run view from durable state only, the way a restarted worker
+/// pass loads it before dispatching.
+fn restart_view_from_db(run_id: i64, circuit_graph_json: &str) -> RunView {
+    let run = crate::db::get_circuit_run(run_id)
+        .expect("read run")
+        .expect("run row survives");
+    let mut context =
+        CircuitContext::from_json(&run.context_json).expect("context parses");
+    let revision = crate::db::circuit::evidence::observation_revision(&run)
+        .expect("revision reads");
+    context.set("evidence.revision", revision.to_string());
+    context.with_run(run_id);
+    RunView {
+        run_id,
+        graph: CircuitGraph::from_json(circuit_graph_json).expect("graph parses"),
+        state: RunState::from_db_str(&run.state),
+        context,
+        steps: super::load_steps(run_id).expect("steps load"),
+    }
+}
+
+/// Controllable OpenPr lookup endpoint for the cancellation-ordering tests.
+/// One struct owns the base URL, request count, hold/release/done channels,
+/// and server thread — no loose synchronization primitives cross the test.
+/// The endpoint holds its single list-pulls response until released, then
+/// keeps watching: a duplicate dispatch from a restart or retry is counted
+/// (and fails the test) instead of refused or hung.
+struct HeldOpenPrEndpoint {
+    base_url: String,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    arrived_rx: std::sync::mpsc::Receiver<String>,
+    release_tx: std::sync::mpsc::Sender<()>,
+    done_tx: std::sync::mpsc::Sender<()>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldOpenPrEndpoint {
+    fn spawn(body: Vec<u8>, expected_head: &str) -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (line_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let expected = expected_head.to_string();
+        let thread_requests = Arc::clone(&requests);
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept lookup");
+            thread_requests.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(sock.try_clone().expect("clone socket"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read header");
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                request_line.starts_with("GET ")
+                    && request_line.contains("/pulls?head=")
+                    && request_line.contains(&expected),
+                "OpenPr recheck must stay a read-only list lookup, got: {}",
+                request_line.trim()
+            );
+            line_tx.send(request_line).expect("report lookup arrival");
+            release_rx.recv().expect("lookup stays held until released");
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8(body).expect("utf8 body")
+            );
+            sock.write_all(http.as_bytes())
+                .expect("write held response");
+            drop(sock);
+            // Duplicate watch: the retry phase runs while this listener is
+            // still up, so a second dispatch is observed here. The test
+            // always sends `done`, so this loop cannot spin forever; a
+            // panic before `done` fails the test first and the parked
+            // thread dies with the process.
+            listener
+                .set_nonblocking(true)
+                .expect("watch nonblocking");
+            loop {
+                if done_rx.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((sock, _)) => {
+                        thread_requests.fetch_add(1, Ordering::SeqCst);
+                        drop(sock);
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("duplicate watch accept failed: {error}"),
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://{addr}"),
+            requests,
+            arrived_rx,
+            release_tx,
+            done_tx,
+            server: Some(server),
+        }
+    }
+
+    /// Block until the held lookup arrives; returns its request line.
+    fn wait_for_lookup(&self) -> String {
+        self.arrived_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("lookup reaches the controllable endpoint")
+    }
+
+    /// Release the held response.
+    fn release(&self) {
+        self.release_tx.send(()).expect("release the held lookup");
+    }
+
+    /// Report the retry phase finished; the duplicate watch exits.
+    fn finish(&self) {
+        self.done_tx.send(()).expect("stop the duplicate watch");
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn join(mut self) {
+        self.server
+            .take()
+            .expect("server thread")
+            .join()
+            .expect("server thread joins");
+    }
+}
+
+/// Issue #1906: a late OpenPr lookup that returns after cancellation must be
+/// rejected through the worker handoff. The lookup runs on a worker thread
+/// through the worker's real `CallGithub` dispatch against a controllable
+/// endpoint that holds its response; cancellation commits through the
+/// production command ordering; only then is the stale success released into
+/// the production outcome seam. A restart rebuild plus a gated retry then
+/// prove no duplicate lookup or effect follows.
+#[test]
+fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
+    use std::sync::{Arc, Mutex};
+
+    use crate::autopilot::circuit::stepper::Effect;
+
+    let fixture = open_pr_fixture();
+    let run_id = fixture.run_id;
+    let pr_body = serde_json::to_vec(&serde_json::json!([{
+        "number": 314,
+        "html_url": "https://github.com/example/buildmesh/pull/314",
+        "title": "Circuit recovery",
+        "head": {"ref": "feature/circuit-recovery"}
+    }]))
+    .unwrap();
+    let endpoint =
+        HeldOpenPrEndpoint::spawn(pr_body, "head=example%3Afeature%2Fcircuit-recovery");
+
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let active = fixture.active.clone();
+    let mut view = fixture.view.clone();
+    let order_worker = Arc::clone(&order);
+    let base_url = endpoint.base_url.clone();
+    let lookup = std::thread::spawn(move || {
+        // `execute_effects` itself cannot run here: it takes a Tauri
+        // `AppHandle`, which unit tests cannot construct. This thread
+        // composes the same app-free production pieces in the loop's exact
+        // order instead: batch permit, durable run-state snapshot,
+        // per-effect gates, then the `CallGithub` dispatch the loop
+        // delegates to.
+        let batch = super::begin_circuit_effect_batch(run_id);
+        let run_state = crate::db::get_circuit_run(run_id)
+            .expect("read run state")
+            .map(|run| run.state);
+        let completing = matches!(view.state, RunState::Completed | RunState::Failed);
+        let effect = Effect::CallGithub {
+            node_id: "open_pr".to_string(),
+            action: GithubActionKind::OpenPr,
+            label: None,
+            comment: None,
+        };
+        let mut outcomes = Vec::new();
+        if !batch.is_cancelled()
+            && run_state.as_deref().is_some_and(|state| {
+                super::effect_allowed_in_state(state, completing, &effect)
+            })
+        {
+            let client =
+                crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
+                    .expect("test client");
+            outcomes.extend(
+                super::execute_call_github_effect(
+                    &active,
+                    &mut view,
+                    "open_pr",
+                    GithubActionKind::OpenPr,
+                    None,
+                    None,
+                    Some(&client),
+                )
+                .expect("dispatch succeeds"),
+            );
+        }
+        let worker_saw_cancellation = batch.is_cancelled();
+        order_worker.lock().unwrap().push("lookup_returned");
+        drop(batch);
+        (view, outcomes, worker_saw_cancellation)
+    });
+
+    // The lookup is held inside the endpoint: cancellation must go terminal
+    // before the delayed result returns.
+    let request_line = endpoint.wait_for_lookup();
+    assert!(
+        request_line.contains("/pulls?head="),
+        "recheck holds a read-only lookup, got: {}",
+        request_line.trim()
+    );
+    order.lock().unwrap().push("lookup_held");
+
+    // Production cancellation ordering: invalidate in-flight effects, commit
+    // the durable terminal state, then release the marker.
+    super::mark_circuit_run_cancelled(run_id);
+    crate::db::cancel_circuit_run(run_id).expect("cancellation commits");
+    super::finish_circuit_run_cancellation(run_id);
+    order.lock().unwrap().push("cancellation_committed");
+
+    let stored = crate::db::get_circuit_run(run_id)
+        .expect("read run")
+        .expect("run row survives cancellation");
+    assert_eq!(stored.state, "cancelled");
+
+    endpoint.release();
+    let (mut view_with_result, outcomes, worker_saw_cancellation) =
+        lookup.join().expect("worker thread joins");
+    assert!(
+        worker_saw_cancellation,
+        "the in-flight worker batch observes the cancellation token"
+    );
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "the held lookup dispatches exactly one outcome event"
+    );
+    let event = outcomes.into_iter().next().unwrap();
+    assert!(
+        matches!(
+            event,
+            CircuitEvent::GithubActionResult {
+                success: true,
+                pr_number: Some(314),
+                ..
+            }
+        ),
+        "the held endpoint returns a success-shaped stale result"
+    );
+    assert_eq!(
+        view_with_result
+            .context
+            .get("node.open_pr.effect_reconciled_attempt"),
+        Some("1"),
+        "the worker handoff mapping ran before the seam rejected it"
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["lookup_held", "cancellation_committed", "lookup_returned"],
+    );
+
+    // The pending-outcome loop, exactly as `drive_run` composes it: advance
+    // the stale event, then commit through the production seam, which must
+    // reject the stale completion.
+    let outcome = advance(&mut view_with_result, &event);
+    assert!(
+        persist_transition(
+            view_with_result.run_id,
+            &mut view_with_result,
+            &outcome
+        )
+        .is_err()
+    );
+
+    // A fresh read and the append-only history agree: nothing from the late
+    // result landed, and the attempt was not reopened.
+    assert_cancelled_open_pr_without_reconcile(run_id);
+
+    // Restart: the cancelled run leaves the worker's active set, so a fresh
+    // pass never picks it up again.
+    assert!(
+        crate::db::list_active_circuit_runs()
+            .expect("list active runs")
+            .iter()
+            .all(|active| active.run.id != run_id),
+        "a cancelled run leaves the active set so a restart cannot redispatch it"
+    );
+
+    // Retry: a view rebuilt from durable state still carries dispatch intent,
+    // but the worker's own gates block it before any GitHub request. The
+    // endpoint is still watching, so a stray dispatch would be counted.
+    let restarted = restart_view_from_db(run_id, &fixture.active.circuit_graph_json);
+    assert_eq!(
+        restarted.context.get("node.open_pr.recheck_only"),
+        Some("1"),
+        "the rebuilt retry still intends a recheck, so the gate below is not vacuous"
+    );
+    let batch = super::begin_circuit_effect_batch(run_id);
+    let run_state = crate::db::get_circuit_run(run_id)
+        .expect("read run state")
+        .map(|run| run.state);
+    let completing = matches!(
+        restarted.state,
+        RunState::Completed | RunState::Failed
+    );
+    let effect = Effect::CallGithub {
+        node_id: "open_pr".to_string(),
+        action: GithubActionKind::OpenPr,
+        label: None,
+        comment: None,
+    };
+    let accepted = !batch.is_cancelled()
+        && run_state.as_deref().is_some_and(|state| {
+            super::effect_allowed_in_state(state, completing, &effect)
+        });
+    drop(batch);
+    assert!(
+        !accepted,
+        "a retry on the cancelled run is gated before any GitHub request"
+    );
+    assert!(
+        !super::run_accepts_effects(run_id).expect("read run state"),
+        "a cancelled run accepts no further effects on retry"
+    );
+    endpoint.finish();
+    assert_eq!(
+        endpoint.request_count(),
+        1,
+        "exactly one read-only lookup: no PR create, no duplicate dispatch by restart or retry"
+    );
+    endpoint.join();
 }
 
 #[test]
