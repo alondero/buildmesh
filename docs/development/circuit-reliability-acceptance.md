@@ -28,10 +28,11 @@ that was missing: a Review Successor now names the run it continues in its own
 append-only Circuit Run History, not only in the run context that retention
 later empties.
 
-Environment: Windows, development profile, Codex CLI 0.157.1 on `gpt-6-luna` in
-native Windows PowerShell. Pre-launch log counts were `buildmesh.log` 51584,
-`panic.log` 132, `panic_early.log` 48; the panic files did not grow and the
-stable hub was never stopped. The only new `ERROR` lines are the pre-existing
+Environment: Windows, development profile, Codex CLI 0.157.0 (`codex --version`;
+its own TUI banner reads v0.157.1) on `gpt-6-luna` in native Windows PowerShell.
+Pre-launch log counts were `buildmesh.log` 51584, `panic.log` 132,
+`panic_early.log` 48; the panic files did not grow and the stable hub was never
+stopped. The only new `ERROR` lines are the pre-existing
 `resize_agent: Agent not running` noise and health probes for a long-deleted
 #1889 fixture directory.
 
