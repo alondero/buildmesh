@@ -183,9 +183,28 @@ pub(super) fn reconcile_open_pr_effect_for_worker(
 ) -> CircuitEvent {
     use crate::services::github::GitHubClient;
 
+    match GitHubClient::new() {
+        Ok(client) => {
+            reconcile_open_pr_effect_for_worker_with_client(active, view, node_id, &client)
+        }
+        Err(error) => {
+            reconcile_open_pr_for_worker(active, view, node_id, |_, _, _| Err(error.to_string()))
+        }
+    }
+}
+
+/// Same worker handoff with an explicit client, so the deterministic coverage
+/// can drive the production lookup-to-outcome mapping against a controllable
+/// endpoint instead of the live API. Production always passes
+/// `GitHubClient::new()`.
+pub(super) fn reconcile_open_pr_effect_for_worker_with_client(
+    active: &db::ActiveCircuitRun,
+    view: &mut RunView,
+    node_id: &str,
+    client: &crate::services::github::GitHubClient,
+) -> CircuitEvent {
     reconcile_open_pr_for_worker(active, view, node_id, |owner, repo, head| {
-        GitHubClient::new()
-            .map_err(|error| error.to_string())?
+        client
             .find_open_pr_for_branch(owner, repo, head)
             .map_err(|error| error.to_string())
     })

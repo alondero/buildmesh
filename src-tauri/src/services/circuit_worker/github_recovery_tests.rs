@@ -324,6 +324,226 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     );
 }
 
+/// Loopback GitHub endpoint that holds its list-pulls response until the test
+/// releases it, so the lookup/cancellation ordering is deterministic. Serves
+/// exactly one connection: any second request (a retried lookup or a PR
+/// create) fails fast with connection-refused instead of hanging the test.
+fn blocking_list_pulls_server(
+    body: Vec<u8>,
+    expected_head: &'static str,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_clone = Arc::clone(&count);
+    let (line_tx, line_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let expected = Mutex::new(expected_head.to_string());
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept lookup");
+        count_clone.fetch_add(1, Ordering::SeqCst);
+        let mut reader = BufReader::new(sock.try_clone().expect("clone socket"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header");
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+        let expected = expected.lock().unwrap();
+        assert!(
+            request_line.starts_with("GET ")
+                && request_line.contains("/pulls?head=")
+                && request_line.contains(expected.as_str()),
+            "OpenPr recheck must stay a read-only list lookup, got: {}",
+            request_line.trim()
+        );
+        line_tx.send(request_line).expect("report lookup arrival");
+        release_rx.recv().expect("lookup stays held until released");
+        let http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8(body).expect("utf8 body")
+        );
+        sock.write_all(http.as_bytes())
+            .expect("write held response");
+    });
+    (format!("http://{addr}"), count, line_rx, release_tx, handle)
+}
+
+/// Issue #1906: a late OpenPr lookup that returns after cancellation must be
+/// rejected through the worker handoff. The lookup runs on a worker thread
+/// through the production client mapping against a controllable endpoint that
+/// holds its response; cancellation commits through the production command
+/// ordering; only then is the stale success released into the production
+/// outcome seam.
+#[test]
+fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let fixture = open_pr_fixture();
+    let run_id = fixture.run_id;
+    let pr_body = serde_json::to_vec(&serde_json::json!([{
+        "number": 314,
+        "html_url": "https://github.com/example/buildmesh/pull/314",
+        "title": "Circuit recovery",
+        "head": {"ref": "feature/circuit-recovery"}
+    }]))
+    .unwrap();
+    let (base_url, request_count, request_rx, release_tx, server) =
+        blocking_list_pulls_server(pr_body, "head=example%3Afeature%2Fcircuit-recovery");
+
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let active = fixture.active.clone();
+    let mut view = fixture.view.clone();
+    let order_worker = Arc::clone(&order);
+    let lookup = std::thread::spawn(move || {
+        // Same gate `execute_effects` takes before dispatching, so the
+        // in-flight lookup observes the cancellation token.
+        let batch = super::begin_circuit_effect_batch(run_id);
+        let client = crate::services::github::GitHubClient::for_test(&base_url, "fake-token")
+            .expect("test client");
+        let event = github::reconcile_open_pr_effect_for_worker_with_client(
+            &active, &mut view, "open_pr", &client,
+        );
+        let worker_saw_cancellation = batch.is_cancelled();
+        order_worker.lock().unwrap().push("lookup_returned");
+        drop(batch);
+        (view, event, worker_saw_cancellation)
+    });
+
+    // The lookup is held inside the endpoint: cancellation must go terminal
+    // before the delayed result returns.
+    let request_line = request_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("lookup reaches the controllable endpoint");
+    assert!(
+        request_line.contains("GET "),
+        "recheck holds a read-only lookup, got: {}",
+        request_line.trim()
+    );
+    order.lock().unwrap().push("lookup_held");
+
+    // Production cancellation ordering: invalidate in-flight effects, commit
+    // the durable terminal state, then release the marker.
+    super::mark_circuit_run_cancelled(run_id);
+    crate::db::cancel_circuit_run(run_id).expect("cancellation commits");
+    super::finish_circuit_run_cancellation(run_id);
+    order.lock().unwrap().push("cancellation_committed");
+
+    let stored = crate::db::get_circuit_run(run_id)
+        .expect("read run")
+        .expect("run row survives cancellation");
+    assert_eq!(stored.state, "cancelled");
+
+    release_tx.send(()).expect("release the held lookup");
+    let (mut view_with_result, event, worker_saw_cancellation) =
+        lookup.join().expect("worker thread joins");
+    assert!(
+        worker_saw_cancellation,
+        "the in-flight worker batch observes the cancellation token"
+    );
+    assert!(
+        matches!(
+            event,
+            CircuitEvent::GithubActionResult {
+                success: true,
+                pr_number: Some(314),
+                ..
+            }
+        ),
+        "the held endpoint returns a success-shaped stale result"
+    );
+    assert_eq!(
+        view_with_result
+            .context
+            .get("node.open_pr.effect_reconciled_attempt"),
+        Some("1"),
+        "the worker handoff mapping ran before the seam rejected it"
+    );
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["lookup_held", "cancellation_committed", "lookup_returned"],
+    );
+
+    // The production outcome seam rejects the stale completion.
+    assert!(persist_effect_result(&mut view_with_result, &event).is_err());
+
+    // A fresh read and the append-only history agree: nothing from the late
+    // result landed, and the attempt was not reopened.
+    let stored = reopened_run(run_id);
+    let context = CircuitContext::from_json(&stored.context_json).unwrap();
+    assert_eq!(stored.state, "cancelled");
+    assert_eq!(context.get("pr.number"), None);
+    let path = {
+        let db = crate::db::read_conn();
+        db.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
+            .unwrap()
+    };
+    let reopened = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        crate::db::circuit::ledger::list_circuit_run_steps_inner(&reopened, run_id).unwrap()[0]
+            .status,
+        "cancelled"
+    );
+    assert_eq!(
+        reopened
+            .query_row(
+                "SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id='open_pr' AND attempt=1 AND kind='github'",
+                [run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "uncertain"
+    );
+    assert_eq!(
+        reopened
+            .query_row(
+                "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind='effect_reconciled'",
+                [run_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        1,
+        "exactly one read-only lookup: no PR create, no duplicate dispatch"
+    );
+    assert!(
+        !super::run_accepts_effects(run_id).expect("read run state"),
+        "a cancelled run accepts no further effects on retry"
+    );
+    assert!(
+        crate::db::list_active_circuit_runs()
+            .expect("list active runs")
+            .iter()
+            .all(|active| active.run.id != run_id),
+        "a cancelled run leaves the active set so a restart cannot redispatch it"
+    );
+    server
+        .join()
+        .expect("endpoint served its single held response");
+}
+
 #[test]
 fn open_pr_missing_or_mismatched_lookup_stays_uncertain_without_replay() {
     for (result, expected_reason) in [
