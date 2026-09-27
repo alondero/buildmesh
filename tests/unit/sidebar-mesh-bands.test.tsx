@@ -15,10 +15,29 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, waitFor, cleanup } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { Sidebar } from '../../src/components/Sidebar/Sidebar';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+
+// Pass-through around the real memoized `NodeItem` (same shape as
+// `sidebar-render-count.test.tsx`): each invocation observes one parent
+// `MeshItem` body execution for that row, without duplicating production
+// comparator logic.
+const { meshItemBodies } = vi.hoisted(() => ({
+  meshItemBodies: {} as Record<number, number>,
+}));
+
+vi.mock('../../src/components/Sidebar/NodeItem', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/components/Sidebar/NodeItem')>();
+  const RealNodeItem = actual.NodeItem;
+  function CountingNodeItem(props: ComponentProps<typeof RealNodeItem>) {
+    meshItemBodies[props.node.id] = (meshItemBodies[props.node.id] ?? 0) + 1;
+    return <RealNodeItem {...props} />;
+  }
+  return { ...actual, NodeItem: CountingNodeItem };
+});
 
 vi.mock('../../src/hooks/useMeshHealth', () => ({
   useMeshHealth: () => ({ health: null, refresh: vi.fn() }),
@@ -111,8 +130,13 @@ async function settleSidebar() {
   }
 }
 
+function clearBodyCounts() {
+  for (const k of Object.keys(meshItemBodies)) delete meshItemBodies[k];
+}
+
 beforeEach(() => {
   cleanup();
+  clearBodyCounts();
   seed();
 });
 
@@ -243,5 +267,31 @@ describe('Sidebar mesh bands (issue #1939)', () => {
 
     // One provider picker per mesh row — de-emphasis never removes the `+ ▾` cluster.
     expect(screen.getAllByTitle('Choose provider')).toHaveLength(6);
+  });
+
+  it('a band-neutral node update re-executes only that mesh row (issue #1748 guarantee)', async () => {
+    render(<Sidebar />);
+    await settleSidebar();
+    clearBodyCounts();
+
+    // Flipping a status inside mesh-beta moves no mesh between bands.
+    act(() => {
+      useAgentNodeStore.getState().patchAgentNode(100, { status: 'awaiting_input' });
+    });
+
+    // Only beta's own row body executed: untouched meshes bail out past
+    // both the `MeshItem` memo comparator and the sortable-items identity.
+    expect(meshItemBodies[100] ?? 0).toBeGreaterThan(0);
+    expect(meshItemBodies[101] ?? 0).toBe(0);
+    expect(meshItemBodies[102] ?? 0).toBe(0);
+    expect(meshItemBodies[104] ?? 0).toBe(0);
+    expect(meshOrder()).toEqual([
+      'mesh-beta',
+      'mesh-delta',
+      'mesh-zeta',
+      'mesh-alpha',
+      'mesh-gamma',
+      'mesh-epsilon',
+    ]);
   });
 });

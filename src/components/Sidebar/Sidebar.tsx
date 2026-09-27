@@ -34,6 +34,10 @@ const EMPTY_NODES: AgentNode[] = [];
 // provider subtree (and, through it, every sortable row) on each node update.
 const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
 
+// Issue #1939 — stable empty identity for the sortable-id retention below,
+// so the band-empty initial state shares one reference like `EMPTY_NODES`.
+const EMPTY_SORTABLE_IDS: number[] = [];
+
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
   // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
@@ -240,18 +244,30 @@ export function Sidebar() {
 
   // Issue #1748 — `SortableContext` keys its context value on the `items`
   // array identity, and every `MeshItem` subscribes through `useSortable` —
-  // a fresh `meshes.map(...)` per render would re-render every row via
-  // context even with memoized props. The id list only changes when the
-  // mesh list itself changes, never on node updates.
+  // a fresh id list per render would re-render every row via context even
+  // with memoized props. The id list only changes when the displayed order
+  // actually changes, never on band-neutral node updates.
   // Issue #1939 — the items follow the DISPLAYED order (active band first)
-  // so the keyboard sensor walks rows as the user sees them. `handleDragEnd`
-  // below still resolves the drop target against the manual `meshes` order,
-  // so dragging across the band boundary only changes the manual position —
-  // band membership itself is never draggable.
-  const sortableMeshIds = useMemo(
-    () => [...activeMeshes, ...inactiveMeshes].map(p => p.id),
-    [activeMeshes, inactiveMeshes],
-  );
+  // so the keyboard sensor walks rows as the user sees them. The band
+  // arrays above are fresh literals on every node update, so mapping them
+  // directly would mint a new identity on each one. The previous list is
+  // retained while the joined id signature is unchanged (element-wise
+  // comparison, idempotent across re-renders), so identity flips only when
+  // a mesh actually crosses a band boundary or the mesh list itself
+  // changes. `handleDragEnd` below still resolves the drop target against
+  // the manual `meshes` order, so dragging across the band boundary only
+  // changes the manual position — band membership itself is never
+  // draggable.
+  const sortableMeshIdsPrevRef = useRef<number[]>(EMPTY_SORTABLE_IDS);
+  const nextSortableMeshIds = [...activeMeshes, ...inactiveMeshes].map(p => p.id);
+  const prevSortableMeshIds = sortableMeshIdsPrevRef.current;
+  if (
+    prevSortableMeshIds.length !== nextSortableMeshIds.length ||
+    prevSortableMeshIds.some((id, index) => id !== nextSortableMeshIds[index])
+  ) {
+    sortableMeshIdsPrevRef.current = nextSortableMeshIds;
+  }
+  const sortableMeshIds = sortableMeshIdsPrevRef.current;
 
   // Issue #1939 — one row renderer for both bands. Inactive rows render
   // `dimmed` (presentational only: same structure, same spawn affordance).

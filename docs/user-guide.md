@@ -121,9 +121,9 @@ accessible. Grouping does not combine nodes from different Meshes.
 
 ## Find open work in the sidebar
 
-Meshes that currently have at least one agent node sit at the top of the
-sidebar under an **Active** label, in your own drag order; every other mesh
-follows below, dimmed, in the same manual order. Nothing is hidden — all
+Meshes that currently have at least one open agent node sit at the top of
+the sidebar under an **Active** label, in your own drag order; every other
+mesh follows below, dimmed, in the same manual order. Nothing is hidden — all
 meshes stay visible and every row keeps its spawn control, so a mesh with
 nothing open is still a working row you can spawn from.
 
