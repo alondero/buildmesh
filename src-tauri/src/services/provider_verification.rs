@@ -338,7 +338,7 @@ pub fn verify_route_blocking(pairing: &ProviderPairing, account: &ProviderAccoun
     tracing::info!(
         harness_id,
         provider_id,
-        runtime = install.runtime_identity,
+        runtime = codex::log_safe_runtime_identity(&install),
         endpoint_host,
         model_id = descriptor.model_id,
         status = ?record.status,
@@ -483,7 +483,7 @@ fn verified_with_record(
         format!(
             "pairing '{}' is unverified for {}; use Verify pairing in Settings",
             account.name,
-            install.runtime_identity
+            codex::log_safe_runtime_identity(install)
         )
     })?;
     if verification.status != PairingVerificationStatus::Verified {
@@ -523,10 +523,18 @@ pub fn launchable_on_runtime(
 }
 
 pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
+    // Issue #1937: the Settings → Providers tab calls this twice per load
+    // (once per runtime) on top of `available_providers`, so each call emits
+    // one `info` line (lands in `logs\buildmesh.log` on a default install)
+    // with the Codex probe cost. Only the runtime identity and CLI version
+    // travel in the fields — never credentials, keys, or endpoint URLs.
+    let derivation_started = std::time::Instant::now();
     let prefs = preferences::load().unwrap_or_default();
     let accounts = preferences::provider_accounts();
+    let probe_started = std::time::Instant::now();
     let install = codex::discover_supported_install(env_type);
-    prefs
+    let probe_duration_ms = probe_started.elapsed().as_millis();
+    let statuses: Vec<PairingVerification> = prefs
         .provider_pairings
         .iter()
         .filter_map(|pairing| {
@@ -571,7 +579,19 @@ pub fn current_statuses(env_type: EnvType) -> Vec<PairingVerification> {
                 }
             }
         })
-        .collect()
+        .collect();
+    tracing::info!(
+        runtime = codex::runtime_identity(env_type),
+        codex_version = install
+            .as_ref()
+            .map(|install| install.version.as_str())
+            .unwrap_or("none"),
+        probe_duration_ms,
+        pairing_count = statuses.len(),
+        total_duration_ms = derivation_started.elapsed().as_millis(),
+        "pairing verification statuses completed"
+    );
+    statuses
 }
 
 #[cfg(test)]
@@ -941,5 +961,146 @@ mod tests {
                 .unwrap()
                 .contains("MiniMax-M3")
         );
+    }
+
+    /// Issue #1937: each `current_statuses` call (twice per Settings →
+    /// Providers load, once per runtime) must emit exactly one greppable
+    /// `info` line with its Codex probe cost. The field allow-list pins the
+    /// redaction discipline: only the runtime identity and CLI version
+    /// travel, never credentials, keys, or endpoint URLs.
+    ///
+    /// A hand-rolled capturing subscriber (scoped via `with_default`, so no
+    /// global state) keeps this parallel-safe without new dev-dependencies.
+    #[test]
+    fn current_statuses_emits_one_timing_log_line() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata};
+
+        struct Recorder {
+            fields: Vec<(String, String)>,
+        }
+        impl Visit for Recorder {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                // `record_debug` is the `Visit` funnel: every typed
+                // `record_*` defaults through it, so one arm captures all
+                // fields. String values arrive Debug-quoted — strip the
+                // quotes for assertion readability.
+                let rendered = format!("{value:?}");
+                let unquoted = rendered
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                    .unwrap_or(&rendered)
+                    .to_string();
+                self.fields.push((field.name().to_string(), unquoted));
+            }
+        }
+        struct Capture {
+            events: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut recorder = Recorder { fields: Vec::new() };
+                event.record(&mut recorder);
+                self.events.lock().unwrap().push(recorder.fields);
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+
+        let events: Arc<Mutex<Vec<Vec<(String, String)>>>> = Arc::new(Mutex::new(Vec::new()));
+        // `tracing` caches per-callsite interest globally: a first hit under
+        // the default no-op dispatcher pins the site as disabled, and a
+        // rebuild only reaches already-registered sites — so a sibling test
+        // hitting `current_statuses` first (or between rebuild and emit)
+        // would silently swallow the line under parallelism. Drive one
+        // throwaway call first (registering the site under the capturing
+        // dispatcher), rebuild, discard its line, and assert on the second
+        // call. Whatever the initial cache state, the second call
+        // contributes exactly one line — which also proves the "one line per
+        // derivation" budget.
+        let run_once = || {
+            tracing::dispatcher::with_default(
+                &tracing::dispatcher::Dispatch::new(Capture {
+                    events: events.clone(),
+                }),
+                || {
+                    tracing::callsite::rebuild_interest_cache();
+                    current_statuses(EnvType::Windows)
+                },
+            )
+        };
+        run_once();
+        tracing::callsite::rebuild_interest_cache();
+        events.lock().unwrap().clear();
+        let statuses = run_once();
+
+        let events = events.lock().unwrap();
+        let derivations: Vec<_> = events
+            .iter()
+            .filter(|fields| {
+                fields.iter().any(|(name, value)| {
+                    name == "message" && value == "pairing verification statuses completed"
+                })
+            })
+            .collect();
+        assert_eq!(
+            derivations.len(),
+            1,
+            "expected exactly one pairing verification statuses log line, got {}",
+            derivations.len()
+        );
+        let fields = derivations[0];
+        let mut names: Vec<&str> = fields
+            .iter()
+            .filter(|(name, _)| name != "message")
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "codex_version",
+                "pairing_count",
+                "probe_duration_ms",
+                "runtime",
+                "total_duration_ms",
+            ],
+            "the statuses log field set is the redaction contract — adding a field is a deliberate change"
+        );
+        let value = |name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_else(|| panic!("statuses log must carry `{name}`"))
+        };
+        // The timings must flow from the real call, not hardcode a shape:
+        // both durations parse as millisecond counts and the pairing count
+        // matches the returned statuses.
+        value("probe_duration_ms")
+            .parse::<u128>()
+            .expect("probe_duration_ms must be a millisecond count");
+        value("total_duration_ms")
+            .parse::<u128>()
+            .expect("total_duration_ms must be a millisecond count");
+        assert_eq!(
+            value("pairing_count")
+                .parse::<usize>()
+                .expect("pairing_count must parse"),
+            statuses.len(),
+            "logged pairing_count must match the returned statuses"
+        );
+        assert!(!value("runtime").is_empty());
+        assert!(!value("codex_version").is_empty());
     }
 }
