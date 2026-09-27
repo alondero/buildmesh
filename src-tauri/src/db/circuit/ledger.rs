@@ -1522,12 +1522,12 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = crate::db::write_conn();
     let tx = db.transaction()?;
-    let woke = commit_circuit_advance_inner(
+    let result = commit_circuit_advance_inner(
         &tx, run_id, run_state, context_json, step_ops,
     )?;
     tx.commit()?;
     drop(db);
-    if woke {
+    if result.terminal_woke {
         crate::services::circuit_worker::wake_circuit_worker();
     }
     Ok(())
@@ -1558,9 +1558,9 @@ pub(crate) fn commit_circuit_advance_locked(
 /// Per-test isolated variant of [`commit_circuit_advance`] (issue #1691).
 /// The public function locks the process-global writer; this helper
 /// takes an explicit `&Connection` so parallel tests can each operate
-/// against their own in-memory DB. Returns `true` when a terminal-state
-/// commit actually fired so the caller can wake the worker (production
-/// only — tests can ignore the boolean).
+/// against their own in-memory DB. The result distinguishes a stale
+/// terminal/deleted run from an applied transition; `terminal_woke` tells
+/// the production wrapper whether it should wake the worker.
 ///
 /// Does NOT commit the transaction — the caller must commit so it can
 /// drop the writer guard before waking the circuit worker.
@@ -1570,7 +1570,7 @@ pub(crate) fn commit_circuit_advance_inner(
     run_state: Option<&str>,
     context_json: Option<&str>,
     step_ops: &[CircuitStepOp],
-) -> SqlResult<bool> {
+) -> SqlResult<CircuitAdvanceCommit> {
     let durable_state = tx
         .query_row(
             "SELECT state FROM autopilot_circuit_runs WHERE id = ?1",
@@ -1595,7 +1595,7 @@ pub(crate) fn commit_circuit_advance_inner(
             "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
             params![run_id],
         )?;
-        return Ok(false);
+        return Ok(CircuitAdvanceCommit { applied: false, terminal_woke: false });
     }
     let prior_context_json = if run_state.map(is_terminal_run_state).unwrap_or(false) {
         tx.query_row(
@@ -1737,7 +1737,12 @@ pub(crate) fn commit_circuit_advance_inner(
             params![run_id],
         )?;
     }
-    Ok(terminal_woke)
+    Ok(CircuitAdvanceCommit { applied: true, terminal_woke })
+}
+
+pub(crate) struct CircuitAdvanceCommit {
+    pub applied: bool,
+    pub terminal_woke: bool,
 }
 
 /// Attach a spawned agent and its optional presentation parent to a step.
@@ -2033,11 +2038,19 @@ mod reviewer_tests {
             node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
         }]).unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_recovery_history BEFORE INSERT ON circuit_run_history
+            WHEN NEW.kind='review_continuation'
+            BEGIN SELECT RAISE(ABORT,'injected continuation history failure'); END;").unwrap();
+        assert!(create_node_circuit_run_recovery_locked(&mut db, recovery, 2).is_err());
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row.get::<_, i64>(0)).unwrap(), 1,
+            "failed recovery must not leave a successor without its history");
+        db.execute_batch("DROP TRIGGER reject_recovery_history").unwrap();
+        let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
         drop(db);
 
         // Restart: reopen the same file and read the continuation back.
-        let db = Connection::open(file.path()).unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
         let (detail, recorded_source, disposition): (String, Option<String>, Option<String>) = db.query_row(
             "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
             params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -2046,6 +2059,17 @@ mod reviewer_tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
         let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
         assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()), "reopened successor still points back at its predecessor");
+        let retry = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
+        assert_eq!(create_node_circuit_run_recovery_locked(&mut db, retry, 2).unwrap(), successor,
+            "restarting and repeating Continue review returns the existing successor");
+        let graph = super::super::evidence::run_graph(&db, successor).unwrap();
+        assert!(graph.node("implementer").is_none(), "review continuation never replays implementation");
+        assert!(!graph.nodes.iter().any(|node| matches!(node.kind,
+            crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr, ..
+            })), "review continuation never replays PR publication");
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1", [successor], |row| row.get::<_, i64>(0)).unwrap(), 0,
+            "an unopened successor has not dispatched any external effect");
     }
 
     /// Issue #1816: every harness with neither an attention hook nor a

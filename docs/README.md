@@ -41,6 +41,8 @@ the complete product manual.
 [Session observation and autonomous supervision](development/circuit-session-observation.md)
 explains lifecycle evidence, report handoff, inference scheduling, and the
 remaining acceptance work for supervising many sessions.
+The [Circuit effect recovery contract](development/circuit-effect-recovery.md)
+maps action intent, dispatch, acknowledgement, cancellation, and restart policy.
 
 ## Documentation maintenance
 

@@ -15,7 +15,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt and spawn claims survive reopen. Attachment acknowledgement is atomic; injected history failure rolls it back. Competing operator revisions are fenced. OpenPr recheck uses only the saved owner/repo/head lookup; deterministic tests cover a matching PR result, `NotPerformed` then a match, and cancellation before the late result commits | Live read-only OpenPr recovery passed in the continued acceptance checks below, including a retained NotPerformed attestation. The create-dispatch crash transition is now covered deterministically (issue #1907, below); a live process crash and live GitHub races remain unverified. Other effect kinds and continuation still need a complete typed journal audit |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt, spawn, continuation, local status, close, and notification recovery policies are inventoried in [the effect recovery contract](circuit-effect-recovery.md). SetNodeStatus now commits with its step; review continuation rollback, reopen deduplication, and publication exclusion have focused DB coverage | Live process crashes and live GitHub mutations remain unverified. Non-OpenPr GitHub actions have no automated read-only recheck and require operator outcome records |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
@@ -931,3 +931,38 @@ This is source/deterministic-seam evidence. It does not claim live delivery for
 any harness; the per-harness live-delivery rows above remain the authority for
 that, and unsupported or untested combinations stay unverified. Platform:
 Windows, development configuration.
+## Durable effect-kind audit (#1908)
+
+The [Circuit effect recovery contract](circuit-effect-recovery.md) maps every
+stepper effect to its durable state and safe restart policy. The external
+journal now uses a closed Rust enum for its `spawn`, `prompt`, and `github`
+claims; the worker maps every effect variant explicitly. Classifier
+continuation remains on its separate pending/claimed context protocol.
+
+The audit found that `SetNodeStatus` committed a completed step before its
+SQLite status write. It now applies the target status, completed step, and
+acknowledgement history in the same transaction. An injected history failure
+proves the status and step both roll back; a reopened database proves they
+both persist after success. Missing and archived status targets now roll back
+that attempted completion and persist a failed run through the original
+transition fence; cancellation also rejects a late status mutation. The
+transaction reports whether it applied the run transition before processing
+local status effects. `CloseAgentNode` retains its existing idempotent retry
+while its target association remains. `Notify` is documented as a transient
+event without restart replay.
+
+Review continuation tests now inject a failure during successor history
+creation, verify that no partial successor remains, reopen the database, and
+repeat the request. The request returns the same successor, whose snapshot
+contains neither implementation nor OpenPr publication and whose effect
+journal is empty before execution.
+
+These are deterministic SQLite/worker-boundary tests. They do not claim a live
+process crash or live GitHub mutation. OpenPr create-to-recovery uses the
+loopback evidence recorded under #1907; other GitHub mutations remain
+Unverified after an unknown result and have no read-only recheck.
+
+Validation for this audit passed 21 Circuit evidence database tests, 94
+Circuit worker tests, and all 8 GitHub recovery worker tests (123 focused Rust
+tests total, run serially). The documentation suite passed all 19 tests, and
+the documentation checker validated 124 Markdown files.

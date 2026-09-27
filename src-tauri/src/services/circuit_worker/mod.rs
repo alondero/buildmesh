@@ -21,10 +21,11 @@
 //!    capacity counters) and turns it into pure [`CircuitEvent`]s;
 //! 2. **Steps** via [`advance`](autopilot::circuit::stepper::advance) —
 //!    no DB, no I/O;
-//! 3. **Commits** the decided writes atomically through
-//!    [`db::commit_circuit_advance`] (one transaction);
-//! 4. **Executes** effects against the real world (spawn agent node,
-//!    inject PTY prompt, set node status, notify UI).
+//! 3. **Commits** the decided writes atomically through the Circuit
+//!    evidence transaction; local `SetNodeStatus` changes commit with their
+//!    completed step;
+//! 4. **Executes** external or transient effects (spawn agent node, inject
+//!    PTY prompt, notify UI).
 //!
 //! A crash between commit and effect execution is recovered by
 //! observation on the next pass: a spawn step whose agent node has
@@ -785,11 +786,58 @@ fn drive_run(
     recover_run_observers(app, &view);
 
     for event in observe(app, active, &view) {
-        let (transition, turn_boundary_changed) = advance_and_persist_observed_event(
+        let persisted = advance_and_persist_observed_event(
             &mut view,
             &event,
             |view, transition| persist_transition_checked(active.run.id, view, transition),
-        )?;
+        );
+        let (transition, turn_boundary_changed) = match persisted {
+            Ok(result) => result,
+            Err(TransitionPersistFailure::AgentStatusEffectRejected {
+                expected,
+                effects,
+                message,
+            }) => {
+                tracing::warn!(
+                    "circuits: run {} SetNodeStatus commit failed: {}; failing the local effect",
+                    active.run.id,
+                    message
+                );
+                fail_rejected_agent_status_effects(
+                    &mut view,
+                    &expected,
+                    &effects,
+                    &message,
+                    |context, steps, expected| {
+                        db::circuit::evidence::commit_transition(
+                            active.run.id,
+                            Some(RunState::Failed.as_db_str()),
+                            context,
+                            steps,
+                            db::circuit::evidence::EvidenceWrite {
+                                expected: Some(expected),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                    },
+                )?;
+                close_run_agents(&view);
+                if let Some(source) = active.run.source_agent_node_id {
+                    crate::autopilot::evaluator::unregister(source);
+                }
+                let _ = app.emit(
+                    "circuit-run-updated",
+                    CircuitRunUpdatedPayload {
+                        run_id: active.run.id,
+                        state: RunState::Failed.as_db_str().to_string(),
+                    },
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error.into_message()),
+        };
         // Capture the pre-prompt transcript revision in the same transaction
         // as the pure transition. This keeps the durable turn boundary on the
         // normal commit path; effect execution only performs the in-memory
@@ -815,7 +863,6 @@ fn drive_run(
                         crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
                         | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
                         | crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
-                        | crate::autopilot::circuit::stepper::Effect::SetNodeStatus { node_id, .. }
                         | crate::autopilot::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
                         | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
                             Some(node_id.clone())
@@ -977,6 +1024,11 @@ pub(super) fn drain_effect_outcomes(
 #[derive(Debug)]
 enum TransitionPersistFailure {
     FreshnessRejected(String),
+    AgentStatusEffectRejected {
+        expected: crate::autopilot::circuit::stepper::TransitionFence,
+        effects: Vec<crate::autopilot::circuit::stepper::Effect>,
+        message: String,
+    },
     Other(String),
 }
 
@@ -984,14 +1036,155 @@ impl TransitionPersistFailure {
     fn into_message(self) -> String {
         match self {
             Self::FreshnessRejected(message) | Self::Other(message) => message,
+            Self::AgentStatusEffectRejected { message, .. } => message,
         }
     }
+}
+
+fn failed_effect_step_ops(
+    view: &RunView,
+    effects: &[crate::autopilot::circuit::stepper::Effect],
+    message: &str,
+) -> Vec<db::CircuitStepOp> {
+    use crate::autopilot::circuit::stepper::Effect;
+    let mut seen = HashSet::new();
+    effects
+        .iter()
+        .filter_map(|effect| {
+            let node_id = match effect {
+                Effect::SpawnAgentNode { node_id }
+                | Effect::InjectPty { node_id, .. }
+                | Effect::ContinueAgentTurn { node_id, .. }
+                | Effect::SetNodeStatus { node_id, .. }
+                | Effect::CloseAgentNode { node_id, .. }
+                | Effect::CallGithub { node_id, .. } => node_id,
+                Effect::Notify { .. } => return None,
+            };
+            if !seen.insert(node_id.clone()) {
+                return None;
+            }
+            Some(db::CircuitStepOp {
+                node_id: node_id.clone(),
+                status: "failed".into(),
+                outcome: Some(Some("failed".into())),
+                error: Some(Some(message.into())),
+                agent_node_id: None,
+                attempt: view.step(node_id).map_or(1, |step| step.attempt),
+                fresh_attempt: false,
+            })
+        })
+        .collect()
+}
+
+fn fail_rejected_agent_status_effects(
+    view: &mut RunView,
+    expected: &crate::autopilot::circuit::stepper::TransitionFence,
+    effects: &[crate::autopilot::circuit::stepper::Effect],
+    message: &str,
+    mut persist: impl FnMut(
+        &str,
+        &[db::CircuitStepOp],
+        &crate::autopilot::circuit::stepper::TransitionFence,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    let steps = failed_effect_step_ops(view, effects, message);
+    if steps.is_empty() {
+        return Err("SetNodeStatus rejection did not identify a failed effect step".into());
+    }
+    let context = view.context.to_json().map_err(|error| error.to_string())?;
+    persist(&context, &steps, expected)?;
+    view.state = RunState::Failed;
+    for op in steps {
+        if let Some(step) = view.step_mut(&op.node_id) {
+            step.status = StepStatus::Failed;
+            step.outcome = Some(crate::autopilot::circuit::model::StepOutcome::Failed);
+            step.error = Some(message.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn effect_persistence_writes(
+    view: &RunView,
+    effects: &[crate::autopilot::circuit::stepper::Effect],
+) -> Result<(
+    Vec<db::circuit::evidence::EffectIntent>,
+    Vec<db::circuit::evidence::AgentStatusEffect>,
+), TransitionPersistFailure> {
+    use crate::autopilot::circuit::stepper::Effect;
+
+    let mut intents = Vec::new();
+    let mut agent_status_effects = Vec::new();
+    let attempt_for = |node_id: &str| view.step(node_id).map_or(1, |step| step.attempt);
+    for effect in effects {
+        let intent = match effect {
+            Effect::SpawnAgentNode { node_id } => Some(db::circuit::evidence::EffectIntent {
+                node_id: node_id.clone(),
+                attempt: attempt_for(node_id),
+                kind: db::circuit::evidence::EffectKind::Spawn,
+            }),
+            Effect::InjectPty { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
+                node_id: node_id.clone(),
+                attempt: attempt_for(node_id),
+                kind: db::circuit::evidence::EffectKind::Prompt,
+            }),
+            Effect::CallGithub { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
+                node_id: node_id.clone(),
+                attempt: attempt_for(node_id),
+                kind: db::circuit::evidence::EffectKind::Github,
+            }),
+            Effect::SetNodeStatus { node_id, status, .. } => {
+                let agent_node_id = view.resolve_target_agent(node_id).ok_or_else(|| {
+                    TransitionPersistFailure::Other(format!(
+                        "SetNodeStatus target agent not found in lineage for node {node_id}"
+                    ))
+                })?;
+                agent_status_effects.push(db::circuit::evidence::AgentStatusEffect {
+                    node_id: node_id.clone(),
+                    attempt: attempt_for(node_id),
+                    agent_node_id,
+                    status: crate::models::SessionStatus::from_db_str(status),
+                });
+                None
+            }
+            // Continuation prompts have their own pending/claimed delivery
+            // state in run context. Close is replayed idempotently while
+            // its spawn association remains; notifications are transient.
+            Effect::ContinueAgentTurn { .. }
+            | Effect::CloseAgentNode { .. }
+            | Effect::Notify { .. } => None,
+        };
+        if let Some(intent) = intent {
+            intents.push(intent);
+        }
+    }
+    Ok((intents, agent_status_effects))
 }
 
 fn persist_transition_checked(
     run_id: i64,
     view: &mut RunView,
     transition: &Transition,
+) -> Result<bool, TransitionPersistFailure> {
+    persist_transition_checked_with(
+        run_id,
+        view,
+        transition,
+        db::circuit::evidence::commit_transition,
+    )
+}
+
+fn persist_transition_checked_with(
+    run_id: i64,
+    view: &mut RunView,
+    transition: &Transition,
+    commit: impl FnOnce(
+        i64,
+        Option<&str>,
+        &str,
+        &[db::CircuitStepOp],
+        db::circuit::evidence::EvidenceWrite<'_>,
+    ) -> rusqlite::Result<i64>,
 ) -> Result<bool, TransitionPersistFailure> {
     let turn_boundary_changed = prepare_turn_boundaries(view, &transition.effects)
         .map_err(TransitionPersistFailure::Other)?;
@@ -1027,7 +1220,7 @@ fn persist_transition_checked(
                     intent: db::circuit::evidence::EffectIntent {
                         node_id: write.node_id.clone(),
                         attempt: write.attempt,
-                        kind: "github".into(),
+                        kind: db::circuit::evidence::EffectKind::Github,
                     },
                     detail: view
                         .context
@@ -1047,26 +1240,27 @@ fn persist_transition_checked(
                 "0",
             );
         }
-        let intents = transition.effects.iter().filter_map(|effect| match effect {
-            crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(), attempt: view.step(node_id).map_or(1, |s| s.attempt), kind: "spawn".into(),
-            }),
-            crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(), attempt: view.step(node_id).map_or(1, |s| s.attempt), kind: "prompt".into(),
-            }),
-            crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => Some(db::circuit::evidence::EffectIntent {
-                node_id: node_id.clone(), attempt: view.step(node_id).map_or(1, |s| s.attempt), kind: "github".into(),
-            }),
-            _ => None,
-        }).collect::<Vec<_>>();
-        let revision = db::circuit::evidence::commit_transition(
+        let (intents, agent_status_effects) =
+            effect_persistence_writes(view, &transition.effects)?;
+        let rejected_status_effect = if agent_status_effects.is_empty() {
+            None
+        } else {
+            transition
+                .expected
+                .clone()
+                .map(|expected| (expected, transition.effects.clone()))
+        };
+        let context = view.context.to_json()
+            .map_err(|error| TransitionPersistFailure::Other(error.to_string()))?;
+        let revision = commit(
             run_id,
             run_state,
-            &view.context.to_json().map_err(|error| TransitionPersistFailure::Other(error.to_string()))?,
+            &context,
             &ops,
             db::circuit::evidence::EvidenceWrite {
                 input_guard: transition.input_guard.as_ref(),
                 intents: &intents,
+                agent_status_effects: &agent_status_effects,
                 reconciled_effects: &reconciled_effects,
                 observations: &transition.observations,
                 classifications: &transition.classifications,
@@ -1077,6 +1271,12 @@ fn persist_transition_checked(
             let message = format!("commit failed: {error}");
             if db::circuit::evidence::is_observation_freshness_rejection(&error) {
                 TransitionPersistFailure::FreshnessRejected(message)
+            } else if let Some((expected, effects)) = rejected_status_effect {
+                TransitionPersistFailure::AgentStatusEffectRejected {
+                    expected,
+                    effects,
+                    message,
+                }
             } else {
                 TransitionPersistFailure::Other(message)
             }
@@ -1090,7 +1290,7 @@ fn advance_and_persist_observed_event(
     view: &mut RunView,
     event: &CircuitEvent,
     mut persist: impl FnMut(&mut RunView, &Transition) -> Result<bool, TransitionPersistFailure>,
-) -> Result<(Transition, bool), String> {
+) -> Result<(Transition, bool), TransitionPersistFailure> {
     let before_observation = view.clone();
     let transition = advance(view, event);
     match persist(view, &transition) {
@@ -1099,19 +1299,27 @@ fn advance_and_persist_observed_event(
             let Some(fallback_event) =
                 codex_observer::freshness_rejection_recheck(&before_observation, event)
             else {
-                return Err(error);
+                *view = before_observation;
+                return Err(TransitionPersistFailure::FreshnessRejected(error));
             };
-            *view = before_observation;
+            *view = before_observation.clone();
             tracing::info!(
                 "circuits: run {} Codex recheck rejected by freshness fence; retaining Unverified state",
                 view.run_id
             );
             let fallback_transition = advance(view, &fallback_event);
-            let turn_boundary_changed = persist(view, &fallback_transition)
-                .map_err(TransitionPersistFailure::into_message)?;
-            Ok((fallback_transition, turn_boundary_changed))
+            match persist(view, &fallback_transition) {
+                Ok(turn_boundary_changed) => Ok((fallback_transition, turn_boundary_changed)),
+                Err(error) => {
+                    *view = before_observation;
+                    Err(error)
+                }
+            }
         }
-        Err(TransitionPersistFailure::Other(error)) => Err(error),
+        Err(error) => {
+            *view = before_observation;
+            Err(error)
+        }
     }
 }
 
@@ -2313,7 +2521,11 @@ pub(super) fn execute_call_github_effect(
             reason: "Read-only external-action recheck is unavailable for this GitHub action.".into(),
         }]);
     }
-    let intent = db::circuit::evidence::EffectIntent { node_id: node_id.to_string(), attempt, kind: "github".into() };
+    let intent = db::circuit::evidence::EffectIntent {
+        node_id: node_id.to_string(),
+        attempt,
+        kind: db::circuit::evidence::EffectKind::Github,
+    };
     let Some(revision) = db::circuit::evidence::claim_effect(view.run_id, &intent).map_err(|e| e.to_string())? else {
         return Ok(Vec::new());
     };
@@ -2434,7 +2646,7 @@ pub(super) fn execute_effects(
         match effect {
             Effect::SpawnAgentNode { node_id } => {
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: "spawn".into() };
+                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: db::circuit::evidence::EffectKind::Spawn };
                 let Some(revision) = db::circuit::evidence::claim_effect(active.run.id, &intent).map_err(|e| e.to_string())? else { continue; };
                 view.context.set("evidence.revision", revision.to_string());
                 if let Err(error) = spawn::spawn_step_agent(app, active.run.id, active.run.mesh_id, view, node_id) {
@@ -2444,7 +2656,7 @@ pub(super) fn execute_effects(
             }
             Effect::InjectPty { node_id, prompt, .. } => {
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: "prompt".into() };
+                let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: db::circuit::evidence::EffectKind::Prompt };
                 match view.resolve_target_agent(node_id) {
                     Some(target) => {
                         // Mirrors `observe`'s agent-existence check: treat
@@ -2542,31 +2754,9 @@ pub(super) fn execute_effects(
                     }
                 }
             }
-            Effect::SetNodeStatus { node_id, status, .. } => {
-                let agent_node_id = view
-                    .resolve_target_agent(node_id)
-                    .ok_or_else(|| format!("SetNodeStatus target agent not found in lineage for node {}", node_id))?;
-                // Same orphan check as `Effect::InjectPty` — mirror the
-                // per-tick observer's "deleted OR archived" semantics so a
-                // row that vanishes between observe and execute is caught
-                // here. Returns Err; `drive_run` persists `status: "failed"`
-                // directly via `commit_circuit_advance` (no AgentLost
-                // cascade — see InjectPty's note above).
-                let agent_alive = db::get_agent_node_by_id(agent_node_id)
-                    .ok()
-                    .filter(|n| n.status != SessionStatus::Archived)
-                    .is_some();
-                if !agent_alive {
-                    let reason = format!(
-                        "target agent {} for step {} was lost before status write",
-                        agent_node_id, node_id
-                    );
-                    tracing::warn!("circuits: run {}: {}", active.run.id, reason);
-                    return Err(reason);
-                }
-                let kind = SessionStatus::from_db_str(status);
-                db::update_agent_node_status(agent_node_id, kind)
-                    .map_err(|e| format!("status write failed: {}", e))?;
+            Effect::SetNodeStatus { .. } => {
+                // persist_transition commits this local SQLite mutation with
+                // the completed step, closing the crash gap before dispatch.
             }
             Effect::CloseAgentNode { node_id, target_node_id } => {
                 let target = view
@@ -3164,7 +3354,269 @@ mod tests {
     use super::spawn::*;
     use crate::agent::spawn::ExplicitSpawnOverrides;
     use crate::autopilot::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
+
+    #[test]
+    fn worker_effect_persistence_mapping_covers_every_effect_variant() {
+        use crate::autopilot::circuit::model::{
+            CircuitEdge, CircuitNodeKind, GithubActionKind, SessionStatusKind,
+        };
+        use crate::autopilot::circuit::stepper::Effect;
+
+        let view = RunView {
+            run_id: 1908,
+            state: RunState::Running,
+            graph: CircuitGraph {
+                version: CIRCUIT_GRAPH_VERSION,
+                blueprint: None,
+                nodes: vec![
+                    CircuitNode {
+                        id: "spawn".into(),
+                        kind: CircuitNodeKind::SpawnAgentNode {
+                            prompt: "work".into(),
+                            name: None,
+                            provider: None,
+                            model: None,
+                            effort: None,
+                            extra_args: None,
+                            timeout_seconds: None,
+                        },
+                    },
+                    CircuitNode {
+                        id: "status".into(),
+                        kind: CircuitNodeKind::SetNodeStatus {
+                            status: SessionStatusKind::Completed,
+                            target_node_id: Some("spawn".into()),
+                        },
+                    },
+                ],
+                edges: vec![CircuitEdge {
+                    from: "spawn".into(),
+                    to: "status".into(),
+                    condition: Default::default(),
+                }],
+            },
+            context: CircuitContext::default(),
+            steps: vec![
+                StepView {
+                    node_id: "spawn".into(),
+                    status: StepStatus::Running,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: Some(101),
+                    attempt: 4,
+                },
+                StepView {
+                    node_id: "status".into(),
+                    status: StepStatus::Running,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: None,
+                    attempt: 2,
+                },
+            ],
+        };
+        let effects = vec![
+            Effect::SpawnAgentNode { node_id: "spawn".into() },
+            Effect::InjectPty {
+                node_id: "status".into(),
+                target_node_id: Some("spawn".into()),
+                prompt: "follow up".into(),
+            },
+            Effect::CallGithub {
+                node_id: "status".into(),
+                action: GithubActionKind::PostComment,
+                label: None,
+                comment: Some("done".into()),
+            },
+            Effect::SetNodeStatus {
+                node_id: "status".into(),
+                status: "completed".into(),
+                target_node_id: Some("spawn".into()),
+            },
+            Effect::ContinueAgentTurn {
+                node_id: "status".into(),
+                target_agent_id: 101,
+                prompt: "continue".into(),
+            },
+            Effect::CloseAgentNode {
+                node_id: "status".into(),
+                target_node_id: Some("spawn".into()),
+            },
+            Effect::Notify { message: "finished".into() },
+        ];
+
+        let (intents, status_effects) = effect_persistence_writes(&view, &effects).unwrap();
+        assert_eq!(
+            intents,
+            vec![
+                db::circuit::evidence::EffectIntent {
+                    node_id: "spawn".into(),
+                    attempt: 4,
+                    kind: db::circuit::evidence::EffectKind::Spawn,
+                },
+                db::circuit::evidence::EffectIntent {
+                    node_id: "status".into(),
+                    attempt: 2,
+                    kind: db::circuit::evidence::EffectKind::Prompt,
+                },
+                db::circuit::evidence::EffectIntent {
+                    node_id: "status".into(),
+                    attempt: 2,
+                    kind: db::circuit::evidence::EffectKind::Github,
+                },
+            ]
+        );
+        assert_eq!(
+            status_effects,
+            vec![db::circuit::evidence::AgentStatusEffect {
+                node_id: "status".into(),
+                attempt: 2,
+                agent_node_id: 101,
+                status: crate::models::SessionStatus::Completed,
+            }]
+        );
+    }
+
+    #[test]
+    fn unavailable_set_node_status_target_fails_run_without_retrying_forever() {
+        use crate::autopilot::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNodeKind, EdgeCondition, SessionStatusKind,
+        };
+        use crate::autopilot::circuit::stepper::{Capacity, Effect};
+
+        for (archived, cancel_before_failure_commit) in [(false, false), (true, false), (false, true)] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            let graph = CircuitGraph {
+                version: CIRCUIT_GRAPH_VERSION,
+                blueprint: None,
+                nodes: vec![
+                    CircuitNode {
+                        id: "agent".into(),
+                        kind: CircuitNodeKind::SpawnAgentNode {
+                            prompt: "work".into(), name: None, provider: None,
+                            model: None, effort: None, extra_args: None,
+                            timeout_seconds: None,
+                        },
+                    },
+                    CircuitNode {
+                        id: "status".into(),
+                        kind: CircuitNodeKind::SetNodeStatus {
+                            status: SessionStatusKind::Running,
+                            target_node_id: Some("agent".into()),
+                        },
+                    },
+                ],
+                edges: vec![CircuitEdge {
+                    from: "agent".into(), to: "status".into(), condition: EdgeCondition::Always,
+                }],
+            };
+            conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'agent','/repo','ready');")
+                .unwrap();
+            crate::db::circuit::ledger::create_autopilot_circuit_inner(
+                &conn, 1, "status target failure", "", 1, &graph.to_json().unwrap(),
+            ).unwrap();
+            conn.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+                INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                    VALUES(1,'agent',1,'completed',9),(1,'status',1,'pending_slot',NULL);")
+                .unwrap();
+            if archived {
+                conn.execute("UPDATE agent_nodes SET status='archived' WHERE id=9", []).unwrap();
+            } else {
+                conn.execute("DELETE FROM agent_nodes WHERE id=9", []).unwrap();
+            }
+
+            let mut view = RunView {
+                run_id: 1,
+                state: RunState::Running,
+                graph,
+                context: CircuitContext::default(),
+                steps: vec![
+                    StepView {
+                        node_id: "agent".into(), status: StepStatus::Completed,
+                        outcome: Some(StepOutcome::Completed), error: None,
+                        agent_node_id: Some(9), attempt: 1,
+                    },
+                    StepView {
+                        node_id: "status".into(), status: StepStatus::Queued,
+                        outcome: None, error: None, agent_node_id: None, attempt: 1,
+                    },
+                ],
+            };
+            let event = CircuitEvent::Tick(Capacity {
+                circuit_free_slots: 1,
+                agent_free_slots: 1,
+            });
+            let result = advance_and_persist_observed_event(&mut view, &event, |view, transition| {
+                persist_transition_checked_with(1, view, transition, |run_id, state, context, steps, evidence| {
+                    db::circuit::evidence::commit_transition_locked(
+                        &mut conn, run_id, state, context, steps, evidence,
+                    )
+                })
+            });
+            let (expected, effects, message) = match result {
+                Err(TransitionPersistFailure::AgentStatusEffectRejected { expected, effects, message }) => {
+                    (expected, effects, message)
+                }
+                other => panic!("expected a rejected local status effect, got {other:?}"),
+            };
+            assert!(effects.iter().any(|effect| matches!(effect, Effect::SetNodeStatus { node_id, .. } if node_id == "status")));
+            assert_eq!(view.step("status").unwrap().status, StepStatus::Queued,
+                "failed transition persistence must restore the pre-event view before terminalizing it");
+            if cancel_before_failure_commit {
+                crate::db::circuit::ledger::cancel_circuit_run_locked(&mut conn, 1).unwrap();
+            }
+            let failure_commit = fail_rejected_agent_status_effects(
+                &mut view,
+                &expected,
+                &effects,
+                &message,
+                |context, steps, expected| {
+                    db::circuit::evidence::commit_transition_locked(
+                        &mut conn,
+                        1,
+                        Some(RunState::Failed.as_db_str()),
+                        context,
+                        steps,
+                        db::circuit::evidence::EvidenceWrite {
+                            expected: Some(expected),
+                            ..Default::default()
+                        },
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                },
+            );
+
+            if cancel_before_failure_commit {
+                assert!(failure_commit.is_err(), "cancellation must invalidate the failure fallback fence");
+                let durable_state: String = conn.query_row(
+                    "SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(durable_state, "cancelled");
+                assert_eq!(view.state, RunState::Running, "a rejected failure fallback must not mutate the stale view");
+                continue;
+            }
+            failure_commit.unwrap();
+
+            assert_eq!(view.state, RunState::Failed);
+            assert_eq!(view.step("status").unwrap().status, StepStatus::Failed);
+            let durable_state: String = conn.query_row(
+                "SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get(0),
+            ).unwrap();
+            let durable_step: String = conn.query_row(
+                "SELECT status FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='status'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!((durable_state.as_str(), durable_step.as_str()), ("failed", "failed"));
+            let target_status: Option<String> = conn.query_row(
+                "SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0),
+            ).optional().unwrap();
+            assert_eq!(target_status.as_deref(), archived.then_some("archived"));
+        }
+    }
 
     #[test]
     fn codex_recheck_input_fence_rejection_commits_unverified_without_stale_evidence() {
