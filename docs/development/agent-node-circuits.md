@@ -87,6 +87,7 @@ the PTY write, accepts Codex's normalized line-ending count, and uses the comple
 paste marker for long prompts. A startup redraw alone cannot acknowledge the
 paste; if Codex never renders it, the node is marked for attention instead of
 leaving an apparently submitted review idle. A dead process ends the wait early.
+Output that arrives immediately after Enter can acknowledge that keystroke.
 Ordinary interactive spawn intents retain their user-facing startup-prefill
 behavior because they have different submit/readiness semantics, but both
 paths share prompt construction and harness argument preparation.

@@ -614,6 +614,9 @@ fn press_enter_until_output_guarded(
     // submission this path has no way to observe either way.
     let verifiable = evaluator::is_piloted(node_id);
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
+        // The PTY reader can observe an immediate response before the write
+        // call returns. Mark first so that response acknowledges this Enter.
+        let sent_at = Instant::now();
         if let Some(expected) = guard.as_deref() {
             let Some(next) = registry.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
             guard = Some(next);
@@ -623,7 +626,6 @@ fn press_enter_until_output_guarded(
         if !verifiable {
             return Ok(Some(attempt));
         }
-        let sent_at = Instant::now();
         while Instant::now() < sent_at + ack_window {
             std::thread::sleep(SUBMIT_POLL);
             if output_seen_within(
@@ -1628,7 +1630,6 @@ mod tests {
             writes.recv_timeout(Duration::from_secs(3)).unwrap(),
             b"\r".to_vec(),
         );
-        std::thread::sleep(SUBMIT_POLL);
         evaluator::on_output(id, "task started");
         assert_eq!(submit.join().unwrap().unwrap(), Some(1));
         evaluator::unregister(id);
