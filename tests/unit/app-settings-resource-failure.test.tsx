@@ -509,6 +509,87 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     expect(screen.queryByText(/no compatible providers/i)).toBeNull();
   });
 
+  it('a slow list_providers shows a spinner on the Providers pane instead of a wall of dead controls', async () => {
+    // The providers resource is gated on the Codex install probe chain
+    // (`codex::discover_supported_install`), which spawns several
+    // subprocesses per runtime and can take seconds on a cold WSL
+    // distro. Before this fix the pane rendered `ResourceLoadStatus`
+    // only when the status was `failed`, so for the whole load the user
+    // saw three disabled provider pickers with no explanation — which
+    // reads as a hang rather than as work in progress.
+    //
+    // We hang `list_providers` to hold the resource in `loading` and
+    // assert the user gets a visible, animated progress signal naming
+    // the resource, then that it clears once the load lands.
+    // We hold `list_providers` in flight with a deferred so we can assert
+    // the loading state deterministically, then release it.
+    let resolveProviders: (list: ProviderInfo[]) => void = () => {};
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_app_preferences':
+          return Promise.resolve({
+            default_provider: null,
+            naming_provider: null,
+            autopilot_pool_size: null,
+            worktree_directory: '',
+            confirm_before_quit: true,
+            harness_defaults: {},
+            provider_pairings: [],
+          });
+        case 'list_providers':
+          return new Promise<ProviderInfo[]>((resolve) => {
+            resolveProviders = resolve;
+          });
+        case 'get_provider_accounts':
+          return Promise.resolve([]);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_for_harness':
+          return Promise.resolve([]);
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Providers');
+
+    // The loading banner is live on the Providers pane itself (not only
+    // on failure), naming the resource so the disabled pickers below it
+    // have an explanation.
+    const loading = await screen.findByTestId('resource-load-providers-loading');
+    expect(loading.textContent).toMatch(/loading providers/i);
+    expect(loading.getAttribute('role')).toBe('status');
+    // …carrying the shared Spinner glyph, so the wait is visibly active
+    // rather than a static line of text. The glyph stays aria-hidden so
+    // the live region announces the sentence once, not the glyph.
+    expect(loading.querySelector('[aria-hidden="true"].animate-spin')).toBeTruthy();
+
+    // The routing pickers stay disabled while the resource is in flight —
+    // unchanged behaviour, now explained by the banner above.
+    expect(screen.getByLabelText('Default provider').hasAttribute('disabled')).toBe(true);
+
+    // Release the load: the banner clears and the picker becomes usable,
+    // so the spinner is tied to the real resource state and not stuck on.
+    resolveProviders(REAL_PROVIDERS);
+    await waitFor(() => {
+      expect(screen.queryAllByTestId('resource-load-providers-loading')).toHaveLength(0);
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Default provider').hasAttribute('disabled')).toBe(false);
+    });
+  });
+
   it('pairings load decoupled from preferences: a corrupted preferences.json does NOT fail the pairings resource', async () => {
     // Round-2 review — the previous `loadPairings` called
     // `getAppPreferences()` for `provider_pairings` (the stored-key

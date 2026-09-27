@@ -24,6 +24,7 @@ import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValu
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { Modal, ModalCloseButton } from '../shared/Modal';
+import { Spinner } from '../shared/Spinner';
 import { SettingsRow, SettingsSection } from './SettingsRow';
 import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
@@ -620,7 +621,7 @@ function ResourceLoadStatus({
   // at `idle` is pairings, which is rendered conditionally below).
   return (
     <p
-      className="text-base text-text-muted"
+      className="flex items-center gap-2 text-base text-text-muted"
       data-testid={`resource-load-${resource}-loading`}
       // Polite live region so a screen reader announces the
       // "Loading…" state change without interrupting whatever's
@@ -629,6 +630,15 @@ function ResourceLoadStatus({
       role="status"
       aria-live="polite"
     >
+      {/* The provider list is dominated by subprocess probes for a
+          routed Codex install (see `codex::discover_supported_install`),
+          so the providers resource can sit in this state for seconds.
+          A bare text line read as a hang — every control gated on it
+          was disabled with no explanation of why. The shared `Spinner`
+          keeps this banner in the same visual family as the probe
+          tabs' `LoadingState` (issue #813); it is `aria-hidden` so the
+          live region announces the text once, not the glyph. */}
+      <Spinner className="w-3.5 h-3.5 shrink-0" />
       Loading {humanResourceName(resource)}…
     </p>
   );
@@ -2002,7 +2012,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             onRetry={() => retryResource('preferences')}
           />
         )}
-        {resources.providers.status === 'failed' && (
+        {/* Providers shows `loading` too, not just `failed` — unlike
+            preferences (a cached preferences read, effectively instant) this
+            resource is gated on the Codex install probe chain, which can take
+            several seconds on a cold WSL distro. The three pickers below are
+            disabled until it resolves, so with a failure-only banner the pane
+            showed a wall of dead controls and no reason why. Same
+            `!loaded` guard the Remote Access pane uses for `network`. */}
+        {!providersLoaded && (
           <ResourceLoadStatus
             resource="providers"
             state={resources.providers}

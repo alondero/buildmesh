@@ -409,10 +409,12 @@ fn wsl_read_files(distro: &str, paths: &[&Path]) -> Result<Vec<String>, String> 
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let path_args: Vec<&str> = path_strings.iter().map(String::as_str).collect();
-    let mut command = wsl_command_with_values(distro, WSL_READ_FILES_SCRIPT, &[], &path_args);
-    let output = command
-        .output()
-        .map_err(|e| format!("failed to read WSL Codex files: {e}"))?;
+    let command = wsl_command_with_values(distro, WSL_READ_FILES_SCRIPT, &[], &path_args);
+    let output = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL Codex file read",
+        CODEX_LOOKUP_TIMEOUT,
+    )?;
     if !output.status.success() {
         return Err(format!(
             "WSL Codex file read exited with {}",
@@ -566,9 +568,11 @@ fn runtime_codex_home(
         "-lc",
         WSL_CODEX_HOME_SCRIPT,
     ]);
-    let output = command
-        .output()
-        .map_err(|e| format!("failed to resolve WSL Codex home for trust: {e}"))?;
+    let output = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL Codex home resolution for trust",
+        CODEX_LOOKUP_TIMEOUT,
+    )?;
     let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
         return Err("WSL Codex home identity is unavailable for trust".to_string());
     };
@@ -759,15 +763,34 @@ fn validate_proxy_cli_help(fresh_help: &str, resume_help: &str) -> Result<(), St
     Ok(())
 }
 
+/// Wall-clock bound for one Codex capability probe (`--version`, `--help`).
+///
+/// These are short, local, non-interactive reads that finish in well under a
+/// second, but a bare `.output()` waits forever for a child that never exits:
+/// a wedged `wsl.exe` (paused VM, busy LxssManager) or a `.cmd` shim blocked on
+/// a console handle returns no output and no exit code. That pinned a
+/// blocking-pool thread for the life of the process, so one stuck probe left
+/// the Settings → Providers tab stuck on "loading" with no way to recover
+/// (this command runs 4 discovery chains per tab open — see
+/// `provider_menu::available_providers`). 20s matches the bound the
+/// WindowsInterop branch already used and is far above the real cost.
+const CODEX_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Bound for the executable-location and `CODEX_HOME` lookups below. These are
+/// plain host/guest reads with no PowerShell in the path, so they get a tighter
+/// bound than [`CODEX_PROBE_TIMEOUT`]; the first `wsl.exe` call after a cold
+/// VM start can take seconds, and 10s leaves ample headroom.
+const CODEX_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn codex_output(
     env_type: EnvType,
     wsl_distro: Option<&str>,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
-    let mut command = if env_type == EnvType::WindowsInterop {
+    let (mut command, op_name) = if env_type == EnvType::WindowsInterop {
         let args = args.iter().map(|arg| crate::env::powershell_literal(arg)).collect::<Vec<_>>().join(" ");
         let command = crate::env::powershell_command(&format!("& codex {args}; exit $LASTEXITCODE"));
-        return crate::process_util::run_command_with_timeout(command, "Windows Codex probe", std::time::Duration::from_secs(20));
+        return crate::process_util::run_command_with_timeout(command, "Windows Codex probe", CODEX_PROBE_TIMEOUT);
     } else if env_type == EnvType::Wsl {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
@@ -776,21 +799,23 @@ fn codex_output(
             "--exec",
             "codex",
         ]);
-        command
+        (command, "WSL Codex probe")
     } else if cfg!(target_os = "windows") {
         // npm installs Codex as a `.cmd` shim. `std::process::Command` cannot
         // execute batch files directly on Windows, so capability probes use
         // the same non-interactive cmd relay as other shim-backed providers.
         let mut command = crate::process_util::command_no_window("cmd.exe");
         command.args(["/d", "/c", "codex"]);
-        command
+        (command, "Windows Codex probe")
     } else {
-        crate::process_util::command_no_window("codex")
+        (crate::process_util::command_no_window("codex"), "Codex probe")
     };
-    command
-        .args(args)
-        .output()
-        .map_err(|e| format!("Codex executable is unavailable: {e}"))
+    command.args(args);
+    // `run_command_with_timeout` names the operation and the failure in its
+    // own error strings ("WSL Codex probe timed out after 20s"), which is more
+    // actionable than the old blanket "Codex executable is unavailable" —
+    // the timeout case is not an availability problem.
+    crate::process_util::run_command_with_timeout(command, op_name, CODEX_PROBE_TIMEOUT)
 }
 
 fn successful_help(
@@ -833,20 +858,23 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
     }
     let executable = if env_type == EnvType::WindowsInterop {
         let command = crate::env::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -ErrorAction Stop).Source");
-        let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", std::time::Duration::from_secs(10))?;
+        let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", CODEX_LOOKUP_TIMEOUT)?;
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else if env_type == EnvType::Wsl {
-        let out = crate::process_util::command_no_window("wsl.exe")
-            .args([
-                "-d",
-                wsl_distro.as_deref().expect("WSL distribution was resolved"),
-                "--exec",
-                "sh",
-                "-lc",
-                "printf '__BUILDMESH_WSL_CODEX_EXECUTABLE__%s\\n' \"$(command -v codex)\"",
-            ])
-            .output()
-            .map_err(|e| format!("failed to locate WSL Codex executable: {e}"))?;
+        let mut locate = crate::process_util::command_no_window("wsl.exe");
+        locate.args([
+            "-d",
+            wsl_distro.as_deref().expect("WSL distribution was resolved"),
+            "--exec",
+            "sh",
+            "-lc",
+            "printf '__BUILDMESH_WSL_CODEX_EXECUTABLE__%s\\n' \"$(command -v codex)\"",
+        ]);
+        let out = crate::process_util::run_command_with_timeout(
+            locate,
+            "WSL Codex executable location",
+            CODEX_LOOKUP_TIMEOUT,
+        )?;
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .rev()
@@ -861,10 +889,10 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
         } else {
             "which"
         };
-        let out = crate::process_util::command_no_window(locator)
-            .arg("codex")
-            .output()
-            .map_err(|e| format!("failed to locate Codex executable: {e}"))?;
+        let mut locate = crate::process_util::command_no_window(locator);
+        locate.arg("codex");
+        let out =
+            crate::process_util::run_command_with_timeout(locate, "Codex executable location", CODEX_LOOKUP_TIMEOUT)?;
         let candidates = String::from_utf8_lossy(&out.stdout);
         if cfg!(target_os = "windows") {
             candidates
@@ -897,9 +925,11 @@ pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, Str
             "-lc",
             WSL_CODEX_HOME_SCRIPT,
         ]);
-        let output = command
-            .output()
-            .map_err(|e| format!("failed to resolve WSL Codex home: {e}"))?;
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "WSL Codex home resolution",
+            CODEX_LOOKUP_TIMEOUT,
+        )?;
         let Some(home) = crate::env::parse_wsl_codex_home_output(&output.stdout) else {
             return Err("WSL Codex home identity is unavailable".into());
         };
@@ -1350,6 +1380,65 @@ impl AgentProvider for CodexAdapter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Regression guard: no read probe in this module may spawn a child
+    /// with a bare `.output()`.
+    ///
+    /// `discover_supported_install` runs four times per Settings →
+    /// Providers tab load (twice inside `available_providers`, twice more
+    /// via `get_pairing_verifications` across Windows + WSL), and every
+    /// probe used to wait on `.output()`, which blocks forever when the
+    /// child never exits — a wedged `wsl.exe` on a paused VM, a `.cmd`
+    /// shim stuck on a console handle. That pinned a blocking-pool thread
+    /// for the life of the process with no way for the user to recover, so
+    /// the tab sat on "loading" indefinitely.
+    ///
+    /// This is a source-shape assertion rather than a live hung-probe test
+    /// because the failure needs a genuinely un-exitable child in a
+    /// specific runtime, which can't be fabricated portably. `run_command_with_timeout`
+    /// itself is covered in `process_util` (kill-on-deadline, early-exit,
+    /// spawn-failure); what's pinned here is that this module keeps routing
+    /// through it. Mirrors `process_util::git_command_disables_interactive_prompts`,
+    /// which guards the same class of regression for the git shell-out.
+    #[test]
+    fn no_codex_read_probe_spawns_without_a_timeout() {
+        let source = include_str!("codex.rs");
+        // Everything before the test module is production code; the test
+        // module legitimately spawns real children with plain `.output()`.
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("codex.rs must keep its #[cfg(test)] mod tests block")
+            .0;
+        // Strip comment lines first: this file's own doc comments name
+        // `.output()` when explaining the bug, and prose about the hazard
+        // must not read as an instance of it.
+        let code: String = production
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with('*') && !trimmed.starts_with("/*")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains(".output()"),
+            "every Codex probe must use process_util::run_command_with_timeout — \
+             a bare `.output()` can block forever and strands the Settings → \
+             Providers tab on a spinner with no recovery"
+        );
+    }
+
+    /// The probe bounds must stay generous enough for a cold WSL distro
+    /// start (seconds) but finite. A zero/absurd value would make the
+    /// timeout above a self-inflicted outage rather than a backstop.
+    #[test]
+    fn codex_probe_timeouts_are_finite_and_non_trivial() {
+        assert!(CODEX_PROBE_TIMEOUT >= std::time::Duration::from_secs(5));
+        assert!(CODEX_LOOKUP_TIMEOUT >= std::time::Duration::from_secs(5));
+        // Lookups are plain host/guest reads, so they stay tighter than the
+        // CLI capability probes (which may go through PowerShell).
+        assert!(CODEX_LOOKUP_TIMEOUT < CODEX_PROBE_TIMEOUT);
+    }
 
     #[test]
     fn multiline_automated_prefill_uses_pty_transport() {
