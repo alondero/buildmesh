@@ -33,6 +33,26 @@ pub(crate) struct NativeHook {
     pub human_fact: Option<crate::autopilot::circuit::observation::ObservedWorkFact>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// SHA-256 of the verbatim `prompt` Claude Code echoes on
+    /// `UserPromptSubmit` (issue #1898). This is the only native field that
+    /// can identify *which* Buildmesh submission a turn acknowledges: the
+    /// text Buildmesh wrote is the text the harness reports receiving.
+    /// Retained only alongside a turn token — the content proof and the turn
+    /// name are only useful together. Absent for every other event, provider
+    /// and payload shape, and an absent digest means "cannot prove
+    /// submission", never "assume it matched". The prompt text itself is
+    /// never retained.
+    #[serde(default)]
+    pub prompt_digest: Option<String>,
+}
+
+/// SHA-256 of the exact prompt text Buildmesh wrote into the PTY. The
+/// submission record and the `UserPromptSubmit` echo must both be hashed
+/// through this helper so an equal digest is a real byte-for-byte match
+/// rather than two independently defined fingerprints.
+pub(crate) fn submission_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 impl NativeHook {
@@ -43,6 +63,7 @@ impl NativeHook {
         if !matches!(provider, "claude" | "claude_code" | "anthropic" | "codex") {
             return None;
         }
+        let claude_family = matches!(provider, "claude" | "claude_code" | "anthropic");
         let value: serde_json::Value = serde_json::from_slice(body).ok()?;
         let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
         let human_fact = human_fact(&value);
@@ -67,6 +88,12 @@ impl NativeHook {
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned)
         };
+        // The turn token naming the prompt the harness is processing. Claude
+        // Code's documented spelling is `prompt_id`; the other aliases are
+        // the shapes sibling harnesses use for the same fact.
+        let turn_id = ["prompt_id", "promptId", "turn_id"]
+            .iter()
+            .find_map(|key| token(key));
         let active_work = (|| {
             let tasks = value.get("background_tasks")?.as_array()?;
             let crons = value.get("session_crons")?.as_array()?;
@@ -84,7 +111,7 @@ impl NativeHook {
         })();
         Some(Self {
             session_id: token("session_id").or_else(|| token("sessionId")).or_else(|| token("sessionID")).or_else(|| token("conversationId")).or_else(|| token("conversation_id")).or_else(|| token("taskId")),
-            turn_id: token("prompt_id").or_else(|| token("promptId")).or_else(|| token("turn_id")),
+            turn_id: turn_id.clone(),
             event: event.into(),
             child_id: token("agent_id"),
             human_fact,
@@ -93,6 +120,17 @@ impl NativeHook {
             termination_reason: None,
             provider: Some(provider.into()),
             active_work,
+            prompt_digest: (claude_family && event == "UserPromptSubmit" && turn_id.is_some())
+                .then(|| {
+                    value
+                        .get("prompt")
+                        .and_then(|text| text.as_str())
+                        // An empty echo identifies nothing: accepting one
+                        // would be a bare turn token with no content proof.
+                        .filter(|text| !text.is_empty())
+                        .map(submission_digest)
+                })
+                .flatten(),
             final_report: if event == "Stop" {
                 token("last_assistant_message")
                     .map(|text| crate::secret_scrubber::SecretScrubber::scrub(&text))
@@ -201,6 +239,7 @@ fn parse_agy(body: &[u8]) -> Option<NativeHook> {
         execution_num,
         termination_reason,
         provider: Some("agy".into()),
+        prompt_digest: None,
     })
 }
 
@@ -257,6 +296,12 @@ pub(crate) struct NativeReceipt {
     pub explicit_turn_mismatch: bool,
     #[serde(default)]
     pub submission_correlated: bool,
+    /// Which recorded Buildmesh submission this turn acknowledged, when one
+    /// was provably bound (issue #1898). Persisted so the ledger answers
+    /// "which input was this?" without re-deriving it, and so a second turn
+    /// cannot claim a submission another turn already acknowledged.
+    #[serde(default)]
+    pub submission_seq: Option<i64>,
     pub hook: NativeHook,
 }
 
@@ -283,9 +328,12 @@ pub(crate) fn receive(
         received_at_ms: chrono::Utc::now().timestamp_millis(),
         turn_fenced,
         explicit_turn_mismatch,
-        // Native turn IDs do not acknowledge a Buildmesh submission. Arrival
-        // time cannot establish that association after delayed hook delivery.
-        submission_correlated: false,
+        // A turn token on its own says nothing about which Buildmesh
+        // submission it belongs to. Correlation is decided against durable
+        // evidence in `db::circuit::evidence::receive_native_hook`, which is
+        // the only place a recorded submission and the harness prompt echo
+        // can be compared (issue #1898).
+        submission_correlated: false, submission_seq: None,
         hook,
     };
     crate::db::circuit::evidence::receive_native_hook(&receipt)?;
@@ -529,6 +577,167 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_prompt_echo_is_the_only_native_submission_evidence() {
+        // Issue #1898: `UserPromptSubmit` is the documented Claude Code event
+        // that carries both the verbatim `prompt` text and the `prompt_id`
+        // turn token. Nothing else may look like a submission acknowledgement.
+        let submit = br#"{"session_id":"session","prompt_id":"turn-1","hook_event_name":"UserPromptSubmit","prompt":"run the tests"}"#;
+        for provider in ["claude", "claude_code", "anthropic"] {
+            let hook = NativeHook::parse(provider, submit).unwrap();
+            assert_eq!(hook.turn_id.as_deref(), Some("turn-1"));
+            assert_eq!(
+                hook.prompt_digest.as_deref(),
+                Some(submission_digest("run the tests").as_str()),
+                "{provider} must hash the harness prompt echo through the shared submission digest"
+            );
+        }
+        // Every other event, and the same event without the documented
+        // `prompt` field, carries no submission evidence at all. An absent
+        // digest must read as "cannot prove", never "assume it matched".
+        for (provider, body) in [
+            ("claude", br#"{"session_id":"session","prompt_id":"turn-1","hook_event_name":"Stop"}"#.as_slice()),
+            ("claude", br#"{"session_id":"session","prompt_id":"turn-1","hook_event_name":"UserPromptSubmit"}"#.as_slice()),
+            // A prompt echo without the turn token names content but no turn,
+            // so it is not a complete acknowledgement candidate.
+            ("claude", br#"{"session_id":"session","hook_event_name":"UserPromptSubmit","prompt":"run the tests"}"#.as_slice()),
+            ("claude", br#"{"session_id":"session","prompt_id":"turn-1","hook_event_name":"UserPromptSubmit","prompt":""}"#.as_slice()),
+        ] {
+            let hook = NativeHook::parse(provider, body).unwrap();
+            assert!(hook.prompt_digest.is_none(), "{provider} {body:?} must not fabricate submission evidence");
+        }
+        // A sibling harness reusing the shared parser keeps its own contract:
+        // the prompt echo is Claude Code's documented field, not a shared one.
+        assert!(
+            NativeHook::parse("codex", submit).unwrap().prompt_digest.is_none(),
+            "Codex has no documented UserPromptSubmit prompt echo"
+        );
+        // Antigravity's `Stop` shape keeps its own contract too.
+        let agy = NativeHook::parse(
+            "agy",
+            br#"{"hook_event_name":"Stop","conversationId":"11111111-1111-4111-8111-111111111111","fullyIdle":true,"prompt":"run the tests"}"#,
+        )
+        .unwrap();
+        assert!(agy.prompt_digest.is_none(), "AGY has no documented UserPromptSubmit prompt echo");
+    }
+
+    #[test]
+    fn submission_digest_is_a_byte_exact_prompt_fingerprint() {
+        // The whole proof rests on this being a real byte-for-byte match, so
+        // a one-character difference must not collide.
+        assert_ne!(submission_digest("run the tests"), submission_digest("run the tests "));
+        assert_ne!(submission_digest("run the tests"), submission_digest("Run the tests"));
+        assert_eq!(submission_digest("run the tests"), submission_digest("run the tests"));
+        assert_eq!(submission_digest("run the tests").len(), 64, "digest is a hex sha256");
+    }
+
+    #[test]
+    fn a_provably_bound_turn_reaches_accepted_and_an_unbound_one_cannot() {
+        // Issue #1898, end to end through the replay path: the correlation
+        // decided in the ledger is what makes a Claude turn's facts
+        // authoritative, and an uncorrelated receipt is presented but cannot
+        // advance the step.
+        use crate::autopilot::circuit::observation::{
+            ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        use crate::autopilot::circuit::stepper::CircuitEvent;
+
+        /// Replay one `Stop` receipt and report how the foreground
+        /// termination was dispositioned, plus the resulting evidence.
+        fn replay(
+            turn: &str,
+            correlated: bool,
+            stamp: Option<&str>,
+        ) -> (ObservationDisposition, WorkEvidence) {
+            let receipt = NativeReceipt {
+                agent_node_id: 9,
+                input_stamp: stamp.map(str::to_owned),
+                session_incarnation: Some("1000".into()),
+                source_id: format!("stop-{turn}"),
+                received_at_ms: 5,
+                turn_fenced: true,
+                explicit_turn_mismatch: false,
+                submission_correlated: correlated,
+                submission_seq: correlated.then_some(1),
+                hook: NativeHook::parse(
+                    "claude",
+                    format!(
+                        r#"{{"hook_event_name":"Stop","session_id":"session","prompt_id":"{turn}","last_assistant_message":"Final report"}}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap(),
+            };
+            let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+                id: 10,
+                node_id: Some("work".into()),
+                attempt: Some(1),
+                kind: "native_hook_received".into(),
+                detail: String::new(),
+                source: None,
+                disposition: None,
+                observed_at: String::new(),
+            };
+            let CircuitEvent::ObservationBatch {
+                expected,
+                observations,
+                input_guard,
+                ..
+            } = normalize(
+                42,
+                entry,
+                receipt,
+                Some("session".into()),
+                Some("1000".into()),
+                Some("1:2".into()),
+            )
+            else {
+                panic!("native batch expected")
+            };
+            assert_eq!(
+                input_guard.is_some(),
+                correlated,
+                "the input fence follows the submission binding"
+            );
+            let mut evidence = WorkEvidence::default();
+            let mut termination = None;
+            for observation in &observations {
+                let disposition = evidence.observe(&expected, observation);
+                if matches!(observation.fact, Fact::ForegroundTerminated) {
+                    termination = Some(disposition);
+                }
+            }
+            (termination.expect("a Stop always reports foreground termination"), evidence)
+        }
+
+        // The binding is what upgrades the turn's own facts from
+        // reduced-confidence presentation to accepted evidence.
+        let (disposition, evidence) = replay("turn-bound", true, Some("1:2"));
+        assert_eq!(disposition, ObservationDisposition::Accepted);
+        assert_eq!(evidence.identity.as_ref().and_then(|i| i.turn_id.as_deref()), Some("turn-bound"));
+        // Binding a turn is not completing a step. Claude's `Stop` carries no
+        // child/background registry, so the ownership fact that follows the
+        // termination is Unavailable and parks the lifecycle unverified.
+        assert!(!evidence.ownership_covered);
+        assert!(!evidence.lifecycle_verified());
+        assert!(!evidence.completion_verified());
+
+        // Without a provable binding the receipt is still recorded and
+        // presented — including the final report — but the foreground
+        // termination is reduced confidence and cannot advance the step. This
+        // is the explicit unavailable path.
+        for stamp in [None, Some("1:2")] {
+            let (disposition, evidence) = replay("turn-unbound", false, stamp);
+            assert_eq!(
+                disposition,
+                ObservationDisposition::ReducedConfidence,
+                "a stamp without a binding grants no authority"
+            );
+            assert!(!evidence.foreground_terminated);
+            assert!(!evidence.lifecycle_verified());
+        }
+    }
+
+    #[test]
     fn circuit_native_human_requests_use_exact_ids_and_never_infer_responses_from_activity() {
         use crate::autopilot::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
         let request = br#"{"hook_event_name":"PermissionRequest","session_id":"session","turn_id":"turn","tool_use_id":"tool-1","tool_name":"Bash"}"#;
@@ -571,7 +780,7 @@ mod tests {
             received_at_ms: 10,
             turn_fenced: true,
             explicit_turn_mismatch: false,
-            submission_correlated: false,
+            submission_correlated: false, submission_seq: None,
             hook,
         };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
@@ -615,7 +824,7 @@ mod tests {
             received_at_ms: 11,
             turn_fenced: true,
             explicit_turn_mismatch: false,
-            submission_correlated: false,
+            submission_correlated: false, submission_seq: None,
             hook: reply,
         };
         let reply_entry = crate::db::circuit::evidence::CircuitHistoryEntry {
@@ -687,7 +896,7 @@ mod tests {
                     let payload = serde_json::json!({"hook_event_name":event,"session_id":"session","turn_id":"turn","tool_use_id":"request","tool_name":tool});
                     let hook = NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap()).unwrap();
                     let receipt = NativeReceipt { agent_node_id:9,input_stamp:None,session_incarnation:Some("1".into()),
-                        source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,explicit_turn_mismatch:false,submission_correlated:false,hook };
+                        source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,explicit_turn_mismatch:false,submission_correlated:false,submission_seq:None,hook };
                     let entry = crate::db::circuit::evidence::CircuitHistoryEntry {id:index,node_id:Some("work".into()),attempt:Some(1),kind:"native_hook_received".into(),detail:String::new(),source:None,disposition:None,observed_at:String::new()};
                     let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(42,entry,receipt,Some("session".into()),Some("1".into()),Some("input".into())) else { panic!("native batch") };
                     assert!(!stale);
@@ -752,7 +961,7 @@ mod tests {
             received_at_ms: 5,
             turn_fenced: false,
             explicit_turn_mismatch: false,
-            submission_correlated: false,
+            submission_correlated: false, submission_seq: None,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop"}"#).unwrap(),
         };
         for (id, detail, deleted) in [
@@ -804,7 +1013,7 @@ mod tests {
     fn normalization_retains_identity_and_rejects_input_that_overtook_the_hook() {
         use crate::autopilot::circuit::observation::ObservedWorkFact as Fact;
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()),
-            source_id: "native-event".into(), received_at_ms: 5, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true,
+            source_id: "native-event".into(), received_at_ms: 5, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true, submission_seq: None,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"prompt","background_tasks":[],"session_crons":[],"last_assistant_message":"Final report"}"#).unwrap() };
         for (input, stale, authoritative) in [
             (Some("1:2"), false, true),
@@ -875,7 +1084,7 @@ mod tests {
             received_at_ms: 50,
             turn_fenced: false,
             explicit_turn_mismatch: true,
-            submission_correlated: false,
+            submission_correlated: false, submission_seq: None,
             hook: NativeHook::parse(
                 "codex",
                 br#"{"hook_event_name":"Stop","session_id":"session","turn_id":"old-turn"}"#,
@@ -1028,7 +1237,7 @@ mod tests {
                 received_at_ms: 2_000,
                 turn_fenced: true,
                 explicit_turn_mismatch: false,
-                submission_correlated: false,
+                submission_correlated: false, submission_seq: None,
                 hook,
             };
             let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
@@ -1127,7 +1336,7 @@ mod tests {
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
+            source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 1, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
@@ -1160,7 +1369,7 @@ mod tests {
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
+            source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 2, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
@@ -1224,7 +1433,7 @@ mod tests {
             let source_id = receipt_source_id(&hook, &session_incarnation).unwrap();
             NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()),
                 session_incarnation, source_id, received_at_ms: at_ms,
-                turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook }
+                turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook }
         };
         let turn0 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true,"terminationReason":"model_stop"}"#, 10);
         let turn1 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"fullyIdle":true,"terminationReason":"model_stop"}"#, 11);
@@ -1275,7 +1484,7 @@ mod tests {
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook };
+            source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
         let entry = || crate::db::circuit::evidence::CircuitHistoryEntry { id: 3, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
         // A replaced session (restart under a new conversation) is rejected.
@@ -1291,7 +1500,7 @@ mod tests {
         // a different session and can never complete the parent's turn.
         let subagent = NativeHook::parse("agy", br#"{"conversationId":"660e8400-e29b-41d4-a716-446655440001","fullyIdle":true}"#).unwrap();
         let subagent_receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-subagent".into(), received_at_ms: 11, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook: subagent };
+            source_id: "agy-subagent".into(), received_at_ms: 11, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook: subagent };
         let super::super::CircuitEvent::ObservationBatch { observations: subagent_observations, .. } =
             normalize(42, entry(), subagent_receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
         else { panic!("native batch") };
@@ -1301,7 +1510,7 @@ mod tests {
         // A deleted node consumes its receipt without lifecycle effect.
         let deleted_hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
         let deleted = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, hook: deleted_hook };
+            source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook: deleted_hook };
         let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 4, node_id: Some("work".into()),
             attempt: Some(1), kind: "native_hook_received".into(), detail: serde_json::to_string(&deleted).unwrap(), source: None, disposition: None, observed_at: String::new() };
         let event = resolve_receipt(42, deleted_entry, |_| Err(rusqlite::Error::QueryReturnedNoRows)).unwrap();
