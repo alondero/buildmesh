@@ -1,5 +1,9 @@
 name: Build
 
+# Orchestrates the repository's verification runs. The jobs that gate a merge
+# live in `verify.yml` because `release.yml` must run the *same* jobs against a
+# tagged SHA before it publishes (issue #1520). Renaming a job there renames a
+# required status check, so it is a branch-protection change.
 on:
   push:
     branches: [main]
@@ -20,293 +24,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality:
-    name: Quality (Linux)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
-      # appindicator3, libxdo, and OpenSSL even when running the Rust tests.
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Check agent infrastructure and changed-code rules
-        env:
-          AGENT_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
-        run: |
-          # test:agent runs check-agent-diff; test:readme runs the
-          # README drift gate's in-memory tests; test:lint runs the
-          # lint-fixtures verifier's in-memory tests. Invoking the npm
-          # scripts explicitly (instead of a `tests/agent-infra/*.test.mjs`
-          # glob) keeps CI in lock-step with what `scripts/check.ps1`
-          # invokes locally.
-          npm run test:agent
-          npm run test:docs
-          npm run test:readme
-          npm run test:lint
-          base="$AGENT_DIFF_BASE"
-          if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
-          node scripts/check-agent-diff.mjs --base "$base"
-
-      # Issue #1545 — gate the README against drift in the Provider enum
-      # count, supported-platforms claim, SmartScreen warning, and the
-      # CLAUDE.md "no internal issue numbers in user-facing docs" rule.
-      # Cheap (no build), runs in ~50ms; safe to add at the top of the
-      # job so a stale landing page fails before any compilation starts.
-      - name: Check README drift (issue #1545)
-        run: npm run check:readme
-
-      - name: Check documentation contract
-        env:
-          DOCS_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
-        run: |
-          base="$DOCS_DIFF_BASE"
-          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then base=HEAD; fi
-          if git rev-parse --verify --end-of-options "${base}^{commit}" >/dev/null 2>&1; then
-            node scripts/check-docs.mjs --base "$base"
-          else
-            echo "::warning::Documentation impact diff base '$base' is unavailable; running the structural documentation check only."
-            node scripts/check-docs.mjs
-          fi
-
-      # Issue #1542 — enforced ESLint + React Hooks gate. Two steps:
-      #  (a) `npm run lint` runs ESLint across the codebase; the flat
-      #      config excludes `src/types/generated/**`, `dist/**`, the
-      #      agent working dir, docs, and the lint-fixtures dir so a
-      #      clean checkout passes. Catches conditional-hook crashes
-      #      (closed #1242 was a real one) before they ship.
-      #  (b) `npm run lint:fixtures` runs ESLint against the two
-      #      intentional-violation fixtures and asserts each one trips
-      #      its target rule. This is the inverse of (a) — it must
-      #      succeed (the gate is live), proving a future rule tweak
-      #      that accidentally silences React Hooks would fail CI.
-      # Run before the build so a syntax-level regression trips in
-      # seconds rather than waiting for tsc + vite.
-      - name: ESLint gate (issue #1542)
-        run: npm run lint
-
-      - name: ESLint fixtures verifier (issue #1542)
-        run: npm run lint:fixtures
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      # Cache the expensive Linux test build once. The platform smoke jobs
-      # deliberately do not persist their target directories, avoiding three
-      # large OS-specific target caches.
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "src-tauri -> target"
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      # Typecheck the frontend against the committed bindings and build the
-      # desktop + mobile bundles the Rust tests embed and the budget gate
-      # below measures. `npm run build` runs `tsc` itself, so this step is
-      # just `npm run build` (no separate `tsc --noEmit`).
-      - name: Build desktop + mobile bundles
-        run: npm run build
-
-      # Issue #1568 - gate the desktop initial JS/CSS bundles against the
-      # documented budget in `scripts/bundle-budget.json`. The script exits
-      # non-zero on a breach so a regression on the entry chunk becomes a
-      # red build instead of a hidden cost on first paint. We run it here
-      # (after the build) rather than inside the test step because the
-      # budget applies to release artifacts, not the dev server.
-      - name: Check desktop initial bundle budget (issue #1568)
-        run: npm run check:bundle
-
-      # Single invocation runs both unit and integration suites in the
-      # same vitest worker-pool boot (cheaper than two separate calls
-      # which each start node + transform every module twice). Issue #1257
-      # — --pool=threads is required; the default forks pool silently
-      # times out inside CI's container and reports PASS(0) FAIL(0) exit
-      # 0, the same false-green we hit in worktrees. Tests scope is
-      # explicit (no `vitest run` default) so a new suite dir can't sneak
-      # in.
-      - name: Run vitest test suite (unit + integration)
-        run: npx vitest run --pool=threads tests/unit tests/integration
-
-      # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
-      # them from `#[derive(TS)]` during `cargo test`). Issue #359.
-      - name: Rust tests + regenerate TS bindings
-        run: cargo test --locked
-        working-directory: src-tauri
-
-      # Fail CI if any code path spawns `git` via bare `Command::new("git")`
-      # or sets `creation_flags` inline. Only process_util may own those details.
-      - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
-        shell: bash
-        run: |
-          HITS=$(find src-tauri/src \
-                  -type f -name '*.rs' \
-                  ! -name '*_tests.rs' \
-                  ! -name 'tests.rs' \
-                  ! -path '*/tests/*' \
-                  ! -name 'process_util.rs' \
-                  -exec grep -nE '\.creation_flags\(|std::process::Command::new\("git"\)' {} + \
-                  | grep -v '// allow-inline-process-spawn' \
-                  || true)
-          if [ -n "$HITS" ]; then
-            echo "::error::Inline process-spawn pattern outside process_util (issue #665 / #690):"
-            echo "$HITS"
-            echo "::error::Use crate::process_util::command_no_window(\"program\") so CREATE_NO_WINDOW is set on Windows."
-            exit 1
-          fi
-
-      # Fail CI if the committed bindings drift from what the Rust structs now
-      # generate — wire-shape drift becomes a red build, not a runtime crash.
-      - name: Check Rust↔TS type bindings are up to date
-        shell: bash
-        run: |
-          git add --intent-to-add src/types/generated
-          if ! git diff --exit-code -- src/types/generated; then
-            echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
-            exit 1
-          fi
-
-      # Manual runs additionally exercise the real CLI contract at a known
-      # version. Regular PRs stay hermetic and use deterministic help-parser
-      # coverage in the Rust suite.
-      - name: Install pinned Codex CLI for proxy contract smoke
-        if: github.event_name == 'workflow_dispatch'
-        run: npm install --global @openai/codex@0.147.0
-
-      - name: Verify pinned Codex profile routing on fresh and resume
-        if: github.event_name == 'workflow_dispatch'
-        run: cargo test --locked pinned_codex_cli_loads_profile_for_fresh_and_resume -- --ignored
-        working-directory: src-tauri
-
-  # Issue #1257 — the Playwright verify-smoke spec (issue #157) was
-  # designed to run WITHOUT a Rust compile — it boots just Vite and
-  # installs a JS-side Tauri mock before any app module evaluates.
-  # Previously this CI never ran it, so the receiver-binding regression
-  # class (#149 — bytes emitted but never reach xterm.js) had no
-  # pre-merge gate. The job installs Chromium, runs only the
-  # `verify-smoke` Playwright project, and stays well under 5 minutes.
-  # Intentionally does NOT `needs: quality` — verify-smoke is a
-  # lightweight frontend test with a mock backend; gating it on the
-  # ~10-minute quality job destroys the fast feedback loop for a
-  # nothing-in-common dependency. It also doesn't gate `platform-smoke`
-  # (the chromium project is far slower, depends on a running
-  # buildmesh.exe, and stays a separate local-only contract per
-  # CLAUDE.local.md).
-  verify-smoke:
-    name: Verify-smoke (Linux)
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      # Issue #157 — verify-smoke installs Chromium with its system
-      # dependencies (libnss3, libatk-bridge2.0-0, etc.) so the headless
-      # browser can render xterm.js + the React app. --with-deps is a
-      # no-op on hosts that already have the libs.
-      - name: Install Chromium for Playwright
-        run: npx playwright install --with-deps chromium
-
-      # The Playwright config's top-level `webServer` (see
-      # playwright.config.ts) boots `npm run dev` (just Vite) and waits
-      # for :1420 to be reachable before running the spec, so no manual
-      # dev-server start is needed here. `--project=verify-smoke`
-      # excludes the chromium project which would need a real
-      # buildmesh.exe on :1991.
-      - name: Run verify-smoke Playwright project
-        run: npx playwright test --project=verify-smoke --reporter=line
-
-      # Surface trace + test-results on failure. `--reporter=line`
-      # intentionally hides what happened; without this artifact a
-      # red CI run leaves zero visibility into the spec failure.
-      - name: Upload Playwright report / trace
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-verify-smoke-report
-          path: test-results/
-          retention-days: 7
-
-  platform-smoke:
-    name: Platform smoke (${{ matrix.os }})
-    needs: quality
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ${{ matrix.os }}
-    # A failure on one operating system must not hide a regression on the
-    # other. Linux compilation and linking are covered by the quality job.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      # Keep the Cargo download cache but do not retain an OS-specific target
-      # directory for these smoke builds.
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "src-tauri -> target"
-          cache-targets: false
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      # Compile and link the real Tauri application on each remaining host,
-      # including the frontend beforeBuildCommand, without spending time or
-      # storage on transient installers. Tagged releases remain authoritative.
-      - name: Compile Tauri app without installers
-        run: npm run tauri build -- --debug --no-bundle
-
-      - name: Verify Windows ConPTY frame ordering
-        if: runner.os == 'Windows'
-        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames -- --test-threads=1
-        working-directory: src-tauri
+  verify:
+    name: Verification
+    uses: ./.github/workflows/verify.yml
 
   wsl-profile-smoke:
     name: WSL Codex profile contract (opt-in)
@@ -326,7 +46,7 @@ jobs:
 
   package-smoke:
     name: Weekly package smoke (${{ matrix.os }})
-    needs: quality
+    needs: verify
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -379,3 +99,47 @@ jobs:
       # the supported distribution path.
       - name: Build native installers
         run: npm run tauri build
+
+  # A scheduled run has no pull request to turn red and nobody is waiting on a
+  # merge button, so GitHub's run status alone can go unnoticed for a week.
+  # Open (or update) a tracking issue so a broken weekly build is a visible,
+  # reviewable result rather than a silently missed run (issue #1520).
+  #
+  # Push and pull-request runs deliberately skip this job: their red state is
+  # already surfaced on the PR and enforced by the `main` ruleset.
+  alert-on-failure:
+    name: Alert on failure
+    needs: [verify, wsl-profile-smoke, package-smoke]
+    if: ${{ failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Read the run URL and comment; nothing else in this job writes anywhere.
+      actions: read
+      issues: write
+
+    steps:
+      - name: Open or update the failure tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # `--force` keeps this working if the label was ever deleted; the
+          # step must not fail merely because metadata is missing.
+          gh label create ci-alert --color B60205 \
+            --description "Automated alert for a failed Build workflow run" --force >/dev/null 2>&1 || true
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY="Build run [${{ github.run_number }}]($RUN_URL) failed on \`${{ github.event_name }}\` for \`${{ github.ref_name }}\` at ${{ github.sha }}.
+
+          Investigate the run, then close this issue once the weekly package
+          smoke is green again. If the failure is a real regression, the next
+          fix must land through a pull request that passes the required checks."
+
+          EXISTING=$(gh issue list --state open --label ci-alert --json number --limit 1 --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Commenting on existing alert issue #$EXISTING"
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            echo "Opening a new alert issue"
+            gh issue create --title "CI alert: Build run #${{ github.run_number }} failed" --body "$BODY" --label ci-alert
+          fi

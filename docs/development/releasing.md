@@ -44,9 +44,12 @@ output.)
    git tag v1.2.0
    git push origin v1.2.0
    ```
-5. The `Release` workflow (`.github/workflows/release.yml`) builds the Windows
+5. The `Release` workflow (`.github/workflows/release.yml`) first re-runs the
+   full verification set on the tagged commit, then builds the Windows
    installer + updater artifacts, signs them, and creates a **draft** GitHub
-   Release containing the installer, its `.sig`, and `latest.json`.
+   Release containing the installer, its `.sig`, and `latest.json`. If
+   verification fails on the tag, nothing is built and no release exists —
+   see [What blocks a release](#what-blocks-a-release).
 6. Review the draft release on GitHub and **publish** it. Once published,
    `…/releases/latest/download/latest.json` serves the feed, and running installs
    will show the "Update available" prompt on next launch.
@@ -64,6 +67,89 @@ Release notes are versioned under [`docs/releases/`](../releases/). Include
 features, fixes, security changes, breaking changes, migrations, and known
 limitations; do not add internal implementation work or rely on a generic
 workflow-generated body.
+
+## Required checks and branch protection
+
+`main` is protected by the `main: verified merges only` ruleset. A pull request
+can merge only when every check below has passed on its head commit, the branch
+is up to date with `main`, and all review conversations are resolved. The rules
+apply to administrators too — there is no standing bypass actor.
+
+| Check | What it proves |
+|---|---|
+| `verify / Quality (Linux)` | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
+| `verify / Verify-smoke (Linux)` | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
+| `verify / Platform smoke (windows-latest)` | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
+| `verify / Platform smoke (macos-latest)` | The Tauri app compiles and links on macOS. |
+
+Those names are owned by `.github/workflows/verify.yml`. Because a job that
+calls a reusable workflow is reported as `<calling job> / <called job>`, the
+`verify / …` prefix comes from the `verify` job in `build.yml`. **Renaming a
+job in `verify.yml` is a branch-protection change**: update the ruleset and this
+table in the same commit, or every pull request will block on a check that no
+longer exists.
+
+A weekly schedule additionally runs `Weekly package smoke` on all three
+platforms. It is not merge-gating: a weekly packaging failure is reported by
+opening or updating a `ci-alert` issue from the workflow itself, because a
+scheduled run has no pull request to turn red.
+
+GitHub disables scheduled workflows after 60 days without repository activity.
+If the weekly packaging stops appearing, check the workflow is still `active`
+(re-enable it under **Actions → Build → … → Enable workflow**) rather than
+assuming the packages are fine.
+
+## What blocks a release
+
+`release.yml` never builds or publishes from an unverified commit:
+
+1. `needs: verify` — the same three required jobs run against the tagged SHA
+   first. `tauri-action` is downstream of that job, so a failing typecheck,
+   test, lint, docs, or platform compile produces no draft release and no
+   uploaded installer.
+2. Tag/version agreement — `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
+   and `package.json` must all match the tag.
+3. Mainline — the tagged commit must be reachable from `main`. A tag cut from a
+   side branch, or from a commit that never went through the ruleset, fails
+   before the build.
+
+Verifying on the tag rather than trusting the earlier push-to-main run is
+deliberate: it is the tag's own SHA that becomes the shipped artifact. The
+tag-specific steps (pinned-Codex contract smoke, WSL profile contract) are
+`workflow_dispatch`-only and do not run for a release.
+
+Packaging the installer and launching the installed application is a separate
+gate tracked in issue #1522; until that lands, a release proves the tree is
+sound and the bundle is produced, not that a clean install boots.
+
+## Emergency bypass procedure
+
+Required checks can be bypassed, but only deliberately and only on the record.
+Use this when CI itself is broken and a fix cannot wait for a green run (a
+runner or Actions outage, a dependency registry failure, or a false failure
+that would otherwise block a security fix). Prefer fixing CI over bypassing it.
+
+1. Say why in the pull request, and get a second opinion — the review
+   conversation is the audit trail and is also required to be resolved.
+2. Local checks still apply: run the smallest relevant `scripts\check.ps1`
+   target plus `npm run check:docs` and record the output in the PR. A bypass is
+   not a substitute for evidence, only for a missing remote run.
+3. Remove the required-check rule temporarily:
+   ```
+   gh api repos/alondero/buildmesh/rulesets --jq '.[] | select(.name=="main: verified merges only") | .id'
+   gh api -X DELETE repos/alondero/buildmesh/rulesets/<ruleset-id>
+   ```
+4. Merge, then restore the ruleset in the same day — the bypass is a
+   time-boxed exception, not a new default:
+   ```
+   gh api -X POST repos/alondero/buildmesh/rulesets --input ruleset.json
+   ```
+   The `ruleset.json` body is the current ruleset definition
+   (`gh api repos/alondero/buildmesh/rulesets/<id>`, minus `id`, `node_id`, and
+   `created_at`/`updated_at`).
+5. Never bypass the release gate to ship a hotfix. If a tagged commit cannot
+   pass verification, the fix is a new commit on a branch that can, then a new
+   tag.
 
 ## One-time setup: updater signing secrets
 
