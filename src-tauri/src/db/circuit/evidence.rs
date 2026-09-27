@@ -27,6 +27,9 @@ pub(super) const SOURCE_RECONCILIATION: &str = "circuit_worker.reconciliation";
 pub(super) const SOURCE_RUN_CONFIGURATION: &str = "run.configuration";
 /// A native harness hook receipt.
 pub(super) const SOURCE_NATIVE_HOOK: &str = "native_hook";
+/// A Buildmesh PTY prompt submission awaiting a harness acknowledgement
+/// (issue #1898).
+pub(super) const SOURCE_PROMPT_SUBMISSION: &str = "prompt_submission";
 /// The report classifier interpreted a report.
 pub(super) const SOURCE_CLASSIFIER: &str = "classifier";
 /// A GitHub read-only lookup or recorded action target.
@@ -263,6 +266,215 @@ pub(crate) fn receive_native_hook(
     receive_native_hook_locked(&mut db, receipt)
 }
 
+/// A Buildmesh prompt submission awaiting a harness acknowledgement
+/// (issue #1898).
+///
+/// `submission_seq` is a per-agent-node ordinal assigned inside the writing
+/// transaction. It is the *ordering* half of the submission proof: a receipt
+/// may only claim the newest submission, so a turn whose start hook arrived
+/// after Buildmesh had already submitted again can never acknowledge the
+/// later one. It is stored in the record rather than in process memory
+/// because the record is written *before* the PTY write — the harness can
+/// report a prompt within milliseconds of Enter, and there must be no window
+/// in which Buildmesh has written to the terminal but has no record to match
+/// the report against.
+///
+/// The prompt text is deliberately absent: only `prompt_digest` is kept, and
+/// the text is never written to the ledger.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PromptSubmission {
+    pub agent_node_id: i64,
+    pub submission_seq: i64,
+    pub prompt_digest: String,
+}
+
+/// Record a Buildmesh prompt submission for a Circuit step. Callers must
+/// invoke this **before** writing the prompt into the PTY so the record
+/// exists by the time the harness can echo the prompt back.
+pub(crate) fn record_prompt_submission(
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    agent_node_id: i64,
+    prompt: &str,
+) -> Result<(), String> {
+    let db = crate::db::write_conn();
+    record_prompt_submission_locked(&db, run_id, node_id, attempt, agent_node_id, prompt)
+}
+
+pub(crate) fn record_prompt_submission_locked(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    agent_node_id: i64,
+    prompt: &str,
+) -> Result<(), String> {
+    // The ordinal is per agent node, not per run: the fence that matters is
+    // "has Buildmesh submitted to this terminal again", which is a property
+    // of the PTY rather than of any one run. Allocating it under the same
+    // writer transaction as the insert keeps concurrent runs from minting
+    // the same ordinal.
+    let previous = newest_submission_seq(db, agent_node_id)?;
+    let submission = PromptSubmission {
+        agent_node_id,
+        submission_seq: previous + 1,
+        prompt_digest: crate::services::circuit_worker::native_hooks::submission_digest(prompt),
+    };
+    append_history(
+        db,
+        run_id,
+        Some(node_id),
+        Some(attempt),
+        "prompt_submitted",
+        &serde_json::to_string(&submission).map_err(|e| e.to_string())?,
+        Some(SOURCE_PROMPT_SUBMISSION),
+        Some(DISPOSITION_RECORDED),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> Result<i64, String> {
+    db.query_row(
+        "SELECT COALESCE(MAX(json_extract(detail,'$.submission_seq')),0)
+         FROM circuit_run_history
+         WHERE kind='prompt_submitted' AND json_extract(detail,'$.agent_node_id')=?1",
+        params![agent_node_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The input stamp a previously recorded, correlated turn start bound to this
+/// receipt's turn token. `Stop` carries the token but not the prompt text, so
+/// it can only inherit a binding established when the turn began.
+fn recorded_turn_binding(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
+) -> Result<Option<Option<String>>, String> {
+    db.query_row(
+        "SELECT json_extract(detail,'$.input_stamp') FROM circuit_run_history
+         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='native_hook_received'
+         AND json_extract(detail,'$.agent_node_id')=?4
+         AND json_extract(detail,'$.session_incarnation') IS ?5
+         AND json_extract(detail,'$.hook.session_id') IS ?6
+         AND json_extract(detail,'$.hook.turn_id') IS ?7
+         AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
+         AND json_extract(detail,'$.submission_correlated')=1
+         ORDER BY id LIMIT 1",
+        params![
+            run_id,
+            node_id,
+            attempt,
+            receipt.agent_node_id,
+            receipt.session_incarnation,
+            receipt.hook.session_id,
+            receipt.hook.turn_id
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+/// Decide whether a `UserPromptSubmit` receipt provably acknowledges a
+/// recorded Buildmesh submission (issue #1898).
+///
+/// `UserPromptSubmit` is the only event carrying both halves of Claude Code's
+/// native submission contract: the verbatim `prompt` text the harness says it
+/// received, and the `prompt_id` turn token naming the turn it is starting.
+/// A turn token alone proves nothing about *which* Buildmesh input it belongs
+/// to, so the token is bound only when all of the following hold inside one
+/// (run, step, attempt, agent) scope:
+///
+/// 1. The receipt is stamped with a current input stamp, so Buildmesh can
+///    still tell which submission is live.
+/// 2. The harness's prompt digest equals a recorded submission's digest — the
+///    harness received byte-for-byte the text Buildmesh wrote.
+/// 3. That submission is the newest one for this agent, so no later
+///    Buildmesh submission has been made since. This is what stops a delayed
+///    start hook from claiming the submission that replaced it.
+/// 4. No *other* turn has already claimed that same submission, so two turns
+///    can never both acknowledge one submission while a later submission
+///    still gets its own turn.
+///
+/// Returns `None` for every refusal. The receipt is still recorded, replayed
+/// and presented — as reduced-confidence evidence that cannot complete a
+/// step. That is the explicit unavailable path: a missing `prompt_id`
+/// (Claude Code before v2.1.196), a missing or transformed `prompt`, a
+/// superseded submission, or an ambiguous claim all land here.
+fn earn_turn_binding(
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
+) -> Result<Option<(String, i64)>, String> {
+    let hook = &receipt.hook;
+    let (Some(turn_id), Some(digest)) = (hook.turn_id.as_deref(), hook.prompt_digest.as_deref())
+    else {
+        return Ok(None);
+    };
+    let Some(stamp) = receipt.input_stamp.clone() else {
+        return Ok(None);
+    };
+    // Rule 2.
+    let submission: Option<PromptSubmission> = db
+        .query_row(
+            "SELECT detail FROM circuit_run_history
+             WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt_submitted'
+             AND json_extract(detail,'$.agent_node_id')=?4
+             AND json_extract(detail,'$.prompt_digest')=?5
+             ORDER BY json_extract(detail,'$.submission_seq') DESC LIMIT 1",
+            params![run_id, node_id, attempt, receipt.agent_node_id, digest],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .and_then(|detail| serde_json::from_str(&detail).ok());
+    let Some(submission) = submission else { return Ok(None) };
+    // Rule 3.
+    if submission.submission_seq != newest_submission_seq(db, receipt.agent_node_id)? {
+        return Ok(None);
+    }
+    // Rule 4, plus idempotency: read the turns that have already claimed
+    // *this* submission, under the same session generation. A prior
+    // generation's claim cannot block a re-submission into a restarted
+    // session, and a later submission starts with an empty claim set.
+    let claimed: Vec<String> = {
+        let mut stmt = db.prepare(
+            "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
+             WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='native_hook_received'
+             AND json_extract(detail,'$.agent_node_id')=?4
+             AND json_extract(detail,'$.session_incarnation') IS ?5
+             AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
+             AND json_extract(detail,'$.submission_correlated')=1
+             AND json_extract(detail,'$.submission_seq')=?6",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
+                params![
+                    run_id,
+                    node_id,
+                    attempt,
+                    receipt.agent_node_id,
+                    receipt.session_incarnation,
+                    submission.submission_seq
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    if !claimed.iter().any(|turn| turn == turn_id) && !claimed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((stamp, submission.submission_seq)))
+}
+
 pub(crate) fn receive_native_hook_locked(
     db: &mut Connection,
     receipt: &crate::services::circuit_worker::native_hooks::NativeReceipt,
@@ -319,26 +531,32 @@ pub(crate) fn receive_native_hook_locked(
     }
     for (run_id, node_id, attempt) in targets {
         let mut receipt = receipt.clone();
-        // Receipt arrival can follow a newer PTY submission. Only the persisted
-        // turn-start binding may correlate a terminal hook with user input.
-        let binding: Option<Option<String>> = tx.query_row(
-            "SELECT json_extract(detail,'$.input_stamp') FROM circuit_run_history
-             WHERE run_id=?1 AND kind='native_hook_received'
-             AND json_extract(detail,'$.agent_node_id')=?2
-             AND json_extract(detail,'$.session_incarnation')=?3
-             AND json_extract(detail,'$.hook.session_id')=?4
-             AND json_extract(detail,'$.hook.turn_id')=?5
-             AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
-             AND json_extract(detail,'$.submission_correlated')=1
-             ORDER BY id LIMIT 1",
-            params![run_id, receipt.agent_node_id, receipt.session_incarnation, receipt.hook.session_id, receipt.hook.turn_id],
-            |row| row.get(0)).optional().map_err(|e| e.to_string())?;
-        if receipt.hook.event != "UserPromptSubmit" || binding.is_some() {
-            receipt.submission_correlated = binding.as_ref().is_some_and(|stamp| stamp.is_some());
-            receipt.input_stamp = binding.flatten();
-        } else if !receipt.submission_correlated || !receipt.turn_fenced || receipt.hook.turn_id.is_none()
-            || receipt.hook.session_id.is_none() || receipt.session_incarnation.is_none() {
-            receipt.input_stamp = None;
+        // Receipt arrival can follow a newer PTY submission, so a terminal
+        // hook may only claim input through the persisted turn-start binding
+        // (issue #1898). A `UserPromptSubmit` receipt is the only place a
+        // turn token is ever earned, and only from the harness prompt echo
+        // plus submission ordering — never from arrival order.
+        let binding: Option<(Option<String>, i64)> =
+            if receipt.hook.event == "UserPromptSubmit" {
+                earn_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
+                    .map(|(stamp, seq)| (Some(stamp), seq))
+            } else {
+                recorded_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
+                    .map(|stamp| (stamp, 0))
+            };
+        match binding {
+            Some((stamp, seq)) => {
+                receipt.submission_correlated = stamp.is_some();
+                receipt.input_stamp = stamp;
+                receipt.submission_seq = (seq > 0).then_some(seq);
+            }
+            None => {
+                // Uncorrelated: drop the receipt-time input stamp entirely so
+                // no downstream freshness check can read authority from it.
+                receipt.submission_correlated = false;
+                receipt.input_stamp = None;
+                receipt.submission_seq = None;
+            }
         }
         let detail = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM circuit_run_history WHERE run_id=?1 AND node_id=?2 AND attempt=?3
@@ -1491,7 +1709,7 @@ mod tests {
             [graph.to_json().unwrap()],
         )
         .unwrap();
-        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: false,
+        let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()), source_id: "event-1".into(), received_at_ms: 1, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None,
             hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"prompt","hook_event_name":"Stop","background_tasks":[],"session_crons":[],"last_assistant_message":"Complete final report"}"#).unwrap() };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         drop(db);
@@ -1544,56 +1762,273 @@ mod tests {
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
         db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        // The ledger now carries recorded submissions alongside the receipts,
+        // so index receipts by kind rather than by position.
+        fn receipts(db: &Connection) -> Vec<crate::db::circuit::evidence::CircuitHistoryEntry> {
+            history_inner(db, 1)
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == "native_hook_received")
+                .collect()
+        }
+        // Two real submissions: input A then input B (issue #1898). B is
+        // submitted before A's turn start hook lands, so A's start describes
+        // a superseded turn.
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "first prompt").unwrap();
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "second prompt").unwrap();
         let mut receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-a".into()), session_incarnation: Some("1000".into()),
-            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true,
-            hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"UserPromptSubmit"}"#).unwrap() };
+            source_id: "start-a".into(), received_at_ms: 1000, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true, submission_seq: None,
+            hook: NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"UserPromptSubmit","prompt":"first prompt"}"#).unwrap() };
+        // The delayed first start is refused: B is the newest submission, so
+        // A's turn cannot acknowledge it, and a receipt can never vouch for
+        // itself by asserting `submission_correlated`.
         receive_native_hook_locked(&mut db, &receipt).unwrap();
+        let refused: NativeReceipt = serde_json::from_str(&receipts(&db)[0].detail).unwrap();
+        assert!(!refused.submission_correlated);
+        assert_eq!(refused.input_stamp, None);
         drop(db);
         let mut db = Connection::open(file.path()).unwrap();
-        // Input B was submitted, but its start hook has not arrived.
+        // Input B's turn has not been observed, so A's stop cannot inherit a
+        // binding either.
         receipt.input_stamp = Some("input-b".into());
-        receipt.hook.event = "Stop".into();
         receipt.source_id = "stop-a".into();
         receipt.received_at_ms = 2000;
-        receipt.hook.final_report = Some("Old approval".into());
+        receipt.hook = NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"Stop","last_assistant_message":"Old approval"}"#).unwrap();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
-        let history = history_inner(&db, 1).unwrap();
-        let old: NativeReceipt = serde_json::from_str(&history[1].detail).unwrap();
-        assert_eq!(old.input_stamp.as_deref(), Some("input-a"));
-        receipt.hook.event = "UserPromptSubmit".into();
-        receipt.hook.final_report = None;
-        receipt.hook.turn_id = Some("b".into());
+        let old: NativeReceipt = serde_json::from_str(&receipts(&db)[0].detail).unwrap();
+        assert_eq!(old.input_stamp, None, "a Stop with no bound turn start keeps no input stamp");
+        // B is observed in order, so it does bind, and its Stop inherits the
+        // binding.
+        receipt.hook = NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"b","hook_event_name":"UserPromptSubmit","prompt":"second prompt"}"#).unwrap();
         receipt.source_id = "start-b".into();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
-        receipt.hook.event = "Stop".into();
+        let current_start: NativeReceipt = serde_json::from_str(&receipts(&db)[2].detail).unwrap();
+        assert!(current_start.submission_correlated);
+        assert_eq!(current_start.input_stamp.as_deref(), Some("input-b"));
+        receipt.hook = NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"b","hook_event_name":"Stop"}"#).unwrap();
         receipt.source_id = "stop-b".into();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
-        let history = history_inner(&db, 1).unwrap();
-        let current: NativeReceipt = serde_json::from_str(&history[3].detail).unwrap();
+        let current: NativeReceipt = serde_json::from_str(&receipts(&db)[3].detail).unwrap();
         assert_eq!(current.input_stamp.as_deref(), Some("input-b"));
+        assert!(current.submission_correlated);
         // An unobserved start cannot acquire authority from receipt-time input.
         receipt.hook.turn_id = Some("missing-start".into());
         receipt.source_id = "stop-c".into();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
-        let history = history_inner(&db, 1).unwrap();
-        let missing: NativeReceipt = serde_json::from_str(&history[4].detail).unwrap();
+        let missing: NativeReceipt = serde_json::from_str(&receipts(&db)[4].detail).unwrap();
         assert_eq!(missing.input_stamp, None);
-        // The real hook transport has no native acknowledgement of submission.
-        // A delayed first start A arriving after input B cannot create a binding.
-        receipt.hook.event = "UserPromptSubmit".into();
-        receipt.hook.turn_id = Some("delayed-first-start".into());
-        receipt.source_id = "delayed-start".into();
-        receipt.submission_correlated = false;
-        receive_native_hook_locked(&mut db, &receipt).unwrap();
-        receipt.hook.event = "Stop".into();
-        receipt.source_id = "delayed-stop".into();
+    }
+
+    #[test]
+    fn claude_submission_correlation_binds_a_turn_only_to_a_provable_submission() {
+        use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path) VALUES (9,1,'owned','/repo');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+
+        // The ledger carries recorded submissions alongside the receipts, so
+        // index receipts by kind rather than by position.
+        fn receipts(db: &Connection) -> Vec<crate::db::circuit::evidence::CircuitHistoryEntry> {
+            history_inner(db, 1)
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.kind == "native_hook_received")
+                .collect()
+        }
+        // Buildmesh submits exactly this text.
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "run the tests").unwrap();
+        let submit = |turn: &str, prompt: &str, stamp: &str| NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some(stamp.into()),
+            session_incarnation: Some("1000".into()),
+            source_id: format!("start-{turn}"),
+            received_at_ms: 1000,
+            turn_fenced: true,
+            explicit_turn_mismatch: false,
+            // Never trusted: correlation is decided from durable evidence.
+            submission_correlated: true, submission_seq: None,
+            hook: NativeHook::parse(
+                "claude",
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": "session", "prompt_id": turn,
+                    "hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                }))
+                .unwrap()
+                .as_slice(),
+            )
+            .unwrap(),
+        };
+        let stop = |turn: &str| NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("1:9".into()),
+            session_incarnation: Some("1000".into()),
+            source_id: format!("stop-{turn}"),
+            received_at_ms: 2000,
+            turn_fenced: true,
+            explicit_turn_mismatch: false,
+            submission_correlated: true, submission_seq: None,
+            hook: NativeHook::parse(
+                "claude",
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": "session", "prompt_id": turn, "hook_event_name": "Stop",
+                }))
+                .unwrap()
+                .as_slice(),
+            )
+            .unwrap(),
+        };
+        fn stored(db: &Connection, turn: &str) -> NativeReceipt {
+            let entry = receipts(db)
+                .into_iter()
+                .find(|entry| {
+                    entry.detail.contains(&format!("\"source_id\":\"stop-{turn}\""))
+                        || entry.detail.contains(&format!("\"source_id\":\"start-{turn}\""))
+                })
+                .unwrap_or_else(|| panic!("no receipt for {turn}"));
+            serde_json::from_str(&entry.detail).unwrap()
+        }
+
+        // Happy path: the harness echoed back the exact text Buildmesh
+        // wrote, so the turn token is bound to that submission.
+        let start = submit("turn-1", "run the tests", "1:9");
+        receive_native_hook_locked(&mut db, &start).unwrap();
+        assert!(stored(&db, "turn-1").submission_correlated, "content match earns the binding");
+        assert_eq!(stored(&db, "turn-1").input_stamp.as_deref(), Some("1:9"));
+        receive_native_hook_locked(&mut db, &stop("turn-1")).unwrap();
+        assert!(stored(&db, "turn-1").submission_correlated, "Stop inherits the turn's binding");
+        assert_eq!(stored(&db, "turn-1").input_stamp.as_deref(), Some("1:9"));
+        // Redelivery of the same start is idempotent, not a second claim.
+        receive_native_hook_locked(&mut db, &start).unwrap();
+        assert_eq!(receipts(&db).len(), 2, "redelivery is deduplicated, not appended");
+
+        // A different turn reporting the same text must not take over a
+        // submission another turn already acknowledged.
+        receive_native_hook_locked(&mut db, &submit("turn-2", "run the tests", "1:9")).unwrap();
+        let second: NativeReceipt = serde_json::from_str(&receipts(&db)[2].detail).unwrap();
+        assert!(!second.submission_correlated, "one submission, one acknowledged turn");
+        assert_eq!(second.input_stamp, None);
+
+        // Text Buildmesh never submitted cannot claim anything.
+        receive_native_hook_locked(&mut db, &submit("turn-3", "an operator prompt", "1:9")).unwrap();
+        let foreign: NativeReceipt = serde_json::from_str(&receipts(&db)[3].detail).unwrap();
+        assert!(!foreign.submission_correlated);
+        assert_eq!(foreign.input_stamp, None);
+        // A hook with no turn token has nothing to bind in the first place.
+        let untokened = NativeReceipt {
+            source_id: "start-no-token".into(),
+            hook: NativeHook::parse(
+                "claude",
+                br#"{"session_id":"session","hook_event_name":"UserPromptSubmit","prompt":"run the tests"}"#,
+            )
+            .unwrap(),
+            ..submit("unused", "run the tests", "1:9")
+        };
+        receive_native_hook_locked(&mut db, &untokened).unwrap();
+        let anonymous: NativeReceipt = serde_json::from_str(&receipts(&db)[4].detail).unwrap();
+        assert!(!anonymous.submission_correlated, "no prompt_id means no turn to bind");
+        assert_eq!(anonymous.input_stamp, None);
+
+        // A start hook that arrives after Buildmesh submitted again describes
+        // an older turn, so it must not claim the newer submission.
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "run the linter").unwrap();
+        receive_native_hook_locked(&mut db, &submit("turn-late", "run the tests", "1:11")).unwrap();
+        let late: NativeReceipt = serde_json::from_str(&receipts(&db)[5].detail).unwrap();
+        assert!(!late.submission_correlated, "a delayed start cannot claim a superseded submission");
+        assert_eq!(late.input_stamp, None);
+        // ...and its Stop is equally uncorrelated.
+        receive_native_hook_locked(&mut db, &stop("turn-late")).unwrap();
+        let late_stop: NativeReceipt = serde_json::from_str(&receipts(&db)[6].detail).unwrap();
+        assert!(!late_stop.submission_correlated);
+        assert_eq!(late_stop.input_stamp, None);
+        // The current submission still correlates, proving the refusal above
+        // was about ordering and not a broken digest comparison — and that a
+        // later submission is free to claim its own turn.
+        receive_native_hook_locked(&mut db, &submit("turn-4", "run the linter", "1:11")).unwrap();
+        assert!(stored(&db, "turn-4").submission_correlated);
+
+        // A submission recorded against another step is not this step's
+        // evidence, even for the same agent and the same text.
+        record_prompt_submission_locked(&db, 1, "other-step", 1, 9, "cross-step text").unwrap();
+        let cross_step = submit("turn-5", "cross-step text", "1:12");
+        receive_native_hook_locked(&mut db, &cross_step).unwrap();
+        let crossed: NativeReceipt = serde_json::from_str(&receipts(&db)[8].detail).unwrap();
+        assert!(!crossed.submission_correlated, "another step's submission cannot bind this step");
+        assert_eq!(crossed.input_stamp, None);
+    }
+
+    #[test]
+    fn claude_submission_correlation_never_accepts_a_receipt_time_claim() {
+        use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path) VALUES (9,1,'owned','/repo');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        // No submission was ever recorded, so nothing can be correlated even
+        // though the receipt asserts it and carries a plausible turn token.
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("1:2".into()),
+            session_incarnation: Some("1000".into()),
+            source_id: "claimed".into(),
+            received_at_ms: 1,
+            turn_fenced: true,
+            explicit_turn_mismatch: false,
+            submission_correlated: true, submission_seq: None,
+            hook: NativeHook::parse(
+                "claude",
+                br#"{"session_id":"session","prompt_id":"turn-1","hook_event_name":"UserPromptSubmit","prompt":"anything"}"#,
+            )
+            .unwrap(),
+        };
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         let history = history_inner(&db, 1).unwrap();
-        for entry in &history[5..] {
-            let receipt: NativeReceipt = serde_json::from_str(&entry.detail).unwrap();
-            assert_eq!(receipt.input_stamp, None);
-            assert!(!receipt.submission_correlated);
-        }
+        let stored: NativeReceipt = serde_json::from_str(&history[0].detail).unwrap();
+        assert!(!stored.submission_correlated, "a receipt cannot vouch for itself");
+        assert_eq!(stored.input_stamp, None, "an uncorrelated receipt keeps no input authority");
+    }
+
+    #[test]
+    fn recorded_prompt_submissions_never_persist_the_prompt_text() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path) VALUES (9,1,'owned','/repo'),(10,1,'other','/repo');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "deploy with token hunter2").unwrap();
+        let detail: String = db
+            .query_row("SELECT detail FROM circuit_run_history WHERE kind='prompt_submitted'", [], |row| row.get(0))
+            .unwrap();
+        assert!(!detail.contains("hunter2"), "the ledger must keep only the digest");
+        let submission: PromptSubmission = serde_json::from_str(&detail).unwrap();
+        assert_eq!(submission.agent_node_id, 9);
+        assert_eq!(submission.submission_seq, 1);
+        assert_eq!(
+            submission.prompt_digest,
+            crate::services::circuit_worker::native_hooks::submission_digest("deploy with token hunter2")
+        );
+        // A second submission for the same agent advances the ordinal; a
+        // different agent has its own sequence.
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "next").unwrap();
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 10, "other node").unwrap();
+        let seqs: Vec<i64> = db
+            .prepare("SELECT json_extract(detail,'$.submission_seq') FROM circuit_run_history WHERE kind='prompt_submitted' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(seqs, vec![1, 2, 1], "ordinals are per agent node, not global");
     }
 
     #[test]

@@ -41,11 +41,21 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
             "Status and report discovery only; unsupported lifecycle remains unverified",
             30_000,
         ),
+        // Issue #1898: Claude Code's documented hook contract supplies both
+        // halves needed to tie a turn to a Buildmesh submission —
+        // `UserPromptSubmit` carries the verbatim `prompt` the harness says
+        // it received plus a `prompt_id` turn token (v2.1.196+), and `Stop`
+        // carries that same token. Buildmesh binds the token to a submission
+        // it recorded, and only while that submission is still the newest
+        // one for the agent, so a delayed, duplicate, prior-turn or
+        // cross-run hook cannot acknowledge a different submission. No live
+        // environment has exercised this yet, so delivery is stated as
+        // unverified rather than claimed.
         "anthropic" => (
-            "Native hook receipts only; authoritative submission correlation unavailable",
+            "UserPromptSubmit prompt echo bound to a recorded submission, then prompt_id inherited by Stop; receipts without a provable binding stay reduced confidence; live delivery unverified",
             "Child hooks and explicit task/cron registries; missing coverage remains unverified",
             "Scrubbed Stop response when supplied; otherwise unavailable",
-            "Durable hook receipt replay and status discovery; no authoritative ownership pull is available",
+            "Durable hook receipt replay bound through the recorded submission; no authoritative ownership pull is available",
             90_000,
         ),
         "codex" => (
@@ -126,6 +136,31 @@ mod tests {
         assert!(policy.owned_work.contains("no child/background registry"));
         assert_eq!(policy.yielded_budget_ms, 30_000, "no validated basis to change the default budget");
         assert_eq!(policy.active_budget_ms, super::super::ACTIVE_WAIT_MS as u32);
+    }
+
+    #[test]
+    fn claude_policy_records_the_submission_contract_without_claiming_live_delivery() {
+        // Issue #1898: Claude's contract names both halves of the correlation
+        // mechanism, and must say plainly that no live run has exercised it.
+        // An over-claim here is how a fixture test turns into a runtime
+        // promise nobody verified.
+        let policy = for_provider("anthropic");
+        assert_eq!(policy.harness, "anthropic");
+        assert!(policy.foreground.contains("UserPromptSubmit"), "names the event that carries the prompt echo");
+        assert!(policy.foreground.contains("prompt_id"), "names the native turn token");
+        assert!(
+            policy.foreground.contains("reduced confidence"),
+            "states what an unprovable receipt is worth"
+        );
+        assert!(
+            policy.foreground.contains("unverified"),
+            "live delivery is not established in this environment"
+        );
+        assert!(
+            policy.reconciliation.contains("recorded submission"),
+            "the binding is through a submission Buildmesh recorded"
+        );
+        assert_eq!(policy.yielded_budget_ms, 90_000, "no validated basis to change the budget");
     }
 
     #[test]

@@ -2475,6 +2475,18 @@ pub(super) fn execute_effects(
                         }
                         let Some(revision) = db::circuit::evidence::claim_effect(active.run.id, &intent).map_err(|e| e.to_string())? else { continue; };
                         view.context.set("evidence.revision", revision.to_string());
+                        // Record the submission before the PTY write. Claude
+                        // echoes the prompt back within milliseconds of Enter,
+                        // and that echo only proves *this* submission if the
+                        // record already exists when the hook is handled
+                        // (issue #1898).
+                        if let Err(error) = db::circuit::evidence::record_prompt_submission(
+                            active.run.id, node_id, attempt, target, prompt,
+                        ) {
+                            tracing::warn!("circuits: run {}: could not record prompt submission: {}", active.run.id, error);
+                            outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt submission could not be recorded for correlation: {error}") });
+                            continue;
+                        }
                         crate::autopilot::evaluator::note_turn_start(target);
                         if let Err(error) = crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app) {
                             outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt delivery is unverified: {error}") });

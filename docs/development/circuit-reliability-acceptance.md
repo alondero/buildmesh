@@ -389,13 +389,59 @@ full Rust suite executed and passed the new permission regression.
 | Native Windows Codex rollout pull | CLI 0.157.0, ChatGPT login, Luna; Run 49 above | Foreground and non-replaying recheck observed; complete ownership Unverified |
 | Native Windows Codex request hooks | Configured PreToolUse/PostToolUse and PermissionRequest callbacks | Question request/reply and no-ID permission request observed below; authoritative permission resolution remains Unverified. The no-tools run establishes neither |
 | Windows host / Ubuntu WSL2 | Linux 6.6.87.2-microsoft-standard-WSL2 x86_64; `/usr/bin/codex` 0.49.0 | Below the adapter's 0.154.0 hook minimum; current hook contract Unverified. Ordinary startup rejects configured effort `xhigh`; `codex -c model_reasoning_effort=low login status` confirms ChatGPT login without changing configuration. No WSL model was launched |
-| Claude native receipts | Windows CLI 2.1.282; user has no Claude account | Live delivery Unverified; authoritative submission correlation remains unavailable |
+| Claude native receipts | Windows CLI 2.1.283; user has no Claude account | Live delivery Unverified. Submission correlation is implemented and fixture-tested (#1898) — see the section below — but no live run has exercised it |
 | Other installed Windows harnesses | OpenCode 1.18.3, Kimi 0.27.0, Agy 1.2.11, Cline 3.0.62, Grok 1.0.41 | Installation does not establish a Circuit lifecycle/ownership adapter. Current observer policy marks these unsupported; no completion claim |
 | Native Linux and macOS | No corresponding host exercised | Unverified |
 
 Inventory used `wsl --list --quiet`, command/version probes and login-status
 commands only. Authentication material was not read or recorded. Unsupported
 boundaries are gaps, not passed completion scenarios.
+
+## Claude hook submission correlation (issue #1898)
+
+The #1889 checkpoint below recorded Claude submission correlation as
+unavailable, on the grounds that a native turn ID cannot acknowledge a
+Buildmesh input. That premise was half right and has now been resolved against
+the documented contract. The full mechanism, hazards and limits are in
+[Claude Code harness capabilities](../learning/claude-code-harness-capabilities.md).
+
+**The native fields.** Claude Code's hooks reference documents `prompt_id` — a
+UUID naming the prompt currently being processed — as a common input field on
+every event from v2.1.196, and `prompt`, the verbatim submitted text, as an
+additional field on `UserPromptSubmit` only. `Stop` carries `prompt_id` but
+not `prompt`. So the pair (submitted text, turn token) exists on exactly one
+event, and a terminal hook can only ever name the turn, never the input.
+
+**The mechanism.** Buildmesh records a submission before writing to the PTY —
+agent node, a per-agent ordinal, and the SHA-256 of the prompt text; the text
+itself is never persisted. A `UserPromptSubmit` receipt is bound to that
+submission only when its prompt digest matches, the submission is still the
+newest for the agent, no other turn has claimed it, and the receipt carries a
+current input stamp. A later `Stop` naming the same `prompt_id` inherits the
+bound stamp. Ordering, not arrival, decides: a receipt is never trusted to
+assert its own correlation, and `source_id` dedup makes redelivery idempotent.
+
+**Closed hazards.** Delayed, duplicate, prior-turn and cross-run hooks are
+each covered by a distinct guard and by a test named for the hazard.
+
+**Explicit unavailable path.** A missing `prompt_id`, a missing/empty/
+transformed `prompt`, a superseded submission, an ambiguous claim, or a
+session-generation change all refuse the binding. The receipt is still
+recorded, replayed and shown in the Probe, as reduced confidence that cannot
+complete a step.
+
+**What this does not establish.** Claude's `Stop` carries no child or
+background registry, so a correlated turn still reports `OwnershipUnavailable`
+and `lifecycle_verified()` stays false. Correlation establishes which
+submission a turn belongs to; it is not step completion, and owned-work
+coverage remains open.
+
+**Live evidence: none.** The user has no Claude account, so no controlled
+request/reply smoke was recorded. The installed CLI (2.1.283) is above the
+`prompt_id` floor, but installation is not delivery. Everything above is
+contract documentation plus deterministic fixture and adapter tests, and the
+observer policy says so in the strings the Probe renders. This environment
+did not pass a live Claude run and makes no such claim.
 
 ## Implementation checkpoint: 2026-09-24
 
@@ -406,9 +452,12 @@ Codex rollouts do not establish complete child/background coverage; the adapter
 keeps that limit visible as Unverified. Production status snapshots enter with
 reduced confidence. Classifier routing now requires an exact retained native
 report, lifecycle coverage and an immutable input/session fence. The initial
-Ready-only review handoff has been removed. Claude hook submission correlation
-is unavailable: native turn IDs do not acknowledge Buildmesh input, so receipt
-arrival cannot authorize completion. Those receipts remain reduced confidence.
+Ready-only review handoff has been removed. At this checkpoint Claude hook
+submission correlation was unavailable: native turn IDs did not acknowledge
+Buildmesh input, so receipt arrival could not authorize completion and those
+receipts remained reduced confidence. #1898 (section above) superseded that
+finding with a content-and-ordering binding; the receipts it covers are
+correlated, the rest stay reduced confidence.
 
 Implemented and exercised so far:
 
