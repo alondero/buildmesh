@@ -32,6 +32,9 @@ Linux and platform smoke builds.
 | `docs/adr/` | Durable architectural decisions |
 | `docs/specs/` | Product and technical design contracts |
 
+For the Circuit side-effect inventory and restart/replay policy, see the
+[Circuit effect recovery contract](circuit-effect-recovery.md).
+
 ## Local development
 
 Prerequisites are Node.js 20+ with npm, Rust stable, Git, and the Tauri 2

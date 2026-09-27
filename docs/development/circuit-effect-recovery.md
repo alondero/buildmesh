@@ -1,0 +1,90 @@
+# Circuit effect recovery contract
+
+This contributor reference maps every effect emitted by the Circuit stepper to
+its durable intent, dispatch, result, cancellation, and restart policy. It
+describes the current implementation and the automated evidence that pins it.
+The user workflow for uncertain actions is in
+[Agent Node Circuits](agent-node-circuits.md).
+
+## Effect inventory
+
+| Effect | Durable intent and dispatch | Result or uncertainty | Cancellation and restart policy |
+|---|---|---|---|
+| `SpawnAgentNode` | `circuit_effects(kind=spawn)` records `intent` in the transition transaction. A claim changes it to `possible_dispatch` before allocation or prompt delivery. | Attachment and `acknowledged` history commit together under the run, attempt, and prior-agent fences. A missing attachment after dispatch becomes Unverified. | An unclaimed intent may be claimed. `possible_dispatch` never dispatches again after restart or timeout; inspect retained agents and record `not_performed` before a new attempt. Cancellation fences late attachment. |
+| `InjectPty` | `circuit_effects(kind=prompt)` records `intent`; the worker claims `possible_dispatch` before writing PTY input. | Successful delivery emits `PromptDelivered`; write errors and restart after claim remain uncertain. | Only an unclaimed intent may be dispatched. A claimed prompt is never resent after restart or cancellation. Recheck observes the same attempt without sending input; deliberate retry requires a `not_performed` attestation and a new attempt. |
+| `ContinueAgentTurn` | The classifier transition records delivery `claimed`, attempt, and continuation count in the same commit that schedules the prompt. History records intent and possible dispatch. The worker checks process, input, and report revisions before writing. | Delivery becomes `delivered`, `obsolete`, or `uncertain`. | A `claimed` delivery becomes Unverified after restart and is never replayed. The worker can promote an explicit `pending` retry marker to `claimed`; the current classifier path writes `claimed` directly. Fresh agent progress may resolve uncertainty. Cancellation fences a late delivery result. |
+| `CallGithub(AddLabel)` | `circuit_effects(kind=github)` records intent and possible dispatch before the GitHub POST. | A successful response acknowledges the action; timeout, cancellation, or restart after claim is uncertain. | No automatic replay. Read-only Recheck is unavailable for this action; inspect GitHub and record an outcome. Retry requires `not_performed` and a new attempt. |
+| `CallGithub(RemoveLabel)` | Same `github` claim; GitHub receives a DELETE. | The adapter treats an already-absent label as success. A lost response still leaves the Circuit result uncertain. | No automatic replay or read-only Circuit Recheck. Operator outcome is required before retry. |
+| `CallGithub(PostComment)` | Same `github` claim; GitHub receives a comment POST. | A successful response acknowledges the action. An unknown result may have created a comment. | No automatic replay or read-only Circuit Recheck. Operator outcome is required before retry. |
+| `CallGithub(CloseIssue)` | Same `github` claim; GitHub receives a PATCH setting the issue state to closed. | Closing an already-closed issue is idempotent, but an unknown response remains uncertain. | No automatic replay or read-only Circuit Recheck. Operator outcome is required before retry. |
+| `CallGithub(OpenPr)` | Same `github` claim. Before lookup or create, the worker stores the exact owner, repository, and head branch. | A matching read-only lookup acknowledges the original attempt. Missing, mismatched, or unavailable lookup stays uncertain. | Recovery performs only the saved-target lookup; it never creates a PR. A matching result commits PR identity and effect reconciliation together. Absence stays uncertain. Operator retry still requires `not_performed`. |
+| `SetNodeStatus` | The target status write, completed step, and `effect_result` history commit in one SQLite transaction. It has no remote dispatch window. | The transaction either commits all three or rolls them all back. If the target is missing or archived, the worker records the effect step and run as failed in a second transition. | Restart observes the status and completed step together; no replay is needed. The failure transition uses the original run/step fence, so cancellation or deletion that wins before it prevents the failure write too. |
+| `CloseAgentNode` | The step completes before resource retirement. Agent deletion records its lifecycle cleanup lease; the target spawn association remains until retirement succeeds. | Deletion is idempotent. A missing agent row is treated as an already-finished close, then the association is cleared. | While the completed close still resolves to its original agent, worker observation emits `CloseAgentRetry`. Once the association clears, retry stops. Cancellation and circuit deletion use the durable retirement path. |
+| `Notify` | Emits the `circuit-notification` Tauri event after the run transition commits. There is no notification outbox or delivery acknowledgement. | Notification delivery is transient and best effort. The run transition and history remain durable. | Notifications are not replayed after restart, avoiding duplicate transient toasts. The UI refreshes from durable run state. |
+
+The external journal has a closed Rust kind vocabulary: `spawn`, `prompt`, and
+`github`. GitHub subactions share the journal fence but keep distinct provider
+contracts above. Worker mapping explicitly handles every `Effect` variant;
+adding one requires choosing a durable policy in that match. Unknown external
+results never authorize automatic replay.
+
+## Review continuation
+
+Continue review creates a new run from the retained review configuration. The
+successor graph contains the reviewer and feedback loop; it omits the
+implementation step and every GitHub publication step. Creation, snapshot,
+lineage history, and successor identity are committed atomically. The
+`recovery.from_run_id` lineage is the deduplication key, so repeating the
+request after restart returns the existing successor. A cancelled successor
+closes that lineage; a failed successor may be continued as its next
+generation.
+
+## Operator and test fences
+
+Checkpoint outcomes require the history revision, run state, step attempt, and
+effect kind observed by the operator. A stale operator result or late worker
+result cannot replace cancellation or a newer attempt. Only OpenPr has a
+read-only external recheck. Other GitHub mutations and prompt/spawn outcomes
+remain manual attestations; `not_performed` is the only path to a deliberate
+new attempt.
+
+The focused deterministic evidence is:
+
+- `worker_effect_persistence_mapping_covers_every_effect_variant` sends each
+  stepper effect through the worker persistence mapper and checks its journal,
+  atomic-status, or separate-policy route.
+- `effect_claim_survives_reopen_and_is_never_replayed` checks that an
+  unclaimed intent remains claimable after restart and that the resulting
+  possible-dispatch claim cannot be claimed again for spawn, prompt, or GitHub.
+  That persisted state also covers a remote success whose acknowledgement was
+  interrupted: restart cannot distinguish it from a lost response, so neither
+  result permits automatic replay.
+- `unsupported_github_mutations_stay_uncertain_without_replay_on_recovery`
+  drives AddLabel, RemoveLabel, PostComment, and CloseIssue through the worker
+  recheck path; each remains Unverified and does not dispatch a second mutation.
+- `spawn_attachment_acknowledgement_is_atomic_fenced_and_deduplicated` covers
+  cancellation, attachment acknowledgement, and injected history failure.
+- `github_recovery_tests` drives OpenPr create, restart lookup, absent-result,
+  and cancellation races through the worker handoff against a loopback GitHub
+  endpoint. The endpoint and process stop are simulated; a live process crash
+  and live GitHub mutation are not claimed.
+- `set_node_status_and_step_commit_atomically_across_restart` injects a
+  history-write failure to prove the status and step roll back together, then
+  reopens the database and checks the committed pair.
+- `unavailable_set_node_status_target_fails_run_without_retrying_forever`
+  drives missing and archived targets through the worker's fenced failure
+  commit; `set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted`
+  proves a terminal or deleted run cannot receive a late status mutation.
+- `close_agent_retry_is_not_observed_after_close_clears_spawn_association`
+  and `walking_skeleton_close_retry_observer_emits_nothing` pin close replay
+  and its stop condition.
+- `circuit_recovery_history_survives_reopen_and_matches_successor_context`
+  injects a continuation-history failure, checks transaction rollback,
+  reopens the database, repeats the request, and verifies successor reuse and
+  the absence of implementation/publication steps or effect claims.
+- Database checkpoint tests cover competing and stale operator revisions;
+  OpenPr tests cover a late result after cancellation.
+
+Run the focused Circuit Rust tests serially because most worker integration
+fixtures share one process database. The per-test `db::circuit` unit tests use
+private connections and remain parallel-safe.

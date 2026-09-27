@@ -146,6 +146,9 @@ Recording **not performed** leaves the checkpoint unresolved and offers a
 separate **Retry as new attempt** action. A stale action requires refreshing the
 history. Unknown GitHub effects are never automatically replayed.
 
+The complete action-by-action journal, provider contract, cancellation, and
+restart inventory is in the [Circuit effect recovery contract](circuit-effect-recovery.md).
+
 Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
 the observation window without sending the original prompt or requesting an
 automatic continuation. Observed human-input waits and explicit approval gates

@@ -487,7 +487,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             agent_node_id: None,
             fresh_attempt: false,
         };
-        super::ledger::commit_circuit_advance_inner(
+        let commit = super::ledger::commit_circuit_advance_inner(
             &tx,
             request.run_id,
             None,
@@ -495,6 +495,9 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             &[op],
         )
         .map_err(|e| e.to_string())?;
+        if !commit.applied {
+            return Err("Circuit run became terminal before evidence recheck commit".into());
+        }
         append_history(
             &tx,
             request.run_id,
@@ -613,7 +616,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         agent_node_id: None,
         fresh_attempt: attempt != step.attempt,
     };
-    super::ledger::commit_circuit_advance_inner(
+    let commit = super::ledger::commit_circuit_advance_inner(
         &tx,
         request.run_id,
         None,
@@ -621,6 +624,9 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         &[op],
     )
         .map_err(|e| e.to_string())?;
+    if !commit.applied {
+        return Err("Circuit run became terminal before operator outcome commit".into());
+    }
     append_history(
         &tx,
         request.run_id,
@@ -635,11 +641,38 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     tx.commit().map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKind {
+    Spawn,
+    Prompt,
+    Github,
+}
+
+impl EffectKind {
+    fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Prompt => "prompt",
+            Self::Github => "github",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectIntent {
     pub node_id: String,
     pub attempt: i32,
-    pub kind: String,
+    pub kind: EffectKind,
+}
+
+/// A local status mutation that is committed with the transition which
+/// completes its Circuit step. It has no external dispatch window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStatusEffect {
+    pub node_id: String,
+    pub attempt: i32,
+    pub agent_node_id: i64,
+    pub status: crate::models::SessionStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -902,13 +935,14 @@ pub fn commit_transition(
 pub struct EvidenceWrite<'a> {
     pub input_guard: Option<&'a crate::autopilot::circuit::stepper::ObservationInputFence>,
     pub intents: &'a [EffectIntent],
+    pub agent_status_effects: &'a [AgentStatusEffect],
     pub reconciled_effects: &'a [ReconciledEffect],
     pub observations: &'a [crate::autopilot::circuit::observation::RecordedObservation],
     pub classifications: &'a [crate::autopilot::circuit::observation::RecordedClassification],
     pub expected: Option<&'a crate::autopilot::circuit::stepper::TransitionFence>,
 }
 
-fn commit_transition_locked(
+pub(crate) fn commit_transition_locked(
     db: &mut Connection,
     run_id: i64,
     state: Option<&str>,
@@ -960,7 +994,76 @@ fn commit_transition_locked(
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
-    super::ledger::commit_circuit_advance_inner(&tx, run_id, state, Some(context), steps)?;
+    let commit = super::ledger::commit_circuit_advance_inner(&tx, run_id, state, Some(context), steps)?;
+    if !commit.applied {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let graph = if evidence.agent_status_effects.is_empty() {
+        None
+    } else {
+        Some(run_graph(&tx, run_id).map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?)
+    };
+    for effect in evidence.agent_status_effects {
+        let completed = steps.iter().any(|step| {
+            step.node_id == effect.node_id
+                && step.attempt == effect.attempt
+                && step.status == "completed"
+        });
+        let configured_status = match graph.as_ref().and_then(|graph| graph.node(&effect.node_id)).map(|node| &node.kind) {
+            Some(crate::autopilot::circuit::model::CircuitNodeKind::SetNodeStatus {
+                status,
+                ..
+            }) => match status {
+                crate::autopilot::circuit::model::SessionStatusKind::Running => {
+                    crate::models::SessionStatus::Running
+                }
+                crate::autopilot::circuit::model::SessionStatusKind::Idle => {
+                    crate::models::SessionStatus::Idle
+                }
+                crate::autopilot::circuit::model::SessionStatusKind::Completed => {
+                    crate::models::SessionStatus::Completed
+                }
+            },
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
+        if !completed || configured_status != effect.status {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let current_status: String = tx
+            .query_row(
+                "SELECT status FROM agent_nodes WHERE id=?1",
+                [effect.agent_node_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if current_status == crate::models::SessionStatus::Archived.to_db_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        crate::db::update_agent_node_status_inner(&tx, effect.agent_node_id, effect.status)?;
+        append_history(
+            &tx,
+            run_id,
+            Some(&effect.node_id),
+            Some(effect.attempt),
+            "effect_result",
+            &serde_json::json!({
+                "effect": "set_node_status",
+                "state": "acknowledged",
+                "agent_node_id": effect.agent_node_id,
+                "status": effect.status.to_db_str(),
+                "meaning": "Agent status and Circuit step committed atomically"
+            })
+            .to_string(),
+            Some(SOURCE_CIRCUIT_WORKER),
+            Some(DISPOSITION_ACKNOWLEDGED),
+        )?;
+    }
     for observation in evidence.observations {
         let identity = &observation.observation.identity;
         let detail = serde_json::to_string(observation)
@@ -999,7 +1102,7 @@ fn commit_transition_locked(
                 ..
             })
         );
-        if !completed || effect.intent.kind != "github" || !is_open_pr {
+        if !completed || effect.intent.kind != EffectKind::Github || !is_open_pr {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let changed = tx.execute(
@@ -1028,7 +1131,7 @@ fn commit_transition_locked(
             SELECT ?1,?2,?3,?4,'intent' WHERE EXISTS
             (SELECT 1 FROM autopilot_circuit_runs r JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
              WHERE r.id=?1 AND r.state='running' AND s.node_id=?2 AND s.attempt=?3)",
-            params![run_id,intent.node_id,intent.attempt,intent.kind])?;
+            params![run_id,intent.node_id,intent.attempt,intent.kind.as_db_str()])?;
         if inserted == 1 {
             append_history(
                 &tx,
@@ -1036,7 +1139,7 @@ fn commit_transition_locked(
                 Some(&intent.node_id),
                 Some(intent.attempt),
                 "effect_intent",
-                &intent.kind,
+                intent.kind.as_db_str(),
                 Some(SOURCE_CIRCUIT_WORKER),
                 Some(DISPOSITION_INTENT),
             )?;
@@ -1194,7 +1297,7 @@ fn claim_effect_locked(
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind=?4 AND state='intent'
         AND EXISTS (SELECT 1 FROM autopilot_circuit_runs r JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
           WHERE r.id=?1 AND r.state='running' AND s.node_id=?2 AND s.attempt=?3 AND s.status='running')",
-        params![run_id,intent.node_id,intent.attempt,intent.kind])? == 1;
+        params![run_id,intent.node_id,intent.attempt,intent.kind.as_db_str()])? == 1;
     if claimed {
         append_history(
             &tx,
@@ -1202,7 +1305,7 @@ fn claim_effect_locked(
             Some(&intent.node_id),
             Some(intent.attempt),
             "effect_possible_dispatch",
-            &intent.kind,
+            intent.kind.as_db_str(),
             Some(SOURCE_CIRCUIT_WORKER),
             Some(DISPOSITION_POSSIBLE_DISPATCH),
         )?;
@@ -1760,6 +1863,7 @@ mod tests {
                 EvidenceWrite {
                     input_guard: Some(&guard),
                     intents: &[],
+                    agent_status_effects: &[],
                     reconciled_effects: &[],
                     observations: &[],
                     classifications: &[],
@@ -1787,6 +1891,7 @@ mod tests {
             EvidenceWrite {
                 input_guard: Some(&guard),
                 intents: &[],
+                agent_status_effects: &[],
                 reconciled_effects: &[],
                 observations: &[],
                 classifications: &[],
@@ -1845,11 +1950,12 @@ mod tests {
         let intent = EffectIntent {
             node_id: "work".into(),
             attempt: 1,
-            kind: "github".into(),
+            kind: EffectKind::Github,
         };
         let write = || EvidenceWrite {
             input_guard: None,
             intents: std::slice::from_ref(&intent),
+            agent_status_effects: &[],
             reconciled_effects: &[],
             observations: std::slice::from_ref(&observation),
             classifications: &[],
@@ -1907,6 +2013,160 @@ mod tests {
                 .unwrap(),
             "intent"
         );
+    }
+
+    #[test]
+    fn set_node_status_and_step_commit_atomically_across_restart() {
+        use crate::autopilot::circuit::model::{
+            CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+            SessionStatusKind,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "agent".into(), kind: CircuitNodeKind::SpawnAgentNode {
+                    prompt: "work".into(), name: None, provider: None, model: None,
+                    effort: None, extra_args: None, timeout_seconds: None,
+                } },
+                CircuitNode { id: "status".into(), kind: CircuitNodeKind::SetNodeStatus {
+                    status: SessionStatusKind::Running,
+                    target_node_id: Some("agent".into()),
+                } },
+            ],
+            edges: vec![CircuitEdge { from: "agent".into(), to: "status".into(), condition: EdgeCondition::Always }],
+        };
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'agent','/repo','ready');").unwrap();
+        crate::db::circuit::ledger::create_autopilot_circuit_inner(
+            &db, 1, "status recovery", "", 1, &graph.to_json().unwrap(),
+        ).unwrap();
+        db.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'agent',1,'completed',9),(1,'status',1,'running',NULL);
+            CREATE TRIGGER reject_status_ack BEFORE INSERT ON circuit_run_history
+                WHEN NEW.kind='effect_result'
+                BEGIN SELECT RAISE(ABORT,'injected status acknowledgement failure'); END;").unwrap();
+        let steps = [
+            super::super::CircuitStepOp {
+                node_id: "status".into(), status: "completed".into(), outcome: None,
+                error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
+            },
+        ];
+        let status_effects = [AgentStatusEffect {
+            node_id: "status".into(), attempt: 1, agent_node_id: 9,
+            status: crate::models::SessionStatus::Running,
+        }];
+        assert!(commit_transition_locked(
+            &mut db, 1, None, "{}", &steps,
+            EvidenceWrite { agent_status_effects: &status_effects, ..Default::default() },
+        ).is_err());
+        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        let step: String = db.query_row("SELECT status FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='status'", [], |row| row.get(0)).unwrap();
+        assert_eq!((status.as_str(), step.as_str()), ("ready", "running"), "a failed append rolls back both the local effect and step completion");
+
+        db.execute_batch("DROP TRIGGER reject_status_ack").unwrap();
+        commit_transition_locked(
+            &mut db, 1, None, "{}", &steps,
+            EvidenceWrite { agent_status_effects: &status_effects, ..Default::default() },
+        ).unwrap();
+        drop(db);
+
+        let reopened = Connection::open(file.path()).unwrap();
+        let status: String = reopened.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        let step: String = reopened.query_row("SELECT status FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='status'", [], |row| row.get(0)).unwrap();
+        let effect: String = reopened.query_row(
+            "SELECT detail FROM circuit_run_history WHERE run_id=1 AND kind='effect_result'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!((status.as_str(), step.as_str()), ("running", "completed"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&effect).unwrap()["effect"], "set_node_status");
+    }
+
+    #[test]
+    fn set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted() {
+        use crate::autopilot::circuit::{
+            model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, SessionStatusKind},
+            stepper::{RunState, StepStatus, StepView, TransitionFence},
+        };
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        let graph = CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "agent".into(), kind: CircuitNodeKind::SpawnAgentNode {
+                    prompt: "work".into(), name: None, provider: None, model: None,
+                    effort: None, extra_args: None, timeout_seconds: None,
+                } },
+                CircuitNode { id: "status".into(), kind: CircuitNodeKind::SetNodeStatus {
+                    status: SessionStatusKind::Running,
+                    target_node_id: Some("agent".into()),
+                } },
+            ],
+            edges: vec![CircuitEdge { from: "agent".into(), to: "status".into(), condition: EdgeCondition::Always }],
+        };
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'agent','/repo','ready');").unwrap();
+        crate::db::circuit::ledger::create_autopilot_circuit_inner(
+            &db, 1, "cancelled status recovery", "", 1, &graph.to_json().unwrap(),
+        ).unwrap();
+        db.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'cancelled');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
+                VALUES(1,'status',1,'cancelled');").unwrap();
+        let expected = TransitionFence {
+            state: RunState::Cancelled,
+            steps: vec![StepView {
+                node_id: "status".into(),
+                attempt: 1,
+                status: StepStatus::Cancelled,
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+            }],
+            revision: None,
+        };
+        let steps = [super::super::CircuitStepOp {
+            node_id: "status".into(), status: "completed".into(), outcome: None,
+            error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
+        }];
+        let status_effects = [AgentStatusEffect {
+            node_id: "status".into(), attempt: 1, agent_node_id: 9,
+            status: crate::models::SessionStatus::Running,
+        }];
+
+        assert!(commit_transition_locked(
+            &mut db,
+            1,
+            None,
+            "{}",
+            &steps,
+            EvidenceWrite {
+                agent_status_effects: &status_effects,
+                expected: Some(&expected),
+                ..Default::default()
+            },
+        ).is_err(), "a terminal run must reject its late local status effect");
+        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        assert_eq!(status, "ready");
+
+        db.execute("DELETE FROM autopilot_circuit_runs WHERE id=1", []).unwrap();
+        assert!(commit_transition_locked(
+            &mut db,
+            1,
+            None,
+            "{}",
+            &steps,
+            EvidenceWrite {
+                agent_status_effects: &status_effects,
+                ..Default::default()
+            },
+        ).is_err(), "a deleted run must also reject a late local status effect");
+        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        assert_eq!(status, "ready");
     }
 
     #[test]
@@ -2066,7 +2326,7 @@ mod tests {
             fresh_attempt: write.fresh_attempt,
         }).collect::<Vec<_>>();
         let reconciled = ReconciledEffect {
-            intent: EffectIntent { node_id: "open_pr".into(), attempt: 1, kind: "github".into() },
+            intent: EffectIntent { node_id: "open_pr".into(), attempt: 1, kind: EffectKind::Github },
             detail: "Read-only GitHub lookup found open pull request #314.".into(),
         };
         assert!(commit_transition_locked(
@@ -2262,7 +2522,7 @@ mod tests {
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'running');
             INSERT INTO circuit_effects VALUES(1,'spawn',1,'spawn','intent');").unwrap();
         assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).unwrap(),None, "unclaimed intent cannot acknowledge a spawn");
-        let intent = EffectIntent { node_id:"spawn".into(),attempt:1,kind:"spawn".into() };
+        let intent = EffectIntent { node_id:"spawn".into(),attempt:1,kind:EffectKind::Spawn };
         assert!(claim_effect_locked(&mut db,1,&intent).unwrap().is_some());
         db.execute_batch("CREATE TRIGGER reject_ack BEFORE INSERT ON circuit_run_history WHEN NEW.kind='effect_result'
             BEGIN SELECT RAISE(ABORT,'injected acknowledgement failure'); END;").unwrap();
@@ -2298,7 +2558,7 @@ mod tests {
 
     #[test]
     fn effect_claim_survives_reopen_and_is_never_replayed() {
-        for kind in ["github", "prompt", "spawn"] {
+        for kind in [EffectKind::Github, EffectKind::Prompt, EffectKind::Spawn] {
             let file = tempfile::NamedTempFile::new().unwrap();
             let mut db = Connection::open(file.path()).unwrap();
             crate::db::init_schema(&db).unwrap();
@@ -2308,7 +2568,7 @@ mod tests {
             let intent = EffectIntent {
                 node_id: "comment".into(),
                 attempt: 1,
-                kind: kind.into(),
+                kind,
             };
             let op = super::super::CircuitStepOp {
                 node_id: "comment".into(),
@@ -2331,8 +2591,11 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(claim_effect_locked(&mut db, 1, &intent).unwrap().is_some());
             drop(db);
+            let mut reopened = Connection::open(file.path()).unwrap();
+            assert!(claim_effect_locked(&mut reopened, 1, &intent).unwrap().is_some(),
+                "an intent that crashed before dispatch remains claimable after restart");
+            drop(reopened);
             let mut reopened = Connection::open(file.path()).unwrap();
             assert!(claim_effect_locked(&mut reopened, 1, &intent)
                 .unwrap()
@@ -2470,7 +2733,7 @@ mod tests {
             intent: EffectIntent {
                 node_id: "open_pr".into(),
                 attempt: 1,
-                kind: "github".into(),
+                kind: EffectKind::Github,
             },
             detail: "Read-only GitHub lookup found open pull request #314.".into(),
         };
@@ -2578,7 +2841,7 @@ mod tests {
             intent: EffectIntent {
                 node_id: "open_pr".into(),
                 attempt: 1,
-                kind: "github".into(),
+                kind: EffectKind::Github,
             },
             detail: "Read-only GitHub lookup found open pull request #314.".into(),
         };

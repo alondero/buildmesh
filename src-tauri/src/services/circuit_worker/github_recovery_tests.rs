@@ -4,15 +4,57 @@ use crate::autopilot::circuit::model::{
     CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, GithubActionKind,
 };
 use crate::autopilot::circuit::stepper::{
-    CircuitEvent, RunState, RunView, StepStatus, StepView,
+    advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
 };
-use crate::db::circuit::evidence::{EffectIntent, EvidenceWrite};
+use crate::db::circuit::evidence::{EffectIntent, EffectKind, EvidenceWrite};
 use crate::db::CircuitStepOp;
 use crate::services::github::tests::{fake_server, Scripted};
 use crate::services::github::{CreatePrRequest, GitHubClient};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
+    for action in [
+        GithubActionKind::AddLabel,
+        GithubActionKind::RemoveLabel,
+        GithubActionKind::PostComment,
+        GithubActionKind::CloseIssue,
+    ] {
+        let fixture = open_pr_fixture();
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").unwrap();
+        let mut view = fixture.view.clone();
+        view.context.set("node.open_pr.recheck_only", "1");
+
+        let mut events = super::execute_call_github_effect(
+            &fixture.active,
+            &mut view,
+            "open_pr",
+            action,
+            Some("triaged"),
+            Some("Recovery audit"),
+            Some(&client),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CircuitEvent::EffectUncertain { attempt: 1, reason, .. }
+                if reason == "Read-only external-action recheck is unavailable for this GitHub action."
+        ), "{action:?} recovery must require an operator outcome");
+
+        let event = events.pop().unwrap();
+        let mut projected = view.clone();
+        let transition = advance(&mut projected, &event);
+        assert!(transition.effects.is_empty(), "uncertain recovery cannot redispatch {action:?}");
+        assert_eq!(projected.step("open_pr").unwrap().status, StepStatus::Unverified);
+        persist_effect_result(&mut view, &event).unwrap();
+        assert_eq!(open_pr_step_status(fixture.run_id), "unverified");
+        assert_eq!(effect_state(fixture.run_id), "uncertain");
+        assert_eq!(history_count(fixture.run_id, "effect_possible_dispatch"), 1);
+    }
+}
 
 struct OpenPrFixture {
     active: crate::db::ActiveCircuitRun,
@@ -63,7 +105,7 @@ fn open_pr_fixture() -> OpenPrFixture {
     let intent = EffectIntent {
         node_id: "open_pr".into(),
         attempt: 1,
-        kind: "github".into(),
+        kind: EffectKind::Github,
     };
     let step = CircuitStepOp {
         node_id: "open_pr".into(),
@@ -210,7 +252,7 @@ fn open_pr_lookup_handoff_commits_acknowledged_result_and_survives_reopen() {
             &EffectIntent {
                 node_id: "open_pr".into(),
                 attempt: 1,
-                kind: "github".into()
+                kind: EffectKind::Github
             }
         )
         .unwrap()
@@ -763,7 +805,7 @@ fn dispatch_fixture() -> DispatchFixture {
     let intent = EffectIntent {
         node_id: "open_pr".into(),
         attempt: 1,
-        kind: "github".into(),
+        kind: EffectKind::Github,
     };
     crate::db::circuit::evidence::commit_transition(
         run_id,
@@ -840,7 +882,7 @@ fn dispatch_open_pr(
     let intent = EffectIntent {
         node_id: "open_pr".into(),
         attempt: 1,
-        kind: "github".into(),
+        kind: EffectKind::Github,
     };
     crate::db::circuit::evidence::claim_effect(fixture.run_id, &intent)
         .unwrap()
@@ -1095,7 +1137,7 @@ fn open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_secon
             &EffectIntent {
                 node_id: "open_pr".into(),
                 attempt: 1,
-                kind: "github".into()
+                kind: EffectKind::Github
             }
         )
         .unwrap()
